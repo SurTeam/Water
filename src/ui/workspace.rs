@@ -453,6 +453,7 @@ impl WorkspaceView {
         )
         .size_full()
         .absolute()
+        .inset_0()
         .into_any_element()
     }
 
