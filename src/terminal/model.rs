@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -14,6 +14,7 @@ use super::snapshot::{
 };
 
 pub(crate) const TERMINAL_WAKE_KEY: usize = usize::MAX - 1;
+const MAX_RETIRED_TERMINALS: usize = 64;
 pub(crate) type WakeupCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 pub(crate) type WakeupSlot = Arc<Mutex<Option<WakeupCallback>>>;
 
@@ -303,6 +304,7 @@ pub struct TerminalManager {
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
     workers: BTreeMap<TerminalId, WorkerHandle>,
+    retired: VecDeque<TerminalId>,
 }
 
 struct WorkerHandle {
@@ -341,6 +343,7 @@ impl TerminalManager {
             event_rx,
             event_wakeup,
             workers: BTreeMap::new(),
+            retired: VecDeque::new(),
         }
     }
 
@@ -455,6 +458,26 @@ impl TerminalManager {
     }
 
     pub fn remove(&mut self, terminal_id: TerminalId) {
+        self.stop_worker(terminal_id);
+        self.retired.retain(|retired| *retired != terminal_id);
+        self.registry.remove(terminal_id);
+    }
+
+    /// Stops a terminal worker after its pane has been closed, but retains the
+    /// final registry snapshot for waiters that race with the auto-close event.
+    /// Retired snapshots are bounded and are removed when the limit is reached.
+    pub(crate) fn retire(&mut self, terminal_id: TerminalId) {
+        self.stop_worker(terminal_id);
+        self.retired.retain(|retired| *retired != terminal_id);
+        self.retired.push_back(terminal_id);
+        while self.retired.len() > MAX_RETIRED_TERMINALS {
+            if let Some(retired) = self.retired.pop_front() {
+                self.registry.remove(retired);
+            }
+        }
+    }
+
+    fn stop_worker(&mut self, terminal_id: TerminalId) {
         if let Some(worker) = self.workers.remove(&terminal_id) {
             let _ = worker.command_tx.send(TerminalWorkerCommand::Shutdown);
             if let Some(wakeup) = worker
@@ -470,7 +493,6 @@ impl TerminalManager {
                 let _ = join_handle.join();
             }
         }
-        self.registry.remove(terminal_id);
     }
 
     pub(crate) fn drain_events(&mut self) -> Vec<TerminalManagerEvent> {

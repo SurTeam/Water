@@ -106,7 +106,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 ?error,
                 "failed to create PTY poller"
             );
-            registry.mark_exited(terminal_id, None);
             emit_manager_event(
                 &event_tx,
                 event_wakeup.as_ref(),
@@ -115,6 +114,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     code: None,
                 },
             );
+            registry.mark_exited(terminal_id, None);
             return;
         }
     };
@@ -132,7 +132,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             ?error,
             "failed to register PTY"
         );
-        registry.mark_exited(terminal_id, None);
         emit_manager_event(
             &event_tx,
             event_wakeup.as_ref(),
@@ -141,6 +140,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 code: None,
             },
         );
+        registry.mark_exited(terminal_id, None);
         return;
     }
 
@@ -246,8 +246,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     }
                 }
                 PTY_CHILD_EVENT_KEY => {
-                    if let Some(ChildEvent::Exited(Some(status))) = pty.next_child_event() {
-                        child_exited = Some(status.code());
+                    if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
+                        child_exited = Some(status.and_then(|status| status.code()));
                     }
                 }
                 TERMINAL_WAKE_KEY => {}
@@ -299,18 +299,17 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     &output_buffer,
                 );
             }
-            registry.mark_exited(terminal_id, code);
             emit_manager_event(
                 &event_tx,
                 event_wakeup.as_ref(),
                 TerminalManagerEvent::Exited { terminal_id, code },
             );
+            registry.mark_exited(terminal_id, code);
             break 'worker;
         }
 
         if worker_stop {
             if !stop_requested {
-                registry.mark_exited(terminal_id, None);
                 emit_manager_event(
                     &event_tx,
                     event_wakeup.as_ref(),
@@ -319,6 +318,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         code: None,
                     },
                 );
+                registry.mark_exited(terminal_id, None);
             }
             break 'worker;
         }

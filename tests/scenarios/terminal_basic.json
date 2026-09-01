@@ -14,6 +14,12 @@
     },
     {
       "command": {
+        "type": "pane.split",
+        "direction": "right"
+      }
+    },
+    {
+      "command": {
         "type": "terminal.spawn",
         "program": "/bin/sh",
         "args": ["-c", "printf '\u001b[31m__READY__\u001b[0m\\n'"],
@@ -38,6 +44,12 @@
       "wait": {
         "type": "process_exit",
         "timeout_ms": 5000
+      }
+    },
+    {
+      "assert": {
+        "type": "pane_count",
+        "value": 1
       }
     },
     {

@@ -165,7 +165,7 @@ The command family is intentionally explicit:
 - `SurfaceCommand`: replace an empty surface (future surface kinds return a typed availability error)
 - `TerminalCommand`: spawn detected real zsh (`/opt/homebrew/bin/zsh`, Intel Homebrew, or `/bin/zsh`) with `-f` by default, or an explicit program, send text/raw bytes, resize, and scroll
 
-Terminal worker notifications are applied by `CommandDispatcher::pump_background_events` on the model thread. No UI callback may push into `tabs`, rewrite a pane tree, replace a surface, or touch a `Term` directly.
+Terminal worker notifications are applied by `CommandDispatcher::pump_background_events` on the model thread. A terminal exit emits `TerminalExited` and automatically removes its pane; if the pane is the tab's last leaf, the tab is removed as well. The terminal worker is retired while a bounded completed snapshot remains available to exit/output waiters, preventing cleanup from racing a query. No UI callback may push into `tabs`, rewrite a pane tree, replace a surface, or touch a `Term` directly.
 
 ## Events and revisions
 

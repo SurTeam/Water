@@ -64,4 +64,4 @@ cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenario
 cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_zsh.json
 ```
 
-The scenario runner waits on operation completion, terminal output, and process exit primitives. It does not use fixed sleeps, coordinates, or screenshots.
+The scenario runner waits on operation completion, terminal output, and process exit primitives. It does not use fixed sleeps, coordinates, or screenshots. When a terminal process exits, Water automatically closes its pane; if it was the tab's final pane, the tab is closed as well. The completed terminal snapshot remains available through bounded wait/query state so exit observers are not raced by the UI cleanup.

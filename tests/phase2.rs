@@ -8,6 +8,7 @@ use water::command::{
     AppCommand, CommandDispatcher, OperationResult, OperationStatus, PaneCommand, SplitDirection,
     TabCommand, TerminalCommand, WorkspaceCommand,
 };
+use water::event::AppEventKind;
 use water::terminal::{
     TerminalColor, TerminalProcessState, default_shell_args, default_shell_program,
 };
@@ -128,6 +129,103 @@ fn terminal_worker_captures_output_and_ansi_cell_attributes() {
 }
 
 #[test]
+fn exited_terminal_closes_a_non_final_pane_automatically() {
+    let mut dispatcher = CommandDispatcher::new();
+    let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+    assert_eq!(
+        dispatcher.wait_operation(workspace).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let tab = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+    assert_eq!(
+        dispatcher.wait_operation(tab).unwrap().status,
+        OperationStatus::Succeeded
+    );
+
+    let split = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Split {
+        pane_id: None,
+        direction: SplitDirection::Right,
+    }));
+    let new_pane = match dispatcher.wait_operation(split).unwrap().result.unwrap() {
+        OperationResult::PaneCreated { pane_id } => pane_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let spawn = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+        pane_id: Some(new_pane),
+        program: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), "exit 0".to_owned()],
+        columns: 80,
+        lines: 24,
+    }));
+    let terminal_id = match dispatcher.wait_operation(spawn).unwrap().result.unwrap() {
+        OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+
+    dispatcher
+        .wait_terminal_exit(terminal_id, Duration::from_secs(5))
+        .expect("short-lived terminal exits");
+    assert!(dispatcher.pump_background_events());
+
+    let state = dispatcher.state_dump();
+    let tab = &state.workspace.as_ref().unwrap().tabs[0];
+    assert_eq!(tab.tree.pane_count(), 1);
+    assert_ne!(tab.active_pane, new_pane);
+    assert_eq!(dispatcher.memory_stats().terminal_count, 1);
+    assert!(dispatcher.terminal_registry().snapshot(terminal_id).is_ok());
+    assert!(dispatcher.all_events().iter().any(|event| matches!(
+        event.kind,
+        AppEventKind::PaneClosed { pane_id } if pane_id == new_pane
+    )));
+
+    dispatcher
+        .terminal_registry()
+        .wait_process_exit(terminal_id, Duration::from_secs(1))
+        .expect("retired terminal remains waitable");
+}
+
+#[test]
+fn exited_terminal_closes_the_final_pane_with_its_tab() {
+    let mut dispatcher = CommandDispatcher::new();
+    let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+    assert_eq!(
+        dispatcher.wait_operation(workspace).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let tab = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+    let tab_id = match dispatcher.wait_operation(tab).unwrap().result.unwrap() {
+        OperationResult::TabCreated { tab_id } => tab_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let spawn = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+        pane_id: None,
+        program: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), "exit 0".to_owned()],
+        columns: 80,
+        lines: 24,
+    }));
+    let terminal_id = match dispatcher.wait_operation(spawn).unwrap().result.unwrap() {
+        OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+
+    dispatcher
+        .wait_terminal_exit(terminal_id, Duration::from_secs(5))
+        .expect("short-lived terminal exits");
+    assert!(dispatcher.pump_background_events());
+
+    let state = dispatcher.state_dump();
+    let workspace = state.workspace.as_ref().unwrap();
+    assert!(workspace.tabs.is_empty());
+    assert_eq!(workspace.active_tab, None);
+    assert_eq!(dispatcher.memory_stats().terminal_count, 0);
+    assert!(dispatcher.all_events().iter().any(|event| matches!(
+        event.kind,
+        AppEventKind::TabClosed { tab_id: closed_tab_id } if closed_tab_id == tab_id
+    )));
+}
+
+#[test]
 fn terminal_scenario_waits_on_output_and_process_exit() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/scenarios/terminal_basic.json");
@@ -198,7 +296,10 @@ fn model_host_projects_terminal_snapshots_without_mutable_ui_access() {
         .dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
             pane_id: None,
             program: "/bin/sh".to_owned(),
-            args: vec!["-c".to_owned(), "printf MODEL_HOST_READY".to_owned()],
+            args: vec![
+                "-c".to_owned(),
+                "printf MODEL_HOST_READY; read line".to_owned(),
+            ],
             columns: 40,
             lines: 8,
         }))
@@ -223,5 +324,20 @@ fn model_host_projects_terminal_snapshots_without_mutable_ui_access() {
     assert_eq!(snapshot.size.columns, 40);
     assert_eq!(snapshot.size.lines, 8);
     assert!(snapshot.visible_text().contains("MODEL_HOST_READY"));
+
+    let send = client
+        .dispatch(AppCommand::Terminal(TerminalCommand::SendText {
+            terminal_id: Some(terminal_id),
+            pane_id: None,
+            text: "\n".to_owned(),
+        }))
+        .unwrap();
+    assert_eq!(
+        client.wait_operation(send).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    client
+        .wait_terminal_exit(terminal_id, Duration::from_secs(5))
+        .unwrap();
     host.shutdown();
 }

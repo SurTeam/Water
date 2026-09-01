@@ -361,6 +361,18 @@ impl ApplicationModel {
         }
     }
 
+    pub(crate) fn pane_id_for_terminal(&self, terminal_id: TerminalId) -> Option<PaneId> {
+        self.panes.values().find_map(|pane| {
+            let surface = self.surfaces.get(&pane.surface)?;
+            match surface {
+                SurfaceState::Terminal(terminal) if terminal.terminal_id == terminal_id => {
+                    Some(pane.id)
+                }
+                SurfaceState::Empty(_) | SurfaceState::Terminal(_) => None,
+            }
+        })
+    }
+
     pub(crate) fn terminal_surface(
         &self,
         terminal_id: TerminalId,

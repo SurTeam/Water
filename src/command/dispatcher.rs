@@ -212,11 +212,71 @@ impl CommandDispatcher {
                             exit_code: code,
                         });
                         changed = true;
+
+                        self.close_exited_terminal_pane(terminal_id);
                     }
                 }
             }
         }
         changed
+    }
+
+    fn close_exited_terminal_pane(&mut self, terminal_id: TerminalId) {
+        let Some(pane_id) = self.model.pane_id_for_terminal(terminal_id) else {
+            return;
+        };
+        let Some(tab_id) = self.model.tab_id_for_pane(pane_id) else {
+            return;
+        };
+        let Some(pane_ids) = self.model.pane_ids_in_tab(tab_id) else {
+            return;
+        };
+
+        if pane_ids.len() == 1 {
+            let terminal_ids: Vec<_> = pane_ids
+                .iter()
+                .filter_map(|pane_id| self.model.terminal_id_for_pane(*pane_id))
+                .collect();
+            if let Err(message) = self.model.close_tab(tab_id) {
+                tracing::warn!(
+                    target: "water::command",
+                    terminal_id = %terminal_id,
+                    pane_id = %pane_id,
+                    tab_id = %tab_id,
+                    %message,
+                    "could not close tab after terminal exit"
+                );
+                return;
+            }
+            for exited_terminal_id in terminal_ids {
+                if exited_terminal_id == terminal_id {
+                    self.terminals.retire(exited_terminal_id);
+                } else {
+                    self.terminals.remove(exited_terminal_id);
+                }
+            }
+            for pane_id in pane_ids {
+                self.emit(AppEventKind::PaneClosed { pane_id });
+            }
+            self.emit(AppEventKind::TabClosed { tab_id });
+            return;
+        }
+
+        match self.model.close_pane(tab_id, pane_id) {
+            Ok(_) => {
+                self.terminals.retire(terminal_id);
+                self.emit(AppEventKind::PaneClosed { pane_id });
+            }
+            Err(message) => {
+                tracing::warn!(
+                    target: "water::command",
+                    terminal_id = %terminal_id,
+                    pane_id = %pane_id,
+                    %message,
+                    "could not close pane after terminal exit"
+                );
+            }
+        }
     }
 
     pub fn events_since(&self, sequence: u64) -> Vec<AppEvent> {
