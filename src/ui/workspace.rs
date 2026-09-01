@@ -367,6 +367,19 @@ impl WorkspaceView {
             }
             self.last_reported_mouse_cell = None;
             cx.stop_propagation();
+        } else if event.button == MouseButton::Left
+            && self.config.features.selection
+            && let Some(terminal_id) = self.dragging_terminal
+            && let Some(point) = self.terminal_cell_at(terminal_id, event.position)
+            && let Some(selection) = self.selection.as_mut()
+            && selection.terminal_id == terminal_id
+            && selection.head != point
+        {
+            // Mouse-up is the authoritative endpoint. A platform may omit a
+            // final move event, so do not leave the copied range one cell
+            // behind the pointer.
+            selection.head = point;
+            cx.notify();
         }
         self.dragging_terminal = None;
     }
@@ -1360,7 +1373,7 @@ fn render_terminal_snapshot(
         cursor_focused,
     } = options;
     let mut terminal = div()
-        .flex_1()
+        .size_full()
         .flex()
         .min_w(px(0.))
         .min_h(px(0.))
@@ -1373,13 +1386,14 @@ fn render_terminal_snapshot(
         .bg(rgb(theme.terminal_background));
     for row in 0..snapshot.size.lines {
         let mut row_element = div()
+            .relative()
+            .w(px(metrics.cell_width * snapshot.size.columns as f32))
             .h(px(metrics.line_height))
             .min_w(px(0.))
             .flex_none()
-            .flex()
-            .flex_nowrap()
             .whitespace_nowrap();
         let mut current: Option<(
+            usize,
             TerminalColor,
             TerminalColor,
             TerminalCellFlags,
@@ -1423,7 +1437,7 @@ fn render_terminal_snapshot(
             let should_merge = current
                 .as_ref()
                 .map(
-                    |(current_fg, current_bg, current_flags, _, _, current_cursor_hollow)| {
+                    |(_, current_fg, current_bg, current_flags, _, _, current_cursor_hollow)| {
                         *current_fg == foreground
                             && *current_bg == background
                             && *current_flags == cell.flags
@@ -1432,13 +1446,16 @@ fn render_terminal_snapshot(
                 )
                 .unwrap_or(false);
             if should_merge {
-                if let Some((_, _, _, text, width_columns_total, _)) = current.as_mut() {
+                if let Some((_, _, _, _, text, width_columns_total, _)) = current.as_mut() {
                     text.push_str(&character);
                     *width_columns_total += width_columns;
                 }
             } else {
-                if let Some((fg, bg, flags, text, width_columns, cursor_hollow)) = current.take() {
+                if let Some((start_column, fg, bg, flags, text, width_columns, cursor_hollow)) =
+                    current.take()
+                {
                     row_element = row_element.child(render_terminal_run(
+                        start_column,
                         fg,
                         bg,
                         flags,
@@ -1452,6 +1469,7 @@ fn render_terminal_snapshot(
                     ));
                 }
                 current = Some((
+                    column,
                     foreground,
                     background,
                     cell.flags,
@@ -1461,8 +1479,9 @@ fn render_terminal_snapshot(
                 ));
             }
         }
-        if let Some((fg, bg, flags, text, width_columns, cursor_hollow)) = current {
+        if let Some((start_column, fg, bg, flags, text, width_columns, cursor_hollow)) = current {
             row_element = row_element.child(render_terminal_run(
+                start_column,
                 fg,
                 bg,
                 flags,
@@ -1481,6 +1500,7 @@ fn render_terminal_snapshot(
 }
 
 fn render_terminal_run(
+    start_column: usize,
     foreground: TerminalColor,
     background: TerminalColor,
     flags: TerminalCellFlags,
@@ -1494,6 +1514,9 @@ fn render_terminal_run(
         cursor_hollow,
     } = style;
     let mut run = div()
+        .absolute()
+        .left(px(metrics.cell_width * start_column as f32))
+        .top(px(0.))
         .w(px(metrics.cell_width * width_columns as f32))
         .h(px(metrics.line_height))
         .flex_none()
