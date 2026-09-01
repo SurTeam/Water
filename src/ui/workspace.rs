@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent,
-    Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, Task, Window, canvas, div, font, prelude::*, px, rgb,
+    AnyElement, App, Bounds, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
+    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
+    ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, font, prelude::*, px,
+    rgb,
 };
 
 use crate::app::model::{PaneTreeDump, TabDump};
@@ -43,10 +44,22 @@ struct TerminalCellPosition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSelectionSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalSelectionEndpoint {
+    position: TerminalCellPosition,
+    side: TerminalSelectionSide,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TerminalSelection {
     terminal_id: TerminalId,
-    anchor: TerminalCellPosition,
-    head: TerminalCellPosition,
+    anchor: TerminalSelectionEndpoint,
+    head: TerminalSelectionEndpoint,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,6 +74,13 @@ struct TerminalMouseContext {
     modes: TerminalModes,
     bounds: Option<Bounds<gpui::Pixels>>,
     metrics: TerminalMetrics,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalMousePosition {
+    column: usize,
+    row: usize,
+    side: TerminalSelectionSide,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -189,27 +209,43 @@ impl WorkspaceView {
             .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
     }
 
+    fn terminal_selection_endpoint_at(
+        &self,
+        terminal_id: TerminalId,
+        position: Point<gpui::Pixels>,
+    ) -> Option<TerminalSelectionEndpoint> {
+        let snapshot = self.terminal_snapshot_for(terminal_id)?;
+        let mouse = terminal_mouse_position(
+            position,
+            self.terminal_bounds_for(terminal_id),
+            self.terminal_metrics,
+        );
+        let row = mouse
+            .row
+            .saturating_sub(1)
+            .min(snapshot.size.lines.saturating_sub(1));
+        let column = mouse
+            .column
+            .saturating_sub(1)
+            .min(snapshot.size.columns.saturating_sub(1));
+        let side = if mouse.row > snapshot.size.lines || mouse.column > snapshot.size.columns {
+            TerminalSelectionSide::Right
+        } else {
+            mouse.side
+        };
+        Some(TerminalSelectionEndpoint {
+            position: TerminalCellPosition { row, column },
+            side,
+        })
+    }
+
     fn terminal_cell_at(
         &self,
         terminal_id: TerminalId,
         position: Point<gpui::Pixels>,
     ) -> Option<TerminalCellPosition> {
-        let snapshot = self.terminal_snapshot_for(terminal_id)?;
-        let (column, row) = terminal_mouse_position(
-            position,
-            self.terminal_bounds_for(terminal_id),
-            self.terminal_metrics,
-        );
-        let row = row
-            .saturating_sub(1)
-            .min(snapshot.size.lines.saturating_sub(1));
-        let column = column
-            .saturating_sub(1)
-            .min(snapshot.size.columns.saturating_sub(1));
-        // Keep the raw half-cell endpoint here. `selection_bounds` expands a
-        // range that touches a wide glyph, which preserves a drag from the
-        // first half to the second half as a real selection.
-        Some(TerminalCellPosition { row, column })
+        self.terminal_selection_endpoint_at(terminal_id, position)
+            .map(|endpoint| endpoint.position)
     }
 
     fn begin_reported_mouse(
@@ -264,13 +300,13 @@ impl WorkspaceView {
         if !self.config.features.selection {
             return;
         }
-        let Some(point) = self.terminal_cell_at(terminal_id, position) else {
+        let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
         self.selection = Some(TerminalSelection {
             terminal_id,
-            anchor: point,
-            head: point,
+            anchor: endpoint,
+            head: endpoint,
         });
         self.dragging_terminal = Some(terminal_id);
         cx.notify();
@@ -287,13 +323,14 @@ impl WorkspaceView {
         if event.pressed_button != Some(MouseButton::Left) {
             return;
         }
-        let Some(point) = self.terminal_cell_at(terminal_id, event.position) else {
+        let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, event.position)
+        else {
             return;
         };
         if let Some(selection) = self.selection.as_mut()
-            && selection.head != point
+            && selection.head != endpoint
         {
-            selection.head = point;
+            selection.head = endpoint;
             cx.notify();
         }
     }
@@ -370,15 +407,15 @@ impl WorkspaceView {
         } else if event.button == MouseButton::Left
             && self.config.features.selection
             && let Some(terminal_id) = self.dragging_terminal
-            && let Some(point) = self.terminal_cell_at(terminal_id, event.position)
+            && let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, event.position)
             && let Some(selection) = self.selection.as_mut()
             && selection.terminal_id == terminal_id
-            && selection.head != point
+            && selection.head != endpoint
         {
             // Mouse-up is the authoritative endpoint. A platform may omit a
             // final move event, so do not leave the copied range one cell
             // behind the pointer.
-            selection.head = point;
+            selection.head = endpoint;
             cx.notify();
         }
         self.dragging_terminal = None;
@@ -388,12 +425,15 @@ impl WorkspaceView {
         let Some(selection) = self.selection else {
             return false;
         };
-        if selection.terminal_id != terminal_id || selection.anchor == selection.head {
+        if selection.terminal_id != terminal_id {
             return false;
         }
         let Some(snapshot) = self.terminal_snapshot_for(terminal_id) else {
             return false;
         };
+        if selection_bounds(snapshot, selection).is_none() {
+            return false;
+        }
         let text = selected_terminal_text(snapshot, selection);
         if text.is_empty() {
             return false;
@@ -991,6 +1031,39 @@ fn terminal_id_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<Terminal
     }
 }
 
+/// Registers window-level listeners during paint so a terminal drag keeps receiving
+/// moves and release events after it crosses another pane or the root hitbox.
+fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
+    canvas(
+        |_bounds, _, _| {},
+        move |_bounds, _, window, _| {
+            let move_entity = entity.clone();
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Capture {
+                    return;
+                }
+                move_entity.update(cx, |view, cx| {
+                    view.update_terminal_selection(event, cx);
+                });
+            });
+
+            let up_entity = entity;
+            window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
+                if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                    return;
+                }
+                up_entity.update(cx, |view, cx| {
+                    view.finish_terminal_selection(event, cx);
+                });
+            });
+        },
+    )
+    .size_full()
+    .absolute()
+    .inset_0()
+    .into_any_element()
+}
+
 fn terminal_scroll_lines(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> i32 {
     let delta = match event.delta {
         ScrollDelta::Lines(delta) => delta.y,
@@ -1075,19 +1148,25 @@ fn terminal_mouse_sequence(
     } else {
         button + if motion { 32 } else { 0 }
     } + modifier;
-    let (column, row) = terminal_mouse_position(position, mouse.bounds, mouse.metrics);
+    let mouse_position = terminal_mouse_position(position, mouse.bounds, mouse.metrics);
     if mouse.modes.sgr_mouse {
         let suffix = if release { 'm' } else { 'M' };
         let mut input = Vec::with_capacity(count * 16);
         for _ in 0..count {
-            input.extend_from_slice(format!("\u{1b}[<{button};{column};{row}{suffix}").as_bytes());
+            input.extend_from_slice(
+                format!(
+                    "\u{1b}[<{button};{};{}{suffix}",
+                    mouse_position.column, mouse_position.row,
+                )
+                .as_bytes(),
+            );
         }
         return input;
     }
 
     let max_coordinate = if mouse.modes.utf8_mouse { 2_047 } else { 223 };
-    let column = column.min(max_coordinate);
-    let row = row.min(max_coordinate);
+    let column = mouse_position.column.min(max_coordinate);
+    let row = mouse_position.row.min(max_coordinate);
     let mut input = Vec::with_capacity(count * 6);
     for _ in 0..count {
         input.extend_from_slice(b"\x1b[M");
@@ -1121,16 +1200,33 @@ fn terminal_mouse_position(
     position: Point<gpui::Pixels>,
     bounds: Option<Bounds<gpui::Pixels>>,
     metrics: TerminalMetrics,
-) -> (usize, usize) {
+) -> TerminalMousePosition {
     let Some(bounds) = bounds else {
-        return (1, 1);
+        return TerminalMousePosition {
+            column: 1,
+            row: 1,
+            side: TerminalSelectionSide::Left,
+        };
     };
-    let x = (f32::from(position.x) - f32::from(bounds.origin.x)).max(0.0);
-    let y = (f32::from(position.y) - f32::from(bounds.origin.y)).max(0.0);
-    (
-        (x / metrics.cell_width).floor() as usize + 1,
-        (y / metrics.line_height).floor() as usize + 1,
-    )
+    let relative_x = f32::from(position.x) - f32::from(bounds.origin.x);
+    let relative_y = f32::from(position.y) - f32::from(bounds.origin.y);
+    let x = relative_x.max(0.0);
+    let y = relative_y.max(0.0);
+    let side = if relative_x < 0.0 || relative_y < 0.0 {
+        TerminalSelectionSide::Left
+    } else if relative_x >= f32::from(bounds.size.width)
+        || relative_y >= f32::from(bounds.size.height)
+        || x % metrics.cell_width > metrics.cell_width / 2.0
+    {
+        TerminalSelectionSide::Right
+    } else {
+        TerminalSelectionSide::Left
+    };
+    TerminalMousePosition {
+        column: (x / metrics.cell_width).floor() as usize + 1,
+        row: (y / metrics.line_height).floor() as usize + 1,
+        side,
+    }
 }
 
 fn terminal_input_for_keystroke_with_modes(
@@ -1294,39 +1390,74 @@ fn is_terminal_cell_selected(
     let Some(selection) = selection else {
         return false;
     };
-    if selection.terminal_id != terminal_id || selection.anchor == selection.head {
+    if selection.terminal_id != terminal_id {
         return false;
     }
-    let (start, end) = selection_bounds(snapshot, selection);
+    let Some((start, end)) = selection_bounds(snapshot, selection) else {
+        return false;
+    };
     (start..=end).contains(&TerminalCellPosition { row, column })
+}
+
+fn selection_boundary_index(endpoint: TerminalSelectionEndpoint, columns: usize) -> usize {
+    endpoint.position.row * columns
+        + endpoint.position.column
+        + usize::from(endpoint.side == TerminalSelectionSide::Right)
 }
 
 fn selection_bounds(
     snapshot: &TerminalSnapshot,
     selection: TerminalSelection,
-) -> (TerminalCellPosition, TerminalCellPosition) {
-    let mut start = selection.anchor.min(selection.head);
-    let mut end = selection.anchor.max(selection.head);
+) -> Option<(TerminalCellPosition, TerminalCellPosition)> {
+    let columns = snapshot.size.columns;
+    let total_cells = snapshot.cells.len();
+    let anchor_boundary = selection_boundary_index(selection.anchor, columns);
+    let head_boundary = selection_boundary_index(selection.head, columns);
+    let (start_endpoint, end_endpoint) = if anchor_boundary <= head_boundary {
+        (selection.anchor, selection.head)
+    } else {
+        (selection.head, selection.anchor)
+    };
+    let mut start = selection_boundary_index(start_endpoint, columns);
+    let mut end = selection_boundary_index(end_endpoint, columns);
+    if start >= end {
+        return None;
+    }
+
     if snapshot
-        .cell(start.row, start.column)
+        .cells
+        .get(start)
         .is_some_and(|cell| cell.flags.wide_spacer)
     {
-        start.column = start.column.saturating_sub(1);
+        start = start.saturating_sub(1);
     }
-    if snapshot
-        .cell(end.row, end.column)
-        .is_some_and(|cell| cell.flags.wide)
+    if end > start
+        && snapshot
+            .cells
+            .get(end.saturating_sub(1))
+            .is_some_and(|cell| cell.flags.wide)
     {
-        end.column = end
-            .column
-            .saturating_add(1)
-            .min(snapshot.size.columns.saturating_sub(1));
+        end = end.saturating_add(1).min(total_cells);
     }
-    (start, end)
+    if start >= end {
+        return None;
+    }
+    Some((
+        TerminalCellPosition {
+            row: start / columns,
+            column: start % columns,
+        },
+        TerminalCellPosition {
+            row: (end - 1) / columns,
+            column: (end - 1) % columns,
+        },
+    ))
 }
 
 fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelection) -> String {
-    let (start, end) = selection_bounds(snapshot, selection);
+    let Some((start, end)) = selection_bounds(snapshot, selection) else {
+        return String::new();
+    };
     let mut text = String::new();
     for row in start.row..=end.row {
         let first_column = if row == start.row { start.column } else { 0 };
@@ -1601,6 +1732,7 @@ impl Render for WorkspaceView {
         let metrics = self.measured_terminal_metrics(window);
         self.terminal_metrics = metrics;
         let theme = self.config.theme.colors();
+
         let window_active = window.is_window_active() && self.focus_handle.is_focused(window);
         let tab_data: Vec<(TabId, String, bool, PaneId)> = self
             .snapshot
@@ -1670,17 +1802,9 @@ impl Render for WorkspaceView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key_down(event, cx);
             }))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
-                this.update_terminal_selection(event, cx);
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                    this.finish_terminal_selection(event, cx);
-                }),
-            )
             .bg(rgb(theme.terminal_background))
             .text_color(rgb(theme.ui_foreground))
+            .child(workspace_mouse_event_observer(cx.entity()))
             .child(
                 div()
                     .h(px(36.))
@@ -1754,6 +1878,17 @@ mod tests {
         }
     }
 
+    fn endpoint(
+        row: usize,
+        column: usize,
+        side: TerminalSelectionSide,
+    ) -> TerminalSelectionEndpoint {
+        TerminalSelectionEndpoint {
+            position: TerminalCellPosition { row, column },
+            side,
+        }
+    }
+
     #[test]
     fn terminal_input_preserves_printable_text_and_control_bytes() {
         assert_eq!(
@@ -1801,13 +1936,44 @@ mod tests {
         snapshot.cells[4].flags.wide = true;
         let selection = TerminalSelection {
             terminal_id,
-            anchor: TerminalCellPosition { row: 0, column: 0 },
-            head: TerminalCellPosition { row: 1, column: 7 },
+            anchor: endpoint(0, 0, TerminalSelectionSide::Left),
+            head: endpoint(1, 7, TerminalSelectionSide::Right),
         };
         assert_eq!(
             selected_terminal_text(&snapshot, selection),
             "hell界\nworld"
         );
+    }
+
+    #[test]
+    fn selection_sides_choose_only_fully_covered_cells() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 1));
+        for (column, character) in "abcd".chars().enumerate() {
+            snapshot.cells[column].character = character;
+        }
+
+        let first_cell = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(0, 0, TerminalSelectionSide::Left),
+            head: endpoint(0, 1, TerminalSelectionSide::Left),
+        };
+        assert_eq!(selection_bounds(&snapshot, first_cell).unwrap().1.column, 0);
+
+        let boundary_only = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(0, 0, TerminalSelectionSide::Right),
+            head: endpoint(0, 1, TerminalSelectionSide::Left),
+        };
+        assert!(selection_bounds(&snapshot, boundary_only).is_none());
+
+        let second_cell = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(0, 0, TerminalSelectionSide::Right),
+            head: endpoint(0, 1, TerminalSelectionSide::Right),
+        };
+        let (start, end) = selection_bounds(&snapshot, second_cell).unwrap();
+        assert_eq!((start.column, end.column), (1, 1));
     }
 
     #[test]
@@ -1819,11 +1985,11 @@ mod tests {
         snapshot.cells[2].flags.wide_spacer = true;
         let selection = TerminalSelection {
             terminal_id,
-            anchor: TerminalCellPosition { row: 0, column: 0 },
-            head: TerminalCellPosition { row: 0, column: 1 },
+            anchor: endpoint(0, 0, TerminalSelectionSide::Left),
+            head: endpoint(0, 1, TerminalSelectionSide::Right),
         };
 
-        let (_, end) = selection_bounds(&snapshot, selection);
+        let (_, end) = selection_bounds(&snapshot, selection).unwrap();
         assert_eq!(end.column, 2);
         assert!(is_terminal_cell_selected(
             &snapshot,
@@ -1842,8 +2008,8 @@ mod tests {
 
         let half_cell_drag = TerminalSelection {
             terminal_id,
-            anchor: TerminalCellPosition { row: 0, column: 1 },
-            head: TerminalCellPosition { row: 0, column: 2 },
+            anchor: endpoint(0, 1, TerminalSelectionSide::Left),
+            head: endpoint(0, 2, TerminalSelectionSide::Right),
         };
         assert!(is_terminal_cell_selected(
             &snapshot,
