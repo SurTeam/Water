@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
-use alacritty_terminal::grid::Scroll;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite, Pty};
 use alacritty_terminal::vte::ansi::Processor;
 use polling::{Event as PollEvent, Events, PollMode, Poller};
@@ -12,8 +12,8 @@ use polling::{Event as PollEvent, Events, PollMode, Poller};
 use crate::ids::TerminalId;
 
 use super::model::{
-    TERMINAL_WAKE_KEY, TerminalManagerEvent, TerminalRegistry, TerminalWorkerCommand,
-    WakeupCallback, WakeupSlot,
+    ScrollbackBudget, TERMINAL_WAKE_KEY, TerminalManagerEvent, TerminalRegistry,
+    TerminalWorkerCommand, WakeupCallback, WakeupSlot,
 };
 use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 
@@ -25,6 +25,7 @@ pub(crate) struct WorkerConfig {
     terminal_id: TerminalId,
     size: TerminalSize,
     scrollback_lines: usize,
+    scrollback_budget: ScrollbackBudget,
     command_rx: Receiver<TerminalWorkerCommand>,
     registry: TerminalRegistry,
     event_tx: Sender<TerminalManagerEvent>,
@@ -60,6 +61,7 @@ impl WorkerConfig {
         terminal_id: TerminalId,
         size: TerminalSize,
         scrollback_lines: usize,
+        scrollback_budget: ScrollbackBudget,
         command_rx: Receiver<TerminalWorkerCommand>,
         channels: WorkerChannels,
     ) -> Self {
@@ -67,6 +69,7 @@ impl WorkerConfig {
             terminal_id,
             size,
             scrollback_lines,
+            scrollback_budget,
             command_rx,
             registry: channels.registry,
             event_tx: channels.event_tx,
@@ -81,6 +84,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         terminal_id,
         size,
         scrollback_lines,
+        scrollback_budget,
         command_rx,
         registry,
         event_tx,
@@ -96,6 +100,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         sender: proxy_events.0,
     };
     let mut term = Term::new(config, &size, proxy);
+    let mut scrollback = ScrollbackState::new(terminal_id, scrollback_lines, scrollback_budget);
+    let _ = scrollback.reconcile(&mut term, false);
     let mut processor = Processor::new();
     let poller = match Poller::new() {
         Ok(poller) => Arc::new(poller),
@@ -115,6 +121,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 },
             );
             registry.mark_exited(terminal_id, None);
+            scrollback.unregister();
             return;
         }
     };
@@ -141,6 +148,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             },
         );
         registry.mark_exited(terminal_id, None);
+        scrollback.unregister();
         return;
     }
 
@@ -153,6 +161,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
     let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut snapshot_revision = 0_u64;
+    let mut viewport_position = 0_i64;
     let mut stop_requested = false;
     let publisher = SnapshotPublisher {
         registry: &registry,
@@ -166,12 +175,17 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         snapshot_revision,
         &publisher,
         &[],
+        viewport_position,
     );
 
     'worker: loop {
         while let Ok(command) = command_rx.try_recv() {
-            match apply_command(command, &mut pty, &mut term) {
-                Ok(CommandEffect::Continue { dirty }) => {
+            match apply_command(command, &mut pty, &mut term, &mut scrollback) {
+                Ok(CommandEffect::Continue {
+                    dirty,
+                    viewport_delta,
+                }) => {
+                    viewport_position = viewport_position.saturating_add(viewport_delta);
                     if dirty {
                         snapshot_revision = snapshot_revision.saturating_add(1);
                         publish_snapshot(
@@ -181,6 +195,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                             snapshot_revision,
                             &publisher,
                             &[],
+                            viewport_position,
                         );
                     }
                 }
@@ -220,6 +235,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         for event in events.iter() {
             match event.key {
                 PTY_READ_WRITE_KEY if event.readable && !pty_eof => {
+                    // A pinned viewport must be allowed to borrow the
+                    // remaining global history before parsing new rows. If
+                    // the normal limit were reached first, alacritty would
+                    // discard the very rows the user is looking at.
+                    let _ = scrollback.prepare_for_output(&mut term);
                     match drain_pty(
                         &mut pty,
                         &mut processor,
@@ -266,6 +286,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
 
         if !output_buffer.is_empty() {
+            let _ = scrollback.sync(&mut term);
             snapshot_revision = snapshot_revision.saturating_add(1);
             publish_snapshot(
                 terminal_id,
@@ -274,6 +295,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 snapshot_revision,
                 &publisher,
                 &output_buffer,
+                viewport_position,
             );
         }
 
@@ -281,6 +303,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             // A final non-blocking drain avoids losing bytes that were already
             // queued in the PTY when SIGCHLD arrived.
             output_buffer.clear();
+            let _ = scrollback.prepare_for_output(&mut term);
             let _ = drain_pty(
                 &mut pty,
                 &mut processor,
@@ -289,6 +312,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 &mut output_buffer,
             );
             if !output_buffer.is_empty() {
+                let _ = scrollback.sync(&mut term);
                 snapshot_revision = snapshot_revision.saturating_add(1);
                 publish_snapshot(
                     terminal_id,
@@ -297,6 +321,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     snapshot_revision,
                     &publisher,
                     &output_buffer,
+                    viewport_position,
                 );
             }
             emit_manager_event(
@@ -326,10 +351,100 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
     let _ = pty.deregister(&poller);
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = None;
+    scrollback.unregister();
+}
+
+struct ScrollbackState {
+    terminal_id: TerminalId,
+    base_limit: usize,
+    current_limit: usize,
+    budget: ScrollbackBudget,
+}
+
+impl ScrollbackState {
+    fn new(terminal_id: TerminalId, base_limit: usize, budget: ScrollbackBudget) -> Self {
+        Self {
+            terminal_id,
+            base_limit,
+            current_limit: base_limit,
+            budget,
+        }
+    }
+
+    fn prepare_for_output(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
+        let active = self.is_pinned(term);
+        self.reconcile(term, active)
+    }
+
+    fn focus_latest(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
+        let old_offset = term.grid().display_offset();
+        if old_offset != 0 {
+            term.scroll_display(Scroll::Bottom);
+        }
+        let changed = self.reconcile(term, false);
+        changed || old_offset != term.grid().display_offset()
+    }
+
+    fn reconcile(&mut self, term: &mut Term<WorkerEventProxy>, active: bool) -> bool {
+        let old_offset = term.grid().display_offset();
+        let old_limit = self.current_limit;
+        let alternate_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let retained = if alternate_screen {
+            0
+        } else {
+            terminal_history_size(term)
+        };
+        let target_limit = if alternate_screen {
+            // The alternate screen has no user scrollback. Release any
+            // temporary reservation held by the normal screen while keeping
+            // the alternate grid bounded as well.
+            let _ = self
+                .budget
+                .limit_for(self.terminal_id, 0, self.base_limit, false);
+            0
+        } else {
+            self.budget
+                .limit_for(self.terminal_id, retained, self.base_limit, active)
+        };
+        if target_limit != self.current_limit {
+            term.grid_mut().update_history(target_limit);
+            self.current_limit = target_limit;
+        }
+        let new_offset = term.grid().display_offset();
+        self.budget.sync(
+            self.terminal_id,
+            terminal_history_size(term),
+            self.is_pinned(term),
+        );
+        old_limit != self.current_limit || old_offset != new_offset
+    }
+
+    fn sync(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
+        let active = self.is_pinned(term);
+        self.reconcile(term, active)
+    }
+
+    fn unregister(&self) {
+        self.budget.unregister(self.terminal_id);
+    }
+
+    fn is_pinned(&self, term: &Term<WorkerEventProxy>) -> bool {
+        !term.mode().contains(TermMode::ALT_SCREEN) && term.grid().display_offset() != 0
+    }
+}
+
+fn terminal_history_size(term: &Term<WorkerEventProxy>) -> usize {
+    term.grid()
+        .total_lines()
+        .saturating_sub(term.grid().screen_lines())
+}
+
+fn viewport_delta(old_offset: usize, new_offset: usize) -> i64 {
+    new_offset as i64 - old_offset as i64
 }
 
 enum CommandEffect {
-    Continue { dirty: bool },
+    Continue { dirty: bool, viewport_delta: i64 },
     Stop,
 }
 
@@ -337,13 +452,20 @@ fn apply_command(
     command: TerminalWorkerCommand,
     pty: &mut Pty,
     term: &mut Term<WorkerEventProxy>,
+    scrollback: &mut ScrollbackState,
 ) -> io::Result<CommandEffect> {
     match command {
         TerminalWorkerCommand::SendText(bytes) | TerminalWorkerCommand::SendBytes(bytes) => {
+            let old_offset = term.grid().display_offset();
             pty.writer().write_all(&bytes)?;
-            Ok(CommandEffect::Continue { dirty: false })
+            let dirty = scrollback.focus_latest(term);
+            Ok(CommandEffect::Continue {
+                dirty,
+                viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
+            })
         }
         TerminalWorkerCommand::Resize(size) => {
+            let old_offset = term.grid().display_offset();
             let window_size = WindowSize {
                 num_lines: size.lines as u16,
                 num_cols: size.columns as u16,
@@ -352,11 +474,21 @@ fn apply_command(
             };
             pty.on_resize(window_size);
             term.resize(size);
-            Ok(CommandEffect::Continue { dirty: true })
+            let dirty = scrollback.reconcile(term, scrollback.is_pinned(term));
+            Ok(CommandEffect::Continue {
+                dirty,
+                viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
+            })
         }
         TerminalWorkerCommand::Scroll(lines) => {
+            let old_offset = term.grid().display_offset();
             term.scroll_display(Scroll::Delta(lines));
-            Ok(CommandEffect::Continue { dirty: true })
+            let dirty = scrollback.reconcile(term, scrollback.is_pinned(term));
+            let new_offset = term.grid().display_offset();
+            Ok(CommandEffect::Continue {
+                dirty: dirty || old_offset != new_offset,
+                viewport_delta: viewport_delta(old_offset, new_offset),
+            })
         }
         TerminalWorkerCommand::Shutdown => Ok(CommandEffect::Stop),
     }
@@ -439,8 +571,15 @@ fn publish_snapshot(
     revision: u64,
     publisher: &SnapshotPublisher<'_>,
     output: &[u8],
+    viewport_position: i64,
 ) {
-    let snapshot = TerminalSnapshot::from_term(terminal_id, term, process, revision);
+    let snapshot = TerminalSnapshot::from_term_with_viewport_position(
+        terminal_id,
+        term,
+        process,
+        revision,
+        viewport_position,
+    );
     publisher.registry.publish(terminal_id, snapshot, output);
     emit_manager_event(
         publisher.event_tx,
@@ -492,5 +631,60 @@ impl EventListener for WorkerEventProxy {
         if let Some(action) = action {
             let _ = self.sender.send(action);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_term(size: TerminalSize, scrollback_lines: usize) -> Term<WorkerEventProxy> {
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        Term::new(
+            Config {
+                scrolling_history: scrollback_lines,
+                ..Config::default()
+            },
+            &size,
+            WorkerEventProxy { sender },
+        )
+    }
+
+    #[test]
+    fn pinned_view_stays_fixed_while_output_grows_temporary_scrollback() {
+        let terminal_id = TerminalId::new(1);
+        let size = TerminalSize::new(16, 3);
+        let budget = ScrollbackBudget::new(100);
+        budget.register(terminal_id, 2);
+        let mut scrollback = ScrollbackState::new(terminal_id, 2, budget);
+        let mut term = test_term(size, 2);
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+
+        processor.advance(
+            &mut term,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\n",
+        );
+        let _ = scrollback.sync(&mut term);
+        term.scroll_display(Scroll::Delta(1));
+        assert!(scrollback.reconcile(&mut term, true));
+        let before =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 1);
+
+        assert!(scrollback.current_limit > scrollback.base_limit);
+        processor.advance(
+            &mut term,
+            b"eight\r\nnine\r\nten\r\neleven\r\ntwelve\r\nthirteen\r\n",
+        );
+        let _ = scrollback.sync(&mut term);
+        let after =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
+
+        assert_eq!(after.visible_text(), before.visible_text());
+        assert!(after.display_offset > before.display_offset);
+
+        assert!(scrollback.focus_latest(&mut term));
+        assert_eq!(term.grid().display_offset(), 0);
+        assert_eq!(scrollback.current_limit, scrollback.base_limit);
+        assert!(terminal_history_size(&term) <= scrollback.base_limit);
     }
 }

@@ -23,6 +23,7 @@ pub use command::{
 pub use config::{AppConfig, ConfigError, FeatureConfig, TerminalConfig, ThemeColors, ThemeConfig};
 pub use ids::{OperationId, PaneId, SessionId, SurfaceId, TabId, TerminalId, WorkspaceId};
 pub use terminal::{
-    MAX_COLUMNS, MAX_LINES, TerminalCell, TerminalCellFlags, TerminalColor, TerminalCursor,
-    TerminalModes, TerminalProcessState, TerminalSize, TerminalSnapshot,
+    MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES, TerminalCell,
+    TerminalCellFlags, TerminalColor, TerminalCursor, TerminalModes, TerminalProcessState,
+    TerminalSize, TerminalSnapshot,
 };

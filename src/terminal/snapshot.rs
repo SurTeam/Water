@@ -14,7 +14,10 @@ pub const DEFAULT_COLUMNS: usize = 80;
 pub const DEFAULT_LINES: usize = 24;
 pub const MAX_COLUMNS: usize = 512;
 pub const MAX_LINES: usize = 256;
+/// Maximum normal scrollback configured for an individual terminal.
 pub const MAX_SCROLLBACK_LINES: usize = 10_000;
+/// Hard safety cap for the combined temporary scrollback of all terminals.
+pub const MAX_TOTAL_SCROLLBACK_LINES: usize = 100_000;
 pub const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +135,13 @@ pub struct TerminalSnapshot {
     pub terminal_id: TerminalId,
     pub size: TerminalSize,
     pub display_offset: usize,
+    /// Cumulative viewport movement caused by commands or resize.
+    ///
+    /// Output can increase `display_offset` while a pinned viewport remains
+    /// visually fixed. This independent coordinate lets consumers distinguish
+    /// a user viewport move from output-driven history growth.
+    #[serde(default)]
+    pub viewport_position: i64,
     pub cursor: TerminalCursor,
     #[serde(default)]
     pub modes: TerminalModes,
@@ -146,6 +156,7 @@ impl TerminalSnapshot {
             terminal_id,
             size,
             display_offset: 0,
+            viewport_position: 0,
             cursor: TerminalCursor::default(),
             modes: TerminalModes::default(),
             process: TerminalProcessState::Running,
@@ -189,6 +200,16 @@ impl TerminalSnapshot {
         process: TerminalProcessState,
         revision: u64,
     ) -> Self {
+        Self::from_term_with_viewport_position(terminal_id, term, process, revision, 0)
+    }
+
+    pub fn from_term_with_viewport_position<T: EventListener>(
+        terminal_id: TerminalId,
+        term: &Term<T>,
+        process: TerminalProcessState,
+        revision: u64,
+        viewport_position: i64,
+    ) -> Self {
         let size = TerminalSize::new(term.columns(), term.screen_lines());
         let display_offset = term.grid().display_offset();
         let mut cells = Vec::with_capacity(size.columns * size.lines);
@@ -227,6 +248,7 @@ impl TerminalSnapshot {
             terminal_id,
             size,
             display_offset,
+            viewport_position,
             cursor,
             modes,
             process,

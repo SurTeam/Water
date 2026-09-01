@@ -9,14 +9,133 @@ use thiserror::Error;
 use crate::ids::TerminalId;
 
 use super::snapshot::{
-    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, TerminalProcessState, TerminalSize,
-    TerminalSnapshot,
+    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES,
+    TerminalProcessState, TerminalSize, TerminalSnapshot,
 };
 
 pub(crate) const TERMINAL_WAKE_KEY: usize = usize::MAX - 1;
 const MAX_RETIRED_TERMINALS: usize = 64;
 pub(crate) type WakeupCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 pub(crate) type WakeupSlot = Arc<Mutex<Option<WakeupCallback>>>;
+
+/// Coordinates temporary scrollback growth across terminal workers.
+///
+/// A terminal that is scrolled away from the live output gets a reservation
+/// for the unused global budget. The reservation is released when the user
+/// returns to the live end or sends input, so a busy terminal cannot grow
+/// without bound while another terminal is open.
+#[derive(Clone, Debug)]
+pub(crate) struct ScrollbackBudget {
+    state: Arc<Mutex<ScrollbackBudgetState>>,
+    max_lines: usize,
+}
+
+#[derive(Debug, Default)]
+struct ScrollbackBudgetState {
+    entries: BTreeMap<TerminalId, ScrollbackBudgetEntry>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ScrollbackBudgetEntry {
+    retained: usize,
+    reservation: usize,
+    active: bool,
+}
+
+impl ScrollbackBudget {
+    pub(crate) fn new(max_lines: usize) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ScrollbackBudgetState::default())),
+            max_lines: max_lines.clamp(1, MAX_TOTAL_SCROLLBACK_LINES),
+        }
+    }
+
+    pub(crate) fn register(&self, terminal_id: TerminalId, base_limit: usize) {
+        let mut state = self.state.lock().expect("scrollback budget poisoned");
+        if state.entries.contains_key(&terminal_id) {
+            return;
+        }
+        let reserved = state
+            .entries
+            .values()
+            .map(|entry| entry.reservation)
+            .sum::<usize>();
+        let reservation = base_limit.min(self.max_lines.saturating_sub(reserved));
+        state.entries.insert(
+            terminal_id,
+            ScrollbackBudgetEntry {
+                retained: 0,
+                reservation,
+                active: false,
+            },
+        );
+    }
+
+    pub(crate) fn unregister(&self, terminal_id: TerminalId) {
+        self.state
+            .lock()
+            .expect("scrollback budget poisoned")
+            .entries
+            .remove(&terminal_id);
+    }
+
+    /// Returns the history limit this terminal may use right now.
+    ///
+    /// Inactive terminals retain their normal per-terminal reservation. An
+    /// active terminal may borrow all budget not reserved by the other
+    /// terminals. Updating the reservation before the worker changes its
+    /// `Grid` makes concurrent PTY workers observe the same global ceiling.
+    pub(crate) fn limit_for(
+        &self,
+        terminal_id: TerminalId,
+        retained: usize,
+        base_limit: usize,
+        active: bool,
+    ) -> usize {
+        let mut state = self.state.lock().expect("scrollback budget poisoned");
+        let reserved_by_others = state
+            .entries
+            .iter()
+            .filter(|(id, _)| **id != terminal_id)
+            .map(|(_, entry)| entry.reservation)
+            .sum::<usize>();
+        let available = self.max_lines.saturating_sub(reserved_by_others);
+        let limit = if active {
+            available
+        } else {
+            base_limit.min(available)
+        };
+        if let Some(entry) = state.entries.get_mut(&terminal_id) {
+            entry.retained = retained;
+            entry.reservation = limit;
+            entry.active = active;
+        }
+        limit
+    }
+
+    pub(crate) fn sync(&self, terminal_id: TerminalId, retained: usize, active: bool) {
+        if let Some(entry) = self
+            .state
+            .lock()
+            .expect("scrollback budget poisoned")
+            .entries
+            .get_mut(&terminal_id)
+        {
+            entry.retained = retained;
+            entry.active = active;
+        }
+    }
+
+    pub(crate) fn retained_lines(&self) -> usize {
+        self.state
+            .lock()
+            .expect("scrollback budget poisoned")
+            .entries
+            .values()
+            .map(|entry| entry.retained)
+            .sum()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) enum TerminalWorkerCommand {
@@ -300,6 +419,8 @@ fn trim_recent_output(output: &mut String) {
 pub struct TerminalManager {
     registry: TerminalRegistry,
     scrollback_lines: usize,
+    max_total_scrollback_lines: usize,
+    scrollback_budget: ScrollbackBudget,
     event_tx: Sender<TerminalManagerEvent>,
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
@@ -335,10 +456,27 @@ impl TerminalManager {
         event_wakeup: Option<WakeupCallback>,
         scrollback_lines: usize,
     ) -> Self {
+        Self::new_with_wakeup_and_scrollback_and_total(
+            event_wakeup,
+            scrollback_lines,
+            MAX_TOTAL_SCROLLBACK_LINES,
+        )
+    }
+
+    pub(crate) fn new_with_wakeup_and_scrollback_and_total(
+        event_wakeup: Option<WakeupCallback>,
+        scrollback_lines: usize,
+        max_total_scrollback_lines: usize,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
+        let scrollback_lines = scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
+        let max_total_scrollback_lines =
+            max_total_scrollback_lines.clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
         Self {
             registry: TerminalRegistry::new(),
-            scrollback_lines: scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES),
+            scrollback_lines,
+            max_total_scrollback_lines,
+            scrollback_budget: ScrollbackBudget::new(max_total_scrollback_lines),
             event_tx,
             event_rx,
             event_wakeup,
@@ -393,12 +531,15 @@ impl TerminalManager {
             command_tx.clone(),
             wakeup.clone(),
         )?;
+        self.scrollback_budget
+            .register(terminal_id, self.scrollback_lines);
 
         let event_tx = self.event_tx.clone();
         let event_wakeup = self.event_wakeup.clone();
         let registry = self.registry.clone();
         let worker_wakeup = wakeup.clone();
         let scrollback_lines = self.scrollback_lines;
+        let scrollback_budget = self.scrollback_budget.clone();
         let join_handle = match thread::Builder::new()
             .name(format!("water-terminal-{terminal_id}"))
             .spawn(move || {
@@ -407,6 +548,7 @@ impl TerminalManager {
                         terminal_id,
                         size,
                         scrollback_lines,
+                        scrollback_budget,
                         command_rx,
                         super::worker::WorkerChannels::new(
                             registry,
@@ -420,6 +562,7 @@ impl TerminalManager {
             }) {
             Ok(join_handle) => join_handle,
             Err(error) => {
+                self.scrollback_budget.unregister(terminal_id);
                 self.registry.remove(terminal_id);
                 return Err(TerminalError::SpawnFailed(error.to_string()));
             }
@@ -507,6 +650,21 @@ impl TerminalManager {
         self.scrollback_lines
     }
 
+    pub fn scrollback_capacity_lines(&self) -> usize {
+        self.workers
+            .len()
+            .saturating_mul(self.scrollback_lines)
+            .min(self.max_total_scrollback_lines)
+    }
+
+    pub fn retained_scrollback_lines(&self) -> usize {
+        self.scrollback_budget.retained_lines()
+    }
+
+    pub fn max_total_scrollback_lines(&self) -> usize {
+        self.max_total_scrollback_lines
+    }
+
     pub fn shutdown_all(&mut self) {
         let terminal_ids: Vec<_> = self.workers.keys().copied().collect();
         for terminal_id in terminal_ids {
@@ -524,5 +682,30 @@ impl Default for TerminalManager {
 impl Drop for TerminalManager {
     fn drop(&mut self) {
         self.shutdown_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_terminal_borrows_and_releases_global_scrollback_budget() {
+        let budget = ScrollbackBudget::new(100);
+        let first = TerminalId::new(1);
+        let second = TerminalId::new(2);
+        budget.register(first, 10);
+        budget.register(second, 10);
+
+        assert_eq!(budget.limit_for(first, 0, 10, true), 90);
+        assert_eq!(budget.limit_for(second, 0, 10, false), 10);
+
+        assert_eq!(budget.limit_for(first, 0, 10, false), 10);
+        assert_eq!(budget.limit_for(second, 0, 10, true), 90);
+
+        budget.sync(second, 12, true);
+        assert_eq!(budget.retained_lines(), 12);
+        budget.unregister(second);
+        assert_eq!(budget.retained_lines(), 0);
     }
 }

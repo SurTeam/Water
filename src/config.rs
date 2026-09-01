@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::terminal::MAX_SCROLLBACK_LINES;
+use crate::terminal::{MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES};
 
 const DEFAULT_FONT_FAMILY: &str = "Menlo";
 const DEFAULT_FONT_SIZE: f32 = 14.0;
@@ -105,6 +105,10 @@ impl AppConfig {
             .terminal
             .scrollback_lines
             .clamp(1, MAX_SCROLLBACK_LINES);
+        self.terminal.max_total_scrollback_lines = self
+            .terminal
+            .max_total_scrollback_lines
+            .clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
         if self.terminal.font_family.trim().is_empty() {
             self.terminal.font_family = DEFAULT_FONT_FAMILY.to_owned();
         }
@@ -157,8 +161,12 @@ impl Default for FeatureConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
-    /// Maximum number of scrollback rows retained by each terminal.
+    /// Maximum number of normal scrollback rows retained by each terminal.
     pub scrollback_lines: usize,
+    /// Maximum number of scrollback rows retained by all terminals together,
+    /// including temporary rows kept while a terminal is pinned away from live
+    /// output.
+    pub max_total_scrollback_lines: usize,
     /// Font family used by terminal rows.
     pub font_family: String,
     /// Terminal font size in logical pixels.
@@ -171,6 +179,7 @@ impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
             scrollback_lines: MAX_SCROLLBACK_LINES,
+            max_total_scrollback_lines: MAX_TOTAL_SCROLLBACK_LINES,
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -294,6 +303,10 @@ mod tests {
     fn missing_config_uses_defaults_and_invalid_colors_fall_back() {
         let config = AppConfig::default();
         assert_eq!(config.terminal.scrollback_lines, MAX_SCROLLBACK_LINES);
+        assert_eq!(
+            config.terminal.max_total_scrollback_lines,
+            MAX_TOTAL_SCROLLBACK_LINES
+        );
         assert_eq!(config.theme.colors().terminal_background, 0x0b1117);
         assert_eq!(parse_color("not-a-color", 0x123456), 0x123456);
     }
@@ -314,6 +327,10 @@ mod tests {
         let config: AppConfig =
             serde_json::from_str(r#"{"terminal":{"scrollback_lines":321}}"#).unwrap();
         assert_eq!(config.terminal.scrollback_lines, 321);
+        assert_eq!(
+            config.terminal.max_total_scrollback_lines,
+            MAX_TOTAL_SCROLLBACK_LINES
+        );
         assert!(config.features.selection);
         assert_eq!(config.theme.terminal_background, "#0b1117");
     }
@@ -323,6 +340,7 @@ mod tests {
         let config = AppConfig {
             terminal: TerminalConfig {
                 scrollback_lines: usize::MAX,
+                max_total_scrollback_lines: usize::MAX,
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,
@@ -331,6 +349,10 @@ mod tests {
         }
         .normalized();
         assert_eq!(config.terminal.scrollback_lines, MAX_SCROLLBACK_LINES);
+        assert_eq!(
+            config.terminal.max_total_scrollback_lines,
+            MAX_TOTAL_SCROLLBACK_LINES
+        );
         assert_eq!(config.terminal.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.terminal.font_size, 8.0);
         assert_eq!(config.terminal.line_height, 64.0);

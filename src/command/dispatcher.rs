@@ -42,10 +42,11 @@ impl CommandDispatcher {
     }
 
     pub fn with_scrollback_lines(scrollback_lines: usize) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback(
+        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total(
             OperationRegistry::new(),
             None,
             scrollback_lines,
+            crate::terminal::MAX_TOTAL_SCROLLBACK_LINES,
         )
     }
 
@@ -69,12 +70,30 @@ impl CommandDispatcher {
         wakeup: Option<crate::terminal::WakeupCallback>,
         scrollback_lines: usize,
     ) -> Self {
+        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total(
+            operations,
+            wakeup,
+            scrollback_lines,
+            crate::terminal::MAX_TOTAL_SCROLLBACK_LINES,
+        )
+    }
+
+    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total(
+        operations: OperationRegistry,
+        wakeup: Option<crate::terminal::WakeupCallback>,
+        scrollback_lines: usize,
+        max_total_scrollback_lines: usize,
+    ) -> Self {
         Self {
             model: ApplicationModel::new(),
             ids: IdAllocator::new(),
             events: EventBus::default(),
             operations,
-            terminals: TerminalManager::new_with_wakeup_and_scrollback(wakeup, scrollback_lines),
+            terminals: TerminalManager::new_with_wakeup_and_scrollback_and_total(
+                wakeup,
+                scrollback_lines,
+                max_total_scrollback_lines,
+            ),
         }
     }
 
@@ -134,8 +153,7 @@ impl CommandDispatcher {
 
     pub fn memory_stats(&self) -> MemoryStats {
         let mut stats = self.model.memory_stats();
-        stats.scrollback_lines =
-            self.terminals.terminal_count() * self.terminals.scrollback_lines();
+        stats.scrollback_lines = self.terminals.scrollback_capacity_lines();
         stats
     }
 

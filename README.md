@@ -29,12 +29,13 @@ Configurable defaults are kept outside the model in a JSON file and loaded at st
 ~/Library/Application Support/water/config.json
 ```
 
-`WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. [`config.example.json`](config.example.json) contains the complete schema. The current defaults include terminal features (`selection`, `mouse_reporting`, and `bracketed_paste`), theme colors, terminal font metrics, and the per-terminal `scrollback_lines` limit (default `10000`). Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
+`WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. [`config.example.json`](config.example.json) contains the complete schema. The current defaults include terminal features (`selection`, `mouse_reporting`, and `bracketed_paste`), theme colors, terminal font metrics, the per-terminal `scrollback_lines` limit (default `10000`), and the aggregate temporary scrollback cap `max_total_scrollback_lines` (default `100000`). When the user scrolls away from live output, the terminal borrows unused aggregate capacity to keep the visible rows pinned; returning to the live end or typing releases that temporary capacity. Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
 
 ```sh
 mkdir -p "$HOME/Library/Application Support/water"
 cp config.example.json "$HOME/Library/Application Support/water/config.json"
-# For example, edit terminal.scrollback_lines or theme.inverse_background.
+# For example, edit terminal.scrollback_lines, terminal.max_total_scrollback_lines,
+# or theme.inverse_background.
 ```
 
 ## Control

@@ -39,7 +39,9 @@ impl Default for TerminalMetrics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TerminalCellPosition {
-    row: usize,
+    /// Viewport-relative row. Signed so a selected cell can remain tracked
+    /// while scrolling moves it outside the visible area.
+    row: i32,
     column: usize,
 }
 
@@ -234,7 +236,10 @@ impl WorkspaceView {
             mouse.side
         };
         Some(TerminalSelectionEndpoint {
-            position: TerminalCellPosition { row, column },
+            position: TerminalCellPosition {
+                row: row as i32,
+                column,
+            },
             side,
         })
     }
@@ -624,6 +629,16 @@ impl WorkspaceView {
         .detach();
     }
 
+    fn install_snapshot(&mut self, snapshot: ModelSnapshot, cx: &mut Context<Self>) {
+        if snapshot.state_revision <= self.snapshot.state_revision {
+            return;
+        }
+        update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
+        self.focused_pane = snapshot.focused_pane;
+        self.snapshot = snapshot;
+        cx.notify();
+    }
+
     fn dispatch(&mut self, command: AppCommand, cx: &mut Context<Self>) {
         let command_name = command.type_name();
         let client = self.client.clone();
@@ -649,11 +664,7 @@ impl WorkspaceView {
                 .await;
             if let Ok(Some(snapshot)) = result {
                 let _ = entity.update(cx, |view, cx| {
-                    if snapshot.state_revision > view.snapshot.state_revision {
-                        view.focused_pane = snapshot.focused_pane;
-                        view.snapshot = snapshot;
-                        cx.notify();
-                    }
+                    view.install_snapshot(snapshot, cx);
                 });
             } else if let Err(error) = result {
                 tracing::warn!(
@@ -979,6 +990,50 @@ impl Focusable for WorkspaceView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+fn update_terminal_selection_for_snapshot(
+    selection: &mut Option<TerminalSelection>,
+    previous: &ModelSnapshot,
+    next: &ModelSnapshot,
+) {
+    let Some(selection) = selection.as_mut() else {
+        return;
+    };
+    let Some(previous_snapshot) = previous.workspace.as_ref().and_then(|workspace| {
+        workspace
+            .tabs
+            .iter()
+            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, selection.terminal_id))
+    }) else {
+        return;
+    };
+    let Some(next_snapshot) = next.workspace.as_ref().and_then(|workspace| {
+        workspace
+            .tabs
+            .iter()
+            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, selection.terminal_id))
+    }) else {
+        return;
+    };
+    update_terminal_selection_for_viewport(selection, previous_snapshot, next_snapshot);
+}
+
+fn update_terminal_selection_for_viewport(
+    selection: &mut TerminalSelection,
+    previous: &TerminalSnapshot,
+    next: &TerminalSnapshot,
+) {
+    let delta = next
+        .viewport_position
+        .saturating_sub(previous.viewport_position);
+    shift_terminal_selection_rows(selection, delta);
+}
+
+fn shift_terminal_selection_rows(selection: &mut TerminalSelection, delta: i64) {
+    let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    selection.anchor.position.row = selection.anchor.position.row.saturating_add(delta);
+    selection.head.position.row = selection.head.position.row.saturating_add(delta);
 }
 
 fn terminal_snapshot_for_id(
@@ -1396,13 +1451,16 @@ fn is_terminal_cell_selected(
     let Some((start, end)) = selection_bounds(snapshot, selection) else {
         return false;
     };
-    (start..=end).contains(&TerminalCellPosition { row, column })
+    (start..=end).contains(&TerminalCellPosition {
+        row: row as i32,
+        column,
+    })
 }
 
-fn selection_boundary_index(endpoint: TerminalSelectionEndpoint, columns: usize) -> usize {
-    endpoint.position.row * columns
-        + endpoint.position.column
-        + usize::from(endpoint.side == TerminalSelectionSide::Right)
+fn selection_boundary_index(endpoint: TerminalSelectionEndpoint, columns: usize) -> i64 {
+    i64::from(endpoint.position.row) * columns as i64
+        + endpoint.position.column as i64
+        + i64::from(endpoint.side == TerminalSelectionSide::Right)
 }
 
 fn selection_bounds(
@@ -1418,8 +1476,11 @@ fn selection_bounds(
     } else {
         (selection.head, selection.anchor)
     };
-    let mut start = selection_boundary_index(start_endpoint, columns);
-    let mut end = selection_boundary_index(end_endpoint, columns);
+    let total_cells_i64 = total_cells as i64;
+    let mut start =
+        selection_boundary_index(start_endpoint, columns).clamp(0, total_cells_i64) as usize;
+    let mut end =
+        selection_boundary_index(end_endpoint, columns).clamp(0, total_cells_i64) as usize;
     if start >= end {
         return None;
     }
@@ -1444,11 +1505,11 @@ fn selection_bounds(
     }
     Some((
         TerminalCellPosition {
-            row: start / columns,
+            row: (start / columns) as i32,
             column: start % columns,
         },
         TerminalCellPosition {
-            row: (end - 1) / columns,
+            row: ((end - 1) / columns) as i32,
             column: (end - 1) % columns,
         },
     ))
@@ -1460,6 +1521,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
     };
     let mut text = String::new();
     for row in start.row..=end.row {
+        let row_index = row as usize;
         let first_column = if row == start.row { start.column } else { 0 };
         let last_column = if row == end.row {
             end.column
@@ -1468,7 +1530,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
         };
         let line_start = text.len();
         for column in first_column..=last_column {
-            let Some(cell) = snapshot.cell(row, column) else {
+            let Some(cell) = snapshot.cell(row_index, column) else {
                 continue;
             };
             if cell.flags.wide_spacer {
@@ -1482,7 +1544,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
         text.truncate(line_start + trimmed_len);
         if row != end.row {
             let wrapped = snapshot
-                .cell(row, snapshot.size.columns.saturating_sub(1))
+                .cell(row_index, snapshot.size.columns.saturating_sub(1))
                 .is_some_and(|cell| cell.flags.wrapline);
             if !wrapped {
                 text.push('\n');
@@ -1849,11 +1911,7 @@ pub fn spawn_snapshot_listener(
                 break;
             };
             entity.update(cx, |view, cx| {
-                if snapshot.state_revision > view.snapshot.state_revision {
-                    view.focused_pane = snapshot.focused_pane;
-                    view.snapshot = snapshot;
-                    cx.notify();
-                }
+                view.install_snapshot(snapshot, cx);
             });
         }
     })
@@ -1884,7 +1942,10 @@ mod tests {
         side: TerminalSelectionSide,
     ) -> TerminalSelectionEndpoint {
         TerminalSelectionEndpoint {
-            position: TerminalCellPosition { row, column },
+            position: TerminalCellPosition {
+                row: row as i32,
+                column,
+            },
             side,
         }
     }
@@ -1974,6 +2035,50 @@ mod tests {
         };
         let (start, end) = selection_bounds(&snapshot, second_cell).unwrap();
         assert_eq!((start.column, end.column), (1, 1));
+    }
+
+    #[test]
+    fn selection_follows_user_viewport_scroll() {
+        let terminal_id = TerminalId::new(1);
+        let mut previous = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 4));
+        previous.display_offset = 2;
+        previous.viewport_position = 2;
+        let mut next = previous.clone();
+        next.display_offset = 6;
+        next.viewport_position = 6;
+
+        let mut selection = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(1, 2, TerminalSelectionSide::Left),
+            head: endpoint(2, 4, TerminalSelectionSide::Right),
+        };
+        update_terminal_selection_for_viewport(&mut selection, &previous, &next);
+
+        assert_eq!(selection.anchor.position.row, 5);
+        assert_eq!(selection.head.position.row, 6);
+    }
+
+    #[test]
+    fn output_growth_does_not_move_selection_in_a_pinned_viewport() {
+        let terminal_id = TerminalId::new(1);
+        let mut previous = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 4));
+        previous.display_offset = 2;
+        previous.viewport_position = 2;
+        let mut next = previous.clone();
+        next.display_offset = 6;
+        // Output can increase display_offset while the pinned viewport stays
+        // on the same visible cells. It must not move the selection highlight.
+        next.viewport_position = previous.viewport_position;
+
+        let mut selection = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(1, 2, TerminalSelectionSide::Left),
+            head: endpoint(2, 4, TerminalSelectionSide::Right),
+        };
+        update_terminal_selection_for_viewport(&mut selection, &previous, &next);
+
+        assert_eq!(selection.anchor.position.row, 1);
+        assert_eq!(selection.head.position.row, 2);
     }
 
     #[test]
