@@ -9,4 +9,5 @@
 - UI is a projection of revisioned snapshots. Keep blocking I/O and model mutation off the GPUI thread; UI command handlers dispatch through a detached GPUI task and background executor.
 - Terminal mutable state belongs to a dedicated PTY worker. The model stores terminal metadata and revisioned visible snapshots; `TerminalRegistry` is a narrow synchronized query/wait surface, not application-state ownership.
 - Real-shell validation uses the detected zsh, preferring `/opt/homebrew/bin/zsh`; `tests/scenarios/terminal_zsh.json` runs zsh interactively with `-f` and waits on output/process state.
+- Application defaults live separately in `AppConfig` and are loaded from `~/Library/Application Support/water/config.json` on macOS, or from `WATER_CONFIG`/`--config`. Keep feature toggles, theme colors, font metrics, and terminal scrollback limits out of hard-coded UI/worker paths.
 - Default logs are structured and quiet. Use `RUST_LOG=water::pty=debug` (or another module) for focused diagnostics; never add per-cell/per-frame logs by default.

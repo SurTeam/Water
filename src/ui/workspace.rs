@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FocusHandle, Focusable, FontWeight, KeyDownEvent,
     Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta,
-    ScrollWheelEvent, SharedString, Task, Window, canvas, div, prelude::*, px, rgb,
+    ScrollWheelEvent, SharedString, Task, Window, canvas, div, font, prelude::*, px, rgb,
 };
 
 use crate::app::model::{PaneTreeDump, TabDump};
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
 use crate::command::{AppCommand, PaneCommand, SplitDirection, TabCommand, TerminalCommand};
+use crate::config::{AppConfig, ThemeColors};
 use crate::ids::{PaneId, TabId, TerminalId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
@@ -17,8 +18,23 @@ use crate::terminal::{
     TerminalCellFlags, TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot,
 };
 
-const TERMINAL_CELL_WIDTH: f32 = 8.4;
-const TERMINAL_LINE_HEIGHT: f32 = 18.0;
+const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
+const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalMetrics {
+    cell_width: f32,
+    line_height: f32,
+}
+
+impl Default for TerminalMetrics {
+    fn default() -> Self {
+        Self {
+            cell_width: DEFAULT_TERMINAL_CELL_WIDTH,
+            line_height: DEFAULT_TERMINAL_LINE_HEIGHT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct TerminalCellPosition {
@@ -40,9 +56,32 @@ enum TerminalMouseReportKind {
     Motion,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TerminalMouseContext {
+    modes: TerminalModes,
+    bounds: Option<Bounds<gpui::Pixels>>,
+    metrics: TerminalMetrics,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalRenderOptions {
+    metrics: TerminalMetrics,
+    theme: ThemeColors,
+    cursor_focused: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerminalRunStyle {
+    metrics: TerminalMetrics,
+    theme: ThemeColors,
+    cursor_hollow: bool,
+}
+
 pub struct WorkspaceView {
     client: CommandClient,
     snapshot: ModelSnapshot,
+    config: AppConfig,
+    terminal_metrics: TerminalMetrics,
     focus_handle: FocusHandle,
     resize_requests: Arc<Mutex<BTreeMap<TerminalId, TerminalSize>>>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
@@ -55,10 +94,21 @@ pub struct WorkspaceView {
 
 impl WorkspaceView {
     pub fn new(client: CommandClient, snapshot: ModelSnapshot, focus_handle: FocusHandle) -> Self {
+        Self::new_with_config(client, snapshot, focus_handle, AppConfig::default())
+    }
+
+    pub fn new_with_config(
+        client: CommandClient,
+        snapshot: ModelSnapshot,
+        focus_handle: FocusHandle,
+        config: AppConfig,
+    ) -> Self {
         let focused_pane = snapshot.focused_pane;
         Self {
             client,
             snapshot,
+            config: config.normalized(),
+            terminal_metrics: TerminalMetrics::default(),
             focus_handle,
             resize_requests: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_bounds: Arc::new(Mutex::new(BTreeMap::new())),
@@ -67,6 +117,22 @@ impl WorkspaceView {
             dragging_terminal: None,
             reported_mouse: None,
             last_reported_mouse_cell: None,
+        }
+    }
+
+    fn measured_terminal_metrics(&self, window: &Window) -> TerminalMetrics {
+        let font_size = px(self.config.terminal.font_size);
+        let font = font(self.config.terminal.font_family.clone());
+        let text_system = window.text_system();
+        let cell_width = text_system
+            .ch_advance(text_system.resolve_font(&font), font_size)
+            .ok()
+            .map(f32::from)
+            .filter(|width| *width > 0.0)
+            .unwrap_or(DEFAULT_TERMINAL_CELL_WIDTH);
+        TerminalMetrics {
+            cell_width,
+            line_height: self.config.terminal.line_height,
         }
     }
 
@@ -129,16 +195,21 @@ impl WorkspaceView {
         position: Point<gpui::Pixels>,
     ) -> Option<TerminalCellPosition> {
         let snapshot = self.terminal_snapshot_for(terminal_id)?;
-        let (column, row) =
-            terminal_mouse_position(position, self.terminal_bounds_for(terminal_id));
-        Some(TerminalCellPosition {
-            row: row
-                .saturating_sub(1)
-                .min(snapshot.size.lines.saturating_sub(1)),
-            column: column
-                .saturating_sub(1)
-                .min(snapshot.size.columns.saturating_sub(1)),
-        })
+        let (column, row) = terminal_mouse_position(
+            position,
+            self.terminal_bounds_for(terminal_id),
+            self.terminal_metrics,
+        );
+        let row = row
+            .saturating_sub(1)
+            .min(snapshot.size.lines.saturating_sub(1));
+        let column = column
+            .saturating_sub(1)
+            .min(snapshot.size.columns.saturating_sub(1));
+        // Keep the raw half-cell endpoint here. `selection_bounds` expands a
+        // range that touches a wide glyph, which preserves a drag from the
+        // first half to the second half as a real selection.
+        Some(TerminalCellPosition { row, column })
     }
 
     fn begin_reported_mouse(
@@ -150,17 +221,21 @@ impl WorkspaceView {
         let Some(snapshot) = self.terminal_snapshot_for(terminal_id) else {
             return false;
         };
-        if !snapshot.modes.mouse_reporting {
+        if !self.config.features.mouse_reporting || !snapshot.modes.mouse_reporting {
             return false;
         }
+        let mouse = TerminalMouseContext {
+            modes: snapshot.modes,
+            bounds: self.terminal_bounds_for(terminal_id),
+            metrics: self.terminal_metrics,
+        };
         let Some(text) = terminal_mouse_button_input(
             event.position,
             event.button,
             true,
             false,
             event.modifiers,
-            snapshot.modes,
-            self.terminal_bounds_for(terminal_id),
+            mouse,
         ) else {
             return false;
         };
@@ -186,6 +261,9 @@ impl WorkspaceView {
         position: Point<gpui::Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if !self.config.features.selection {
+            return;
+        }
         let Some(point) = self.terminal_cell_at(terminal_id, position) else {
             return;
         };
@@ -239,15 +317,14 @@ impl WorkspaceView {
         if self.last_reported_mouse_cell == Some((terminal_id, point)) {
             return;
         }
-        let Some(text) = terminal_mouse_button_input(
-            event.position,
-            button,
-            true,
-            true,
-            event.modifiers,
-            snapshot.modes,
-            self.terminal_bounds_for(terminal_id),
-        ) else {
+        let mouse = TerminalMouseContext {
+            modes: snapshot.modes,
+            bounds: self.terminal_bounds_for(terminal_id),
+            metrics: self.terminal_metrics,
+        };
+        let Some(text) =
+            terminal_mouse_button_input(event.position, button, true, true, event.modifiers, mouse)
+        else {
             return;
         };
         self.enqueue_terminal_command(
@@ -272,8 +349,11 @@ impl WorkspaceView {
                     false,
                     false,
                     event.modifiers,
-                    snapshot.modes,
-                    self.terminal_bounds_for(terminal_id),
+                    TerminalMouseContext {
+                        modes: snapshot.modes,
+                        bounds: self.terminal_bounds_for(terminal_id),
+                        metrics: self.terminal_metrics,
+                    },
                 )
             {
                 self.enqueue_terminal_command(
@@ -313,6 +393,7 @@ impl WorkspaceView {
         &self,
         terminal_id: TerminalId,
         current_size: TerminalSize,
+        metrics: TerminalMetrics,
     ) -> AnyElement {
         let client = self.client.clone();
         let resize_requests = self.resize_requests.clone();
@@ -329,8 +410,8 @@ impl WorkspaceView {
                     return;
                 }
                 let size = TerminalSize::new(
-                    (width / TERMINAL_CELL_WIDTH).floor() as usize,
-                    (height / TERMINAL_LINE_HEIGHT).floor() as usize,
+                    (width / metrics.cell_width).floor() as usize,
+                    (height / metrics.line_height).floor() as usize,
                 );
                 if size == current_size {
                     return;
@@ -390,7 +471,11 @@ impl WorkspaceView {
                             .active_terminal_snapshot()
                             .map(|snapshot| snapshot.modes)
                             .unwrap_or_default();
-                        self.paste_into_terminal(terminal_id, modes.bracketed_paste, cx);
+                        self.paste_into_terminal(
+                            terminal_id,
+                            modes.bracketed_paste && self.config.features.bracketed_paste,
+                            cx,
+                        );
                     }
                 }
                 "c" => {
@@ -534,16 +619,21 @@ impl WorkspaceView {
         title: String,
         active: bool,
         active_pane: PaneId,
+        theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let background = if active { rgb(0x29435c) } else { rgb(0x1d2733) };
+        let background = if active {
+            rgb(theme.tab_active_background)
+        } else {
+            rgb(theme.tab_inactive_background)
+        };
         div()
             .h(px(32.))
             .px(px(12.))
             .items_center()
             .flex()
             .bg(background)
-            .text_color(rgb(0xd8e2ef))
+            .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title))
             .on_mouse_down(
                 MouseButton::Left,
@@ -563,14 +653,24 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    fn render_pane_tree(&self, tree: &PaneTreeDump, cx: &mut Context<Self>) -> AnyElement {
-        self.render_pane_tree_with_grow(tree, 1.0, cx)
+    fn render_pane_tree(
+        &self,
+        tree: &PaneTreeDump,
+        window_active: bool,
+        metrics: TerminalMetrics,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.render_pane_tree_with_grow(tree, 1.0, window_active, metrics, theme, cx)
     }
 
     fn render_pane_tree_with_grow(
         &self,
         tree: &PaneTreeDump,
         grow: f32,
+        window_active: bool,
+        metrics: TerminalMetrics,
+        theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match tree {
@@ -583,7 +683,11 @@ impl WorkspaceView {
             } => {
                 let pane_id = *pane_id;
                 let active = self.focused_pane == Some(pane_id);
-                let border = if active { rgb(0x61b3ff) } else { rgb(0x364656) };
+                let border = if active {
+                    rgb(theme.active_pane_border)
+                } else {
+                    rgb(theme.inactive_pane_border)
+                };
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",
@@ -604,16 +708,28 @@ impl WorkspaceView {
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_snapshot
                         .as_ref()
-                        .map(|snapshot| render_terminal_snapshot(snapshot, self.selection))
+                        .map(|snapshot| {
+                            render_terminal_snapshot(
+                                snapshot,
+                                self.selection,
+                                TerminalRenderOptions {
+                                    metrics,
+                                    theme,
+                                    cursor_focused: active && window_active,
+                                },
+                                &self.config.terminal.font_family,
+                                self.config.terminal.font_size,
+                            )
+                        })
                         .unwrap_or_else(|| {
                             div()
-                                .text_color(rgb(0xaab8c7))
+                                .text_color(rgb(theme.terminal_foreground))
                                 .child("Starting terminal…")
                                 .into_any_element()
                         })
                 } else {
                     div()
-                        .text_color(rgb(0xc9d6e3))
+                        .text_color(rgb(theme.terminal_foreground))
                         .child(SharedString::from(format!("Pane {pane_id} · {label}")))
                         .into_any_element()
                 };
@@ -628,6 +744,7 @@ impl WorkspaceView {
                         .child(self.terminal_resize_observer(
                             terminal.terminal_id,
                             TerminalSize::new(terminal.columns, terminal.lines),
+                            metrics,
                         ))
                         .into_any_element(),
                     SurfaceState::Empty(_) => content,
@@ -642,8 +759,8 @@ impl WorkspaceView {
                     .p(px(8.))
                     .border_1()
                     .border_color(border)
-                    .bg(rgb(0x101820))
-                    .text_color(rgb(0xc9d6e3))
+                    .bg(rgb(theme.pane_background))
+                    .text_color(rgb(theme.terminal_foreground))
                     .child(content)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -672,13 +789,18 @@ impl WorkspaceView {
                         move |this, event: &ScrollWheelEvent, window, cx| {
                             this.focus_handle.focus(window, cx);
                             if let Some(terminal_id) = this.terminal_id_for_pane(pane_id) {
-                                let lines = terminal_scroll_lines(event);
+                                let lines = terminal_scroll_lines(event, this.terminal_metrics);
                                 if lines != 0 {
-                                    if mouse_modes.mouse_reporting {
+                                    if mouse_modes.mouse_reporting
+                                        && this.config.features.mouse_reporting
+                                    {
                                         if let Some(bytes) = terminal_mouse_input(
                                             event,
-                                            mouse_modes,
-                                            this.terminal_bounds_for(terminal_id),
+                                            TerminalMouseContext {
+                                                modes: mouse_modes,
+                                                bounds: this.terminal_bounds_for(terminal_id),
+                                                metrics: this.terminal_metrics,
+                                            },
                                         ) {
                                             this.enqueue_terminal_command(
                                                 terminal_id,
@@ -740,20 +862,40 @@ impl WorkspaceView {
                     container = container.flex_col();
                 }
                 container
-                    .child(self.render_pane_tree_with_grow(first, ratio, cx))
-                    .child(self.render_pane_tree_with_grow(second, 1.0 - ratio, cx))
+                    .child(self.render_pane_tree_with_grow(
+                        first,
+                        ratio,
+                        window_active,
+                        metrics,
+                        theme,
+                        cx,
+                    ))
+                    .child(self.render_pane_tree_with_grow(
+                        second,
+                        1.0 - ratio,
+                        window_active,
+                        metrics,
+                        theme,
+                        cx,
+                    ))
                     .into_any_element()
             }
         }
     }
 
-    fn render_active_tab(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_active_tab(
+        &self,
+        window_active: bool,
+        metrics: TerminalMetrics,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(workspace) = self.snapshot.workspace.as_ref() else {
             return div()
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0xaab8c7))
+                .text_color(rgb(theme.terminal_foreground))
                 .child("No workspace")
                 .into_any_element();
         };
@@ -762,7 +904,7 @@ impl WorkspaceView {
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0xaab8c7))
+                .text_color(rgb(theme.terminal_foreground))
                 .child("No tab")
                 .into_any_element();
         };
@@ -771,11 +913,11 @@ impl WorkspaceView {
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .text_color(rgb(0xaab8c7))
+                .text_color(rgb(theme.terminal_foreground))
                 .child("Active tab is unavailable")
                 .into_any_element();
         };
-        self.render_pane_tree(&tab.tree, cx)
+        self.render_pane_tree(&tab.tree, window_active, metrics, theme, cx)
     }
 }
 
@@ -835,10 +977,10 @@ fn terminal_id_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<Terminal
     }
 }
 
-fn terminal_scroll_lines(event: &ScrollWheelEvent) -> i32 {
+fn terminal_scroll_lines(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> i32 {
     let delta = match event.delta {
         ScrollDelta::Lines(delta) => delta.y,
-        ScrollDelta::Pixels(delta) => f32::from(delta.y) / TERMINAL_LINE_HEIGHT,
+        ScrollDelta::Pixels(delta) => f32::from(delta.y) / metrics.line_height,
     };
     if delta == 0.0 {
         return 0;
@@ -857,12 +999,8 @@ fn terminal_alternate_scroll_input(lines: i32, modes: TerminalModes) -> String {
     sequence.repeat(lines.unsigned_abs().min(100) as usize)
 }
 
-fn terminal_mouse_input(
-    event: &ScrollWheelEvent,
-    modes: TerminalModes,
-    bounds: Option<Bounds<gpui::Pixels>>,
-) -> Option<Vec<u8>> {
-    let lines = terminal_scroll_lines(event);
+fn terminal_mouse_input(event: &ScrollWheelEvent, mouse: TerminalMouseContext) -> Option<Vec<u8>> {
+    let lines = terminal_scroll_lines(event, mouse.metrics);
     if lines == 0 {
         return None;
     }
@@ -873,8 +1011,7 @@ fn terminal_mouse_input(
         count,
         event.position,
         event.modifiers,
-        modes,
-        bounds,
+        mouse,
         TerminalMouseReportKind::Press,
     ))
 }
@@ -885,8 +1022,7 @@ fn terminal_mouse_button_input(
     pressed: bool,
     motion: bool,
     modifiers: gpui::Modifiers,
-    modes: TerminalModes,
-    bounds: Option<Bounds<gpui::Pixels>>,
+    mouse: TerminalMouseContext,
 ) -> Option<Vec<u8>> {
     let button = mouse_button_code(button)?;
     Some(terminal_mouse_sequence(
@@ -894,8 +1030,7 @@ fn terminal_mouse_button_input(
         1,
         position,
         modifiers,
-        modes,
-        bounds,
+        mouse,
         if pressed {
             if motion {
                 TerminalMouseReportKind::Motion
@@ -913,8 +1048,7 @@ fn terminal_mouse_sequence(
     count: usize,
     position: Point<gpui::Pixels>,
     modifiers: gpui::Modifiers,
-    modes: TerminalModes,
-    bounds: Option<Bounds<gpui::Pixels>>,
+    mouse: TerminalMouseContext,
     kind: TerminalMouseReportKind,
 ) -> Vec<u8> {
     let release = kind == TerminalMouseReportKind::Release;
@@ -927,8 +1061,8 @@ fn terminal_mouse_sequence(
     } else {
         button + if motion { 32 } else { 0 }
     } + modifier;
-    let (column, row) = terminal_mouse_position(position, bounds);
-    if modes.sgr_mouse {
+    let (column, row) = terminal_mouse_position(position, mouse.bounds, mouse.metrics);
+    if mouse.modes.sgr_mouse {
         let suffix = if release { 'm' } else { 'M' };
         let mut input = Vec::with_capacity(count * 16);
         for _ in 0..count {
@@ -937,15 +1071,15 @@ fn terminal_mouse_sequence(
         return input;
     }
 
-    let max_coordinate = if modes.utf8_mouse { 2_047 } else { 223 };
+    let max_coordinate = if mouse.modes.utf8_mouse { 2_047 } else { 223 };
     let column = column.min(max_coordinate);
     let row = row.min(max_coordinate);
     let mut input = Vec::with_capacity(count * 6);
     for _ in 0..count {
         input.extend_from_slice(b"\x1b[M");
-        push_mouse_coordinate(&mut input, 32 + button, modes.utf8_mouse);
-        push_mouse_coordinate(&mut input, 32 + column as u16, modes.utf8_mouse);
-        push_mouse_coordinate(&mut input, 32 + row as u16, modes.utf8_mouse);
+        push_mouse_coordinate(&mut input, 32 + button, mouse.modes.utf8_mouse);
+        push_mouse_coordinate(&mut input, 32 + column as u16, mouse.modes.utf8_mouse);
+        push_mouse_coordinate(&mut input, 32 + row as u16, mouse.modes.utf8_mouse);
     }
     input
 }
@@ -972,6 +1106,7 @@ fn mouse_button_code(button: MouseButton) -> Option<u16> {
 fn terminal_mouse_position(
     position: Point<gpui::Pixels>,
     bounds: Option<Bounds<gpui::Pixels>>,
+    metrics: TerminalMetrics,
 ) -> (usize, usize) {
     let Some(bounds) = bounds else {
         return (1, 1);
@@ -979,8 +1114,8 @@ fn terminal_mouse_position(
     let x = (f32::from(position.x) - f32::from(bounds.origin.x)).max(0.0);
     let y = (f32::from(position.y) - f32::from(bounds.origin.y)).max(0.0);
     (
-        (x / TERMINAL_CELL_WIDTH).floor() as usize + 1,
-        (y / TERMINAL_LINE_HEIGHT).floor() as usize + 1,
+        (x / metrics.cell_width).floor() as usize + 1,
+        (y / metrics.line_height).floor() as usize + 1,
     )
 }
 
@@ -1136,6 +1271,7 @@ fn function_key_sequence(number: u8, modifier: u8) -> String {
 }
 
 fn is_terminal_cell_selected(
+    snapshot: &TerminalSnapshot,
     selection: Option<TerminalSelection>,
     terminal_id: TerminalId,
     row: usize,
@@ -1147,14 +1283,36 @@ fn is_terminal_cell_selected(
     if selection.terminal_id != terminal_id || selection.anchor == selection.head {
         return false;
     }
-    let start = selection.anchor.min(selection.head);
-    let end = selection.anchor.max(selection.head);
+    let (start, end) = selection_bounds(snapshot, selection);
     (start..=end).contains(&TerminalCellPosition { row, column })
 }
 
+fn selection_bounds(
+    snapshot: &TerminalSnapshot,
+    selection: TerminalSelection,
+) -> (TerminalCellPosition, TerminalCellPosition) {
+    let mut start = selection.anchor.min(selection.head);
+    let mut end = selection.anchor.max(selection.head);
+    if snapshot
+        .cell(start.row, start.column)
+        .is_some_and(|cell| cell.flags.wide_spacer)
+    {
+        start.column = start.column.saturating_sub(1);
+    }
+    if snapshot
+        .cell(end.row, end.column)
+        .is_some_and(|cell| cell.flags.wide)
+    {
+        end.column = end
+            .column
+            .saturating_add(1)
+            .min(snapshot.size.columns.saturating_sub(1));
+    }
+    (start, end)
+}
+
 fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelection) -> String {
-    let start = selection.anchor.min(selection.head);
-    let end = selection.anchor.max(selection.head);
+    let (start, end) = selection_bounds(snapshot, selection);
     let mut text = String::new();
     for row in start.row..=end.row {
         let first_column = if row == start.row { start.column } else { 0 };
@@ -1192,7 +1350,15 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
 fn render_terminal_snapshot(
     snapshot: &TerminalSnapshot,
     selection: Option<TerminalSelection>,
+    options: TerminalRenderOptions,
+    font_family: &str,
+    font_size: f32,
 ) -> AnyElement {
+    let TerminalRenderOptions {
+        metrics,
+        theme,
+        cursor_focused,
+    } = options;
     let mut terminal = div()
         .flex_1()
         .flex()
@@ -1200,13 +1366,14 @@ fn render_terminal_snapshot(
         .min_h(px(0.))
         .flex_col()
         .overflow_hidden()
-        .font_family("Menlo")
-        .text_sm()
+        .font_family(font_family.to_owned())
+        .text_size(px(font_size))
+        .line_height(px(metrics.line_height))
         .whitespace_nowrap()
-        .bg(rgb(0x0b1117));
+        .bg(rgb(theme.terminal_background));
     for row in 0..snapshot.size.lines {
         let mut row_element = div()
-            .h(px(TERMINAL_LINE_HEIGHT))
+            .h(px(metrics.line_height))
             .min_w(px(0.))
             .flex_none()
             .flex()
@@ -1218,6 +1385,7 @@ fn render_terminal_snapshot(
             TerminalCellFlags,
             String,
             usize,
+            bool,
         )> = None;
         for column in 0..snapshot.size.columns {
             let Some(cell) = snapshot.cell(row, column) else {
@@ -1228,59 +1396,84 @@ fn render_terminal_snapshot(
             }
             let mut foreground = cell.fg;
             let mut background = cell.bg;
+            let default_colors = cell.fg == TerminalColor::Named { value: 256 }
+                && cell.bg == TerminalColor::Named { value: 257 };
             if cell.flags.inverse {
                 std::mem::swap(&mut foreground, &mut background);
+                if default_colors {
+                    foreground = theme_color(theme.inverse_foreground);
+                    background = theme_color(theme.inverse_background);
+                }
             }
-            if is_terminal_cell_selected(selection, snapshot.terminal_id, row, column) {
-                background = TerminalColor::Rgb {
-                    red: 51,
-                    green: 93,
-                    blue: 122,
-                };
+            if is_terminal_cell_selected(snapshot, selection, snapshot.terminal_id, row, column) {
+                background = theme_color(theme.selection_background);
             }
-            if snapshot.cursor.visible
+            let cursor_at_cell = snapshot.cursor.visible
                 && snapshot.cursor.row == row
-                && snapshot.cursor.column == column
-            {
-                foreground = TerminalColor::Rgb {
-                    red: 11,
-                    green: 17,
-                    blue: 23,
-                };
-                background = TerminalColor::Rgb {
-                    red: 156,
-                    green: 200,
-                    blue: 239,
-                };
+                && snapshot.cursor.column == column;
+            if cursor_at_cell && cursor_focused {
+                foreground = theme_color(theme.cursor_foreground);
+                background = theme_color(theme.cursor_background);
             }
+            let cursor_hollow = cursor_at_cell && !cursor_focused;
             let mut character = String::new();
             character.push(cell.character);
             character.extend(cell.zerowidth.iter().copied());
             let width_columns = if cell.flags.wide { 2 } else { 1 };
             let should_merge = current
                 .as_ref()
-                .map(|(current_fg, current_bg, current_flags, _, _)| {
-                    *current_fg == foreground
-                        && *current_bg == background
-                        && *current_flags == cell.flags
-                })
+                .map(
+                    |(current_fg, current_bg, current_flags, _, _, current_cursor_hollow)| {
+                        *current_fg == foreground
+                            && *current_bg == background
+                            && *current_flags == cell.flags
+                            && *current_cursor_hollow == cursor_hollow
+                    },
+                )
                 .unwrap_or(false);
             if should_merge {
-                if let Some((_, _, _, text, width_columns_total)) = current.as_mut() {
+                if let Some((_, _, _, text, width_columns_total, _)) = current.as_mut() {
                     text.push_str(&character);
                     *width_columns_total += width_columns;
                 }
             } else {
-                if let Some((fg, bg, flags, text, width_columns)) = current.take() {
-                    row_element =
-                        row_element.child(render_terminal_run(fg, bg, flags, text, width_columns));
+                if let Some((fg, bg, flags, text, width_columns, cursor_hollow)) = current.take() {
+                    row_element = row_element.child(render_terminal_run(
+                        fg,
+                        bg,
+                        flags,
+                        text,
+                        width_columns,
+                        TerminalRunStyle {
+                            metrics,
+                            theme,
+                            cursor_hollow,
+                        },
+                    ));
                 }
-                current = Some((foreground, background, cell.flags, character, width_columns));
+                current = Some((
+                    foreground,
+                    background,
+                    cell.flags,
+                    character,
+                    width_columns,
+                    cursor_hollow,
+                ));
             }
         }
-        if let Some((fg, bg, flags, text, width_columns)) = current {
-            row_element =
-                row_element.child(render_terminal_run(fg, bg, flags, text, width_columns));
+        if let Some((fg, bg, flags, text, width_columns, cursor_hollow)) = current {
+            row_element = row_element.child(render_terminal_run(
+                fg,
+                bg,
+                flags,
+                text,
+                width_columns,
+                TerminalRunStyle {
+                    metrics,
+                    theme,
+                    cursor_hollow,
+                },
+            ));
         }
         terminal = terminal.child(row_element);
     }
@@ -1293,13 +1486,22 @@ fn render_terminal_run(
     flags: TerminalCellFlags,
     text: String,
     width_columns: usize,
+    style: TerminalRunStyle,
 ) -> AnyElement {
+    let TerminalRunStyle {
+        metrics,
+        theme,
+        cursor_hollow,
+    } = style;
     let mut run = div()
-        .w(px(TERMINAL_CELL_WIDTH * width_columns as f32))
-        .h(px(TERMINAL_LINE_HEIGHT))
+        .w(px(metrics.cell_width * width_columns as f32))
+        .h(px(metrics.line_height))
         .flex_none()
-        .text_color(rgb(color_to_rgb(foreground, true)))
-        .bg(rgb(color_to_rgb(background, false)));
+        .text_color(rgb(color_to_rgb(foreground, true, theme)))
+        .bg(rgb(color_to_rgb(background, false, theme)));
+    if cursor_hollow {
+        run = run.border_1().border_color(rgb(theme.inactive_cursor));
+    }
     if flags.bold {
         run = run.font_weight(FontWeight::BOLD);
     }
@@ -1315,20 +1517,28 @@ fn render_terminal_run(
     run.child(SharedString::from(text)).into_any_element()
 }
 
-fn color_to_rgb(color: TerminalColor, foreground: bool) -> u32 {
+fn color_to_rgb(color: TerminalColor, foreground: bool, theme: ThemeColors) -> u32 {
     match color {
         TerminalColor::Rgb { red, green, blue } => {
             (u32::from(red) << 16) | (u32::from(green) << 8) | u32::from(blue)
         }
         TerminalColor::Named { value } => match value {
             0..=15 => basic_color(value as usize),
-            256 if foreground => 0xd8e2ef,
-            257 if !foreground => 0x101820,
-            258 => 0xd8e2ef,
-            259 => 0x101820,
-            _ => 0xc9d6e3,
+            256 if foreground => theme.terminal_foreground,
+            257 if !foreground => theme.terminal_background,
+            258 => theme.terminal_foreground,
+            259 => theme.terminal_background,
+            _ => theme.ui_foreground,
         },
         TerminalColor::Indexed { value } => indexed_color(value),
+    }
+}
+
+fn theme_color(value: u32) -> TerminalColor {
+    TerminalColor::Rgb {
+        red: ((value >> 16) & 0xff) as u8,
+        green: ((value >> 8) & 0xff) as u8,
+        blue: (value & 0xff) as u8,
     }
 }
 
@@ -1363,7 +1573,11 @@ fn indexed_color(index: u8) -> u32 {
 }
 
 impl Render for WorkspaceView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let metrics = self.measured_terminal_metrics(window);
+        self.terminal_metrics = metrics;
+        let theme = self.config.theme.colors();
+        let window_active = window.is_window_active() && self.focus_handle.is_focused(window);
         let tab_data: Vec<(TabId, String, bool, PaneId)> = self
             .snapshot
             .workspace
@@ -1397,12 +1611,12 @@ impl Render for WorkspaceView {
             .gap(px(4.))
             .items_center()
             .flex()
-            .bg(rgb(0x151e28))
+            .bg(rgb(theme.chrome_background))
             .children(
                 tab_data
                     .into_iter()
                     .map(|(tab_id, title, active, active_pane)| {
-                        self.tab_button(tab_id, title, active, active_pane, cx)
+                        self.tab_button(tab_id, title, active, active_pane, theme, cx)
                     }),
             )
             .child(
@@ -1412,8 +1626,8 @@ impl Render for WorkspaceView {
                     .items_center()
                     .justify_center()
                     .flex()
-                    .bg(rgb(0x263544))
-                    .text_color(rgb(0xe6eef7))
+                    .bg(rgb(theme.tab_add_background))
+                    .text_color(rgb(theme.ui_foreground))
                     .child("+")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1441,15 +1655,15 @@ impl Render for WorkspaceView {
                     this.finish_terminal_selection(event, cx);
                 }),
             )
-            .bg(rgb(0x0b1117))
-            .text_color(rgb(0xe6eef7))
+            .bg(rgb(theme.terminal_background))
+            .text_color(rgb(theme.ui_foreground))
             .child(
                 div()
                     .h(px(36.))
                     .px(px(12.))
                     .items_center()
                     .flex()
-                    .bg(rgb(0x0f161e))
+                    .bg(rgb(theme.chrome_background))
                     .child(SharedString::from(format!(
                         "Water · Workspace {workspace_id} · revision {revision}"
                     ))),
@@ -1462,7 +1676,7 @@ impl Render for WorkspaceView {
                     .min_w(px(0.))
                     .min_h(px(0.))
                     .overflow_hidden()
-                    .child(self.render_active_tab(cx)),
+                    .child(self.render_active_tab(window_active, metrics, theme, cx)),
             )
     }
 }
@@ -1573,6 +1787,57 @@ mod tests {
     }
 
     #[test]
+    fn wide_character_selection_expands_to_both_grid_cells() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(5, 1));
+        snapshot.cells[1].character = '界';
+        snapshot.cells[1].flags.wide = true;
+        snapshot.cells[2].flags.wide_spacer = true;
+        let selection = TerminalSelection {
+            terminal_id,
+            anchor: TerminalCellPosition { row: 0, column: 0 },
+            head: TerminalCellPosition { row: 0, column: 1 },
+        };
+
+        let (_, end) = selection_bounds(&snapshot, selection);
+        assert_eq!(end.column, 2);
+        assert!(is_terminal_cell_selected(
+            &snapshot,
+            Some(selection),
+            terminal_id,
+            0,
+            1,
+        ));
+        assert!(is_terminal_cell_selected(
+            &snapshot,
+            Some(selection),
+            terminal_id,
+            0,
+            2,
+        ));
+
+        let half_cell_drag = TerminalSelection {
+            terminal_id,
+            anchor: TerminalCellPosition { row: 0, column: 1 },
+            head: TerminalCellPosition { row: 0, column: 2 },
+        };
+        assert!(is_terminal_cell_selected(
+            &snapshot,
+            Some(half_cell_drag),
+            terminal_id,
+            0,
+            1,
+        ));
+        assert!(is_terminal_cell_selected(
+            &snapshot,
+            Some(half_cell_drag),
+            terminal_id,
+            0,
+            2,
+        ));
+    }
+
+    #[test]
     fn terminal_input_honors_application_cursor_and_mouse_reporting_modes() {
         assert_eq!(
             terminal_input_for_keystroke_with_modes(
@@ -1591,12 +1856,15 @@ mod tests {
         assert_eq!(
             terminal_mouse_input(
                 &event,
-                TerminalModes {
-                    mouse_reporting: true,
-                    sgr_mouse: true,
-                    ..TerminalModes::default()
+                TerminalMouseContext {
+                    modes: TerminalModes {
+                        mouse_reporting: true,
+                        sgr_mouse: true,
+                        ..TerminalModes::default()
+                    },
+                    bounds: None,
+                    metrics: TerminalMetrics::default(),
                 },
-                None,
             ),
             Some(b"\x1b[<64;1;1M".to_vec())
         );

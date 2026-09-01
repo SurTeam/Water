@@ -59,6 +59,22 @@ fn new_tabs_and_split_panes_start_real_shell_terminals() {
 }
 
 #[test]
+fn configured_scrollback_limit_is_used_by_new_terminals() {
+    let mut dispatcher = CommandDispatcher::with_scrollback_lines(123);
+    let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+    assert_eq!(
+        dispatcher.wait_operation(workspace).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let tab = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+    assert_eq!(
+        dispatcher.wait_operation(tab).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    assert_eq!(dispatcher.memory_stats().scrollback_lines, 123);
+}
+
+#[test]
 fn terminal_worker_captures_output_and_ansi_cell_attributes() {
     let mut dispatcher = CommandDispatcher::new();
     let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));

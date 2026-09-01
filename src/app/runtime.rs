@@ -9,6 +9,7 @@ use crate::app::model::{MemoryStats, ModelSnapshot, StateDump};
 use crate::command::{
     AppCommand, CommandDispatcher, DispatchError, OperationRegistry, OperationSnapshot,
 };
+use crate::config::AppConfig;
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::{TerminalSnapshot, WakeupCallback};
@@ -287,6 +288,12 @@ pub struct ModelHost {
 
 impl ModelHost {
     pub fn start() -> Self {
+        Self::start_with_config(AppConfig::default())
+    }
+
+    pub fn start_with_config(config: AppConfig) -> Self {
+        let config = config.normalized();
+        let terminal_scrollback_lines = config.terminal.scrollback_lines;
         let (request_tx, request_rx) = mpsc::channel();
         let (snapshot_tx, snapshot_rx) = snapshot_channel();
         let operations = OperationRegistry::new();
@@ -308,6 +315,7 @@ impl ModelHost {
                     thread_operations,
                     Some(terminal_wakeup),
                     terminal_wakeup_pending,
+                    terminal_scrollback_lines,
                 )
             })
             .expect("failed to start water model thread");
@@ -354,9 +362,13 @@ fn run_model_thread(
     operations: OperationRegistry,
     terminal_wakeup: Option<WakeupCallback>,
     terminal_wakeup_pending: Arc<AtomicBool>,
+    terminal_scrollback_lines: usize,
 ) {
-    let mut dispatcher =
-        CommandDispatcher::with_operations_and_terminal_wakeup(operations, terminal_wakeup);
+    let mut dispatcher = CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback(
+        operations,
+        terminal_wakeup,
+        terminal_scrollback_lines,
+    );
     let _ = snapshot_tx.send(dispatcher.state_dump());
 
     while let Ok(request) = request_rx.recv() {

@@ -15,7 +15,7 @@ use super::model::{
     TERMINAL_WAKE_KEY, TerminalManagerEvent, TerminalRegistry, TerminalWorkerCommand,
     WakeupCallback, WakeupSlot,
 };
-use super::snapshot::{MAX_SCROLLBACK_LINES, TerminalProcessState, TerminalSize, TerminalSnapshot};
+use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
@@ -24,6 +24,7 @@ const READ_BUFFER_BYTES: usize = 16 * 1024;
 pub(crate) struct WorkerConfig {
     terminal_id: TerminalId,
     size: TerminalSize,
+    scrollback_lines: usize,
     command_rx: Receiver<TerminalWorkerCommand>,
     registry: TerminalRegistry,
     event_tx: Sender<TerminalManagerEvent>,
@@ -31,20 +32,21 @@ pub(crate) struct WorkerConfig {
     wakeup_slot: WakeupSlot,
 }
 
-impl WorkerConfig {
+pub(crate) struct WorkerChannels {
+    pub(crate) registry: TerminalRegistry,
+    pub(crate) event_tx: Sender<TerminalManagerEvent>,
+    pub(crate) event_wakeup: Option<WakeupCallback>,
+    pub(crate) wakeup_slot: WakeupSlot,
+}
+
+impl WorkerChannels {
     pub(crate) fn new(
-        terminal_id: TerminalId,
-        size: TerminalSize,
-        command_rx: Receiver<TerminalWorkerCommand>,
         registry: TerminalRegistry,
         event_tx: Sender<TerminalManagerEvent>,
         event_wakeup: Option<WakeupCallback>,
         wakeup_slot: WakeupSlot,
     ) -> Self {
         Self {
-            terminal_id,
-            size,
-            command_rx,
             registry,
             event_tx,
             event_wakeup,
@@ -53,10 +55,32 @@ impl WorkerConfig {
     }
 }
 
+impl WorkerConfig {
+    pub(crate) fn new(
+        terminal_id: TerminalId,
+        size: TerminalSize,
+        scrollback_lines: usize,
+        command_rx: Receiver<TerminalWorkerCommand>,
+        channels: WorkerChannels,
+    ) -> Self {
+        Self {
+            terminal_id,
+            size,
+            scrollback_lines,
+            command_rx,
+            registry: channels.registry,
+            event_tx: channels.event_tx,
+            event_wakeup: channels.event_wakeup,
+            wakeup_slot: channels.wakeup_slot,
+        }
+    }
+}
+
 pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let WorkerConfig {
         terminal_id,
         size,
+        scrollback_lines,
         command_rx,
         registry,
         event_tx,
@@ -64,7 +88,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         wakeup_slot,
     } = config;
     let config = Config {
-        scrolling_history: MAX_SCROLLBACK_LINES,
+        scrolling_history: scrollback_lines,
         ..Config::default()
     };
     let proxy_events = std::sync::mpsc::channel();

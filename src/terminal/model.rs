@@ -9,7 +9,8 @@ use thiserror::Error;
 use crate::ids::TerminalId;
 
 use super::snapshot::{
-    MAX_RECENT_OUTPUT_BYTES, TerminalProcessState, TerminalSize, TerminalSnapshot,
+    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, TerminalProcessState, TerminalSize,
+    TerminalSnapshot,
 };
 
 pub(crate) const TERMINAL_WAKE_KEY: usize = usize::MAX - 1;
@@ -297,6 +298,7 @@ fn trim_recent_output(output: &mut String) {
 
 pub struct TerminalManager {
     registry: TerminalRegistry,
+    scrollback_lines: usize,
     event_tx: Sender<TerminalManagerEvent>,
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
@@ -320,13 +322,21 @@ impl std::fmt::Debug for TerminalManager {
 
 impl TerminalManager {
     pub fn new() -> Self {
-        Self::new_with_wakeup(None)
+        Self::new_with_scrollback(MAX_SCROLLBACK_LINES)
     }
 
-    pub(crate) fn new_with_wakeup(event_wakeup: Option<WakeupCallback>) -> Self {
+    pub fn new_with_scrollback(scrollback_lines: usize) -> Self {
+        Self::new_with_wakeup_and_scrollback(None, scrollback_lines)
+    }
+
+    pub(crate) fn new_with_wakeup_and_scrollback(
+        event_wakeup: Option<WakeupCallback>,
+        scrollback_lines: usize,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         Self {
             registry: TerminalRegistry::new(),
+            scrollback_lines: scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES),
             event_tx,
             event_rx,
             event_wakeup,
@@ -385,6 +395,7 @@ impl TerminalManager {
         let event_wakeup = self.event_wakeup.clone();
         let registry = self.registry.clone();
         let worker_wakeup = wakeup.clone();
+        let scrollback_lines = self.scrollback_lines;
         let join_handle = match thread::Builder::new()
             .name(format!("water-terminal-{terminal_id}"))
             .spawn(move || {
@@ -392,11 +403,14 @@ impl TerminalManager {
                     super::worker::WorkerConfig::new(
                         terminal_id,
                         size,
+                        scrollback_lines,
                         command_rx,
-                        registry,
-                        event_tx,
-                        event_wakeup,
-                        worker_wakeup,
+                        super::worker::WorkerChannels::new(
+                            registry,
+                            event_tx,
+                            event_wakeup,
+                            worker_wakeup,
+                        ),
                     ),
                     pty,
                 )
@@ -465,6 +479,10 @@ impl TerminalManager {
 
     pub fn terminal_count(&self) -> usize {
         self.workers.len()
+    }
+
+    pub fn scrollback_lines(&self) -> usize {
+        self.scrollback_lines
     }
 
     pub fn shutdown_all(&mut self) {

@@ -50,7 +50,7 @@ The current upstream examples explicitly use `AppContext` for `cx.new`, `cx.open
 
 ## Ownership and data flow
 
-Phase 2 adds a dedicated terminal runtime without changing the single application mutation path. A terminal worker owns the mutable `alacritty_terminal::Term` and PTY; the model owns serializable terminal metadata and receives revision notifications. A narrow `TerminalRegistry` publishes bounded visible snapshots and wait predicates.
+Phase 2 adds a dedicated terminal runtime without changing the single application mutation path. A terminal worker owns the mutable `alacritty_terminal::Term` and PTY; the model owns serializable terminal metadata and receives revision notifications. A narrow `TerminalRegistry` publishes bounded visible snapshots and wait predicates. Application defaults are loaded separately through `AppConfig`; terminal workers receive the configured scrollback limit while GPUI receives the feature and theme projection.
 
 ```text
                            external process
@@ -134,7 +134,7 @@ TerminalSurfaceState { terminal_id, session_id, program, title, args,
 `TerminalSnapshot` is a bounded, row-major visible projection containing cell
 characters, ANSI colors, flags (bold/italic/underline/inverse/strike/wide),
 cursor state, display offset, process state, and a monotonic terminal revision.
-Scrollback remains inside the worker's `Term` grid and is bounded to 10,000 lines. Terminal dimensions are clamped to 2–512 columns and 1–256 lines to keep snapshots and control frames bounded.
+Scrollback remains inside the worker's `Term` grid and is configured per application defaults file (`1..=10,000` lines, default `10,000`). Terminal dimensions are clamped to 2–512 columns and 1–256 lines to keep snapshots and control frames bounded.
 
 ## Mutation path
 
@@ -196,7 +196,7 @@ Windows will get a named-pipe transport later; domain commands and the scenario 
 
 ## GPUI projection
 
-`WorkspaceView` holds a `ModelSnapshot`, not the mutable model. It renders the tab bar, recursively projects the pane tree using each split ratio, and projects visible terminal rows from the included `TerminalSnapshot`. The workspace owns a focus handle; key events are translated to PTY bytes/VT sequences and enqueued through `CommandClient` without blocking the GPUI thread. Click-to-focus, keyboard PTY routing, Shift-PageUp/Down, mouse-wheel scroll (including application mouse reporting), bracketed Cmd-V paste, drag selection/copy, and Cmd-C/Cmd-D control-byte shortcuts are supported for the current terminal surface. Button/mouse handlers that change model state start detached GPUI tasks; dispatch, operation wait, and snapshot fetch run on the background executor. No blocking filesystem, PTY, parser, or scrollback work is performed in the GPUI thread. The normal GUI startup creates one workspace, one Terminal tab, and connects it to the detected real zsh; new tabs and split panes use the same default shell automatically. `Cmd-\\` creates a right-side horizontal split, `Cmd--` creates a downward vertical split, and `Cmd-T` creates a new terminal tab. `--no-initial-terminal` keeps the workspace but omits the initial tab/PTY, while `--empty-workspace` starts with no workspace for scenarios that exercise workspace creation. The current Phase 2 renderer favors correctness and simple color runs; row/cell batching and font shaping are Phase 3 work.
+`WorkspaceView` holds a `ModelSnapshot`, not the mutable model. It renders the tab bar, recursively projects the pane tree using each split ratio, and projects visible terminal rows from the included `TerminalSnapshot`. The workspace owns a focus handle; key events are translated to PTY bytes/VT sequences and enqueued through `CommandClient` without blocking the GPUI thread. Click-to-focus, keyboard PTY routing, Shift-PageUp/Down, mouse-wheel scroll (including application mouse reporting), configurable bracketed Cmd-V paste, drag selection/copy, and Cmd-C/Cmd-D control-byte shortcuts are supported for the current terminal surface. Selection maps against measured monospaced cell metrics, normalizes wide-character spacers, and paints each Unicode glyph as an all-or-nothing two-cell selection. Focused terminals use a solid cursor; inactive panes/windows use a hollow cursor. Button/mouse handlers that change model state start detached GPUI tasks; dispatch, operation wait, and snapshot fetch run on the background executor. No blocking filesystem, PTY, parser, or scrollback work is performed in the GPUI thread. The normal GUI startup creates one workspace, one Terminal tab, and connects it to the detected real zsh; new tabs and split panes use the same default shell automatically. `Cmd-\\` creates a right-side horizontal split, `Cmd--` creates a downward vertical split, and `Cmd-T` creates a new terminal tab. `--no-initial-terminal` keeps the workspace but omits the initial tab/PTY, while `--empty-workspace` starts with no workspace for scenarios that exercise workspace creation. The current Phase 3 renderer uses measured font metrics, configurable theme colors, and simple color runs; row/cell batching and font shaping remain future optimization work.
 
 The model thread publishes snapshots only after changes through a single-slot coalescing mailbox. The design leaves a GPUI async subscription path for external control updates; no timer-driven redraw loop is used for idle state.
 
@@ -241,7 +241,7 @@ The local Xcode installation required the `MetalToolchain` component for GPUI's 
 
 - **Phase 1:** app shell, model, commands, operations, events, Unix control, `waterctl`, scenario runner, GPUI projection. Complete.
 - **Phase 2:** `alacritty_terminal` worker and terminal surface. Complete: PTY spawn, real zsh integration (`/opt/homebrew/bin/zsh` when available), input, output, resize, scroll, bounded waits, process status, ANSI cell projection, and live scenario validation.
-- **Phase 3:** in progress. Keyboard/PTY routing, focus, paste, navigation, mouse-wheel scrolling, fixed-width rendering, approximate resize-driven dimensions, and basic selection/copy are implemented; dirty rows, snapshot coalescing, row/background batching, font shaping, wide/emoji/combining policy, and benchmarks remain.
+- **Phase 3:** in progress. Keyboard/PTY routing, focus, paste, navigation, mouse-wheel scrolling, measured cell rendering, split-aware resize, wide-character selection, configurable theme/features, and basic selection/copy are implemented; dirty rows, row/background batching, font shaping, and benchmarks remain.
 - **Phase 4:** file browser and image preview.
 - **Phase 5:** structured Agent Surface adapters.
 

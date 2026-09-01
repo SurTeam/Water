@@ -21,6 +21,22 @@ The app starts a local control socket at `/tmp/water.sock` by default and opens 
 cargo run --bin water -- --control-socket /tmp/my-water.sock
 ```
 
+## Application defaults
+
+Configurable defaults are kept outside the model in a JSON file and loaded at startup. On macOS the default path is:
+
+```text
+~/Library/Application Support/water/config.json
+```
+
+`WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. [`config.example.json`](config.example.json) contains the complete schema. The current defaults include terminal features (`selection`, `mouse_reporting`, and `bracketed_paste`), theme colors, terminal font metrics, and the per-terminal `scrollback_lines` limit (default `10000`). Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
+
+```sh
+mkdir -p "$HOME/Library/Application Support/water"
+cp config.example.json "$HOME/Library/Application Support/water/config.json"
+# For example, edit terminal.scrollback_lines or theme.inverse_background.
+```
+
 ## Control
 
 ```sh
