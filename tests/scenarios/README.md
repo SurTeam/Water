@@ -1,0 +1,3 @@
+Scenario fixtures are executed by the single `ScenarioRunner`. Workspace-creation fixtures expect a clean model; start the GUI with `--empty-workspace` when running them through `waterctl`.
+
+Every command step is dispatched through `CommandDispatcher` (in-process tests) or the versioned control socket (`waterctl`) and then awaited by operation ID. Terminal fixtures may use `terminal_contains` and `process_exit`, which are bounded condition-variable waits over PTY-worker state. `terminal_zsh.json` exercises an interactive `/opt/homebrew/bin/zsh -f` when that Homebrew installation is available. Do not add fixed sleeps or coordinate-based UI assertions here.

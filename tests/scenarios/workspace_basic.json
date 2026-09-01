@@ -1,0 +1,22 @@
+{
+  "name": "workspace-basic",
+  "steps": [
+    { "command": { "type": "workspace.create" } },
+    { "command": { "type": "tab.new", "title": "Main" } },
+    { "command": { "type": "pane.split", "direction": "right" } },
+    { "command": { "type": "pane.focus", "direction": "left" } },
+    { "assert": { "type": "pane_count", "value": 2 } },
+    { "command": { "type": "pane.split", "direction": "down" } },
+    { "command": { "type": "pane.resize", "ratio": 0.6 } },
+    { "command": { "type": "pane.close" } },
+    { "assert": { "type": "pane_count", "value": 2 } },
+    { "command": { "type": "tab.new", "title": "Second" } },
+    { "assert": { "type": "tab_count", "value": 2 } },
+    { "command": { "type": "tab.activate", "index": 0 } },
+    { "assert": { "type": "pane_count", "value": 2 } },
+    { "command": { "type": "tab.close" } },
+    { "assert": { "type": "tab_count", "value": 1 } },
+    { "wait": { "type": "state_revision_at_least", "value": 1 } },
+    { "wait": { "type": "app_idle" } }
+  ]
+}

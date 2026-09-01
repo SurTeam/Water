@@ -1,0 +1,149 @@
+use std::collections::VecDeque;
+
+use serde::{Deserialize, Serialize};
+
+use crate::ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum AppEventKind {
+    WorkspaceCreated {
+        workspace_id: WorkspaceId,
+    },
+    TabCreated {
+        tab_id: TabId,
+    },
+    TabActivated {
+        tab_id: TabId,
+    },
+    TabClosed {
+        tab_id: TabId,
+    },
+    PaneCreated {
+        pane_id: PaneId,
+    },
+    PaneSplit {
+        target_pane: PaneId,
+        new_pane: PaneId,
+    },
+    PaneFocused {
+        pane_id: PaneId,
+    },
+    PaneClosed {
+        pane_id: PaneId,
+    },
+    PaneResized {
+        pane_id: PaneId,
+        ratio: f32,
+    },
+    SurfaceChanged {
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    },
+    TerminalSpawned {
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+    },
+    TerminalExited {
+        terminal_id: TerminalId,
+        exit_code: Option<i32>,
+    },
+    TerminalOutputChanged {
+        terminal_id: TerminalId,
+    },
+    TerminalResized {
+        terminal_id: TerminalId,
+        columns: usize,
+        lines: usize,
+    },
+    TerminalTitleChanged {
+        terminal_id: TerminalId,
+        title: String,
+    },
+}
+
+impl AppEventKind {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Self::WorkspaceCreated { .. } => "workspace.created",
+            Self::TabCreated { .. } => "tab.created",
+            Self::TabActivated { .. } => "tab.activated",
+            Self::TabClosed { .. } => "tab.closed",
+            Self::PaneCreated { .. } => "pane.created",
+            Self::PaneSplit { .. } => "pane.split",
+            Self::PaneFocused { .. } => "pane.focused",
+            Self::PaneClosed { .. } => "pane.closed",
+            Self::PaneResized { .. } => "pane.resized",
+            Self::SurfaceChanged { .. } => "surface.changed",
+            Self::TerminalSpawned { .. } => "terminal.spawned",
+            Self::TerminalExited { .. } => "terminal.exited",
+            Self::TerminalOutputChanged { .. } => "terminal.output_changed",
+            Self::TerminalResized { .. } => "terminal.resized",
+            Self::TerminalTitleChanged { .. } => "terminal.title_changed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppEvent {
+    pub sequence: u64,
+    pub state_revision: u64,
+    pub kind: AppEventKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct EventBus {
+    next_sequence: u64,
+    max_events: usize,
+    events: VecDeque<AppEvent>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new(4096)
+    }
+}
+
+impl EventBus {
+    pub fn new(max_events: usize) -> Self {
+        assert!(max_events > 0, "event history must be non-empty");
+        Self {
+            next_sequence: 1,
+            max_events,
+            events: VecDeque::with_capacity(max_events.min(256)),
+        }
+    }
+
+    pub fn emit(&mut self, state_revision: u64, kind: AppEventKind) -> AppEvent {
+        let event = AppEvent {
+            sequence: self.next_sequence,
+            state_revision,
+            kind,
+        };
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .expect("water event sequence exhausted");
+        if self.events.len() == self.max_events {
+            self.events.pop_front();
+        }
+        self.events.push_back(event.clone());
+        event
+    }
+
+    pub fn since(&self, sequence: u64) -> Vec<AppEvent> {
+        self.events
+            .iter()
+            .filter(|event| event.sequence > sequence)
+            .cloned()
+            .collect()
+    }
+
+    pub fn all(&self) -> Vec<AppEvent> {
+        self.events.iter().cloned().collect()
+    }
+
+    pub fn latest_sequence(&self) -> u64 {
+        self.next_sequence.saturating_sub(1)
+    }
+}

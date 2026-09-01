@@ -1,0 +1,38 @@
+[package]
+name = "water"
+version = "0.1.0"
+edition = "2024"
+default-run = "water"
+description = "A native Rust desktop development workbench."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "water"
+path = "src/lib.rs"
+
+[features]
+# Reserved for tracing/profiling integrations; disabled by default in release builds.
+profiling = []
+
+[[bin]]
+name = "water"
+path = "src/main.rs"
+
+[[bin]]
+name = "waterctl"
+path = "src/bin/waterctl.rs"
+
+[dependencies]
+alacritty_terminal = "0.26.0"
+anyhow = "1.0"
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", features = ["font-kit"] }
+polling = "3.8.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "test-support"] }

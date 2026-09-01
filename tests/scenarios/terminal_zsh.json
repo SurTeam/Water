@@ -1,0 +1,76 @@
+{
+  "name": "terminal_zsh",
+  "steps": [
+    {
+      "command": {
+        "type": "workspace.create"
+      }
+    },
+    {
+      "command": {
+        "type": "tab.new",
+        "title": "Real zsh"
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.spawn",
+        "program": "/opt/homebrew/bin/zsh",
+        "args": ["-f"],
+        "columns": 100,
+        "lines": 30
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.send_text",
+        "text": "print -r -- \"WATER_REAL_ZSH_READY:$ZSH_VERSION\"\n"
+      }
+    },
+    {
+      "wait": {
+        "type": "terminal_contains",
+        "text": "WATER_REAL_ZSH_READY:",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.send_text",
+        "text": "print -r -- WATER_REAL_ZSH_WAITING; read -r reply; print -r -- \"WATER_REAL_ZSH_INPUT:$reply\"\n"
+      }
+    },
+    {
+      "wait": {
+        "type": "terminal_contains",
+        "text": "WATER_REAL_ZSH_WAITING",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.send_text",
+        "text": "real-shell\n"
+      }
+    },
+    {
+      "wait": {
+        "type": "terminal_contains",
+        "text": "WATER_REAL_ZSH_INPUT:real-shell",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.send_text",
+        "text": "exit 0\n"
+      }
+    },
+    {
+      "wait": {
+        "type": "process_exit",
+        "timeout_ms": 5000
+      }
+    }
+  ]
+}

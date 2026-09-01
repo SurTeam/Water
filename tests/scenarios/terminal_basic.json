@@ -1,0 +1,72 @@
+{
+  "name": "terminal_basic",
+  "steps": [
+    {
+      "command": {
+        "type": "workspace.create"
+      }
+    },
+    {
+      "command": {
+        "type": "tab.new",
+        "title": "Terminal"
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.spawn",
+        "program": "/bin/sh",
+        "args": ["-c", "printf '\u001b[31m__READY__\u001b[0m\\n'"],
+        "columns": 80,
+        "lines": 24
+      }
+    },
+    {
+      "wait": {
+        "type": "terminal_contains",
+        "text": "__READY__",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "assert": {
+        "type": "active_surface_kind",
+        "kind": "terminal"
+      }
+    },
+    {
+      "wait": {
+        "type": "process_exit",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.spawn",
+        "program": "/bin/sh",
+        "args": ["-c", "read line; printf 'INPUT:%s\\n' \"$line\""],
+        "columns": 80,
+        "lines": 24
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.send_text",
+        "text": "hello\n"
+      }
+    },
+    {
+      "wait": {
+        "type": "terminal_contains",
+        "text": "INPUT:hello",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "wait": {
+        "type": "process_exit",
+        "timeout_ms": 5000
+      }
+    }
+  ]
+}
