@@ -129,6 +129,66 @@ fn terminal_worker_captures_output_and_ansi_cell_attributes() {
 }
 
 #[test]
+fn binary_terminal_output_does_not_leave_device_responses_in_zsh_input() {
+    let shell = default_shell_program();
+    if !std::path::Path::new(&shell).is_file() {
+        eprintln!("skipping binary terminal output test: {shell} is not installed");
+        return;
+    }
+
+    let mut dispatcher = CommandDispatcher::new();
+    let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+    assert_eq!(
+        dispatcher.wait_operation(workspace).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let tab = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+    assert_eq!(
+        dispatcher.wait_operation(tab).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let spawn = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+        pane_id: None,
+        program: shell,
+        args: vec!["-f".to_owned()],
+        columns: 80,
+        lines: 24,
+    }));
+    let terminal_id = match dispatcher.wait_operation(spawn).unwrap().result.unwrap() {
+        OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+
+    let send_binary = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::SendText {
+        terminal_id: Some(terminal_id),
+        pane_id: None,
+        text: r#"printf '\033[\023c\0'; printf 'BINARY_DONE\n'"#.to_owned() + "\n",
+    }));
+    assert_eq!(
+        dispatcher.wait_operation(send_binary).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let snapshot = dispatcher
+        .wait_terminal_contains(terminal_id, "BINARY_DONE", Duration::from_secs(5))
+        .expect("binary command completes");
+    assert!(!snapshot.visible_text().contains("6c"));
+
+    let send_follow_up = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::SendText {
+        terminal_id: Some(terminal_id),
+        pane_id: None,
+        text: r#"printf 'AFTER\n'"#.to_owned() + "\n",
+    }));
+    assert_eq!(
+        dispatcher.wait_operation(send_follow_up).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let snapshot = dispatcher
+        .wait_terminal_contains(terminal_id, "AFTER", Duration::from_secs(5))
+        .expect("follow-up command reaches zsh");
+    assert!(!snapshot.visible_text().contains("6c"));
+}
+
+#[test]
 fn exited_terminal_closes_a_non_final_pane_automatically() {
     let mut dispatcher = CommandDispatcher::new();
     let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));

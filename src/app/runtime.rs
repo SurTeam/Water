@@ -12,7 +12,7 @@ use crate::command::{
 use crate::config::AppConfig;
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
-use crate::terminal::{TerminalSnapshot, WakeupCallback};
+use crate::terminal::{TerminalSnapshot, TerminalTheme, WakeupCallback};
 
 #[derive(Debug)]
 enum ModelRequest {
@@ -279,6 +279,13 @@ impl CommandClient {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ModelThreadConfig {
+    terminal_scrollback_lines: usize,
+    terminal_max_total_scrollback_lines: usize,
+    terminal_theme: TerminalTheme,
+}
+
 /// Owns the model thread and the one snapshot stream consumed by the GPUI view.
 pub struct ModelHost {
     client: CommandClient,
@@ -293,8 +300,16 @@ impl ModelHost {
 
     pub fn start_with_config(config: AppConfig) -> Self {
         let config = config.normalized();
-        let terminal_scrollback_lines = config.terminal.scrollback_lines;
-        let terminal_max_total_scrollback_lines = config.terminal.max_total_scrollback_lines;
+        let theme_colors = config.theme.colors();
+        let terminal_config = ModelThreadConfig {
+            terminal_scrollback_lines: config.terminal.scrollback_lines,
+            terminal_max_total_scrollback_lines: config.terminal.max_total_scrollback_lines,
+            terminal_theme: TerminalTheme::new(
+                theme_colors.terminal_foreground,
+                theme_colors.terminal_background,
+                theme_colors.cursor_background,
+            ),
+        };
         let (request_tx, request_rx) = mpsc::channel();
         let (snapshot_tx, snapshot_rx) = snapshot_channel();
         let operations = OperationRegistry::new();
@@ -316,8 +331,7 @@ impl ModelHost {
                     thread_operations,
                     Some(terminal_wakeup),
                     terminal_wakeup_pending,
-                    terminal_scrollback_lines,
-                    terminal_max_total_scrollback_lines,
+                    terminal_config,
                 )
             })
             .expect("failed to start water model thread");
@@ -364,15 +378,20 @@ fn run_model_thread(
     operations: OperationRegistry,
     terminal_wakeup: Option<WakeupCallback>,
     terminal_wakeup_pending: Arc<AtomicBool>,
-    terminal_scrollback_lines: usize,
-    terminal_max_total_scrollback_lines: usize,
+    terminal_config: ModelThreadConfig,
 ) {
+    let ModelThreadConfig {
+        terminal_scrollback_lines,
+        terminal_max_total_scrollback_lines,
+        terminal_theme,
+    } = terminal_config;
     let mut dispatcher =
-        CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback_and_total(
+        CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
             operations,
             terminal_wakeup,
             terminal_scrollback_lines,
             terminal_max_total_scrollback_lines,
+            terminal_theme,
         );
     let _ = snapshot_tx.send(dispatcher.state_dump());
 

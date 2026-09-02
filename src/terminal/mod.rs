@@ -8,6 +8,32 @@ pub const HOMEBREW_ZSH: &str = "/opt/homebrew/bin/zsh";
 pub const INTEL_HOMEBREW_ZSH: &str = "/usr/local/bin/zsh";
 pub const SYSTEM_ZSH: &str = "/bin/zsh";
 
+/// Colors used when answering terminal dynamic-color queries (OSC 10/11/12).
+/// Keeping these values with the PTY worker makes the protocol response match
+/// the palette used by the renderer, including user-configured themes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalTheme {
+    pub foreground: u32,
+    pub background: u32,
+    pub cursor: u32,
+}
+
+impl TerminalTheme {
+    pub const fn new(foreground: u32, background: u32, cursor: u32) -> Self {
+        Self {
+            foreground,
+            background,
+            cursor,
+        }
+    }
+}
+
+impl Default for TerminalTheme {
+    fn default() -> Self {
+        Self::new(0xe4e4e4, 0x2c2c2c, 0xe4e4e4)
+    }
+}
+
 /// Select the real zsh executable used for terminals when no program is supplied.
 /// `WATER_SHELL` is an explicit override for development and integration tests.
 pub fn default_shell_program() -> String {

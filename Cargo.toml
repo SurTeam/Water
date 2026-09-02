@@ -11,6 +11,10 @@ name = "water"
 path = "src/lib.rs"
 
 [features]
+default = ["runtime-screenshot"]
+# Keep the runtime screenshot hook available to the local control interface.
+# GPUI gates its scene-to-image API behind this feature.
+runtime-screenshot = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 # Reserved for tracing/profiling integrations; disabled by default in release builds.
 profiling = []
 
@@ -25,6 +29,7 @@ path = "src/bin/waterctl.rs"
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0"
+image = { version = "0.25.10", optional = true }
 libc = "0.2"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", features = ["font-kit"] }

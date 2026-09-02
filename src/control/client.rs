@@ -11,7 +11,7 @@ use crate::command::{AppCommand, OperationSnapshot};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::TerminalSnapshot;
-use crate::ui::{UiKeystrokeResult, UiSnapshot};
+use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot};
 
 use super::protocol::{
     PROTOCOL_VERSION, RpcMethod, RpcRequest, RpcResponse, read_frame, write_frame,
@@ -138,6 +138,15 @@ impl ControlClient {
         self.call(RpcMethod::UiSnapshot)
     }
 
+    pub fn ui_screenshot(
+        &self,
+        path: impl Into<PathBuf>,
+    ) -> Result<UiScreenshot, ControlClientError> {
+        self.call(RpcMethod::UiScreenshot {
+            path: path.into().display().to_string(),
+        })
+    }
+
     pub fn ping(&self) -> Result<(), ControlClientError> {
         let response: PingResponse = self.call(RpcMethod::Ping)?;
         if response.protocol_version != PROTOCOL_VERSION {
@@ -262,6 +271,13 @@ impl ControlClient {
     }
 
     pub fn ui_snapshot(&self) -> Result<UiSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
+    pub fn ui_screenshot(
+        &self,
+        _path: impl Into<PathBuf>,
+    ) -> Result<UiScreenshot, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 

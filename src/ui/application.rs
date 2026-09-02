@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+#[cfg(feature = "runtime-screenshot")]
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
 use crate::config::AppConfig;
 
 use super::WorkspaceView;
+#[cfg(feature = "runtime-screenshot")]
+use super::control::UiScreenshot;
 use super::control::{UiControlReceiver, UiControlRequest, UiKeystrokeResult, UiSnapshot};
 
 actions!(
@@ -187,10 +191,74 @@ impl WaterApplication {
                         });
                         let _ = reply.send(result);
                     }
+                    #[cfg(feature = "runtime-screenshot")]
+                    UiControlRequest::Screenshot { path, reply } => {
+                        let result = cx.update(capture_active_window);
+                        let result = match result {
+                            Ok(image) => {
+                                cx.background_executor()
+                                    .spawn(async move { save_screenshot(image, path) })
+                                    .await
+                            }
+                            Err(error) => Err(error),
+                        };
+                        let _ = reply.send(result);
+                    }
+                    #[cfg(not(feature = "runtime-screenshot"))]
+                    UiControlRequest::Screenshot { path, reply } => {
+                        let _ = path;
+                        let _ = reply.send(Err(
+                            "runtime screenshot support is disabled at compile time".to_owned(),
+                        ));
+                    }
                 }
             }
         })
     }
+}
+
+#[cfg(feature = "runtime-screenshot")]
+fn capture_active_window(cx: &mut App) -> Result<image::RgbaImage, String> {
+    let window = cx
+        .active_window()
+        .or_else(|| {
+            cx.window_stack()
+                .and_then(|windows| windows.into_iter().next())
+        })
+        .or_else(|| cx.windows().into_iter().last())
+        .ok_or_else(|| "Water has no open window".to_owned())?;
+    window
+        .update(cx, |_, window, _cx| {
+            window
+                .render_to_image()
+                .map_err(|error| format!("could not capture Water window: {error}"))
+        })
+        .map_err(|error| format!("could not access Water window: {error}"))?
+}
+
+#[cfg(feature = "runtime-screenshot")]
+fn save_screenshot(image: image::RgbaImage, path: PathBuf) -> Result<UiScreenshot, String> {
+    let path = if path.extension().is_some() {
+        path
+    } else {
+        path.with_extension("png")
+    };
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create screenshot directory: {error}"))?;
+    }
+    let width = image.width();
+    let height = image.height();
+    image
+        .save_with_format(&path, image::ImageFormat::Png)
+        .map_err(|error| format!("could not save screenshot {}: {error}", path.display()))?;
+    Ok(UiScreenshot {
+        path: path.display().to_string(),
+        width,
+        height,
+    })
 }
 
 fn water_window_options(bounds: Bounds<gpui::Pixels>) -> WindowOptions {

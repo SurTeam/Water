@@ -8,7 +8,7 @@ use crate::{
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::{
         TerminalError, TerminalManager, TerminalRegistry, TerminalSize, TerminalSnapshot,
-        default_shell_args, default_shell_program,
+        TerminalTheme, default_shell_args, default_shell_program,
     },
 };
 
@@ -87,16 +87,33 @@ impl CommandDispatcher {
         scrollback_lines: usize,
         max_total_scrollback_lines: usize,
     ) -> Self {
+        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
+            operations,
+            wakeup,
+            scrollback_lines,
+            max_total_scrollback_lines,
+            TerminalTheme::default(),
+        )
+    }
+
+    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
+        operations: OperationRegistry,
+        wakeup: Option<crate::terminal::WakeupCallback>,
+        scrollback_lines: usize,
+        max_total_scrollback_lines: usize,
+        theme: TerminalTheme,
+    ) -> Self {
         Self {
             model: ApplicationModel::new(),
             ids: IdAllocator::new(),
             next_workspace_number: 1,
             events: EventBus::default(),
             operations,
-            terminals: TerminalManager::new_with_wakeup_and_scrollback_and_total(
+            terminals: TerminalManager::new_with_wakeup_and_scrollback_and_total_and_theme(
                 wakeup,
                 scrollback_lines,
                 max_total_scrollback_lines,
+                theme,
             ),
         }
     }

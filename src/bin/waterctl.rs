@@ -64,8 +64,19 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
         Some("state") | Some("snapshot") => {
             print_json(&client.ui_snapshot().context("UI state request failed")?)?;
         }
+        Some("screenshot") | Some("capture") => {
+            let path = optional_value(arguments, "--output")?
+                .or_else(|| {
+                    arguments
+                        .get(1)
+                        .filter(|value| !value.starts_with('-'))
+                        .cloned()
+                })
+                .unwrap_or_else(|| "target/water-screenshot.png".to_owned());
+            print_json(&client.ui_screenshot(path).context("UI screenshot failed")?)?;
+        }
         Some(command) => bail!("unknown ui command: {command}"),
-        None => bail!("ui requires key or state"),
+        None => bail!("ui requires key, state, or screenshot"),
     }
     Ok(())
 }
@@ -730,6 +741,7 @@ fn print_usage() {
            waterctl state\n\
            waterctl ui key cmd-t\n\
            waterctl ui state\n\
+           waterctl ui screenshot --output target/water.png\n\
            waterctl workspace new\n\
            waterctl workspace rename --workspace 1 --title Dev\n\
            waterctl tab new --title Main\n\

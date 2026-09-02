@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::ids::TerminalId;
 
+use super::TerminalTheme;
 use super::snapshot::{
     MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES,
     TerminalProcessState, TerminalSize, TerminalSnapshot,
@@ -456,6 +457,7 @@ fn process_name_from_program(program: &str) -> String {
 
 pub struct TerminalManager {
     registry: TerminalRegistry,
+    theme: TerminalTheme,
     scrollback_lines: usize,
     max_total_scrollback_lines: usize,
     scrollback_budget: ScrollbackBudget,
@@ -507,12 +509,27 @@ impl TerminalManager {
         scrollback_lines: usize,
         max_total_scrollback_lines: usize,
     ) -> Self {
+        Self::new_with_wakeup_and_scrollback_and_total_and_theme(
+            event_wakeup,
+            scrollback_lines,
+            max_total_scrollback_lines,
+            TerminalTheme::default(),
+        )
+    }
+
+    pub(crate) fn new_with_wakeup_and_scrollback_and_total_and_theme(
+        event_wakeup: Option<WakeupCallback>,
+        scrollback_lines: usize,
+        max_total_scrollback_lines: usize,
+        theme: TerminalTheme,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::channel();
         let scrollback_lines = scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
         let max_total_scrollback_lines =
             max_total_scrollback_lines.clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
         Self {
             registry: TerminalRegistry::new(),
+            theme,
             scrollback_lines,
             max_total_scrollback_lines,
             scrollback_budget: ScrollbackBudget::new(max_total_scrollback_lines),
@@ -600,6 +617,7 @@ impl TerminalManager {
         let scrollback_lines = self.scrollback_lines;
         let scrollback_budget = self.scrollback_budget.clone();
         let metadata_executor = self.metadata_executor.clone();
+        let theme = self.theme;
         let join_handle = match thread::Builder::new()
             .name(format!("water-terminal-{terminal_id}"))
             .spawn(move || {
@@ -621,7 +639,8 @@ impl TerminalManager {
                             fallback_process_name,
                             fallback_cwd,
                         },
-                    ),
+                    )
+                    .with_theme(theme),
                     pty,
                 )
             }) {

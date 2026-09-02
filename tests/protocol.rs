@@ -87,6 +87,25 @@ fn ui_automation_methods_use_stable_wire_names() {
 }
 
 #[test]
+fn ui_screenshot_uses_a_stable_wire_name() {
+    let request = RpcRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 9,
+        method: RpcMethod::UiScreenshot {
+            path: "/tmp/water.png".to_owned(),
+        },
+    };
+    let value = serde_json::to_value(&request).expect("screenshot request serializes");
+    assert_eq!(value["method"], "ui.screenshot");
+    assert_eq!(value["params"]["path"], "/tmp/water.png");
+    let decoded: RpcRequest = serde_json::from_value(value).expect("screenshot request decodes");
+    assert!(matches!(
+        decoded.method,
+        RpcMethod::UiScreenshot { path } if path == "/tmp/water.png"
+    ));
+}
+
+#[test]
 fn length_prefixed_protocol_round_trips() {
     let request = RpcRequest {
         protocol_version: PROTOCOL_VERSION,

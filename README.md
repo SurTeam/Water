@@ -56,6 +56,8 @@ cargo run --bin waterctl -- --socket /tmp/water.sock state
 # Dispatch a real GPUI keystroke through the focused native window/action tree.
 cargo run --bin waterctl -- --socket /tmp/water.sock ui key cmd-t
 cargo run --bin waterctl -- --socket /tmp/water.sock ui state
+# Capture only the active Water window (not the full desktop).
+cargo run --bin waterctl -- --socket /tmp/water.sock ui screenshot --output /tmp/water.png
 cargo run --bin waterctl -- --socket /tmp/water.sock tab new       # creates a terminal tab
 cargo run --bin waterctl -- --socket /tmp/water.sock pane split --right  # creates a terminal pane
 # Pane-targeted input still mutates through AppCommand -> CommandDispatcher.
@@ -91,6 +93,6 @@ cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenario
 cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_zsh.json
 ```
 
-`ui key` is a running-application test interface: the control thread hands the keystroke to the GPUI thread, which calls `Window::dispatch_keystroke` against the active/frontmost Water window. It therefore exercises the actual keymap and focused element action handlers instead of directly invoking model commands. `pane input` targets a pane through `TerminalCommand::SendText`, and `pane content` returns the requested viewport row/column range.
+`ui key` is a running-application test interface: the control thread hands the keystroke to the GPUI thread, which calls `Window::dispatch_keystroke` against the active/frontmost Water window. It therefore exercises the actual keymap and focused element action handlers instead of directly invoking model commands. `ui screenshot` asks GPUI to render that same active Water window to a PNG; it does not invoke the system full-screen screenshot tool. `pane input` targets a pane through `TerminalCommand::SendText`, and `pane content` returns the requested viewport row/column range.
 
 The scenario runner waits on operation completion, terminal output, and process exit primitives. It does not use fixed sleeps, coordinates, or screenshots. When a terminal process exits, Water automatically closes its pane; if it was the tab's final pane, the tab is closed as well. The completed terminal snapshot remains available through bounded wait/query state so exit observers are not raced by the UI cleanup.

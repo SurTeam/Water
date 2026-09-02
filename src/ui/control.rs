@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -14,6 +15,10 @@ pub(crate) enum UiControlRequest {
     },
     Snapshot {
         reply: Sender<Result<UiSnapshot, String>>,
+    },
+    Screenshot {
+        path: PathBuf,
+        reply: Sender<Result<UiScreenshot, String>>,
     },
 }
 
@@ -38,6 +43,15 @@ pub struct UiKeystrokeResult {
 pub struct UiSnapshot {
     pub window_count: usize,
     pub has_active_window: bool,
+}
+
+/// Metadata returned after the current Water window has been rendered to an
+/// image at the requested path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiScreenshot {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 pub fn ui_control_channel() -> (UiControlClient, UiControlReceiver) {
@@ -71,6 +85,19 @@ impl UiControlClient {
         let (reply, response) = mpsc::channel();
         self.sender
             .send(UiControlRequest::Snapshot { reply })
+            .map_err(|_| "UI control channel is unavailable".to_owned())?;
+        response
+            .recv_timeout(UI_CONTROL_TIMEOUT)
+            .map_err(|_| "timed out waiting for the GPUI thread".to_owned())?
+    }
+
+    pub fn screenshot(&self, path: impl Into<PathBuf>) -> Result<UiScreenshot, String> {
+        let (reply, response) = mpsc::channel();
+        self.sender
+            .send(UiControlRequest::Screenshot {
+                path: path.into(),
+                reply,
+            })
             .map_err(|_| "UI control channel is unavailable".to_owned())?;
         response
             .recv_timeout(UI_CONTROL_TIMEOUT)

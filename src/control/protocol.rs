@@ -9,7 +9,7 @@ use crate::command::{AppCommand, CommandError, OperationSnapshot};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::TerminalSnapshot;
-use crate::ui::{UiKeystrokeResult, UiSnapshot};
+use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -54,6 +54,8 @@ pub enum RpcMethod {
     UiKeystroke { keystroke: String },
     #[serde(rename = "ui.snapshot")]
     UiSnapshot,
+    #[serde(rename = "ui.screenshot")]
+    UiScreenshot { path: String },
     #[serde(rename = "ping")]
     Ping,
 }
@@ -132,6 +134,7 @@ pub enum RpcResult {
     Terminal(TerminalSnapshot),
     UiKeystroke(UiKeystrokeResult),
     Ui(UiSnapshot),
+    Screenshot(UiScreenshot),
     Pong { protocol_version: u32 },
 }
 

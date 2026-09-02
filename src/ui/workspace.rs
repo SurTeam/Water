@@ -2937,8 +2937,8 @@ fn terminal_special_key_input_with_modes(
         "right" => Some(cursor_sequence('C', modifier, modes.application_cursor)),
         "up" => Some(cursor_sequence('A', modifier, modes.application_cursor)),
         "down" => Some(cursor_sequence('B', modifier, modes.application_cursor)),
-        "home" => Some(numbered_sequence("1", 'H', modifier)),
-        "end" => Some(numbered_sequence("1", 'F', modifier)),
+        "home" => Some(cursor_sequence('H', modifier, modes.application_cursor)),
+        "end" => Some(cursor_sequence('F', modifier, modes.application_cursor)),
         "insert" => Some(numbered_sequence("2", '~', modifier)),
         "delete" => Some(numbered_sequence("3", '~', modifier)),
         "pageup" => Some(numbered_sequence("5", '~', modifier)),
@@ -3991,6 +3991,51 @@ mod tests {
                 TerminalModes::default(),
             ),
             Some("\r".to_owned())
+        );
+    }
+
+    #[test]
+    fn terminal_home_and_end_use_standard_and_application_sequences() {
+        let normal = TerminalModes::default();
+        assert_eq!(
+            terminal_input_for_keystroke_with_modes(
+                &keystroke("home", None, Modifiers::none()),
+                normal,
+            ),
+            Some("\u{1b}[H".to_owned())
+        );
+        assert_eq!(
+            terminal_input_for_keystroke_with_modes(
+                &keystroke("end", None, Modifiers::none()),
+                normal,
+            ),
+            Some("\u{1b}[F".to_owned())
+        );
+
+        let application = TerminalModes {
+            application_cursor: true,
+            ..normal
+        };
+        assert_eq!(
+            terminal_input_for_keystroke_with_modes(
+                &keystroke("home", None, Modifiers::none()),
+                application,
+            ),
+            Some("\u{1b}OH".to_owned())
+        );
+        assert_eq!(
+            terminal_input_for_keystroke_with_modes(
+                &keystroke("end", None, Modifiers::none()),
+                application,
+            ),
+            Some("\u{1b}OF".to_owned())
+        );
+        assert_eq!(
+            terminal_input_for_keystroke_with_modes(
+                &keystroke("home", None, Modifiers::shift()),
+                application,
+            ),
+            Some("\u{1b}[1;2H".to_owned())
         );
     }
 

@@ -13,11 +13,12 @@ use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty::{ChildEvent, EventedPty, EventedReadWrite, Pty};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Processor, Rgb};
 use polling::{Event as PollEvent, Events, PollMode, Poller};
 
 use crate::ids::TerminalId;
 
+use super::TerminalTheme;
 use super::model::{
     ScrollbackBudget, TERMINAL_WAKE_KEY, TerminalManagerEvent, TerminalRegistry,
     TerminalWorkerCommand, WakeupCallback, WakeupSlot,
@@ -99,6 +100,7 @@ pub(crate) struct WorkerConfig {
     event_wakeup: Option<WakeupCallback>,
     wakeup_slot: WakeupSlot,
     metadata_executor: ProcessMetadataExecutor,
+    theme: TerminalTheme,
 }
 
 pub(crate) struct WorkerMetadata {
@@ -155,7 +157,13 @@ impl WorkerConfig {
             event_wakeup: channels.event_wakeup,
             wakeup_slot: channels.wakeup_slot,
             metadata_executor: channels.metadata_executor,
+            theme: TerminalTheme::default(),
         }
+    }
+
+    pub(crate) fn with_theme(mut self, theme: TerminalTheme) -> Self {
+        self.theme = theme;
+        self
     }
 }
 
@@ -173,6 +181,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         event_wakeup,
         wakeup_slot,
         metadata_executor,
+        theme,
     } = config;
     let config = Config {
         scrolling_history: scrollback_lines,
@@ -181,6 +190,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let proxy_events = std::sync::mpsc::channel();
     let proxy = WorkerEventProxy {
         sender: proxy_events.0,
+        theme,
     };
     let mut term = Term::new(config, &size, proxy);
     let mut scrollback = ScrollbackState::new(terminal_id, scrollback_lines, scrollback_budget);
@@ -358,6 +368,10 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         output_buffer.clear();
         let mut child_exited = None;
         let mut worker_stop = false;
+        // A raw binary stream can contain bytes that happen to look like a
+        // terminal query (for example, CSI `c`). Never feed the automatic
+        // response for such a query into the shell's input queue.
+        let mut binary_output = false;
         let mut pty_eof = false;
         for event in events.iter() {
             match event.key {
@@ -367,13 +381,16 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     // the normal limit were reached first, alacritty would
                     // discard the very rows the user is looking at.
                     let _ = scrollback.prepare_for_output(&mut term);
-                    match drain_pty(
+                    let output_start = output_buffer.len();
+                    let drain_result = drain_pty(
                         &mut pty,
                         &mut processor,
                         &mut term,
                         &mut read_buffer,
                         &mut output_buffer,
-                    ) {
+                    );
+                    binary_output |= output_buffer[output_start..].contains(&0);
+                    match drain_result {
                         Ok(ReadEffect::Continue | ReadEffect::BudgetExhausted) => {}
                         Ok(ReadEffect::Eof) => {
                             pty_eof = true;
@@ -408,6 +425,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             &event_tx,
             event_wakeup.as_ref(),
             terminal_id,
+            binary_output,
         ) {
             worker_stop = true;
         }
@@ -942,11 +960,13 @@ fn process_proxy_events(
     event_tx: &Sender<TerminalManagerEvent>,
     event_wakeup: Option<&WakeupCallback>,
     terminal_id: TerminalId,
+    binary_output: bool,
 ) -> bool {
     let mut should_stop = false;
     loop {
         match proxy_events.try_recv() {
-            Ok(ProxyAction::Write(bytes)) => {
+            Ok(ProxyAction::TerminalResponse(_)) if binary_output => {}
+            Ok(ProxyAction::TerminalResponse(bytes)) => {
                 if let Err(error) = pty.writer().write_all(&bytes) {
                     tracing::debug!(
                         target: "water::pty",
@@ -1028,19 +1048,34 @@ fn emit_manager_event(
 
 #[derive(Debug)]
 enum ProxyAction {
-    Write(Vec<u8>),
+    TerminalResponse(Vec<u8>),
     Title(String),
     Stop,
 }
 
 struct WorkerEventProxy {
     sender: Sender<ProxyAction>,
+    theme: TerminalTheme,
+}
+
+fn terminal_dynamic_color(theme: TerminalTheme, index: usize) -> Option<Rgb> {
+    let color = match index {
+        256 => theme.foreground,
+        257 => theme.background,
+        258 => theme.cursor,
+        _ => return None,
+    };
+    Some(Rgb {
+        r: ((color >> 16) & 0xff) as u8,
+        g: ((color >> 8) & 0xff) as u8,
+        b: (color & 0xff) as u8,
+    })
 }
 
 impl EventListener for WorkerEventProxy {
     fn send_event(&self, event: Event) {
         let action = match event {
-            Event::PtyWrite(text) => Some(ProxyAction::Write(text.into_bytes())),
+            Event::PtyWrite(text) => Some(ProxyAction::TerminalResponse(text.into_bytes())),
             Event::Title(title) => Some(ProxyAction::Title(title)),
             Event::ResetTitle => Some(ProxyAction::Title(String::new())),
             Event::Exit => Some(ProxyAction::Stop),
@@ -1048,11 +1083,12 @@ impl EventListener for WorkerEventProxy {
             Event::MouseCursorDirty
             | Event::ClipboardStore(_, _)
             | Event::ClipboardLoad(_, _)
-            | Event::ColorRequest(_, _)
             | Event::TextAreaSizeRequest(_)
             | Event::CursorBlinkingChange
             | Event::Wakeup
             | Event::Bell => None,
+            Event::ColorRequest(index, format) => terminal_dynamic_color(self.theme, index)
+                .map(|color| ProxyAction::TerminalResponse(format(color).into_bytes())),
         };
         if let Some(action) = action {
             let _ = self.sender.send(action);
@@ -1072,8 +1108,27 @@ mod tests {
                 ..Config::default()
             },
             &size,
-            WorkerEventProxy { sender },
+            WorkerEventProxy {
+                sender,
+                theme: TerminalTheme::default(),
+            },
         )
+    }
+
+    #[test]
+    fn dynamic_color_queries_are_written_back_to_the_pty() {
+        let (sender, receiver) = mpsc::channel();
+        let theme = TerminalTheme::new(0x123456, 0xabcdef, 0x654321);
+        let proxy = WorkerEventProxy { sender, theme };
+        let format =
+            Arc::new(|color: Rgb| format!("rgb:{:02x}{:02x}{:02x}", color.r, color.g, color.b));
+
+        proxy.send_event(Event::ColorRequest(257, format));
+
+        assert!(matches!(
+            receiver.recv_timeout(Duration::from_secs(1)).unwrap(),
+            ProxyAction::TerminalResponse(bytes) if bytes == b"rgb:abcdef"
+        ));
     }
 
     #[test]
