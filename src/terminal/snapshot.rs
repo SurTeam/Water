@@ -157,6 +157,12 @@ pub struct TerminalSnapshot {
     pub process: TerminalProcessState,
     pub revision: u64,
     pub cells: Vec<TerminalCell>,
+    /// The nearest available grid row above the visible viewport, if any.
+    #[serde(default)]
+    pub rows_before: Vec<Vec<TerminalCell>>,
+    /// The nearest available grid row below the visible viewport, if any.
+    #[serde(default)]
+    pub rows_after: Vec<Vec<TerminalCell>>,
 }
 
 impl TerminalSnapshot {
@@ -173,6 +179,8 @@ impl TerminalSnapshot {
             process: TerminalProcessState::Running,
             revision: 0,
             cells: vec![TerminalCell::default(); size.columns * size.lines],
+            rows_before: Vec::new(),
+            rows_after: Vec::new(),
         }
     }
 
@@ -233,6 +241,27 @@ impl TerminalSnapshot {
             }
         }
 
+        let viewport_start = -(display_offset as i32);
+        let viewport_end = viewport_start + size.lines as i32 - 1;
+        let rows_before = if viewport_start > term.grid().topmost_line().0 {
+            vec![Self::row_from_alacritty(
+                term,
+                Line(viewport_start - 1),
+                size.columns,
+            )]
+        } else {
+            Vec::new()
+        };
+        let rows_after = if viewport_end < term.grid().bottommost_line().0 {
+            vec![Self::row_from_alacritty(
+                term,
+                Line(viewport_end + 1),
+                size.columns,
+            )]
+        } else {
+            Vec::new()
+        };
+
         let point = term.grid().cursor.point;
         let viewport_row = point.line.0 + display_offset as i32;
         let cursor = TerminalCursor {
@@ -268,7 +297,23 @@ impl TerminalSnapshot {
             process,
             revision,
             cells,
+            rows_before,
+            rows_after,
         }
+    }
+
+    fn row_from_alacritty<T: EventListener>(
+        term: &Term<T>,
+        line: Line,
+        columns: usize,
+    ) -> Vec<TerminalCell> {
+        let mut row = Vec::with_capacity(columns);
+        for column in 0..columns {
+            row.push(Self::cell_from_alacritty(
+                &term.grid()[line][Column(column)],
+            ));
+        }
+        row
     }
 
     fn cell_from_alacritty(cell: &Cell) -> TerminalCell {
@@ -303,5 +348,82 @@ fn color_from_alacritty(color: Color) -> TerminalColor {
             blue: b,
         },
         Color::Indexed(value) => TerminalColor::Indexed { value },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::event::VoidListener;
+    use alacritty_terminal::grid::Scroll;
+    use alacritty_terminal::term::Config;
+    use alacritty_terminal::vte::ansi::Processor;
+
+    fn test_term(size: TerminalSize, scrollback_lines: usize) -> Term<VoidListener> {
+        Term::new(
+            Config {
+                scrolling_history: scrollback_lines,
+                ..Config::default()
+            },
+            &size,
+            VoidListener,
+        )
+    }
+
+    #[test]
+    fn extracts_nearest_overscan_rows_and_respects_grid_bounds() {
+        let terminal_id = TerminalId::new(1);
+        let size = TerminalSize::new(8, 2);
+        let mut term = test_term(size, 8);
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        processor.advance(
+            &mut term,
+            b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\r\n",
+        );
+
+        let at_bottom =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 1);
+        assert_eq!(at_bottom.rows_before.len(), 1);
+        assert!(at_bottom.rows_after.is_empty());
+
+        term.scroll_display(Scroll::Delta(1));
+        let one_row_up =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
+        assert_eq!(one_row_up.rows_before.len(), 1);
+        assert_eq!(one_row_up.rows_after.len(), 1);
+        assert_eq!(
+            &one_row_up.cells[..size.columns],
+            at_bottom.rows_before[0].as_slice()
+        );
+        assert_eq!(
+            one_row_up.rows_after[0].as_slice(),
+            &at_bottom.cells[size.columns..size.columns * size.lines]
+        );
+
+        term.scroll_display(Scroll::Top);
+        let at_top =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 3);
+        assert!(at_top.rows_before.is_empty());
+        assert_eq!(at_top.rows_after.len(), 1);
+    }
+
+    #[test]
+    fn empty_and_legacy_snapshots_default_to_empty_overscan() {
+        let terminal_id = TerminalId::new(1);
+        let size = TerminalSize::new(8, 2);
+        let empty = TerminalSnapshot::empty(terminal_id, size);
+        assert!(empty.rows_before.is_empty());
+        assert!(empty.rows_after.is_empty());
+
+        let mut legacy = serde_json::to_value(&empty)
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap();
+        legacy.remove("rows_before");
+        legacy.remove("rows_after");
+        let decoded: TerminalSnapshot = serde_json::from_value(legacy.into()).unwrap();
+        assert!(decoded.rows_before.is_empty());
+        assert!(decoded.rows_after.is_empty());
     }
 }

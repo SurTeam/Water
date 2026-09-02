@@ -657,9 +657,11 @@ fn apply_command(
             };
             pty.on_resize(window_size);
             term.resize(size);
-            let dirty = scrollback.reconcile(term, scrollback.is_pinned(term));
+            let _ = scrollback.reconcile(term, scrollback.is_pinned(term));
+            // Resizing changes the published cell grid even when scrollback
+            // limits and the viewport offset remain unchanged.
             Ok(CommandEffect::Continue {
-                dirty,
+                dirty: true,
                 viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
                 refresh_process: false,
             })
