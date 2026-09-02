@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
     ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId},
@@ -10,7 +10,7 @@ use crate::{
     workspace::{Tab, Workspace},
 };
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StateDump {
     pub state_revision: u64,
     /// Compatibility alias for the active workspace. New consumers should use
@@ -21,6 +21,53 @@ pub struct StateDump {
     #[serde(default)]
     pub active_workspace: Option<WorkspaceId>,
     pub focused_pane: Option<PaneId>,
+}
+
+impl<'de> Deserialize<'de> for StateDump {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct StateDumpFields {
+            state_revision: u64,
+            #[serde(default)]
+            workspace: Option<WorkspaceDump>,
+            #[serde(default)]
+            workspaces: Vec<WorkspaceDump>,
+            #[serde(default)]
+            active_workspace: Option<WorkspaceId>,
+            #[serde(default)]
+            focused_pane: Option<PaneId>,
+        }
+
+        let fields = StateDumpFields::deserialize(deserializer)?;
+        let active_workspace = fields
+            .active_workspace
+            .or_else(|| fields.workspace.as_ref().map(|workspace| workspace.id));
+        let mut workspaces = fields.workspaces;
+        if workspaces.is_empty()
+            && let Some(workspace) = fields.workspace.as_ref()
+        {
+            workspaces.push(workspace.clone());
+        }
+        let workspace = fields.workspace.or_else(|| {
+            active_workspace.and_then(|workspace_id| {
+                workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)
+                    .cloned()
+            })
+        });
+
+        Ok(Self {
+            state_revision: fields.state_revision,
+            workspace,
+            workspaces,
+            active_workspace,
+            focused_pane: fields.focused_pane,
+        })
+    }
 }
 
 pub type ModelSnapshot = StateDump;

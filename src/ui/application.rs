@@ -48,6 +48,10 @@ struct WaterApplicationState {
     snapshot: RefCell<ModelSnapshot>,
     views: RefCell<Vec<WeakEntity<WorkspaceView>>>,
     settings_window: RefCell<Option<WindowHandle<SettingsView>>>,
+    // Startup window dimensions are fixed for this process. Settings keeps
+    // the newly saved values visible, but they take effect after restart.
+    window_width: f32,
+    window_height: f32,
 }
 
 impl WaterApplication {
@@ -61,10 +65,13 @@ impl WaterApplication {
         config: AppConfig,
         config_path: PathBuf,
     ) -> Self {
+        let config = config.normalized();
         Self {
             state: Rc::new(WaterApplicationState {
+                window_width: config.startup.window_width,
+                window_height: config.startup.window_height,
                 client,
-                config: RefCell::new(config.normalized()),
+                config: RefCell::new(config),
                 config_path,
                 snapshot: RefCell::new(snapshot),
                 views: RefCell::new(Vec::new()),
@@ -137,7 +144,11 @@ impl WaterApplication {
     }
 
     pub fn reopen(&self, cx: &mut App) {
-        if cx.windows().is_empty() {
+        let has_workspace_window = cx
+            .windows()
+            .iter()
+            .any(|window| window.downcast::<WorkspaceView>().is_some());
+        if !has_workspace_window {
             self.open_window(cx);
         }
         cx.activate(true);
@@ -157,10 +168,7 @@ impl WaterApplication {
         let focus_handle = root.read(cx).focus_handle(cx);
         let bounds = Bounds::centered(
             None,
-            size(
-                px(config.startup.window_width),
-                px(config.startup.window_height),
-            ),
+            size(px(self.state.window_width), px(self.state.window_height)),
             cx,
         );
         match cx.open_window(water_window_options(bounds), move |window, cx| {
@@ -180,15 +188,15 @@ impl WaterApplication {
     pub fn open_settings(&self, cx: &mut App) {
         let settings_window = *self.state.settings_window.borrow();
         if let Some(window) = settings_window {
-            if window
-                .update(cx, |_, window, _cx| window.activate_window())
-                .is_ok()
-            {
+            let any_handle: gpui::AnyWindowHandle = window.into();
+            let update_result = window.update(cx, |_, window, _cx| window.activate_window());
+            if update_result.is_ok() || cx.windows().contains(&any_handle) {
                 return;
             }
             // A WindowHandle can outlive its native window. Clear it before
             // recreating the singleton so a closed settings window never
-            // blocks the shortcut from opening a replacement.
+            // blocks the shortcut from opening a replacement. A transient
+            // update failure for a still-live window is deliberately ignored.
             self.state.settings_window.replace(None);
         }
 
@@ -579,6 +587,56 @@ mod tests {
         cx.simulate_keystrokes(workspace_window, "cmd-,");
         cx.run_until_parked();
         assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+        assert_eq!(
+            cx.read(|cx| {
+                cx.windows()
+                    .iter()
+                    .filter(|window| window.root_entity_type_name().contains("SettingsView"))
+                    .count()
+            }),
+            1
+        );
+        host.shutdown();
+    }
+
+    #[gpui::test]
+    fn reopen_restores_a_workspace_window_when_settings_is_still_open(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = crate::app::ModelHost::start();
+        let client = host.client();
+        let snapshot = client.state_dump().unwrap();
+        let application = WaterApplication::new(client, snapshot, AppConfig::default());
+
+        cx.update(|cx| {
+            application.open_window(cx);
+            application.open_settings(cx);
+        });
+        assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+        let workspace_window = cx.read(|cx| {
+            cx.windows()
+                .into_iter()
+                .find(|window| window.downcast::<WorkspaceView>().is_some())
+                .expect("workspace window exists")
+        });
+        workspace_window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 1);
+
+        cx.update(|cx| application.reopen(cx));
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+        assert_eq!(
+            cx.read(|cx| {
+                cx.windows()
+                    .iter()
+                    .filter(|window| window.downcast::<WorkspaceView>().is_some())
+                    .count()
+            }),
+            1
+        );
         assert_eq!(
             cx.read(|cx| {
                 cx.windows()

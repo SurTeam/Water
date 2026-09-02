@@ -1,10 +1,44 @@
 use std::io::Cursor;
 
+use water::app::model::StateDump;
 use water::command::{
     AppCommand, PaneCommand, SplitDirection, TabCommand, TerminalCommand, WorkspaceCommand,
 };
 use water::control::protocol::{PROTOCOL_VERSION, RpcMethod, RpcRequest, read_frame, write_frame};
 use water::terminal::{default_shell_args, default_shell_program};
+
+#[test]
+fn state_dump_deserialization_migrates_legacy_and_new_shapes() {
+    let legacy: StateDump = serde_json::from_value(serde_json::json!({
+        "state_revision": 7,
+        "workspace": {
+            "id": 42,
+            "title": "Legacy",
+            "active_tab": null,
+            "tabs": []
+        },
+        "focused_pane": null
+    }))
+    .expect("legacy state dump decodes");
+    assert_eq!(legacy.active_workspace, Some(42.into()));
+    assert_eq!(legacy.workspaces.len(), 1);
+    assert_eq!(legacy.workspace.as_ref().unwrap().id, 42.into());
+
+    let current: StateDump = serde_json::from_value(serde_json::json!({
+        "state_revision": 8,
+        "workspaces": [{
+            "id": 99,
+            "title": "Current",
+            "active_tab": null,
+            "tabs": []
+        }],
+        "active_workspace": 99,
+        "focused_pane": null
+    }))
+    .expect("current state dump without compatibility alias decodes");
+    assert_eq!(current.workspace.as_ref().unwrap().id, 99.into());
+    assert_eq!(current.workspaces.len(), 1);
+}
 
 #[test]
 fn commands_use_stable_dot_named_wire_types() {
