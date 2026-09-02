@@ -180,11 +180,16 @@ impl WaterApplication {
     pub fn open_settings(&self, cx: &mut App) {
         let settings_window = *self.state.settings_window.borrow();
         if let Some(window) = settings_window {
-            let any_handle: gpui::AnyWindowHandle = window.into();
-            if cx.windows().contains(&any_handle) {
-                let _ = window.update(cx, |_, window, _cx| window.activate_window());
+            if window
+                .update(cx, |_, window, _cx| window.activate_window())
+                .is_ok()
+            {
                 return;
             }
+            // A WindowHandle can outlive its native window. Clear it before
+            // recreating the singleton so a closed settings window never
+            // blocks the shortcut from opening a replacement.
+            self.state.settings_window.replace(None);
         }
 
         let root = cx.new(|cx| SettingsView::new(self.clone(), cx.focus_handle()));
