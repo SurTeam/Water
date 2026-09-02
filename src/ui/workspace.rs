@@ -116,11 +116,20 @@ struct TerminalBackgroundSpan {
     color: u32,
 }
 
+struct TerminalTextCell {
+    text: String,
+    run: TextRun,
+    width_columns: usize,
+}
+
 struct TerminalTextChunk {
     start_column: usize,
     width_columns: usize,
+    span_columns: usize,
+    requires_cell_scaling: bool,
     text: String,
     runs: Vec<TextRun>,
+    cells: Vec<TerminalTextCell>,
 }
 
 struct TerminalTextPaint {
@@ -2885,20 +2894,69 @@ impl gpui::Element for TerminalRenderElement {
                 self.options,
                 &self.font_family,
             );
-            let text = chunks
-                .into_iter()
-                .map(|chunk| TerminalTextPaint {
-                    start_column: chunk.start_column,
-                    line: window.text_system().shape_line(
-                        SharedString::from(chunk.text),
-                        px(self.font_size),
+            let mut text = Vec::new();
+            for chunk in chunks {
+                let target_width = f32::from(
+                    terminal_cell_bounds(
+                        bounds,
+                        self.options.metrics,
+                        row,
+                        chunk.start_column,
+                        chunk.span_columns,
+                    )
+                    .size
+                    .width,
+                );
+                let line = (!chunk.requires_cell_scaling).then(|| {
+                    shape_terminal_text_line(
+                        window,
+                        &chunk.text,
                         &chunk.runs,
-                        Some(px(
-                            self.options.metrics.cell_width * chunk.width_columns as f32
-                        )),
-                    ),
-                })
-                .collect();
+                        self.font_size,
+                        self.options.metrics.cell_width * chunk.width_columns as f32,
+                        target_width,
+                    )
+                });
+                let should_shape_cells = chunk.requires_cell_scaling
+                    || line.as_ref().is_some_and(|line| {
+                        let natural_width = f32::from(line.width());
+                        natural_width.is_finite() && natural_width > target_width + 0.01
+                    });
+                if should_shape_cells {
+                    let mut column = chunk.start_column;
+                    for cell in chunk.cells {
+                        let width = f32::from(
+                            terminal_cell_bounds(
+                                bounds,
+                                self.options.metrics,
+                                row,
+                                column,
+                                cell.width_columns,
+                            )
+                            .size
+                            .width,
+                        );
+                        let line = shape_terminal_text_line(
+                            window,
+                            &cell.text,
+                            std::slice::from_ref(&cell.run),
+                            self.font_size,
+                            width,
+                            width,
+                        );
+                        text.push(TerminalTextPaint {
+                            start_column: column,
+                            line,
+                        });
+                        column += cell.width_columns;
+                    }
+                } else if let Some(line) = line {
+                    text.push(TerminalTextPaint {
+                        start_column: chunk.start_column,
+                        line,
+                    });
+                }
+            }
             rows.push(TerminalRowPaint { text, backgrounds });
         }
 
@@ -3017,6 +3075,41 @@ impl gpui::Element for TerminalRenderElement {
     }
 }
 
+fn shape_terminal_text_line(
+    window: &mut Window,
+    text: &str,
+    runs: &[TextRun],
+    font_size: f32,
+    force_width: f32,
+    target_width: f32,
+) -> ShapedLine {
+    let text_system = window.text_system();
+    let shape = |font_size: f32| {
+        text_system.shape_line(
+            SharedString::from(text.to_owned()),
+            px(font_size),
+            runs,
+            Some(px(force_width)),
+        )
+    };
+    let line = shape(font_size);
+    let natural_width = f32::from(line.width());
+    let scale = terminal_fit_scale(natural_width, target_width);
+    if scale < 1.0 {
+        shape((font_size * scale).max(0.5))
+    } else {
+        line
+    }
+}
+
+fn terminal_fit_scale(natural_width: f32, target_width: f32) -> f32 {
+    if target_width > 0.0 && natural_width.is_finite() && natural_width > target_width + 0.01 {
+        (target_width / natural_width).clamp(0.05, 1.0)
+    } else {
+        1.0
+    }
+}
+
 fn terminal_row_data(
     snapshot: &TerminalSnapshot,
     row: usize,
@@ -3036,19 +3129,28 @@ fn terminal_row_data(
     let mut chunks = Vec::new();
     let mut current_text = String::new();
     let mut current_runs = Vec::new();
+    let mut current_cells = Vec::new();
+    let mut current_requires_cell_scaling = false;
     let mut current_start = 0;
 
     let flush_chunk = |chunks: &mut Vec<TerminalTextChunk>,
                        current_text: &mut String,
                        current_runs: &mut Vec<TextRun>,
+                       current_cells: &mut Vec<TerminalTextCell>,
+                       current_requires_cell_scaling: &mut bool,
                        current_start: &mut usize| {
         if !current_text.is_empty() {
+            let span_columns = current_cells.iter().map(|cell| cell.width_columns).sum();
             chunks.push(TerminalTextChunk {
                 start_column: *current_start,
                 width_columns: 1,
+                span_columns,
+                requires_cell_scaling: *current_requires_cell_scaling,
                 text: std::mem::take(current_text),
                 runs: std::mem::take(current_runs),
+                cells: std::mem::take(current_cells),
             });
+            *current_requires_cell_scaling = false;
         }
     };
     let mut backgrounds = Vec::new();
@@ -3062,6 +3164,8 @@ fn terminal_row_data(
                 &mut chunks,
                 &mut current_text,
                 &mut current_runs,
+                &mut current_cells,
+                &mut current_requires_cell_scaling,
                 &mut current_start,
             );
             continue;
@@ -3095,6 +3199,8 @@ fn terminal_row_data(
                 &mut chunks,
                 &mut current_text,
                 &mut current_runs,
+                &mut current_cells,
+                &mut current_requires_cell_scaling,
                 &mut current_start,
             );
             continue;
@@ -3119,18 +3225,29 @@ fn terminal_row_data(
                 color: Some(color),
             }),
         };
+        let requires_cell_scaling = character.chars().any(|character| !character.is_ascii());
+        let text_cell = TerminalTextCell {
+            text: character.clone(),
+            run: run.clone(),
+            width_columns,
+        };
         if cell.flags.wide {
             flush_chunk(
                 &mut chunks,
                 &mut current_text,
                 &mut current_runs,
+                &mut current_cells,
+                &mut current_requires_cell_scaling,
                 &mut current_start,
             );
             chunks.push(TerminalTextChunk {
                 start_column: column,
                 width_columns,
+                span_columns: width_columns,
+                requires_cell_scaling: true,
                 text: character,
                 runs: vec![run],
+                cells: vec![text_cell],
             });
         } else {
             if current_text.is_empty() {
@@ -3138,12 +3255,16 @@ fn terminal_row_data(
             }
             current_text.push_str(&character);
             append_terminal_text_run(&mut current_runs, run);
+            current_cells.push(text_cell);
+            current_requires_cell_scaling |= requires_cell_scaling;
         }
     }
     flush_chunk(
         &mut chunks,
         &mut current_text,
         &mut current_runs,
+        &mut current_cells,
+        &mut current_requires_cell_scaling,
         &mut current_start,
     );
 
@@ -3769,6 +3890,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 1, "a"), (1, 2, "界"), (3, 1, "b ")]
         );
+    }
+
+    #[test]
+    fn oversized_unicode_uses_a_bounded_font_scale() {
+        assert!((terminal_fit_scale(21.0, 14.0) - (2.0 / 3.0)).abs() < 1e-6);
+        assert_eq!(terminal_fit_scale(14.0, 14.0), 1.0);
+        assert_eq!(terminal_fit_scale(12.0, 14.0), 1.0);
+        assert_eq!(terminal_fit_scale(f32::INFINITY, 14.0), 1.0);
     }
 
     #[test]
