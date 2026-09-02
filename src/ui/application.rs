@@ -178,11 +178,13 @@ impl WaterApplication {
     }
 
     pub fn open_settings(&self, cx: &mut App) {
-        if let Some(window) = *self.state.settings_window.borrow()
-            && window.is_active(cx).is_some()
-        {
-            let _ = window.update(cx, |_, window, _cx| window.activate_window());
-            return;
+        let settings_window = *self.state.settings_window.borrow();
+        if let Some(window) = settings_window {
+            let any_handle: gpui::AnyWindowHandle = window.into();
+            if cx.windows().contains(&any_handle) {
+                let _ = window.update(cx, |_, window, _cx| window.activate_window());
+                return;
+            }
         }
 
         let root = cx.new(|cx| SettingsView::new(self.clone(), cx.focus_handle()));
@@ -534,9 +536,53 @@ mod tests {
                 .any(|window| window.root_entity_type_name().contains("SettingsView"))
         }));
 
+        let settings_window = cx.read(|cx| {
+            cx.windows()
+                .into_iter()
+                .find(|window| window.root_entity_type_name().contains("SettingsView"))
+                .expect("settings window exists")
+        });
+        cx.simulate_keystrokes(settings_window, "cmd-,");
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+        assert_eq!(
+            cx.read(|cx| {
+                cx.windows()
+                    .iter()
+                    .filter(|window| window.root_entity_type_name().contains("SettingsView"))
+                    .count()
+            }),
+            1
+        );
+
+        cx.update(|cx| {
+            workspace_window
+                .update(cx, |_, window, _| window.activate_window())
+                .unwrap();
+        });
+        cx.run_until_parked();
         cx.simulate_keystrokes(workspace_window, "cmd-,");
         cx.run_until_parked();
         assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+
+        settings_window
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 1);
+
+        cx.simulate_keystrokes(workspace_window, "cmd-,");
+        cx.run_until_parked();
+        assert_eq!(cx.read(|cx| cx.windows().len()), 2);
+        assert_eq!(
+            cx.read(|cx| {
+                cx.windows()
+                    .iter()
+                    .filter(|window| window.root_entity_type_name().contains("SettingsView"))
+                    .count()
+            }),
+            1
+        );
         host.shutdown();
     }
 
