@@ -14,14 +14,14 @@ use gpui::{
 use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
 use crate::app::{CommandClient, ModelSnapshot};
 use crate::command::{
-    AppCommand, FocusDirection, PaneCommand, SplitDirection, TabCommand, TerminalCommand,
-    WorkspaceCommand,
+    AppCommand, FocusDirection, OperationResult, PaneCommand, SplitDirection, TabCommand,
+    TerminalCommand, WorkspaceCommand,
 };
 use crate::config::{AppConfig, DEFAULT_TERMINAL_LINE_HEIGHT, ThemeColors};
 use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
-use crate::terminal::{TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
+use crate::terminal::{TerminalCell, TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
 
 use super::application::{
     HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, NewWorkspace, RenameTab,
@@ -125,6 +125,10 @@ struct TerminalRenderOptions {
     metrics: TerminalMetrics,
     theme: ThemeColors,
     cursor_focused: bool,
+    /// Fractional normal-screen viewport movement that has not crossed a
+    /// whole row. Positive values reveal `rows_before`; negative values reveal
+    /// `rows_after`.
+    scroll_remainder: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -156,6 +160,9 @@ struct TerminalTextPaint {
 }
 
 struct TerminalRowPaint {
+    /// Signed viewport-relative row. `-1` and `size.lines` are the optional
+    /// overscan rows surrounding the visible grid.
+    row: i32,
     text: Vec<TerminalTextPaint>,
     backgrounds: Vec<TerminalBackgroundSpan>,
 }
@@ -403,7 +410,11 @@ pub struct WorkspaceView {
     resize_requests: Arc<Mutex<BTreeMap<TerminalId, TerminalSize>>>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
     input_handler_terminal: Option<TerminalId>,
+    /// Workspace selection and pane focus belong to this projection. The
+    /// model's active aliases are compatibility state shared by all windows.
+    selected_workspace: Option<WorkspaceId>,
     focused_pane: Option<PaneId>,
+    scroll_accumulators: BTreeMap<TerminalId, f32>,
     selection: Option<TerminalSelection>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
@@ -433,7 +444,9 @@ impl WorkspaceView {
         config: AppConfig,
     ) -> Self {
         let config = config.normalized();
-        let focused_pane = snapshot.focused_pane;
+        let selected_workspace = workspace_selection_after_snapshot(None, &snapshot);
+        let focused_pane =
+            focused_pane_for_workspace(&snapshot, selected_workspace, snapshot.focused_pane);
         let sidebar_width = config.ui.sidebar_width;
         let sidebar_collapsed = !config.ui.sidebar_visible;
         Self {
@@ -445,7 +458,9 @@ impl WorkspaceView {
             resize_requests: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             input_handler_terminal: None,
+            selected_workspace,
             focused_pane,
+            scroll_accumulators: BTreeMap::new(),
             selection: None,
             ime_terminal: None,
             ime_marked_text: String::new(),
@@ -464,21 +479,36 @@ impl WorkspaceView {
         }
     }
 
-    fn workspace_dumps(&self) -> Vec<WorkspaceDump> {
-        if self.snapshot.workspaces.is_empty() {
-            self.snapshot.workspace.clone().into_iter().collect()
-        } else {
-            self.snapshot.workspaces.clone()
-        }
+    /// Returns this window's workspace projection, never the process-global
+    /// compatibility alias from the model snapshot.
+    fn selected_workspace_dump(&self) -> Option<&WorkspaceDump> {
+        self.selected_workspace
+            .and_then(|workspace_id| self.workspace_by_id(workspace_id))
     }
 
     fn active_workspace_id(&self) -> Option<WorkspaceId> {
-        self.snapshot.active_workspace.or_else(|| {
-            self.snapshot
-                .workspace
-                .as_ref()
-                .map(|workspace| workspace.id)
-        })
+        self.selected_workspace
+    }
+
+    fn select_workspace_locally(
+        &mut self,
+        workspace_id: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(workspace) = self.workspace_by_id(workspace_id) else {
+            return false;
+        };
+        let focused_pane = workspace_active_pane(workspace);
+        let changed =
+            self.selected_workspace != Some(workspace_id) || self.focused_pane != focused_pane;
+        self.selected_workspace = Some(workspace_id);
+        self.focused_pane = focused_pane;
+        self.selection = None;
+        self.clear_ime();
+        if changed {
+            cx.notify();
+        }
+        changed
     }
 
     fn has_transient_ui(&self) -> bool {
@@ -499,11 +529,24 @@ impl WorkspaceView {
     }
 
     pub(crate) fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
-        self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+        let Some(workspace_id) = self.selected_workspace else {
+            return;
+        };
+        self.dispatch(
+            AppCommand::Tab(TabCommand::NewInWorkspace {
+                workspace_id,
+                title: None,
+            }),
+            cx,
+        );
     }
 
     pub(crate) fn split_active_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
-        if let Some(pane_id) = self.focused_pane {
+        if let Some(pane_id) = self.focused_pane
+            && self
+                .selected_workspace
+                .is_some_and(|workspace_id| self.workspace_contains_pane(workspace_id, pane_id))
+        {
             self.dispatch(
                 AppCommand::Pane(PaneCommand::Split {
                     pane_id: Some(pane_id),
@@ -528,16 +571,19 @@ impl WorkspaceView {
         }
     }
 
-    fn workspace_by_id(&self, workspace_id: WorkspaceId) -> Option<WorkspaceDump> {
-        self.workspace_dumps()
-            .into_iter()
-            .find(|workspace| workspace.id == workspace_id)
+    fn workspace_by_id(&self, workspace_id: WorkspaceId) -> Option<&WorkspaceDump> {
+        workspace_dump_for_snapshot(&self.snapshot, workspace_id)
     }
 
-    fn tab_by_id(&self, tab_id: TabId) -> Option<TabDump> {
-        self.workspace_dumps()
-            .into_iter()
-            .flat_map(|workspace| workspace.tabs)
+    fn workspace_contains_pane(&self, workspace_id: WorkspaceId, pane_id: PaneId) -> bool {
+        self.workspace_by_id(workspace_id)
+            .is_some_and(|workspace| workspace_active_tab_contains_pane(workspace, pane_id))
+    }
+
+    fn tab_by_id(&self, tab_id: TabId) -> Option<&TabDump> {
+        self.selected_workspace_dump()?
+            .tabs
+            .iter()
             .find(|tab| tab.id == tab_id)
     }
 
@@ -583,8 +629,9 @@ impl WorkspaceView {
         let Some(workspace) = self.workspace_by_id(workspace_id) else {
             return;
         };
+        let has_tabs = !workspace.tabs.is_empty();
         self.context_menu = None;
-        if workspace.tabs.is_empty() {
+        if !has_tabs {
             self.dispatch_close_workspace(workspace_id, cx);
             cx.notify();
         } else {
@@ -649,12 +696,15 @@ impl WorkspaceView {
         if self.has_transient_ui() {
             return;
         }
-        let Some(workspace) = self.workspace_by_id(workspace_id) else {
+        let Some(workspace_title) = self
+            .workspace_by_id(workspace_id)
+            .map(|workspace| workspace.title.clone())
+        else {
             return;
         };
         self.context_menu = None;
         self.rename_target = Some(RenameTarget::Workspace(workspace_id));
-        self.rename_value = workspace.title.clone();
+        self.rename_value = workspace_title;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -663,17 +713,16 @@ impl WorkspaceView {
         if self.has_transient_ui() {
             return;
         }
-        let Some(tab) = self
-            .workspace_dumps()
-            .into_iter()
-            .flat_map(|workspace| workspace.tabs)
-            .find(|tab| tab.id == tab_id)
+        let Some(tab_title) = self
+            .selected_workspace_dump()
+            .and_then(|workspace| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+            .map(|tab| tab.title.clone())
         else {
             return;
         };
         self.context_menu = None;
         self.rename_target = Some(RenameTarget::Tab(tab_id));
-        self.rename_value = tab.title.clone();
+        self.rename_value = tab_title;
         self.focus_handle.focus(window, cx);
         cx.notify();
     }
@@ -768,7 +817,7 @@ impl WorkspaceView {
 
     fn active_terminal_id(&self) -> Option<TerminalId> {
         let focused_pane = self.focused_pane?;
-        let workspace = self.snapshot.workspace.as_ref()?;
+        let workspace = self.selected_workspace_dump()?;
         let active_tab_id = workspace.active_tab?;
         let tab = workspace.tabs.iter().find(|tab| tab.id == active_tab_id)?;
         terminal_id_for_pane(&tab.tree, focused_pane)
@@ -776,7 +825,8 @@ impl WorkspaceView {
 
     fn active_terminal_snapshot(&self) -> Option<&TerminalSnapshot> {
         let focused_pane = self.focused_pane?;
-        let workspace = self.snapshot.workspace.as_ref()?;
+        let workspace_id = self.selected_workspace?;
+        let workspace = workspace_dump_for_snapshot(&self.snapshot, workspace_id)?;
         let active_tab_id = workspace.active_tab?;
         let tab = workspace.tabs.iter().find(|tab| tab.id == active_tab_id)?;
         terminal_snapshot_for_pane(&tab.tree, focused_pane)
@@ -799,9 +849,8 @@ impl WorkspaceView {
     }
 
     fn terminal_id_for_pane(&self, pane_id: PaneId) -> Option<TerminalId> {
-        self.snapshot
-            .workspace
-            .as_ref()?
+        let workspace = self.selected_workspace_dump()?;
+        workspace
             .tabs
             .iter()
             .find_map(|tab| terminal_id_for_pane(&tab.tree, pane_id))
@@ -816,12 +865,32 @@ impl WorkspaceView {
     }
 
     fn terminal_snapshot_for(&self, terminal_id: TerminalId) -> Option<&TerminalSnapshot> {
-        self.snapshot
-            .workspace
-            .as_ref()?
+        let workspace_id = self.selected_workspace?;
+        let workspace = workspace_dump_for_snapshot(&self.snapshot, workspace_id)?;
+        workspace
             .tabs
             .iter()
             .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+    }
+
+    fn terminal_scroll_remainder_for_snapshot(&self, snapshot: &TerminalSnapshot) -> f32 {
+        let remainder = self
+            .scroll_accumulators
+            .get(&snapshot.terminal_id)
+            .copied()
+            .unwrap_or(0.0);
+        if (remainder > 0.0 && snapshot.rows_before.is_empty())
+            || (remainder < 0.0 && snapshot.rows_after.is_empty())
+        {
+            0.0
+        } else {
+            remainder
+        }
+    }
+
+    fn accumulate_terminal_scroll(&mut self, terminal_id: TerminalId, delta_rows: f32) -> i32 {
+        let accumulator = self.scroll_accumulators.entry(terminal_id).or_default();
+        accumulate_terminal_scroll_delta(accumulator, delta_rows)
     }
 
     fn terminal_selection_endpoint_at(
@@ -1067,12 +1136,16 @@ impl WorkspaceView {
         terminal_id: TerminalId,
         current_size: TerminalSize,
         metrics: TerminalMetrics,
+        window_active: bool,
     ) -> AnyElement {
         let client = self.client.clone();
         let resize_requests = self.resize_requests.clone();
         canvas(
             move |bounds, _, _| {
-                if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+                // A terminal can be projected in several native windows. Only
+                // the focused active window is allowed to negotiate its PTY
+                // size, otherwise each window can fight over the shared size.
+                if !window_active || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
                     return;
                 }
                 let size = TerminalSize::new(
@@ -1141,7 +1214,11 @@ impl WorkspaceView {
             if self.focused_pane.is_some() {
                 self.dispatch(
                     AppCommand::Pane(PaneCommand::Focus {
-                        pane_id: None,
+                        // Keep directional focus scoped to this window's
+                        // selected workspace. With an explicit source pane,
+                        // the dispatcher need not consult its global active
+                        // workspace alias.
+                        pane_id: self.focused_pane,
                         direction: Some(direction),
                     }),
                     cx,
@@ -1288,8 +1365,14 @@ impl WorkspaceView {
             return;
         }
         update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
-        self.focused_pane = snapshot.focused_pane;
+        self.selected_workspace =
+            workspace_selection_after_snapshot(self.selected_workspace, &snapshot);
+        self.focused_pane =
+            focused_pane_for_workspace(&snapshot, self.selected_workspace, self.focused_pane);
         self.snapshot = snapshot;
+        self.scroll_accumulators.retain(|terminal_id, _| {
+            terminal_snapshot_in_snapshot(&self.snapshot, *terminal_id).is_some()
+        });
         if self
             .context_menu
             .is_some_and(|menu| !self.context_menu_target_exists(menu.target))
@@ -1315,17 +1398,132 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn dispatch_new_workspace(&mut self, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        cx.spawn(async move |entity, cx| {
+            let result: Result<
+                Option<(ModelSnapshot, WorkspaceId)>,
+                crate::command::DispatchError,
+            > = cx
+                .background_executor()
+                .spawn(async move {
+                    let operation_id =
+                        client.dispatch(AppCommand::Workspace(WorkspaceCommand::New))?;
+                    let operation = client.wait_operation(operation_id)?;
+                    let workspace_id = match operation.result {
+                        Some(OperationResult::WorkspaceCreated { workspace_id }) => workspace_id,
+                        _ => {
+                            if operation.status.is_terminal() && operation.error.is_none() {
+                                tracing::warn!(
+                                    target: "water::ui",
+                                    "new workspace completed without a workspace result"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    target: "water::ui",
+                                    status = ?operation.status,
+                                    error = ?operation.error,
+                                    "new workspace command failed"
+                                );
+                            }
+                            return Ok(None);
+                        }
+                    };
+                    if !operation.status.is_terminal() || operation.error.is_some() {
+                        tracing::warn!(
+                            target: "water::ui",
+                            status = ?operation.status,
+                            error = ?operation.error,
+                            "new workspace command failed"
+                        );
+                        return Ok(None);
+                    }
+                    Ok(Some((client.state_dump()?, workspace_id)))
+                })
+                .await;
+            if let Ok(Some((snapshot, workspace_id))) = result {
+                let _ = entity.update(cx, |view, cx| {
+                    view.install_snapshot(snapshot, cx);
+                    view.select_workspace_locally(workspace_id, cx);
+                });
+            } else if let Err(error) = result {
+                tracing::warn!(
+                    target: "water::ui",
+                    ?error,
+                    "could not complete new workspace command"
+                );
+            }
+        })
+        .detach();
+    }
+
+    fn apply_operation_result(&mut self, result: OperationResult, cx: &mut Context<Self>) {
+        match result {
+            OperationResult::PaneCreated { pane_id } | OperationResult::PaneFocused { pane_id } => {
+                if self
+                    .selected_workspace_dump()
+                    .is_some_and(|workspace| workspace_active_pane(workspace) == Some(pane_id))
+                {
+                    self.focused_pane = Some(pane_id);
+                    self.selection = None;
+                    self.clear_ime();
+                    cx.notify();
+                }
+            }
+            OperationResult::PaneClosed { .. } | OperationResult::TabClosed { .. } => {
+                self.focused_pane = focused_pane_for_workspace(
+                    &self.snapshot,
+                    self.selected_workspace,
+                    self.focused_pane,
+                );
+                self.selection = None;
+                self.clear_ime();
+                cx.notify();
+            }
+            OperationResult::TabActivated { tab_id } | OperationResult::TabCreated { tab_id } => {
+                if let Some(workspace) = self.selected_workspace_dump()
+                    && workspace.active_tab == Some(tab_id)
+                    && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == tab_id)
+                {
+                    self.focused_pane = Some(tab.active_pane);
+                    self.selection = None;
+                    self.clear_ime();
+                    cx.notify();
+                }
+            }
+            OperationResult::WorkspaceActivated { .. }
+            | OperationResult::WorkspaceClosed { .. }
+            | OperationResult::WorkspaceCreated { .. }
+            | OperationResult::WorkspaceRenamed { .. }
+            | OperationResult::PaneResized { .. }
+            | OperationResult::SurfaceReplaced { .. }
+            | OperationResult::TerminalSpawned { .. }
+            | OperationResult::TerminalTextSent { .. }
+            | OperationResult::TerminalBytesSent { .. }
+            | OperationResult::TerminalResized { .. }
+            | OperationResult::TerminalScrolled { .. }
+            | OperationResult::None
+            | OperationResult::TabRenamed { .. } => {}
+        }
+    }
+
     fn dispatch(&mut self, command: AppCommand, cx: &mut Context<Self>) {
         let command_name = command.type_name();
         let client = self.client.clone();
         cx.spawn(async move |entity, cx| {
-            let result = cx
+            let result: Result<
+                Option<(ModelSnapshot, OperationResult)>,
+                crate::command::DispatchError,
+            > = cx
                 .background_executor()
                 .spawn(async move {
                     let operation_id = client.dispatch(command)?;
                     let operation = client.wait_operation(operation_id)?;
                     if operation.status.is_terminal() && operation.error.is_none() {
-                        client.state_dump().map(Some)
+                        Ok(Some((
+                            client.state_dump()?,
+                            operation.result.unwrap_or(OperationResult::None),
+                        )))
                     } else {
                         tracing::warn!(
                             target: "water::ui",
@@ -1338,9 +1536,10 @@ impl WorkspaceView {
                     }
                 })
                 .await;
-            if let Ok(Some(snapshot)) = result {
+            if let Ok(Some((snapshot, operation_result))) = result {
                 let _ = entity.update(cx, |view, cx| {
                     view.install_snapshot(snapshot, cx);
+                    view.apply_operation_result(operation_result, cx);
                 });
             } else if let Err(error) = result {
                 tracing::warn!(
@@ -1396,6 +1595,7 @@ impl WorkspaceView {
                     this.focus_handle.focus(window, cx);
                     this.focused_pane = Some(active_pane);
                     this.selection = None;
+                    this.clear_ime();
                     this.dispatch(
                         AppCommand::Tab(TabCommand::Activate {
                             tab_id: Some(tab_id),
@@ -1441,7 +1641,7 @@ impl WorkspaceView {
 
     fn render_sidebar_workspace(
         &self,
-        workspace: WorkspaceDump,
+        workspace: &WorkspaceDump,
         active_workspace: Option<WorkspaceId>,
         theme: ThemeColors,
         cx: &mut Context<Self>,
@@ -1470,8 +1670,8 @@ impl WorkspaceView {
         let workspace_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
+            this.select_workspace_locally(workspace_id, cx);
             this.focused_pane = workspace_active_pane;
-            this.selection = None;
             this.dispatch(
                 AppCommand::Workspace(WorkspaceCommand::Activate {
                     workspace_id: Some(workspace_id),
@@ -1516,16 +1716,30 @@ impl WorkspaceView {
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         let active_workspace = self.active_workspace_id();
-        let workspaces = self.workspace_dumps();
         let mut list = div()
             .id("workspace-list")
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
             .flex_col();
-        for workspace in workspaces {
-            list =
-                list.child(self.render_sidebar_workspace(workspace, active_workspace, theme, cx));
+        if self.snapshot.workspaces.is_empty() {
+            if let Some(workspace) = self.snapshot.workspace.as_ref() {
+                list = list.child(self.render_sidebar_workspace(
+                    workspace,
+                    active_workspace,
+                    theme,
+                    cx,
+                ));
+            }
+        } else {
+            for workspace in &self.snapshot.workspaces {
+                list = list.child(self.render_sidebar_workspace(
+                    workspace,
+                    active_workspace,
+                    theme,
+                    cx,
+                ));
+            }
         }
         div()
             .w(px(self.sidebar_width))
@@ -1805,9 +2019,7 @@ impl WorkspaceView {
 
     fn render_tab_bar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         let tab_data: Vec<(TabId, String, bool, PaneId)> = self
-            .snapshot
-            .workspace
-            .as_ref()
+            .selected_workspace_dump()
             .map(|workspace| {
                 workspace
                     .tabs
@@ -1858,7 +2070,7 @@ impl WorkspaceView {
                                 return;
                             }
                             this.focus_handle.focus(window, cx);
-                            this.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+                            this.new_terminal_tab(cx);
                             cx.stop_propagation();
                         }),
                     ),
@@ -2007,6 +2219,9 @@ impl WorkspaceView {
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
+                let smooth_scroll = !(mouse_modes.mouse_reporting
+                    && self.config.features.mouse_reporting)
+                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll);
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_snapshot
                         .as_ref()
@@ -2018,6 +2233,11 @@ impl WorkspaceView {
                                     metrics,
                                     theme,
                                     cursor_focused: active && window_active,
+                                    scroll_remainder: if smooth_scroll {
+                                        self.terminal_scroll_remainder_for_snapshot(snapshot)
+                                    } else {
+                                        0.0
+                                    },
                                 },
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
@@ -2050,6 +2270,7 @@ impl WorkspaceView {
                             terminal.terminal_id,
                             TerminalSize::new(terminal.columns, terminal.lines),
                             metrics,
+                            window_active,
                         ))
                         .into_any_element(),
                     SurfaceState::Empty(_) => content,
@@ -2093,56 +2314,77 @@ impl WorkspaceView {
                     .on_scroll_wheel(cx.listener(
                         move |this, event: &ScrollWheelEvent, window, cx| {
                             this.focus_handle.focus(window, cx);
-                            if let Some(terminal_id) = this.terminal_id_for_pane(pane_id) {
+                            let Some(terminal_id) = this.terminal_id_for_pane(pane_id) else {
+                                return;
+                            };
+                            let delta_rows =
+                                terminal_scroll_delta_rows(event, this.terminal_metrics);
+                            if !delta_rows.is_finite() || delta_rows == 0.0 {
+                                return;
+                            }
+
+                            if mouse_modes.mouse_reporting && this.config.features.mouse_reporting {
+                                // Mouse reporting owns the wheel protocol; do
+                                // not turn a partial trackpad delta into local
+                                // viewport movement in this mode.
+                                this.scroll_accumulators.remove(&terminal_id);
+                                if let Some(bytes) = terminal_mouse_input(
+                                    event,
+                                    TerminalMouseContext {
+                                        modes: mouse_modes,
+                                        bounds: this.terminal_bounds_for(terminal_id),
+                                        metrics: this.terminal_metrics,
+                                    },
+                                ) {
+                                    this.enqueue_terminal_command(
+                                        terminal_id,
+                                        TerminalCommand::SendBytes {
+                                            terminal_id: Some(terminal_id),
+                                            pane_id: Some(pane_id),
+                                            bytes,
+                                        },
+                                    );
+                                }
+                            } else if mouse_modes.alternate_screen && mouse_modes.alternate_scroll {
+                                // Alternate-screen applications expect cursor
+                                // key sequences rather than normal scrollback.
+                                this.scroll_accumulators.remove(&terminal_id);
                                 let lines = terminal_scroll_lines(event, this.terminal_metrics);
                                 if lines != 0 {
-                                    if mouse_modes.mouse_reporting
-                                        && this.config.features.mouse_reporting
-                                    {
-                                        if let Some(bytes) = terminal_mouse_input(
-                                            event,
-                                            TerminalMouseContext {
-                                                modes: mouse_modes,
-                                                bounds: this.terminal_bounds_for(terminal_id),
-                                                metrics: this.terminal_metrics,
-                                            },
-                                        ) {
-                                            this.enqueue_terminal_command(
-                                                terminal_id,
-                                                TerminalCommand::SendBytes {
-                                                    terminal_id: Some(terminal_id),
-                                                    pane_id: Some(pane_id),
-                                                    bytes,
-                                                },
-                                            );
-                                        }
-                                    } else if mouse_modes.alternate_screen
-                                        && mouse_modes.alternate_scroll
-                                    {
-                                        this.enqueue_terminal_command(
-                                            terminal_id,
-                                            TerminalCommand::SendText {
-                                                terminal_id: Some(terminal_id),
-                                                pane_id: Some(pane_id),
-                                                text: terminal_alternate_scroll_input(
-                                                    lines,
-                                                    mouse_modes,
-                                                ),
-                                            },
-                                        );
-                                    } else {
-                                        this.enqueue_terminal_command(
-                                            terminal_id,
-                                            TerminalCommand::Scroll {
-                                                terminal_id: Some(terminal_id),
-                                                pane_id: Some(pane_id),
+                                    this.enqueue_terminal_command(
+                                        terminal_id,
+                                        TerminalCommand::SendText {
+                                            terminal_id: Some(terminal_id),
+                                            pane_id: Some(pane_id),
+                                            text: terminal_alternate_scroll_input(
                                                 lines,
-                                            },
-                                        );
-                                    }
-                                    cx.stop_propagation();
+                                                mouse_modes,
+                                            ),
+                                        },
+                                    );
+                                }
+                            } else {
+                                let lines =
+                                    this.accumulate_terminal_scroll(terminal_id, delta_rows);
+                                if lines != 0 {
+                                    this.enqueue_terminal_command(
+                                        terminal_id,
+                                        TerminalCommand::Scroll {
+                                            terminal_id: Some(terminal_id),
+                                            pane_id: Some(pane_id),
+                                            lines,
+                                        },
+                                    );
                                 }
                             }
+                            // The fractional accumulator is view state, so
+                            // schedule a repaint even when no whole-row
+                            // command was emitted yet.
+                            cx.notify();
+                            // Consume even a fractional normal-screen wheel
+                            // event so the surrounding UI cannot interpret it
+                            // as a second scroll gesture.
+                            cx.stop_propagation();
                         },
                     ))
                     .into_any_element()
@@ -2197,35 +2439,204 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(workspace) = self.snapshot.workspace.as_ref() else {
-            return div()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(theme.terminal_foreground))
-                .child("No workspace")
-                .into_any_element();
+        let Some(workspace) = self.selected_workspace_dump() else {
+            return render_empty_workspace_state(theme, &self.config.shortcuts.new_workspace);
         };
         let Some(active_tab_id) = workspace.active_tab else {
-            return div()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(theme.terminal_foreground))
-                .child("No tab")
-                .into_any_element();
+            return render_empty_tab_state(theme, &self.config.shortcuts.new_terminal_tab);
         };
         let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab_id) else {
-            return div()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(theme.terminal_foreground))
-                .child("Active tab is unavailable")
-                .into_any_element();
+            return render_empty_tab_state(theme, &self.config.shortcuts.new_terminal_tab);
         };
         self.render_pane_tree(&tab.tree, window_active, metrics, theme, cx)
     }
+}
+
+fn workspace_exists_in_snapshot(snapshot: &ModelSnapshot, workspace_id: WorkspaceId) -> bool {
+    if snapshot.workspaces.is_empty() {
+        snapshot
+            .workspace
+            .as_ref()
+            .is_some_and(|workspace| workspace.id == workspace_id)
+    } else {
+        snapshot
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+    }
+}
+
+fn first_workspace_id_in_snapshot(snapshot: &ModelSnapshot) -> Option<WorkspaceId> {
+    if snapshot.workspaces.is_empty() {
+        snapshot.workspace.as_ref().map(|workspace| workspace.id)
+    } else {
+        snapshot.workspaces.first().map(|workspace| workspace.id)
+    }
+}
+
+fn workspace_dump_for_snapshot(
+    snapshot: &ModelSnapshot,
+    workspace_id: WorkspaceId,
+) -> Option<&WorkspaceDump> {
+    if snapshot.workspaces.is_empty() {
+        snapshot
+            .workspace
+            .as_ref()
+            .filter(|workspace| workspace.id == workspace_id)
+    } else {
+        snapshot
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+    }
+}
+
+fn workspace_selection_after_snapshot(
+    selected_workspace: Option<WorkspaceId>,
+    snapshot: &ModelSnapshot,
+) -> Option<WorkspaceId> {
+    selected_workspace
+        .filter(|workspace_id| workspace_exists_in_snapshot(snapshot, *workspace_id))
+        .or_else(|| {
+            snapshot
+                .active_workspace
+                .filter(|workspace_id| workspace_exists_in_snapshot(snapshot, *workspace_id))
+        })
+        .or_else(|| first_workspace_id_in_snapshot(snapshot))
+}
+
+fn workspace_active_pane(workspace: &WorkspaceDump) -> Option<PaneId> {
+    workspace
+        .active_tab
+        .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+        .map(|tab| tab.active_pane)
+}
+
+fn pane_tree_contains_pane(tree: &PaneTreeDump, pane_id: PaneId) -> bool {
+    match tree {
+        PaneTreeDump::Leaf {
+            pane_id: leaf_id, ..
+        } => *leaf_id == pane_id,
+        PaneTreeDump::Split { first, second, .. } => {
+            pane_tree_contains_pane(first, pane_id) || pane_tree_contains_pane(second, pane_id)
+        }
+    }
+}
+
+fn workspace_active_tab_contains_pane(workspace: &WorkspaceDump, pane_id: PaneId) -> bool {
+    workspace
+        .active_tab
+        .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+        .is_some_and(|tab| pane_tree_contains_pane(&tab.tree, pane_id))
+}
+
+fn focused_pane_for_workspace(
+    snapshot: &ModelSnapshot,
+    workspace_id: Option<WorkspaceId>,
+    preferred_pane: Option<PaneId>,
+) -> Option<PaneId> {
+    let workspace_id = workspace_id?;
+    let workspace = workspace_dump_for_snapshot(snapshot, workspace_id)?;
+    preferred_pane
+        .filter(|pane_id| workspace_active_tab_contains_pane(workspace, *pane_id))
+        .or_else(|| {
+            (snapshot.active_workspace == Some(workspace_id))
+                .then_some(snapshot.focused_pane)
+                .flatten()
+                .filter(|pane_id| workspace_active_tab_contains_pane(workspace, *pane_id))
+        })
+        .or_else(|| workspace_active_pane(workspace))
+}
+
+fn terminal_snapshot_in_snapshot(
+    snapshot: &ModelSnapshot,
+    terminal_id: TerminalId,
+) -> Option<&TerminalSnapshot> {
+    if snapshot.workspaces.is_empty() {
+        snapshot
+            .workspace
+            .as_ref()
+            .into_iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+    } else {
+        snapshot
+            .workspaces
+            .iter()
+            .flat_map(|workspace| workspace.tabs.iter())
+            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+    }
+}
+
+fn render_empty_workspace_state(theme: ThemeColors, shortcut: &str) -> AnyElement {
+    render_empty_state(
+        theme,
+        "No workspace",
+        format!(
+            "Press {} to create a workspace",
+            shortcut_label(shortcut, "cmd-shift-n")
+        ),
+    )
+}
+
+fn render_empty_tab_state(theme: ThemeColors, shortcut: &str) -> AnyElement {
+    render_empty_state(
+        theme,
+        "No terminal tab",
+        format!(
+            "Press {} to open a terminal tab",
+            shortcut_label(shortcut, "cmd-t")
+        ),
+    )
+}
+
+fn render_empty_state(theme: ThemeColors, title: &'static str, hint: String) -> AnyElement {
+    div()
+        .flex_1()
+        .items_center()
+        .justify_center()
+        .flex()
+        .flex_col()
+        .gap(px(8.))
+        .text_color(rgb(theme.terminal_foreground))
+        .child(title)
+        .child(
+            div()
+                .text_color(rgb(theme.inactive_pane_border))
+                .child(SharedString::from(hint)),
+        )
+        .into_any_element()
+}
+
+fn shortcut_label(source: &str, fallback: &str) -> String {
+    let source = source.trim();
+    let source = if !source.is_empty()
+        && source
+            .split_whitespace()
+            .all(|keystroke| Keystroke::parse(keystroke).is_ok())
+    {
+        source.split_whitespace().next().unwrap_or(fallback)
+    } else {
+        fallback
+    };
+    source
+        .split('-')
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "cmd" => "Cmd".to_owned(),
+            "ctrl" | "control" => "Ctrl".to_owned(),
+            "shift" => "Shift".to_owned(),
+            "alt" | "option" => "Alt".to_owned(),
+            "fn" | "function" => "Fn".to_owned(),
+            part => {
+                let mut characters = part.chars();
+                match characters.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("-")
 }
 
 impl Focusable for WorkspaceView {
@@ -2492,26 +2903,22 @@ fn update_terminal_selection_for_snapshot(
     previous: &ModelSnapshot,
     next: &ModelSnapshot,
 ) {
-    let Some(selection) = selection.as_mut() else {
+    let Some(terminal_id) = selection.as_ref().map(|selection| selection.terminal_id) else {
         return;
     };
-    let Some(previous_snapshot) = previous.workspace.as_ref().and_then(|workspace| {
-        workspace
-            .tabs
-            .iter()
-            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, selection.terminal_id))
-    }) else {
+    let Some(previous_snapshot) = terminal_snapshot_in_snapshot(previous, terminal_id) else {
         return;
     };
-    let Some(next_snapshot) = next.workspace.as_ref().and_then(|workspace| {
-        workspace
-            .tabs
-            .iter()
-            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, selection.terminal_id))
-    }) else {
+    let Some(next_snapshot) = terminal_snapshot_in_snapshot(next, terminal_id) else {
+        // The terminal was removed from every workspace. Do not leave a
+        // selection referring to a dead projection.
+        *selection = None;
         return;
     };
-    update_terminal_selection_for_viewport(selection, previous_snapshot, next_snapshot);
+    let Some(selection_state) = selection.as_mut() else {
+        return;
+    };
+    update_terminal_selection_for_viewport(selection_state, previous_snapshot, next_snapshot);
 }
 
 fn update_terminal_selection_for_viewport(
@@ -2623,11 +3030,28 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
     .into_any_element()
 }
 
-fn terminal_scroll_lines(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> i32 {
-    let delta = match event.delta {
+fn terminal_scroll_delta_rows(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> f32 {
+    match event.delta {
         ScrollDelta::Lines(delta) => delta.y,
-        ScrollDelta::Pixels(delta) => f32::from(delta.y) / metrics.line_height,
-    };
+        ScrollDelta::Pixels(delta) => f32::from(delta.y) / metrics.line_height.max(f32::EPSILON),
+    }
+}
+
+/// Converts accumulated wheel movement into whole terminal rows while
+/// retaining the fractional remainder for pixel-smooth rendering.
+fn accumulate_terminal_scroll_delta(accumulator: &mut f32, delta_rows: f32) -> i32 {
+    if !delta_rows.is_finite() || delta_rows == 0.0 {
+        return 0;
+    }
+    let delta_rows = delta_rows.clamp(-100.0, 100.0);
+    let total = (*accumulator + delta_rows).clamp(-101.0, 101.0);
+    let lines = total.trunc().clamp(-100.0, 100.0) as i32;
+    *accumulator = total - lines as f32;
+    lines
+}
+
+fn terminal_scroll_lines(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> i32 {
+    let delta = terminal_scroll_delta_rows(event, metrics);
     if delta == 0.0 {
         return 0;
     }
@@ -3210,6 +3634,84 @@ fn render_terminal_snapshot(
     .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn terminal_row_paint(
+    snapshot: &TerminalSnapshot,
+    row: i32,
+    cells: &[TerminalCell],
+    selected_bounds: Option<(TerminalCellPosition, TerminalCellPosition)>,
+    options: TerminalRenderOptions,
+    font_family: &str,
+    font_size: f32,
+    bounds: Bounds<gpui::Pixels>,
+    window: &mut Window,
+) -> TerminalRowPaint {
+    let (chunks, backgrounds) =
+        terminal_row_data_for_cells(snapshot, row, cells, selected_bounds, options, font_family);
+    let mut text = Vec::new();
+    for chunk in chunks {
+        let target_width = f32::from(
+            terminal_cell_bounds(
+                bounds,
+                options.metrics,
+                0,
+                chunk.start_column,
+                chunk.span_columns,
+            )
+            .size
+            .width,
+        );
+        let line = (!chunk.requires_cell_scaling).then(|| {
+            shape_terminal_text_line(
+                window,
+                &chunk.text,
+                &chunk.runs,
+                font_size,
+                options.metrics.cell_width * chunk.width_columns as f32,
+                target_width,
+            )
+        });
+        let should_shape_cells = chunk.requires_cell_scaling
+            || line.as_ref().is_some_and(|line| {
+                let natural_width = f32::from(line.width());
+                natural_width.is_finite() && natural_width > target_width + 0.01
+            });
+        if should_shape_cells {
+            let mut column = chunk.start_column;
+            for cell in chunk.cells {
+                let width = f32::from(
+                    terminal_cell_bounds(bounds, options.metrics, 0, column, cell.width_columns)
+                        .size
+                        .width,
+                );
+                let line = shape_terminal_text_line(
+                    window,
+                    &cell.text,
+                    std::slice::from_ref(&cell.run),
+                    font_size,
+                    width,
+                    width,
+                );
+                text.push(TerminalTextPaint {
+                    start_column: column,
+                    line,
+                });
+                column += cell.width_columns;
+            }
+        } else if let Some(line) = line {
+            text.push(TerminalTextPaint {
+                start_column: chunk.start_column,
+                line,
+            });
+        }
+    }
+    TerminalRowPaint {
+        row,
+        text,
+        backgrounds,
+    }
+}
+
 impl gpui::IntoElement for TerminalRenderElement {
     type Element = Self;
 
@@ -3262,79 +3764,54 @@ impl gpui::Element for TerminalRenderElement {
             .selection
             .filter(|selection| selection.terminal_id == self.snapshot.terminal_id)
             .and_then(|selection| selection_bounds(&self.snapshot, selection));
-        let mut rows = Vec::with_capacity(self.snapshot.size.lines);
-        for row in 0..self.snapshot.size.lines {
-            let (chunks, backgrounds) = terminal_row_data(
+        let remainder = self.options.scroll_remainder;
+        let mut rows = Vec::with_capacity(self.snapshot.size.lines + 1);
+        if remainder > 0.0
+            && let Some(cells) = self.snapshot.rows_before.first()
+        {
+            rows.push(terminal_row_paint(
                 &self.snapshot,
-                row,
+                -1,
+                cells,
                 selected_bounds,
                 self.options,
                 &self.font_family,
-            );
-            let mut text = Vec::new();
-            for chunk in chunks {
-                let target_width = f32::from(
-                    terminal_cell_bounds(
-                        bounds,
-                        self.options.metrics,
-                        row,
-                        chunk.start_column,
-                        chunk.span_columns,
-                    )
-                    .size
-                    .width,
-                );
-                let line = (!chunk.requires_cell_scaling).then(|| {
-                    shape_terminal_text_line(
-                        window,
-                        &chunk.text,
-                        &chunk.runs,
-                        self.font_size,
-                        self.options.metrics.cell_width * chunk.width_columns as f32,
-                        target_width,
-                    )
-                });
-                let should_shape_cells = chunk.requires_cell_scaling
-                    || line.as_ref().is_some_and(|line| {
-                        let natural_width = f32::from(line.width());
-                        natural_width.is_finite() && natural_width > target_width + 0.01
-                    });
-                if should_shape_cells {
-                    let mut column = chunk.start_column;
-                    for cell in chunk.cells {
-                        let width = f32::from(
-                            terminal_cell_bounds(
-                                bounds,
-                                self.options.metrics,
-                                row,
-                                column,
-                                cell.width_columns,
-                            )
-                            .size
-                            .width,
-                        );
-                        let line = shape_terminal_text_line(
-                            window,
-                            &cell.text,
-                            std::slice::from_ref(&cell.run),
-                            self.font_size,
-                            width,
-                            width,
-                        );
-                        text.push(TerminalTextPaint {
-                            start_column: column,
-                            line,
-                        });
-                        column += cell.width_columns;
-                    }
-                } else if let Some(line) = line {
-                    text.push(TerminalTextPaint {
-                        start_column: chunk.start_column,
-                        line,
-                    });
-                }
-            }
-            rows.push(TerminalRowPaint { text, backgrounds });
+                self.font_size,
+                bounds,
+                window,
+            ));
+        }
+        for row in 0..self.snapshot.size.lines {
+            let start = row.saturating_mul(self.snapshot.size.columns);
+            let end = start
+                .saturating_add(self.snapshot.size.columns)
+                .min(self.snapshot.cells.len());
+            rows.push(terminal_row_paint(
+                &self.snapshot,
+                row as i32,
+                &self.snapshot.cells[start..end],
+                selected_bounds,
+                self.options,
+                &self.font_family,
+                self.font_size,
+                bounds,
+                window,
+            ));
+        }
+        if remainder < 0.0
+            && let Some(cells) = self.snapshot.rows_after.first()
+        {
+            rows.push(terminal_row_paint(
+                &self.snapshot,
+                self.snapshot.size.lines as i32,
+                cells,
+                selected_bounds,
+                self.options,
+                &self.font_family,
+                self.font_size,
+                bounds,
+                window,
+            ));
         }
 
         let ime_line = self.ime_text.as_deref().and_then(|text| {
@@ -3381,25 +3858,34 @@ impl gpui::Element for TerminalRenderElement {
             metrics,
             theme,
             cursor_focused,
+            scroll_remainder,
         } = self.options;
         window.paint_quad(fill(bounds, rgb(theme.terminal_background)));
 
-        for (row, row_paint) in prepaint.rows.iter().enumerate() {
+        for row_paint in &prepaint.rows {
             for background in &row_paint.backgrounds {
                 window.paint_quad(fill(
-                    terminal_cell_bounds(
+                    terminal_cell_bounds_for_row(
                         bounds,
                         metrics,
-                        row,
+                        row_paint.row,
                         background.start_column,
                         background.width_columns,
+                        scroll_remainder,
                     ),
                     rgb(background.color),
                 ));
             }
             for text in &row_paint.text {
-                let origin =
-                    terminal_cell_bounds(bounds, metrics, row, text.start_column, 1).origin;
+                let origin = terminal_cell_bounds_for_row(
+                    bounds,
+                    metrics,
+                    row_paint.row,
+                    text.start_column,
+                    1,
+                    scroll_remainder,
+                )
+                .origin;
                 let _ = text.line.paint(
                     origin,
                     px(metrics.line_height),
@@ -3412,7 +3898,15 @@ impl gpui::Element for TerminalRenderElement {
         }
 
         if let Some((line, row, column)) = prepaint.ime_line.as_ref() {
-            let origin = terminal_cell_bounds(bounds, metrics, *row, *column, 1).origin;
+            let origin = terminal_cell_bounds_for_row(
+                bounds,
+                metrics,
+                *row as i32,
+                *column,
+                1,
+                scroll_remainder,
+            )
+            .origin;
             let _ = line.paint(
                 origin,
                 px(metrics.line_height),
@@ -3431,7 +3925,14 @@ impl gpui::Element for TerminalRenderElement {
                 .map(|cell| if cell.flags.wide { 2 } else { 1 })
                 .unwrap_or(1);
             window.paint_quad(outline(
-                terminal_cell_bounds(bounds, metrics, row, column, width_columns),
+                terminal_cell_bounds_for_row(
+                    bounds,
+                    metrics,
+                    row as i32,
+                    column,
+                    width_columns,
+                    scroll_remainder,
+                ),
                 rgb(theme.inactive_cursor),
                 gpui::BorderStyle::default(),
             ));
@@ -3487,9 +3988,32 @@ fn terminal_fit_scale(natural_width: f32, target_width: f32) -> f32 {
     }
 }
 
+#[cfg(test)]
 fn terminal_row_data(
     snapshot: &TerminalSnapshot,
     row: usize,
+    selected_bounds: Option<(TerminalCellPosition, TerminalCellPosition)>,
+    options: TerminalRenderOptions,
+    font_family: &str,
+) -> (Vec<TerminalTextChunk>, Vec<TerminalBackgroundSpan>) {
+    let start = row.saturating_mul(snapshot.size.columns);
+    let end = start
+        .saturating_add(snapshot.size.columns)
+        .min(snapshot.cells.len());
+    terminal_row_data_for_cells(
+        snapshot,
+        row as i32,
+        &snapshot.cells[start..end],
+        selected_bounds,
+        options,
+        font_family,
+    )
+}
+
+fn terminal_row_data_for_cells(
+    snapshot: &TerminalSnapshot,
+    row: i32,
+    cells: &[TerminalCell],
     selected_bounds: Option<(TerminalCellPosition, TerminalCellPosition)>,
     options: TerminalRenderOptions,
     font_family: &str,
@@ -3533,7 +4057,7 @@ fn terminal_row_data(
     let mut backgrounds = Vec::new();
 
     for column in 0..snapshot.size.columns {
-        let Some(cell) = snapshot.cell(row, column) else {
+        let Some(cell) = cells.get(column) else {
             continue;
         };
         if cell.flags.wide_spacer {
@@ -3550,16 +4074,14 @@ fn terminal_row_data(
 
         let (mut foreground, mut background) = terminal_cell_colors(cell, options.theme);
         let selected = selected_bounds.is_some_and(|(start, end)| {
-            (start..=end).contains(&TerminalCellPosition {
-                row: row as i32,
-                column,
-            })
+            (start..=end).contains(&TerminalCellPosition { row, column })
         });
         if selected {
             background = theme_color(options.theme.selection_background);
         }
-        let cursor_at_cell =
-            snapshot.cursor.visible && terminal_cursor_position(snapshot) == (row, column);
+        let cursor_at_cell = row >= 0
+            && snapshot.cursor.visible
+            && terminal_cursor_position(snapshot) == (row as usize, column);
         if cursor_at_cell && options.cursor_focused {
             foreground = theme_color(options.theme.cursor_foreground);
             background = theme_color(options.theme.cursor_background);
@@ -3740,6 +4262,42 @@ fn terminal_cell_bounds(
     )
 }
 
+fn terminal_row_position(row: i32, scroll_remainder: f32) -> f32 {
+    row as f32 + scroll_remainder
+}
+
+/// Positions a visible or overscan row while preserving the device-snapped
+/// geometry of the normal grid and adding only the fractional wheel movement.
+fn terminal_cell_bounds_for_row(
+    bounds: Bounds<gpui::Pixels>,
+    metrics: TerminalMetrics,
+    row: i32,
+    column: usize,
+    width_columns: usize,
+    scroll_remainder: f32,
+) -> Bounds<gpui::Pixels> {
+    let row_bounds = if row >= 0 {
+        terminal_cell_bounds(bounds, metrics, row as usize, column, width_columns)
+    } else {
+        let first = terminal_cell_bounds(bounds, metrics, 0, column, width_columns);
+        Bounds::new(
+            point(
+                first.origin.x,
+                px(f32::from(first.origin.y) + row as f32 * metrics.line_height),
+            ),
+            first.size,
+        )
+    };
+    let fractional_offset = terminal_row_position(row, scroll_remainder) - row as f32;
+    Bounds::new(
+        point(
+            row_bounds.origin.x,
+            px(f32::from(row_bounds.origin.y) + fractional_offset * metrics.line_height),
+        ),
+        row_bounds.size,
+    )
+}
+
 fn terminal_cursor_position(snapshot: &TerminalSnapshot) -> (usize, usize) {
     let row = snapshot
         .cursor
@@ -3898,7 +4456,7 @@ impl Render for WorkspaceView {
                 move |_: &NewWorkspace, _window, cx| {
                     view.update(cx, |workspace, cx| {
                         if !workspace.has_transient_ui() {
-                            workspace.dispatch(AppCommand::Workspace(WorkspaceCommand::New), cx);
+                            workspace.dispatch_new_workspace(cx);
                         }
                     });
                 }
@@ -3967,6 +4525,74 @@ mod tests {
             },
             side,
         }
+    }
+
+    fn workspace_dump(id: WorkspaceId) -> WorkspaceDump {
+        WorkspaceDump {
+            id,
+            title: format!("Workspace {id}"),
+            active_tab: None,
+            tabs: Vec::new(),
+        }
+    }
+
+    fn model_snapshot(
+        workspaces: Vec<WorkspaceDump>,
+        active_workspace: Option<WorkspaceId>,
+    ) -> ModelSnapshot {
+        ModelSnapshot {
+            state_revision: 1,
+            workspace: workspaces.first().cloned(),
+            workspaces,
+            active_workspace,
+            focused_pane: None,
+        }
+    }
+
+    #[test]
+    fn workspace_selection_preserves_local_choice_and_falls_back_safely() {
+        let first = workspace_dump(WorkspaceId::new(1));
+        let second = workspace_dump(WorkspaceId::new(2));
+        let snapshot = model_snapshot(vec![first.clone(), second.clone()], Some(second.id));
+
+        assert_eq!(
+            workspace_selection_after_snapshot(Some(first.id), &snapshot),
+            Some(first.id)
+        );
+        assert_eq!(
+            workspace_selection_after_snapshot(Some(WorkspaceId::new(99)), &snapshot),
+            Some(second.id)
+        );
+
+        let no_active = model_snapshot(vec![first.clone(), second], None);
+        assert_eq!(
+            workspace_selection_after_snapshot(Some(WorkspaceId::new(99)), &no_active),
+            Some(first.id)
+        );
+        let empty = model_snapshot(Vec::new(), None);
+        assert_eq!(
+            workspace_selection_after_snapshot(Some(first.id), &empty),
+            None
+        );
+    }
+
+    #[test]
+    fn fractional_scroll_accumulates_until_a_whole_row() {
+        let mut accumulator = 0.0;
+        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, 0.4), 0);
+        assert!((accumulator - 0.4).abs() < f32::EPSILON);
+        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, 0.7), 1);
+        assert!((accumulator - 0.1).abs() < f32::EPSILON);
+        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, -0.25), 0);
+        assert!((accumulator + 0.15).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fractional_scroll_positions_nearest_overscan_rows_without_a_gap() {
+        assert_eq!(terminal_row_position(-1, 0.25), -0.75);
+        assert_eq!(terminal_row_position(0, 0.25), 0.25);
+        assert_eq!(terminal_row_position(4, -0.25), 3.75);
+        assert_eq!(terminal_row_position(5, -0.25), 4.75);
     }
 
     #[test]
@@ -4271,6 +4897,7 @@ mod tests {
                 ui_foreground: 15,
             },
             cursor_focused: false,
+            scroll_remainder: 0.0,
         };
         let (chunks, _) =
             terminal_row_data(&snapshot, 0, None, options, "Sarasa Term SC Nerd Font");
