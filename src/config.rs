@@ -5,22 +5,53 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::terminal::{MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES};
+use crate::terminal::{
+    DEFAULT_COLUMNS, DEFAULT_LINES, MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES,
+    MAX_TOTAL_SCROLLBACK_LINES, default_shell_args, default_shell_program,
+};
 
 const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC Nerd Font";
-const DEFAULT_FONT_SIZE: f32 = 14.0;
+const DEFAULT_FONT_SIZE: f32 = 16.0;
 const DEFAULT_LINE_HEIGHT: f32 = 18.0;
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1100.0;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 170.0;
+pub const DEFAULT_SIDEBAR_MIN_WIDTH: f32 = 170.0;
+pub const DEFAULT_SIDEBAR_MAX_WIDTH: f32 = 420.0;
+pub const DEFAULT_SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
+pub const DEFAULT_TITLEBAR_HEIGHT: f32 = 36.0;
+pub const DEFAULT_TAB_HEIGHT: f32 = 28.0;
+pub const DEFAULT_SIDEBAR_HEADER_HEIGHT: f32 = 24.0;
+pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
+pub const DEFAULT_PANE_PADDING: f32 = 8.0;
+pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = DEFAULT_LINE_HEIGHT;
+
+/// The effective configuration used by the running application.
+///
+/// Files are decoded into [`AppConfigOverrides`] and merged onto
+/// `AppConfig::default()`. Keeping the effective values in this type means
+/// the rest of the application never has to deal with a partially specified
+/// configuration.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct AppConfig {
+    pub startup: StartupConfig,
+    pub shell: ShellConfig,
     pub features: FeatureConfig,
     pub theme: ThemeConfig,
     pub terminal: TerminalConfig,
+    pub ui: UiConfig,
+    pub shortcuts: ShortcutConfig,
 }
 
 impl AppConfig {
-    /// Returns the per-user defaults file path for the current platform.
+    /// Returns the primary per-user config path for the current platform.
+    ///
+    /// macOS keeps using Application Support as the native default. The XDG
+    /// path is also supported through [`Self::standard_path`] and is selected
+    /// automatically when it is the existing user config, which makes the
+    /// standard `~/.config/water` layout convenient on every platform.
     pub fn default_path() -> PathBuf {
         if cfg!(target_os = "macos")
             && let Some(home) = std::env::var_os("HOME")
@@ -32,6 +63,11 @@ impl AppConfig {
                 .join("config.json");
         }
 
+        Self::standard_path()
+    }
+
+    /// Returns the conventional XDG-style Water config path.
+    pub fn standard_path() -> PathBuf {
         if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
             return PathBuf::from(config_home).join("water").join("config.json");
         }
@@ -44,9 +80,24 @@ impl AppConfig {
         PathBuf::from("water-config.json")
     }
 
+    /// Chooses an existing user config before falling back to the native
+    /// default path. This keeps old macOS installs working while allowing a
+    /// user-created `~/.config/water/config.json` to be the active override.
+    pub fn default_load_path() -> PathBuf {
+        let native = Self::default_path();
+        if native.is_file() {
+            return native;
+        }
+        let standard = Self::standard_path();
+        if standard.is_file() {
+            return standard;
+        }
+        native
+    }
+
     /// Loads a user config file. A missing file means "use application
-    /// defaults"; malformed files are reported so configuration mistakes are
-    /// visible instead of silently changing behavior.
+    /// defaults"; the file itself is an override layer, so omitted fields keep
+    /// their built-in defaults.
     pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref().to_path_buf();
         let contents = match fs::read_to_string(&path) {
@@ -54,36 +105,36 @@ impl AppConfig {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(source) => return Err(ConfigError::Read { path, source }),
         };
-        let config: Self =
+        let document: ConfigDocument =
             serde_json::from_str(&contents).map_err(|source| ConfigError::Parse {
                 path: path.clone(),
                 source,
             })?;
-        Ok(config.normalized())
+        Ok(document.into_overrides().into_config())
     }
 
     /// Loads the default per-user config path, honoring `WATER_CONFIG` when
-    /// present. The selected path is returned for diagnostics.
+    /// present. The selected path is returned for diagnostics and saving.
     pub fn load_default() -> Result<(Self, PathBuf), ConfigError> {
         let path = std::env::var_os("WATER_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(Self::default_path);
+            .unwrap_or_else(Self::default_load_path);
         Ok((Self::load_from_path(&path)?, path))
     }
 
-    /// Writes this configuration to the selected per-user defaults path and
-    /// returns that path.
+    /// Writes this effective configuration to the selected per-user config
+    /// path and returns that path. The serialized document is complete, so it
+    /// is easy to inspect and edit by hand; loading still treats it as an
+    /// override layer.
     pub fn save_default(&self) -> Result<PathBuf, ConfigError> {
         let path = std::env::var_os("WATER_CONFIG")
             .map(PathBuf::from)
-            .unwrap_or_else(Self::default_path);
+            .unwrap_or_else(Self::default_load_path);
         self.save_to_path(&path)?;
         Ok(path)
     }
 
-    /// Writes a complete, pretty-printed defaults file. The application does
-    /// not create one automatically, so a fresh install stays clean until the
-    /// user chooses to persist settings.
+    /// Writes a complete, pretty-printed config file.
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> Result<(), ConfigError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent()
@@ -100,21 +151,54 @@ impl AppConfig {
             .map_err(|source| ConfigError::Write { path, source })
     }
 
-    pub fn normalized(mut self) -> Self {
-        self.terminal.scrollback_lines = self
-            .terminal
-            .scrollback_lines
-            .clamp(1, MAX_SCROLLBACK_LINES);
-        self.terminal.max_total_scrollback_lines = self
-            .terminal
-            .max_total_scrollback_lines
-            .clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
-        if self.terminal.font_family.trim().is_empty() {
-            self.terminal.font_family = DEFAULT_FONT_FAMILY.to_owned();
+    /// Returns a path suitable for launching a terminal, expanding a leading
+    /// `~` without requiring the config file to contain a machine-specific
+    /// absolute path.
+    pub fn default_cwd_path(&self) -> Option<PathBuf> {
+        let value = self.startup.default_cwd.as_deref()?.trim();
+        if value.is_empty() {
+            return None;
         }
-        self.terminal.font_size = self.terminal.font_size.clamp(8.0, 32.0);
-        self.terminal.line_height = self.terminal.line_height.clamp(8.0, 64.0);
+        if value == "~" {
+            return std::env::var_os("HOME").map(PathBuf::from);
+        }
+        if let Some(relative) = value.strip_prefix("~/") {
+            return std::env::var_os("HOME").map(|home| PathBuf::from(home).join(relative));
+        }
+        Some(PathBuf::from(value))
+    }
+
+    /// Whether changing from this effective config requires a process restart
+    /// before the model and terminal workers can use the new values.
+    pub fn restart_required_for(&self, next: &Self) -> bool {
+        self.startup.default_cwd != next.startup.default_cwd
+            || self.startup.control_socket != next.startup.control_socket
+            || self.startup.initial_workspace != next.startup.initial_workspace
+            || self.startup.initial_terminal != next.startup.initial_terminal
+            || self.shell != next.shell
+            || self.terminal.scrollback_lines != next.terminal.scrollback_lines
+            || self.terminal.max_total_scrollback_lines != next.terminal.max_total_scrollback_lines
+            || self.terminal.default_columns != next.terminal.default_columns
+            || self.terminal.default_lines != next.terminal.default_lines
+    }
+
+    pub fn normalized(mut self) -> Self {
+        self.startup = self.startup.normalized();
+        self.shell = self.shell.normalized();
+        self.terminal = self.terminal.normalized();
+        self.ui = self.ui.normalized();
         self
+    }
+}
+
+impl<'de> Deserialize<'de> for AppConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(ConfigDocument::deserialize(deserializer)?
+            .into_overrides()
+            .into_config())
     }
 }
 
@@ -133,6 +217,79 @@ pub enum ConfigError {
     Write { path: PathBuf, source: io::Error },
     #[error("could not serialize config: {0}")]
     Serialize(#[source] serde_json::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupConfig {
+    /// Initial directory for terminals when there is no active terminal to
+    /// inherit from. `null` uses Water's process working directory.
+    pub default_cwd: Option<String>,
+    /// Optional Unix control socket path. CLI and WATER_CONTROL_SOCKET take
+    /// precedence when they are present.
+    pub control_socket: Option<String>,
+    pub initial_workspace: bool,
+    pub initial_terminal: bool,
+    pub window_width: f32,
+    pub window_height: f32,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            default_cwd: Some("~".to_owned()),
+            control_socket: None,
+            initial_workspace: true,
+            initial_terminal: true,
+            window_width: DEFAULT_WINDOW_WIDTH,
+            window_height: DEFAULT_WINDOW_HEIGHT,
+        }
+    }
+}
+
+impl StartupConfig {
+    fn normalized(mut self) -> Self {
+        self.default_cwd = self
+            .default_cwd
+            .take()
+            .map(|cwd| cwd.trim().to_owned())
+            .filter(|cwd| !cwd.is_empty());
+        self.control_socket = self
+            .control_socket
+            .take()
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty());
+        self.window_width = self.window_width.clamp(480.0, 4096.0);
+        self.window_height = self.window_height.clamp(320.0, 4096.0);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellConfig {
+    pub program: String,
+    /// Arguments passed to every default terminal. This is an ordered list,
+    /// not a shell command string.
+    pub args: Vec<String>,
+}
+
+impl Default for ShellConfig {
+    fn default() -> Self {
+        let program = default_shell_program();
+        let args = default_shell_args(&program);
+        Self { program, args }
+    }
+}
+
+impl ShellConfig {
+    fn normalized(mut self) -> Self {
+        self.program = self.program.trim().to_owned();
+        if self.program.is_empty() {
+            self.program = default_shell_program();
+        }
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,6 +318,9 @@ impl Default for FeatureConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerminalConfig {
+    /// Initial terminal dimensions before GPUI reports the actual pane size.
+    pub default_columns: usize,
+    pub default_lines: usize,
     /// Maximum number of normal scrollback rows retained by each terminal.
     pub scrollback_lines: usize,
     /// Maximum number of scrollback rows retained by all terminals together,
@@ -178,11 +338,141 @@ pub struct TerminalConfig {
 impl Default for TerminalConfig {
     fn default() -> Self {
         Self {
+            default_columns: DEFAULT_COLUMNS,
+            default_lines: DEFAULT_LINES,
             scrollback_lines: MAX_SCROLLBACK_LINES,
             max_total_scrollback_lines: MAX_TOTAL_SCROLLBACK_LINES,
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
+        }
+    }
+}
+
+impl TerminalConfig {
+    fn normalized(mut self) -> Self {
+        self.default_columns = self.default_columns.clamp(2, MAX_COLUMNS);
+        self.default_lines = self.default_lines.clamp(1, MAX_LINES);
+        self.scrollback_lines = self.scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
+        self.max_total_scrollback_lines = self
+            .max_total_scrollback_lines
+            .clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
+        if self.font_family.trim().is_empty() {
+            self.font_family = DEFAULT_FONT_FAMILY.to_owned();
+        } else {
+            self.font_family = self.font_family.trim().to_owned();
+        }
+        self.font_size = self.font_size.clamp(8.0, 32.0);
+        self.line_height = self.line_height.clamp(8.0, 64.0);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Base font size for Water chrome, workspace labels, and settings text.
+    pub font_size: f32,
+    pub sidebar_visible: bool,
+    pub sidebar_width: f32,
+    pub sidebar_min_width: f32,
+    pub sidebar_max_width: f32,
+    pub sidebar_resize_handle_width: f32,
+    pub titlebar_height: f32,
+    pub tab_height: f32,
+    pub sidebar_header_height: f32,
+    pub pane_margin: f32,
+    pub pane_padding: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            font_size: DEFAULT_UI_FONT_SIZE,
+            sidebar_visible: true,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_min_width: DEFAULT_SIDEBAR_MIN_WIDTH,
+            sidebar_max_width: DEFAULT_SIDEBAR_MAX_WIDTH,
+            sidebar_resize_handle_width: DEFAULT_SIDEBAR_RESIZE_HANDLE_WIDTH,
+            titlebar_height: DEFAULT_TITLEBAR_HEIGHT,
+            tab_height: DEFAULT_TAB_HEIGHT,
+            sidebar_header_height: DEFAULT_SIDEBAR_HEADER_HEIGHT,
+            pane_margin: DEFAULT_PANE_MARGIN,
+            pane_padding: DEFAULT_PANE_PADDING,
+        }
+    }
+}
+
+impl UiConfig {
+    fn normalized(mut self) -> Self {
+        self.font_size = self.font_size.clamp(8.0, 32.0);
+        self.sidebar_min_width = self.sidebar_min_width.clamp(100.0, 800.0);
+        self.sidebar_max_width = self.sidebar_max_width.clamp(self.sidebar_min_width, 1200.0);
+        self.sidebar_width = self
+            .sidebar_width
+            .clamp(self.sidebar_min_width, self.sidebar_max_width);
+        self.sidebar_resize_handle_width = self.sidebar_resize_handle_width.clamp(1.0, 40.0);
+        self.titlebar_height = self.titlebar_height.clamp(24.0, 96.0);
+        self.tab_height = self.tab_height.clamp(20.0, 80.0);
+        self.sidebar_header_height = self.sidebar_header_height.clamp(20.0, 96.0);
+        self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
+        self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShortcutConfig {
+    pub open_settings: String,
+    pub new_window: String,
+    pub hide_window: String,
+    pub minimize_window: String,
+    pub ignore_quit: String,
+    pub new_terminal_tab: String,
+    pub new_workspace: String,
+    pub toggle_sidebar: String,
+    pub rename_workspace: String,
+    pub rename_tab: String,
+    pub split_right: String,
+    pub split_down: String,
+    pub close_pane: String,
+    pub focus_left: String,
+    pub focus_right: String,
+    pub focus_up: String,
+    pub focus_down: String,
+    pub paste: String,
+    pub copy_or_interrupt: String,
+    pub eof: String,
+    pub scroll_page_up: String,
+    pub scroll_page_down: String,
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        Self {
+            open_settings: "cmd-,".to_owned(),
+            new_window: "cmd-n".to_owned(),
+            hide_window: "cmd-w".to_owned(),
+            minimize_window: "cmd-m".to_owned(),
+            ignore_quit: "cmd-q".to_owned(),
+            new_terminal_tab: "cmd-t".to_owned(),
+            new_workspace: "cmd-shift-n".to_owned(),
+            toggle_sidebar: "cmd-e".to_owned(),
+            rename_workspace: "cmd-shift-e".to_owned(),
+            rename_tab: "cmd-shift-t".to_owned(),
+            split_right: "cmd-\\".to_owned(),
+            split_down: "cmd--".to_owned(),
+            close_pane: "cmd-shift-w".to_owned(),
+            focus_left: "cmd-h".to_owned(),
+            focus_right: "cmd-l".to_owned(),
+            focus_up: "cmd-k".to_owned(),
+            focus_down: "cmd-j".to_owned(),
+            paste: "cmd-v".to_owned(),
+            copy_or_interrupt: "cmd-c".to_owned(),
+            eof: "cmd-d".to_owned(),
+            scroll_page_up: "shift-pageup".to_owned(),
+            scroll_page_down: "shift-pagedown".to_owned(),
         }
     }
 }
@@ -275,9 +565,17 @@ impl ThemeConfig {
             ui_foreground: parse_color(&self.ui_foreground, 0xe4e4e4),
         }
     }
+
+    pub fn is_valid_color(value: &str) -> bool {
+        parse_color_option(value).is_some()
+    }
 }
 
 fn parse_color(value: &str, fallback: u32) -> u32 {
+    parse_color_option(value).unwrap_or(fallback)
+}
+
+fn parse_color_option(value: &str) -> Option<u32> {
     let value = value.trim();
     let value = value
         .strip_prefix('#')
@@ -290,12 +588,324 @@ fn parse_color(value: &str, fallback: u32) -> u32 {
             expanded.push(character);
             expanded.push(character);
         }
-        return u32::from_str_radix(&expanded, 16).unwrap_or(fallback);
+        return u32::from_str_radix(&expanded, 16).ok();
     }
     if value.len() == 6 {
-        return u32::from_str_radix(value, 16).unwrap_or(fallback);
+        return u32::from_str_radix(value, 16).ok();
     }
-    fallback
+    None
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ConfigDocument {
+    Wrapped { overrides: AppConfigOverrides },
+    Flat(AppConfigOverrides),
+}
+
+impl ConfigDocument {
+    fn into_overrides(self) -> AppConfigOverrides {
+        match self {
+            Self::Wrapped { overrides } | Self::Flat(overrides) => overrides,
+        }
+    }
+}
+
+/// Optional values read from disk. Nested options are deliberate: a missing
+/// field keeps the built-in default instead of replacing an entire section.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppConfigOverrides {
+    pub startup: Option<StartupConfigOverrides>,
+    pub shell: Option<ShellConfigOverrides>,
+    pub features: Option<FeatureConfigOverrides>,
+    pub theme: Option<ThemeConfigOverrides>,
+    pub terminal: Option<TerminalConfigOverrides>,
+    pub ui: Option<UiConfigOverrides>,
+    pub shortcuts: Option<ShortcutConfigOverrides>,
+}
+
+pub type ConfigOverrides = AppConfigOverrides;
+
+impl AppConfigOverrides {
+    pub fn into_config(self) -> AppConfig {
+        let mut config = AppConfig::default();
+        self.apply_to(&mut config);
+        config.normalized()
+    }
+
+    pub fn apply_to(&self, config: &mut AppConfig) {
+        if let Some(startup) = &self.startup {
+            if let Some(default_cwd) = &startup.default_cwd {
+                config.startup.default_cwd = default_cwd.clone();
+            }
+            if let Some(control_socket) = &startup.control_socket {
+                config.startup.control_socket = control_socket.clone();
+            }
+            if let Some(value) = startup.initial_workspace {
+                config.startup.initial_workspace = value;
+            }
+            if let Some(value) = startup.initial_terminal {
+                config.startup.initial_terminal = value;
+            }
+            if let Some(value) = startup.window_width {
+                config.startup.window_width = value;
+            }
+            if let Some(value) = startup.window_height {
+                config.startup.window_height = value;
+            }
+        }
+        if let Some(shell) = &self.shell {
+            let program_changed = shell.program.is_some();
+            if let Some(program) = &shell.program {
+                config.shell.program = program.clone();
+            }
+            if let Some(args) = &shell.args {
+                config.shell.args = args.clone();
+            } else if program_changed {
+                config.shell.args = default_shell_args(&config.shell.program);
+            }
+        }
+        if let Some(features) = &self.features {
+            if let Some(value) = features.mouse_reporting {
+                config.features.mouse_reporting = value;
+            }
+            if let Some(value) = features.bracketed_paste {
+                config.features.bracketed_paste = value;
+            }
+            if let Some(value) = features.selection {
+                config.features.selection = value;
+            }
+        }
+        if let Some(theme) = &self.theme {
+            theme.apply_to(&mut config.theme);
+        }
+        if let Some(terminal) = &self.terminal {
+            if let Some(value) = terminal.default_columns {
+                config.terminal.default_columns = value;
+            }
+            if let Some(value) = terminal.default_lines {
+                config.terminal.default_lines = value;
+            }
+            if let Some(value) = terminal.scrollback_lines {
+                config.terminal.scrollback_lines = value;
+            }
+            if let Some(value) = terminal.max_total_scrollback_lines {
+                config.terminal.max_total_scrollback_lines = value;
+            }
+            if let Some(value) = &terminal.font_family {
+                config.terminal.font_family = value.clone();
+            }
+            if let Some(value) = terminal.font_size {
+                config.terminal.font_size = value;
+            }
+            if let Some(value) = terminal.line_height {
+                config.terminal.line_height = value;
+            }
+        }
+        if let Some(ui) = &self.ui {
+            if let Some(value) = ui.font_size {
+                config.ui.font_size = value;
+            }
+            if let Some(value) = ui.sidebar_visible {
+                config.ui.sidebar_visible = value;
+            }
+            if let Some(value) = ui.sidebar_width {
+                config.ui.sidebar_width = value;
+            }
+            if let Some(value) = ui.sidebar_min_width {
+                config.ui.sidebar_min_width = value;
+            }
+            if let Some(value) = ui.sidebar_max_width {
+                config.ui.sidebar_max_width = value;
+            }
+            if let Some(value) = ui.sidebar_resize_handle_width {
+                config.ui.sidebar_resize_handle_width = value;
+            }
+            if let Some(value) = ui.titlebar_height {
+                config.ui.titlebar_height = value;
+            }
+            if let Some(value) = ui.tab_height {
+                config.ui.tab_height = value;
+            }
+            if let Some(value) = ui.sidebar_header_height {
+                config.ui.sidebar_header_height = value;
+            }
+            if let Some(value) = ui.pane_margin {
+                config.ui.pane_margin = value;
+            }
+            if let Some(value) = ui.pane_padding {
+                config.ui.pane_padding = value;
+            }
+        }
+        if let Some(shortcuts) = &self.shortcuts {
+            shortcuts.apply_to(&mut config.shortcuts);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupConfigOverrides {
+    pub default_cwd: Option<Option<String>>,
+    pub control_socket: Option<Option<String>>,
+    pub initial_workspace: Option<bool>,
+    pub initial_terminal: Option<bool>,
+    pub window_width: Option<f32>,
+    pub window_height: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShellConfigOverrides {
+    pub program: Option<String>,
+    pub args: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FeatureConfigOverrides {
+    pub mouse_reporting: Option<bool>,
+    pub bracketed_paste: Option<bool>,
+    pub selection: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfigOverrides {
+    pub terminal_background: Option<String>,
+    pub terminal_foreground: Option<String>,
+    pub selection_background: Option<String>,
+    pub cursor_foreground: Option<String>,
+    pub cursor_background: Option<String>,
+    pub inactive_cursor: Option<String>,
+    pub inverse_foreground: Option<String>,
+    pub inverse_background: Option<String>,
+    pub pane_background: Option<String>,
+    pub active_pane_border: Option<String>,
+    pub inactive_pane_border: Option<String>,
+    pub chrome_background: Option<String>,
+    pub tab_active_background: Option<String>,
+    pub tab_inactive_background: Option<String>,
+    pub tab_add_background: Option<String>,
+    pub ui_foreground: Option<String>,
+}
+
+impl ThemeConfigOverrides {
+    fn apply_to(&self, theme: &mut ThemeConfig) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(value) = &self.$field {
+                    theme.$field = value.clone();
+                }
+            };
+        }
+        apply!(terminal_background);
+        apply!(terminal_foreground);
+        apply!(selection_background);
+        apply!(cursor_foreground);
+        apply!(cursor_background);
+        apply!(inactive_cursor);
+        apply!(inverse_foreground);
+        apply!(inverse_background);
+        apply!(pane_background);
+        apply!(active_pane_border);
+        apply!(inactive_pane_border);
+        apply!(chrome_background);
+        apply!(tab_active_background);
+        apply!(tab_inactive_background);
+        apply!(tab_add_background);
+        apply!(ui_foreground);
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalConfigOverrides {
+    pub default_columns: Option<usize>,
+    pub default_lines: Option<usize>,
+    pub scrollback_lines: Option<usize>,
+    pub max_total_scrollback_lines: Option<usize>,
+    pub font_family: Option<String>,
+    pub font_size: Option<f32>,
+    pub line_height: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfigOverrides {
+    pub font_size: Option<f32>,
+    pub sidebar_visible: Option<bool>,
+    pub sidebar_width: Option<f32>,
+    pub sidebar_min_width: Option<f32>,
+    pub sidebar_max_width: Option<f32>,
+    pub sidebar_resize_handle_width: Option<f32>,
+    pub titlebar_height: Option<f32>,
+    pub tab_height: Option<f32>,
+    pub sidebar_header_height: Option<f32>,
+    pub pane_margin: Option<f32>,
+    pub pane_padding: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShortcutConfigOverrides {
+    pub open_settings: Option<String>,
+    pub new_window: Option<String>,
+    pub hide_window: Option<String>,
+    pub minimize_window: Option<String>,
+    pub ignore_quit: Option<String>,
+    pub new_terminal_tab: Option<String>,
+    pub new_workspace: Option<String>,
+    pub toggle_sidebar: Option<String>,
+    pub rename_workspace: Option<String>,
+    pub rename_tab: Option<String>,
+    pub split_right: Option<String>,
+    pub split_down: Option<String>,
+    pub close_pane: Option<String>,
+    pub focus_left: Option<String>,
+    pub focus_right: Option<String>,
+    pub focus_up: Option<String>,
+    pub focus_down: Option<String>,
+    pub paste: Option<String>,
+    pub copy_or_interrupt: Option<String>,
+    pub eof: Option<String>,
+    pub scroll_page_up: Option<String>,
+    pub scroll_page_down: Option<String>,
+}
+
+impl ShortcutConfigOverrides {
+    fn apply_to(&self, shortcuts: &mut ShortcutConfig) {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(value) = &self.$field {
+                    shortcuts.$field = value.clone();
+                }
+            };
+        }
+        apply!(open_settings);
+        apply!(new_window);
+        apply!(hide_window);
+        apply!(minimize_window);
+        apply!(ignore_quit);
+        apply!(new_terminal_tab);
+        apply!(new_workspace);
+        apply!(toggle_sidebar);
+        apply!(rename_workspace);
+        apply!(rename_tab);
+        apply!(split_right);
+        apply!(split_down);
+        apply!(close_pane);
+        apply!(focus_left);
+        apply!(focus_right);
+        apply!(focus_up);
+        apply!(focus_down);
+        apply!(paste);
+        apply!(copy_or_interrupt);
+        apply!(eof);
+        apply!(scroll_page_up);
+        apply!(scroll_page_down);
+    }
 }
 
 #[cfg(test)]
@@ -315,6 +925,7 @@ mod tests {
         assert_eq!(config.theme.colors().active_pane_border, 0x339966);
         assert_eq!(config.theme.colors().tab_active_background, 0x339966);
         assert_eq!(parse_color("not-a-color", 0x123456), 0x123456);
+        assert!(!ThemeConfig::is_valid_color("not-a-color"));
     }
 
     #[test]
@@ -329,33 +940,113 @@ mod tests {
     }
 
     #[test]
-    fn partial_config_keeps_defaults_for_omitted_sections() {
-        let config: AppConfig =
-            serde_json::from_str(r#"{"terminal":{"scrollback_lines":321}}"#).unwrap();
+    fn partial_config_is_merged_onto_the_default_override_layer() {
+        let path = write_temp_config(r#"{"terminal":{"scrollback_lines":321}}"#);
+        let config: AppConfig = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
         assert_eq!(config.terminal.scrollback_lines, 321);
         assert_eq!(
             config.terminal.max_total_scrollback_lines,
             MAX_TOTAL_SCROLLBACK_LINES
         );
+        assert_eq!(config.terminal.default_columns, DEFAULT_COLUMNS);
         assert!(config.features.selection);
         assert_eq!(config.theme.terminal_background, "#2c2c2c");
-        assert_eq!(config.theme.terminal_foreground, "#e4e4e4");
-        assert_eq!(config.theme.active_pane_border, "#339966");
+        assert_eq!(config.shell.args, default_shell_args(&config.shell.program));
     }
 
     #[test]
-    fn config_normalizes_terminal_limits() {
+    fn explicit_empty_shell_args_are_preserved() {
+        let config: AppConfig =
+            serde_json::from_str(r#"{"shell":{"program":"/bin/zsh","args":[]}}"#).unwrap();
+        assert_eq!(config.shell.program, "/bin/zsh");
+        assert!(config.shell.args.is_empty());
+    }
+
+    #[test]
+    fn wrapped_override_documents_are_supported() {
+        let path = write_temp_config(
+            r#"{"overrides":{"terminal":{"default_columns":64},"ui":{"sidebar_visible":false}}}"#,
+        );
+        let config = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(config.terminal.default_columns, 64);
+        assert!(!config.ui.sidebar_visible);
+        assert_eq!(config.terminal.default_lines, DEFAULT_LINES);
+    }
+
+    #[test]
+    fn all_new_sections_keep_the_previous_defaults() {
+        let config = AppConfig::default();
+        assert_eq!(config.startup.default_cwd.as_deref(), Some("~"));
+        assert_eq!(config.startup.window_width, DEFAULT_WINDOW_WIDTH);
+        assert_eq!(config.startup.window_height, DEFAULT_WINDOW_HEIGHT);
+        assert_eq!(config.ui.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!(config.ui.font_size, DEFAULT_UI_FONT_SIZE);
+        assert_eq!(config.shortcuts.open_settings, "cmd-,");
+        assert_eq!(config.terminal.default_columns, DEFAULT_COLUMNS);
+        assert_eq!(config.terminal.default_lines, DEFAULT_LINES);
+    }
+
+    #[test]
+    fn override_layer_merges_shell_cwd_theme_and_shortcuts_independently() {
+        let path = write_temp_config(
+            r##"{
+                "startup": {"default_cwd": "~/Projects", "window_width": 1500},
+                "shell": {"program": "/bin/sh"},
+                "theme": {"active_pane_border": "#abcdef"},
+                "shortcuts": {"open_settings": "cmd-shift-,"}
+            }"##,
+        );
+        let config = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(config.startup.default_cwd.as_deref(), Some("~/Projects"));
+        assert_eq!(config.startup.window_width, 1500.0);
+        assert_eq!(config.shell.program, "/bin/sh");
+        assert!(config.shell.args.is_empty());
+        assert_eq!(config.theme.active_pane_border, "#abcdef");
+        assert_eq!(config.shortcuts.open_settings, "cmd-shift-,");
+        assert_eq!(config.shortcuts.new_window, "cmd-n");
+    }
+
+    #[test]
+    fn restart_classification_only_covers_worker_and_startup_settings() {
+        let base = AppConfig::default();
+        let mut immediate = base.clone();
+        immediate.theme.ui_foreground = "#ffffff".to_owned();
+        immediate.ui.sidebar_width += 10.0;
+        immediate.terminal.font_size += 1.0;
+        assert!(!base.restart_required_for(&immediate));
+
+        let mut restart = base;
+        restart.shell.args = vec!["-f".to_owned()];
+        assert!(AppConfig::default().restart_required_for(&restart));
+    }
+
+    #[test]
+    fn config_normalizes_terminal_and_ui_limits() {
         let config = AppConfig {
             terminal: TerminalConfig {
+                default_columns: usize::MAX,
+                default_lines: usize::MAX,
                 scrollback_lines: usize::MAX,
                 max_total_scrollback_lines: usize::MAX,
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,
             },
+            ui: UiConfig {
+                font_size: 100.0,
+                sidebar_width: 9999.0,
+                sidebar_min_width: 500.0,
+                sidebar_max_width: 100.0,
+                ..UiConfig::default()
+            },
             ..AppConfig::default()
         }
         .normalized();
+        assert_eq!(config.terminal.default_columns, MAX_COLUMNS);
+        assert_eq!(config.terminal.default_lines, MAX_LINES);
         assert_eq!(config.terminal.scrollback_lines, MAX_SCROLLBACK_LINES);
         assert_eq!(
             config.terminal.max_total_scrollback_lines,
@@ -364,5 +1055,19 @@ mod tests {
         assert_eq!(config.terminal.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.terminal.font_size, 8.0);
         assert_eq!(config.terminal.line_height, 64.0);
+        assert_eq!(config.ui.font_size, 32.0);
+        assert_eq!(config.ui.sidebar_min_width, 500.0);
+        assert_eq!(config.ui.sidebar_max_width, 500.0);
+        assert_eq!(config.ui.sidebar_width, 500.0);
+    }
+
+    fn write_temp_config(contents: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "water-config-override-test-{}-{}.json",
+            std::process::id(),
+            contents.len()
+        ));
+        std::fs::write(&path, contents).unwrap();
+        path
     }
 }

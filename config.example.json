@@ -1,4 +1,16 @@
 {
+  "startup": {
+    "default_cwd": "~",
+    "control_socket": null,
+    "initial_workspace": true,
+    "initial_terminal": true,
+    "window_width": 1100.0,
+    "window_height": 760.0
+  },
+  "shell": {
+    "program": "/opt/homebrew/bin/zsh",
+    "args": ["-l"]
+  },
   "features": {
     "mouse_reporting": true,
     "bracketed_paste": true,
@@ -23,10 +35,49 @@
     "ui_foreground": "#e4e4e4"
   },
   "terminal": {
+    "default_columns": 80,
+    "default_lines": 24,
     "scrollback_lines": 10000,
     "max_total_scrollback_lines": 100000,
     "font_family": "Sarasa Term SC Nerd Font",
-    "font_size": 14.0,
+    "font_size": 16.0,
     "line_height": 18.0
+  },
+  "ui": {
+    "font_size": 14.0,
+    "sidebar_visible": true,
+    "sidebar_width": 170.0,
+    "sidebar_min_width": 170.0,
+    "sidebar_max_width": 420.0,
+    "sidebar_resize_handle_width": 6.0,
+    "titlebar_height": 36.0,
+    "tab_height": 28.0,
+    "sidebar_header_height": 24.0,
+    "pane_margin": 4.0,
+    "pane_padding": 8.0
+  },
+  "shortcuts": {
+    "open_settings": "cmd-,",
+    "new_window": "cmd-n",
+    "hide_window": "cmd-w",
+    "minimize_window": "cmd-m",
+    "ignore_quit": "cmd-q",
+    "new_terminal_tab": "cmd-t",
+    "new_workspace": "cmd-shift-n",
+    "toggle_sidebar": "cmd-e",
+    "rename_workspace": "cmd-shift-e",
+    "rename_tab": "cmd-shift-t",
+    "split_right": "cmd-\\",
+    "split_down": "cmd--",
+    "close_pane": "cmd-shift-w",
+    "focus_left": "cmd-h",
+    "focus_right": "cmd-l",
+    "focus_up": "cmd-k",
+    "focus_down": "cmd-j",
+    "paste": "cmd-v",
+    "copy_or_interrupt": "cmd-c",
+    "eof": "cmd-d",
+    "scroll_page_up": "shift-pageup",
+    "scroll_page_down": "shift-pagedown"
   }
 }

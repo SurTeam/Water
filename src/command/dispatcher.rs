@@ -2,13 +2,14 @@ use std::path::PathBuf;
 
 use crate::{
     app::model::{ApplicationModel, MemoryStats, PaneTreeDump, SplitRequest, StateDump},
+    config::AppConfig,
     event::{AppEvent, AppEventKind, EventBus},
     ids::{IdAllocator, OperationId, PaneId, SessionId, TerminalId},
     pane::SplitAxis,
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::{
         TerminalError, TerminalManager, TerminalRegistry, TerminalSize, TerminalSnapshot,
-        TerminalTheme, default_shell_args, default_shell_program,
+        TerminalTheme,
     },
 };
 
@@ -26,6 +27,10 @@ pub struct CommandDispatcher {
     events: EventBus,
     operations: OperationRegistry,
     terminals: TerminalManager,
+    shell_program: String,
+    shell_args: Vec<String>,
+    default_cwd: Option<PathBuf>,
+    default_terminal_size: TerminalSize,
 }
 
 struct SpawnedTerminal {
@@ -42,6 +47,26 @@ impl Default for CommandDispatcher {
 impl CommandDispatcher {
     pub fn new() -> Self {
         Self::with_operations(OperationRegistry::new())
+    }
+
+    /// Creates a dispatcher with the effective application configuration.
+    /// User settings are captured by the model thread and are used for every
+    /// subsequently created default terminal.
+    pub fn with_config(config: AppConfig) -> Self {
+        let config = config.normalized();
+        let theme = config.theme.colors();
+        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
+            OperationRegistry::new(),
+            None,
+            config.terminal.scrollback_lines,
+            config.terminal.max_total_scrollback_lines,
+            TerminalTheme::new(
+                theme.terminal_foreground,
+                theme.terminal_background,
+                theme.cursor_background,
+            ),
+            config,
+        )
     }
 
     pub fn with_scrollback_lines(scrollback_lines: usize) -> Self {
@@ -103,6 +128,32 @@ impl CommandDispatcher {
         max_total_scrollback_lines: usize,
         theme: TerminalTheme,
     ) -> Self {
+        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
+            operations,
+            wakeup,
+            scrollback_lines,
+            max_total_scrollback_lines,
+            theme,
+            AppConfig::default(),
+        )
+    }
+
+    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
+        operations: OperationRegistry,
+        wakeup: Option<crate::terminal::WakeupCallback>,
+        scrollback_lines: usize,
+        max_total_scrollback_lines: usize,
+        theme: TerminalTheme,
+        config: AppConfig,
+    ) -> Self {
+        let config = config.normalized();
+        let default_terminal_size = TerminalSize::new(
+            config.terminal.default_columns,
+            config.terminal.default_lines,
+        );
+        let default_cwd = config.default_cwd_path();
+        let shell_program = config.shell.program.clone();
+        let shell_args = config.shell.args.clone();
         Self {
             model: ApplicationModel::new(),
             ids: IdAllocator::new(),
@@ -115,6 +166,10 @@ impl CommandDispatcher {
                 max_total_scrollback_lines,
                 theme,
             ),
+            shell_program,
+            shell_args,
+            default_cwd,
+            default_terminal_size,
         }
     }
 
@@ -487,8 +542,8 @@ impl CommandDispatcher {
                     ));
                 }
                 let inherited_cwd = self.current_working_directory();
-                let program = default_shell_program();
-                let args = default_shell_args(&program);
+                let program = self.shell_program.clone();
+                let args = self.shell_args.clone();
                 let title_is_pinned = title.is_some();
                 let title = title
                     .map(normalize_title)
@@ -511,7 +566,7 @@ impl CommandDispatcher {
                     pane_id,
                     program,
                     args,
-                    TerminalSize::default(),
+                    self.default_terminal_size,
                     inherited_cwd,
                 ) {
                     Ok(terminal) => terminal,
@@ -609,13 +664,13 @@ impl CommandDispatcher {
                         new_first,
                     })
                     .map_err(|message| self.pane_error(message))?;
-                let program = default_shell_program();
-                let args = default_shell_args(&program);
+                let program = self.shell_program.clone();
+                let args = self.shell_args.clone();
                 let terminal = match self.spawn_terminal_for_pane(
                     new_pane,
                     program,
                     args,
-                    TerminalSize::default(),
+                    self.default_terminal_size,
                     inherited_cwd,
                 ) {
                     Ok(terminal) => terminal,
@@ -763,6 +818,9 @@ impl CommandDispatcher {
         let session_id: SessionId = self.ids.alloc();
         let surface_id = self.ids.alloc();
         let process_name = default_process_name(&program);
+        let working_directory = working_directory
+            .or_else(|| self.default_cwd.clone())
+            .filter(|path| path.is_dir());
         let cwd = working_directory
             .clone()
             .or_else(|| std::env::current_dir().ok())
@@ -1060,6 +1118,7 @@ impl CommandDispatcher {
             .and_then(|terminal_id| self.model.terminal_cwd(terminal_id))
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
+            .or_else(|| self.default_cwd.clone().filter(|path| path.is_dir()))
             .or_else(|| std::env::current_dir().ok())
     }
 }
@@ -1133,6 +1192,42 @@ mod tests {
         let snapshot = dispatcher.wait_operation(operation).unwrap();
         assert_eq!(snapshot.status, OperationStatus::Succeeded);
         dispatcher
+    }
+
+    #[test]
+    fn configured_shell_cwd_and_terminal_size_are_used_for_new_tabs() {
+        let mut config = AppConfig::default();
+        config.startup.default_cwd = Some("/tmp".to_owned());
+        config.shell.program = "/bin/sh".to_owned();
+        config.shell.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
+        config.terminal.default_columns = 40;
+        config.terminal.default_lines = 8;
+        let mut dispatcher = CommandDispatcher::with_config(config);
+        let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        assert_eq!(
+            dispatcher.wait_operation(workspace).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        let tab = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+        assert_eq!(
+            dispatcher.wait_operation(tab).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let state = dispatcher.state_dump();
+        let tree = &state.workspace.as_ref().unwrap().tabs[0].tree;
+        let PaneTreeDump::Leaf {
+            surface_state: SurfaceState::Terminal(terminal),
+            ..
+        } = tree
+        else {
+            panic!("configured tab did not contain a terminal: {tree:?}");
+        };
+        assert_eq!(terminal.program, "/bin/sh");
+        assert_eq!(terminal.args, ["-c", "exec sleep 30"]);
+        assert_eq!(terminal.cwd, "/tmp");
+        assert_eq!(terminal.columns, 40);
+        assert_eq!(terminal.lines, 8);
     }
 
     #[test]

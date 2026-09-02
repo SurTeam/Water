@@ -20,7 +20,13 @@ pub use command::{
     OperationSnapshot, OperationStatus, PaneCommand, SplitDirection, SurfaceCommand, TabCommand,
     TerminalCommand, WorkspaceCommand,
 };
-pub use config::{AppConfig, ConfigError, FeatureConfig, TerminalConfig, ThemeColors, ThemeConfig};
+pub use config::{
+    AppConfig, AppConfigOverrides, ConfigError, ConfigOverrides, FeatureConfig,
+    FeatureConfigOverrides, ShellConfig, ShellConfigOverrides, ShortcutConfig,
+    ShortcutConfigOverrides, StartupConfig, StartupConfigOverrides, TerminalConfig,
+    TerminalConfigOverrides, ThemeColors, ThemeConfig, ThemeConfigOverrides, UiConfig,
+    UiConfigOverrides,
+};
 pub use ids::{OperationId, PaneId, SessionId, SurfaceId, TabId, TerminalId, WorkspaceId};
 pub use terminal::{
     MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES, TerminalCell,

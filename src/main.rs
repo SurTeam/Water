@@ -16,9 +16,15 @@ fn main() -> Result<()> {
     let startup = parse_startup_options(std::env::args().skip(1))?;
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let socket_path = startup
+        .socket_path
+        .clone()
+        .or_else(|| std::env::var_os("WATER_CONTROL_SOCKET").map(PathBuf::from))
+        .or_else(|| config.startup.control_socket.clone().map(PathBuf::from))
+        .unwrap_or_else(default_socket_path);
     tracing::info!(
         target: "water::workspace",
-        socket = %startup.socket_path.display(),
+        socket = %socket_path.display(),
         config = %startup.config_path.display(),
         scrollback_lines = config.terminal.scrollback_lines,
         initial_workspace = startup.initial_workspace,
@@ -28,10 +34,17 @@ fn main() -> Result<()> {
 
     let mut model_host = ModelHost::start_with_config(config.clone());
     let client = model_host.client();
-    if startup.initial_workspace {
+    let initial_workspace = startup
+        .initial_workspace
+        .unwrap_or(config.startup.initial_workspace);
+    let initial_terminal = startup
+        .initial_terminal
+        .unwrap_or(config.startup.initial_terminal)
+        && initial_workspace;
+    if initial_workspace {
         dispatch_checked(&client, AppCommand::Workspace(WorkspaceCommand::Create))?;
     }
-    if startup.initial_terminal {
+    if initial_terminal {
         dispatch_checked(&client, AppCommand::Tab(TabCommand::New { title: None }))?;
     }
     let initial_snapshot = client
@@ -40,11 +53,17 @@ fn main() -> Result<()> {
     let snapshot_receiver = model_host.take_snapshot_receiver();
     let (ui_control_client, ui_control_receiver) = ui_control_channel();
     let mut control_server =
-        ControlServer::start_with_ui(startup.socket_path, client.clone(), ui_control_client)
+        ControlServer::start_with_ui(socket_path, client.clone(), ui_control_client)
             .context("failed to start control socket")?;
-    let ui_application = WaterApplication::new(client, initial_snapshot, config);
+    let ui_application = WaterApplication::new_with_config_path(
+        client,
+        initial_snapshot,
+        config,
+        startup.config_path.clone(),
+    );
     let reopen_application = ui_application.clone();
-    let application = platform_application();
+    let application =
+        platform_application().with_restart_arguments(std::env::args_os().skip(1).collect());
     application.on_reopen(move |cx| reopen_application.reopen(cx));
     application.run(move |cx: &mut App| {
         ui_application.install(cx, snapshot_receiver, ui_control_receiver);
@@ -73,36 +92,37 @@ fn dispatch_checked(client: &CommandClient, command: AppCommand) -> Result<()> {
 }
 
 struct StartupOptions {
-    socket_path: PathBuf,
+    socket_path: Option<PathBuf>,
     config_path: PathBuf,
-    initial_workspace: bool,
-    initial_terminal: bool,
+    initial_workspace: Option<bool>,
+    initial_terminal: Option<bool>,
 }
 
 fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
-    let mut socket_path = default_socket_path();
+    let mut socket_path = None;
     let mut config_path = std::env::var_os("WATER_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(AppConfig::default_path);
-    let mut initial_workspace = true;
-    let mut initial_terminal = true;
+        .unwrap_or_else(AppConfig::default_load_path);
+    let mut initial_workspace = None;
+    let mut initial_terminal = None;
     while let Some(argument) = args.next() {
         if argument == "--control-socket" {
-            socket_path = args
-                .next()
-                .context("--control-socket requires a path")?
-                .into();
+            socket_path = Some(
+                args.next()
+                    .context("--control-socket requires a path")?
+                    .into(),
+            );
         } else if let Some(path) = argument.strip_prefix("--control-socket=") {
-            socket_path = path.into();
+            socket_path = Some(path.into());
         } else if argument == "--config" {
             config_path = args.next().context("--config requires a path")?.into();
         } else if let Some(path) = argument.strip_prefix("--config=") {
             config_path = path.into();
         } else if argument == "--no-initial-terminal" {
-            initial_terminal = false;
+            initial_terminal = Some(false);
         } else if argument == "--empty-workspace" || argument == "--no-initial-workspace" {
-            initial_workspace = false;
-            initial_terminal = false;
+            initial_workspace = Some(false);
+            initial_terminal = Some(false);
         } else if argument == "--help" || argument == "-h" {
             println!(
                 "water [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace]"

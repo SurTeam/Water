@@ -15,7 +15,7 @@
 cargo run --bin water
 ```
 
-The app starts a local control socket at `/tmp/water.sock` by default and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-l` (login mode). New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-N` opens another native Water window, `Cmd-W` hides the active window without terminating Water or its workspace state, `Cmd-M` minimizes it, and `Cmd-Q` is intentionally ignored. `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. The same commands are available from the macOS menu bar. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
+The app starts a local control socket at `/tmp/water.sock` by default, uses `~` as the default terminal cwd, and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-l` (login mode). New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-N` opens another native Water window, `Cmd-W` hides the active window without terminating Water or its workspace state, `Cmd-M` minimizes it, and `Cmd-Q` is intentionally ignored. `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. `Cmd-,` opens the standalone Settings page; it is also available from the Water menu. The same commands are available from the macOS menu bar. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
 
 ```sh
 cargo run --bin water -- --control-socket /tmp/my-water.sock
@@ -34,17 +34,21 @@ The editable icon source is [`assets/macos/Water.svg`](assets/macos/Water.svg); 
 
 ## Application defaults
 
-Configurable defaults are kept outside the model in a JSON file and loaded at startup. On macOS the default path is:
+Configurable defaults are kept outside the model in a JSON file and loaded at startup. On macOS the native default path is:
 
 ```text
 ~/Library/Application Support/water/config.json
 ```
 
-`WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. [`config.example.json`](config.example.json) contains the complete schema. The current defaults include terminal features (`selection`, `mouse_reporting`, and `bracketed_paste`), theme colors, terminal font metrics, the per-terminal `scrollback_lines` limit (default `10000`), and the aggregate temporary scrollback cap `max_total_scrollback_lines` (default `100000`). The built-in dark theme mirrors the Kitty `kitty_normal.conf` base colors (`#2c2c2c` background and `#e4e4e4` foreground) and uses Kitty green `#339966` for the active pane/tab UI accent (`theme.active_pane_border` and `theme.tab_active_background`). These remain Water-owned AppConfig defaults; Kitty is not read at runtime. When the user scrolls away from live output, the terminal borrows unused aggregate capacity to keep the visible rows pinned; returning to the live end or typing releases that temporary capacity. Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
+The conventional XDG path `~/.config/water/config.json` (or `$XDG_CONFIG_HOME/water/config.json`) is also supported and is selected when it already exists. `WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. The file is an override layer: omitted fields keep Water's built-in defaults (both the flat schema and an optional `{ "overrides": { ... } }` wrapper are accepted), while the Settings page writes a complete, readable JSON document. [`config.example.json`](config.example.json) contains the complete schema.
+
+Open Settings with `Cmd-,` or the Water menu. It exposes startup defaults (cwd, control socket, initial workspace/terminal, window size), shell program and ordered arguments, terminal dimensions/scrollback/font metrics, terminal features, UI base font size, every current theme color, sidebar/layout metrics, and all current Water shortcuts. Each row declares whether it takes effect immediately, for a new window, or after restarting Water. UI/theme/font/feature/shortcut changes are applied to existing workspace windows after a successful save; shell, startup, terminal history, and default-terminal-size changes are marked for restart so existing PTY workers are never silently reconfigured. The Settings page has a Restart Water button; when there are unsaved changes it saves them first and only restarts after persistence succeeds. The built-in dark theme mirrors the Kitty `kitty_normal.conf` base colors (`#2c2c2c` background and `#e4e4e4` foreground) and uses Kitty green `#339966` for the active pane/tab UI accent (`theme.active_pane_border` and `theme.tab_active_background`). These remain Water-owned AppConfig defaults; Kitty is not read at runtime. When the user scrolls away from live output, the terminal borrows unused aggregate capacity to keep the visible rows pinned; returning to the live end or typing releases that temporary capacity. Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
 
 ```sh
 mkdir -p "$HOME/Library/Application Support/water"
 cp config.example.json "$HOME/Library/Application Support/water/config.json"
+# The checked-in example uses the current built-in defaults, including ~/,
+# a 16px terminal font, 14px UI text, and a 170px sidebar.
 # For example, edit terminal.scrollback_lines, terminal.max_total_scrollback_lines,
 # or theme.inverse_background.
 ```

@@ -17,7 +17,7 @@ use crate::command::{
     AppCommand, FocusDirection, PaneCommand, SplitDirection, TabCommand, TerminalCommand,
     WorkspaceCommand,
 };
-use crate::config::{AppConfig, ThemeColors};
+use crate::config::{AppConfig, DEFAULT_TERMINAL_LINE_HEIGHT, ThemeColors};
 use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
@@ -25,15 +25,10 @@ use crate::terminal::{TerminalColor, TerminalModes, TerminalSize, TerminalSnapsh
 
 use super::application::{
     HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, NewWorkspace, RenameTab,
-    RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
+    RenameWorkspace, SplitDown, SplitRight, ToggleSidebar, shortcut_matches_or_default,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
-const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
-const DEFAULT_SIDEBAR_WIDTH: f32 = 236.0;
-const MIN_SIDEBAR_WIDTH: f32 = 170.0;
-const MAX_SIDEBAR_WIDTH: f32 = 420.0;
-const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy)]
 struct TerminalMetrics {
@@ -437,11 +432,14 @@ impl WorkspaceView {
         focus_handle: FocusHandle,
         config: AppConfig,
     ) -> Self {
+        let config = config.normalized();
         let focused_pane = snapshot.focused_pane;
+        let sidebar_width = config.ui.sidebar_width;
+        let sidebar_collapsed = !config.ui.sidebar_visible;
         Self {
             client,
             snapshot,
-            config: config.normalized(),
+            config,
             terminal_metrics: TerminalMetrics::default(),
             focus_handle,
             resize_requests: Arc::new(Mutex::new(BTreeMap::new())),
@@ -455,8 +453,8 @@ impl WorkspaceView {
             dragging_terminal: None,
             reported_mouse: None,
             last_reported_mouse_cell: None,
-            sidebar_collapsed: false,
-            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_collapsed,
+            sidebar_width,
             dragging_sidebar: false,
             titlebar_dragging: false,
             rename_target: None,
@@ -492,6 +490,14 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    pub(crate) fn apply_config(&mut self, config: AppConfig, cx: &mut Context<Self>) {
+        let config = config.normalized();
+        self.sidebar_width = config.ui.sidebar_width;
+        self.sidebar_collapsed = !config.ui.sidebar_visible;
+        self.config = config;
+        cx.notify();
+    }
+
     pub(crate) fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
         self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
     }
@@ -512,7 +518,10 @@ impl WorkspaceView {
         if !self.dragging_sidebar || self.sidebar_collapsed {
             return;
         }
-        let width = f32::from(x).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let width = f32::from(x).clamp(
+            self.config.ui.sidebar_min_width,
+            self.config.ui.sidebar_max_width,
+        );
         if (self.sidebar_width - width).abs() > f32::EPSILON {
             self.sidebar_width = width;
             cx.notify();
@@ -1117,83 +1126,81 @@ impl WorkspaceView {
         }
 
         let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform {
-            match (keystroke.key.as_str(), keystroke.modifiers.shift) {
-                ("h", false) | ("j", false) | ("k", false) | ("l", false) => {
-                    if self.focused_pane.is_none() {
-                        return;
-                    }
-                    let direction = match keystroke.key.as_str() {
-                        "h" => FocusDirection::Left,
-                        "j" => FocusDirection::Down,
-                        "k" => FocusDirection::Up,
-                        "l" => FocusDirection::Right,
-                        _ => unreachable!(),
-                    };
-                    self.dispatch(
-                        AppCommand::Pane(PaneCommand::Focus {
-                            pane_id: None,
-                            direction: Some(direction),
-                        }),
-                        cx,
-                    );
-                    return;
-                }
-                ("w", true) => {
-                    if let Some(pane_id) = self.focused_pane {
-                        self.dispatch(
-                            AppCommand::Pane(PaneCommand::Close {
-                                pane_id: Some(pane_id),
-                            }),
-                            cx,
-                        );
-                    }
-                    return;
-                }
-                ("v", false) => {
-                    if let Some(terminal_id) = self.active_terminal_id() {
-                        let modes = self
-                            .active_terminal_snapshot()
-                            .map(|snapshot| snapshot.modes)
-                            .unwrap_or_default();
-                        self.paste_into_terminal(
-                            terminal_id,
-                            modes.bracketed_paste && self.config.features.bracketed_paste,
-                            cx,
-                        );
-                    }
-                    return;
-                }
-                ("c", false) => {
-                    if let Some(terminal_id) = self.active_terminal_id()
-                        && !self.copy_terminal_selection(terminal_id, cx)
-                    {
-                        self.enqueue_terminal_command(
-                            terminal_id,
-                            TerminalCommand::SendText {
-                                terminal_id: Some(terminal_id),
-                                pane_id: None,
-                                text: "\u{3}".to_owned(),
-                            },
-                        );
-                    }
-                    return;
-                }
-                ("d", false) => {
-                    if let Some(terminal_id) = self.active_terminal_id() {
-                        self.enqueue_terminal_command(
-                            terminal_id,
-                            TerminalCommand::SendText {
-                                terminal_id: Some(terminal_id),
-                                pane_id: None,
-                                text: "\u{4}".to_owned(),
-                            },
-                        );
-                    }
-                    return;
-                }
-                _ => {}
+        let shortcuts = &self.config.shortcuts;
+        let focus_direction = [
+            (&shortcuts.focus_left, "cmd-h", FocusDirection::Left),
+            (&shortcuts.focus_right, "cmd-l", FocusDirection::Right),
+            (&shortcuts.focus_up, "cmd-k", FocusDirection::Up),
+            (&shortcuts.focus_down, "cmd-j", FocusDirection::Down),
+        ]
+        .into_iter()
+        .find_map(|(shortcut, fallback, direction)| {
+            shortcut_matches_or_default(shortcut, fallback, keystroke).then_some(direction)
+        });
+        if let Some(direction) = focus_direction {
+            if self.focused_pane.is_some() {
+                self.dispatch(
+                    AppCommand::Pane(PaneCommand::Focus {
+                        pane_id: None,
+                        direction: Some(direction),
+                    }),
+                    cx,
+                );
             }
+            return;
+        }
+        if shortcut_matches_or_default(&shortcuts.close_pane, "cmd-shift-w", keystroke) {
+            if let Some(pane_id) = self.focused_pane {
+                self.dispatch(
+                    AppCommand::Pane(PaneCommand::Close {
+                        pane_id: Some(pane_id),
+                    }),
+                    cx,
+                );
+            }
+            return;
+        }
+        if shortcut_matches_or_default(&shortcuts.paste, "cmd-v", keystroke) {
+            if let Some(terminal_id) = self.active_terminal_id() {
+                let modes = self
+                    .active_terminal_snapshot()
+                    .map(|snapshot| snapshot.modes)
+                    .unwrap_or_default();
+                self.paste_into_terminal(
+                    terminal_id,
+                    modes.bracketed_paste && self.config.features.bracketed_paste,
+                    cx,
+                );
+            }
+            return;
+        }
+        if shortcut_matches_or_default(&shortcuts.copy_or_interrupt, "cmd-c", keystroke) {
+            if let Some(terminal_id) = self.active_terminal_id()
+                && !self.copy_terminal_selection(terminal_id, cx)
+            {
+                self.enqueue_terminal_command(
+                    terminal_id,
+                    TerminalCommand::SendText {
+                        terminal_id: Some(terminal_id),
+                        pane_id: None,
+                        text: "\u{3}".to_owned(),
+                    },
+                );
+            }
+            return;
+        }
+        if shortcut_matches_or_default(&shortcuts.eof, "cmd-d", keystroke) {
+            if let Some(terminal_id) = self.active_terminal_id() {
+                self.enqueue_terminal_command(
+                    terminal_id,
+                    TerminalCommand::SendText {
+                        terminal_id: Some(terminal_id),
+                        pane_id: None,
+                        text: "\u{4}".to_owned(),
+                    },
+                );
+            }
+            return;
         }
 
         let Some(terminal_id) = self.active_terminal_id() else {
@@ -1203,8 +1210,18 @@ impl WorkspaceView {
             .active_terminal_snapshot()
             .map(|snapshot| snapshot.modes)
             .unwrap_or_default();
-        if keystroke.modifiers.shift && matches!(keystroke.key.as_str(), "pageup" | "pagedown") {
-            let lines = if keystroke.key == "pageup" { 20 } else { -20 };
+        if shortcut_matches_or_default(&shortcuts.scroll_page_up, "shift-pageup", keystroke)
+            || shortcut_matches_or_default(&shortcuts.scroll_page_down, "shift-pagedown", keystroke)
+        {
+            let lines = if shortcut_matches_or_default(
+                &shortcuts.scroll_page_up,
+                "shift-pageup",
+                keystroke,
+            ) {
+                20
+            } else {
+                -20
+            };
             self.enqueue_terminal_command(
                 terminal_id,
                 TerminalCommand::Scroll {
@@ -1358,7 +1375,7 @@ impl WorkspaceView {
         };
         div()
             .id(format!("tab-{tab_id}"))
-            .h(px(28.))
+            .h(px(self.config.ui.tab_height))
             .px(px(10.))
             .items_center()
             .flex()
@@ -1406,7 +1423,7 @@ impl WorkspaceView {
 
     fn sidebar_resize_handle(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         div()
-            .w(px(SIDEBAR_RESIZE_HANDLE_WIDTH))
+            .w(px(self.config.ui.sidebar_resize_handle_width))
             .h_full()
             .cursor(CursorStyle::ResizeLeftRight)
             .bg(rgb(theme.chrome_background))
@@ -1526,7 +1543,7 @@ impl WorkspaceView {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(36.))
+                            .h(px(self.config.ui.sidebar_header_height))
                             .px(px(10.))
                             .items_center()
                             .flex()
@@ -1720,7 +1737,11 @@ impl WorkspaceView {
             .border_1()
             .border_color(rgb(theme.active_pane_border))
             .text_color(rgb(theme.ui_foreground))
-            .child(div().text_lg().child("Close workspace?"))
+            .child(
+                div()
+                    .text_size(px(self.config.ui.font_size * 1.125))
+                    .child("Close workspace?"),
+            )
             .child(SharedString::from(message))
             .child(
                 div()
@@ -1818,7 +1839,7 @@ impl WorkspaceView {
             .child(
                 div()
                     .id("new-tab")
-                    .h(px(28.))
+                    .h(px(self.config.ui.tab_height))
                     .w(px(28.))
                     .items_center()
                     .justify_center()
@@ -1893,7 +1914,7 @@ impl WorkspaceView {
             );
         div()
             .id("water-titlebar")
-            .h(px(36.))
+            .h(px(self.config.ui.titlebar_height))
             .w_full()
             .gap(px(8.))
             .px(px(10.))
@@ -2039,8 +2060,8 @@ impl WorkspaceView {
                     .min_w(px(0.))
                     .min_h(px(0.))
                     .overflow_hidden()
-                    .m(px(4.))
-                    .p(px(8.))
+                    .m(px(self.config.ui.pane_margin))
+                    .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
                     .bg(rgb(theme.pane_background))
@@ -3903,6 +3924,7 @@ impl Render for WorkspaceView {
                 this.handle_key_down(event, cx);
             }))
             .bg(rgb(theme.terminal_background))
+            .text_size(px(self.config.ui.font_size))
             .text_color(rgb(theme.ui_foreground))
             .child(workspace_mouse_event_observer(cx.entity()))
             .child(self.render_titlebar(theme, cx))

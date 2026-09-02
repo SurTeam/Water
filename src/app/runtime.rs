@@ -279,11 +279,12 @@ impl CommandClient {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ModelThreadConfig {
     terminal_scrollback_lines: usize,
     terminal_max_total_scrollback_lines: usize,
     terminal_theme: TerminalTheme,
+    app_config: AppConfig,
 }
 
 /// Owns the model thread and the one snapshot stream consumed by the GPUI view.
@@ -309,6 +310,7 @@ impl ModelHost {
                 theme_colors.terminal_background,
                 theme_colors.cursor_background,
             ),
+            app_config: config.clone(),
         };
         let (request_tx, request_rx) = mpsc::channel();
         let (snapshot_tx, snapshot_rx) = snapshot_channel();
@@ -384,15 +386,16 @@ fn run_model_thread(
         terminal_scrollback_lines,
         terminal_max_total_scrollback_lines,
         terminal_theme,
+        app_config,
     } = terminal_config;
-    let mut dispatcher =
-        CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
-            operations,
-            terminal_wakeup,
-            terminal_scrollback_lines,
-            terminal_max_total_scrollback_lines,
-            terminal_theme,
-        );
+    let mut dispatcher = CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
+        operations,
+        terminal_wakeup,
+        terminal_scrollback_lines,
+        terminal_max_total_scrollback_lines,
+        terminal_theme,
+        app_config,
+    );
     let _ = snapshot_tx.send(dispatcher.state_dump());
 
     while let Ok(request) = request_rx.recv() {
