@@ -1167,19 +1167,20 @@ impl CommandDispatcher {
         pane_id: Option<PaneId>,
         direction: Option<FocusDirection>,
     ) -> Result<(crate::ids::TabId, PaneId), CommandError> {
-        if let Some(pane_id) = pane_id {
-            let (tab_id, _) = self.resolve_pane(Some(pane_id))?;
-            return Ok((tab_id, pane_id));
-        }
-
-        let tab_id = self
-            .model
-            .active_tab_id()
-            .ok_or_else(|| CommandError::new("TAB_NOT_FOUND", "there is no active tab"))?;
-        let current = self
-            .model
-            .active_pane()
-            .ok_or_else(|| CommandError::new("PANE_NOT_FOUND", "there is no active pane"))?;
+        let (tab_id, current) = if let Some(pane_id) = pane_id {
+            let (tab_id, pane_id) = self.resolve_pane(Some(pane_id))?;
+            (tab_id, pane_id)
+        } else {
+            let tab_id = self
+                .model
+                .active_tab_id()
+                .ok_or_else(|| CommandError::new("TAB_NOT_FOUND", "there is no active tab"))?;
+            let current = self
+                .model
+                .active_pane()
+                .ok_or_else(|| CommandError::new("PANE_NOT_FOUND", "there is no active pane"))?;
+            (tab_id, current)
+        };
         let Some(direction) = direction else {
             return Ok((tab_id, current));
         };
@@ -1410,6 +1411,58 @@ mod tests {
         );
         let state = dispatcher.state_dump();
         assert_eq!(state.workspace.unwrap().tabs[0].tree.pane_count(), 1);
+    }
+
+    #[test]
+    fn explicit_focus_source_pane_targets_its_workspace() {
+        let mut dispatcher = create_dispatcher();
+        let tab_operation = dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+        let tab_result = dispatcher.wait_operation(tab_operation).unwrap();
+        assert_eq!(tab_result.status, OperationStatus::Succeeded);
+        let first_state = dispatcher.state_dump();
+        let first_workspace = first_state.workspace.as_ref().unwrap().id;
+        let first_pane = first_state.workspace.as_ref().unwrap().tabs[0].active_pane;
+
+        let split_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Split {
+            pane_id: Some(first_pane),
+            direction: SplitDirection::Right,
+        }));
+        let split_result = dispatcher.wait_operation(split_operation).unwrap();
+        let right_pane = match split_result.result.unwrap() {
+            OperationResult::PaneCreated { pane_id } => pane_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+
+        let second_workspace_operation =
+            dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        assert_eq!(
+            dispatcher
+                .wait_operation(second_workspace_operation)
+                .unwrap()
+                .status,
+            OperationStatus::Succeeded
+        );
+        let second_tab_operation =
+            dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
+        assert_eq!(
+            dispatcher.wait_operation(second_tab_operation).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        assert_ne!(dispatcher.state_dump().active_workspace, Some(first_workspace));
+
+        let focus_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Focus {
+            pane_id: Some(first_pane),
+            direction: Some(FocusDirection::Right),
+        }));
+        let focus_result = dispatcher.wait_operation(focus_operation).unwrap();
+        assert_eq!(focus_result.status, OperationStatus::Succeeded);
+        assert_eq!(
+            focus_result.result,
+            Some(OperationResult::PaneFocused { pane_id: right_pane })
+        );
+        let state = dispatcher.state_dump();
+        assert_eq!(state.active_workspace, Some(first_workspace));
+        assert_eq!(state.focused_pane, Some(right_pane));
     }
 
     #[test]

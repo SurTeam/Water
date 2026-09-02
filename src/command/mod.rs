@@ -22,10 +22,11 @@ pub enum AppCommand {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkspaceCommand {
-    /// Creates a new workspace and activates it. This is the command used by
-    /// the UI's "new workspace" action.
+    /// Creates and activates an empty workspace. Startup flows retain this
+    /// primitive so they can opt into creating the initial terminal
+    /// separately.
     Create,
-    /// Alias for `Create` for callers that prefer an explicit verb.
+    /// Creates and activates a workspace with one configured terminal tab.
     New,
     /// Idempotent compatibility command for old startup/control callers.
     Ensure,
