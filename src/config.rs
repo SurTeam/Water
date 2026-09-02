@@ -199,6 +199,7 @@ pub struct ThemeConfig {
     pub inverse_foreground: String,
     pub inverse_background: String,
     pub pane_background: String,
+    /// Accent color used for active pane borders and active tabs.
     pub active_pane_border: String,
     pub inactive_pane_border: String,
     pub chrome_background: String,
@@ -208,25 +209,27 @@ pub struct ThemeConfig {
     pub ui_foreground: String,
 }
 
+/// Water owns these built-in defaults; they mirror the dark Kitty palette
+/// without reading Kitty configuration at runtime.
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
-            terminal_background: "#0b1117".to_owned(),
-            terminal_foreground: "#d8e2ef".to_owned(),
-            selection_background: "#335d7a".to_owned(),
-            cursor_foreground: "#0b1117".to_owned(),
-            cursor_background: "#9cc8ef".to_owned(),
-            inactive_cursor: "#9cc8ef".to_owned(),
-            inverse_foreground: "#e6eef7".to_owned(),
-            inverse_background: "#335d7a".to_owned(),
-            pane_background: "#101820".to_owned(),
-            active_pane_border: "#61b3ff".to_owned(),
-            inactive_pane_border: "#364656".to_owned(),
-            chrome_background: "#0f161e".to_owned(),
-            tab_active_background: "#29435c".to_owned(),
-            tab_inactive_background: "#1d2733".to_owned(),
-            tab_add_background: "#263544".to_owned(),
-            ui_foreground: "#e6eef7".to_owned(),
+            terminal_background: "#2c2c2c".to_owned(),
+            terminal_foreground: "#e4e4e4".to_owned(),
+            selection_background: "#555555".to_owned(),
+            cursor_foreground: "#2c2c2c".to_owned(),
+            cursor_background: "#e4e4e4".to_owned(),
+            inactive_cursor: "#555555".to_owned(),
+            inverse_foreground: "#2c2c2c".to_owned(),
+            inverse_background: "#e4e4e4".to_owned(),
+            pane_background: "#2c2c2c".to_owned(),
+            active_pane_border: "#339966".to_owned(),
+            inactive_pane_border: "#555555".to_owned(),
+            chrome_background: "#000000".to_owned(),
+            tab_active_background: "#339966".to_owned(),
+            tab_inactive_background: "#000000".to_owned(),
+            tab_add_background: "#555555".to_owned(),
+            ui_foreground: "#e4e4e4".to_owned(),
         }
     }
 }
@@ -254,22 +257,22 @@ pub struct ThemeColors {
 impl ThemeConfig {
     pub fn colors(&self) -> ThemeColors {
         ThemeColors {
-            terminal_background: parse_color(&self.terminal_background, 0x0b1117),
-            terminal_foreground: parse_color(&self.terminal_foreground, 0xd8e2ef),
-            selection_background: parse_color(&self.selection_background, 0x335d7a),
-            cursor_foreground: parse_color(&self.cursor_foreground, 0x0b1117),
-            cursor_background: parse_color(&self.cursor_background, 0x9cc8ef),
-            inactive_cursor: parse_color(&self.inactive_cursor, 0x9cc8ef),
-            inverse_foreground: parse_color(&self.inverse_foreground, 0xe6eef7),
-            inverse_background: parse_color(&self.inverse_background, 0x335d7a),
-            pane_background: parse_color(&self.pane_background, 0x101820),
-            active_pane_border: parse_color(&self.active_pane_border, 0x61b3ff),
-            inactive_pane_border: parse_color(&self.inactive_pane_border, 0x364656),
-            chrome_background: parse_color(&self.chrome_background, 0x0f161e),
-            tab_active_background: parse_color(&self.tab_active_background, 0x29435c),
-            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x1d2733),
-            tab_add_background: parse_color(&self.tab_add_background, 0x263544),
-            ui_foreground: parse_color(&self.ui_foreground, 0xe6eef7),
+            terminal_background: parse_color(&self.terminal_background, 0x2c2c2c),
+            terminal_foreground: parse_color(&self.terminal_foreground, 0xe4e4e4),
+            selection_background: parse_color(&self.selection_background, 0x555555),
+            cursor_foreground: parse_color(&self.cursor_foreground, 0x2c2c2c),
+            cursor_background: parse_color(&self.cursor_background, 0xe4e4e4),
+            inactive_cursor: parse_color(&self.inactive_cursor, 0x555555),
+            inverse_foreground: parse_color(&self.inverse_foreground, 0x2c2c2c),
+            inverse_background: parse_color(&self.inverse_background, 0xe4e4e4),
+            pane_background: parse_color(&self.pane_background, 0x2c2c2c),
+            active_pane_border: parse_color(&self.active_pane_border, 0x339966),
+            inactive_pane_border: parse_color(&self.inactive_pane_border, 0x555555),
+            chrome_background: parse_color(&self.chrome_background, 0x000000),
+            tab_active_background: parse_color(&self.tab_active_background, 0x339966),
+            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x000000),
+            tab_add_background: parse_color(&self.tab_add_background, 0x555555),
+            ui_foreground: parse_color(&self.ui_foreground, 0xe4e4e4),
         }
     }
 }
@@ -307,7 +310,10 @@ mod tests {
             config.terminal.max_total_scrollback_lines,
             MAX_TOTAL_SCROLLBACK_LINES
         );
-        assert_eq!(config.theme.colors().terminal_background, 0x0b1117);
+        assert_eq!(config.theme.colors().terminal_background, 0x2c2c2c);
+        assert_eq!(config.theme.colors().terminal_foreground, 0xe4e4e4);
+        assert_eq!(config.theme.colors().active_pane_border, 0x339966);
+        assert_eq!(config.theme.colors().tab_active_background, 0x339966);
         assert_eq!(parse_color("not-a-color", 0x123456), 0x123456);
     }
 
@@ -332,7 +338,9 @@ mod tests {
             MAX_TOTAL_SCROLLBACK_LINES
         );
         assert!(config.features.selection);
-        assert_eq!(config.theme.terminal_background, "#0b1117");
+        assert_eq!(config.theme.terminal_background, "#2c2c2c");
+        assert_eq!(config.theme.terminal_foreground, "#e4e4e4");
+        assert_eq!(config.theme.active_pane_border, "#339966");
     }
 
     #[test]

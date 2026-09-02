@@ -54,7 +54,7 @@ The control socket exposes `ui.keystroke` and `ui.snapshot` as running-applicati
 
 ## Ownership and data flow
 
-Phase 2 adds a dedicated terminal runtime without changing the single application mutation path. A terminal worker owns the mutable `alacritty_terminal::Term` and PTY; the model owns serializable terminal metadata and receives revision notifications. A narrow `TerminalRegistry` publishes bounded visible snapshots and wait predicates. Application defaults are loaded separately through `AppConfig`; terminal workers receive the configured scrollback limit while GPUI receives the feature and theme projection.
+Phase 2 adds a dedicated terminal runtime without changing the single application mutation path. A terminal worker owns the mutable `alacritty_terminal::Term` and PTY; the model owns serializable terminal metadata and receives revision notifications. A narrow `TerminalRegistry` publishes bounded visible snapshots and wait predicates. Application defaults are loaded separately through `AppConfig`; terminal workers receive the configured scrollback limit while GPUI receives the feature and theme projection. The built-in dark theme mirrors the Kitty `kitty_normal.conf` base colors (`#2c2c2c` background and `#e4e4e4` foreground), with Kitty green `#339966` as the active pane/tab UI accent; Kitty is not read at runtime.
 
 ```text
                            external process
