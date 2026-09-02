@@ -208,6 +208,7 @@ impl std::fmt::Debug for TerminalEntry {
 struct TerminalEntryState {
     snapshot: TerminalSnapshot,
     recent_output: String,
+    output_event_pending: bool,
 }
 
 impl Default for TerminalRegistry {
@@ -234,6 +235,7 @@ impl TerminalRegistry {
             state: Mutex::new(TerminalEntryState {
                 snapshot,
                 recent_output: String::new(),
+                output_event_pending: false,
             }),
             changed: Condvar::new(),
             command_tx,
@@ -353,12 +355,15 @@ impl TerminalRegistry {
         Ok(())
     }
 
+    /// Publishes the latest worker snapshot and returns whether the model
+    /// needs a new output notification. At most one output event per terminal
+    /// is queued until the model atomically takes the latest snapshot.
     pub(crate) fn publish(
         &self,
         terminal_id: TerminalId,
         snapshot: TerminalSnapshot,
         output: &[u8],
-    ) {
+    ) -> bool {
         let Some(entry) = self
             .entries
             .lock()
@@ -366,7 +371,7 @@ impl TerminalRegistry {
             .get(&terminal_id)
             .cloned()
         else {
-            return;
+            return false;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         state.snapshot = snapshot;
@@ -376,7 +381,24 @@ impl TerminalRegistry {
                 .push_str(&String::from_utf8_lossy(output));
             trim_recent_output(&mut state.recent_output);
         }
+        let should_notify = !state.output_event_pending;
+        state.output_event_pending = true;
         entry.changed.notify_all();
+        should_notify
+    }
+
+    /// Takes the newest snapshot represented by a queued output event and
+    /// clears that event while holding the same lock used by publishers. A
+    /// later publication will therefore always queue a fresh notification.
+    pub(crate) fn take_output_snapshot(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        let entry = self.entry(terminal_id)?;
+        let mut state = entry.state.lock().expect("terminal entry poisoned");
+        let snapshot = state.snapshot.clone();
+        state.output_event_pending = false;
+        Ok(snapshot)
     }
 
     pub(crate) fn mark_exited(&self, terminal_id: TerminalId, code: Option<i32>) {
@@ -440,6 +462,7 @@ pub struct TerminalManager {
     event_tx: Sender<TerminalManagerEvent>,
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
+    metadata_executor: super::worker::ProcessMetadataExecutor,
     workers: BTreeMap<TerminalId, WorkerHandle>,
     retired: VecDeque<TerminalId>,
 }
@@ -496,6 +519,7 @@ impl TerminalManager {
             event_tx,
             event_rx,
             event_wakeup,
+            metadata_executor: super::worker::ProcessMetadataExecutor::new(),
             workers: BTreeMap::new(),
             retired: VecDeque::new(),
         }
@@ -575,6 +599,7 @@ impl TerminalManager {
         let worker_wakeup = wakeup.clone();
         let scrollback_lines = self.scrollback_lines;
         let scrollback_budget = self.scrollback_budget.clone();
+        let metadata_executor = self.metadata_executor.clone();
         let join_handle = match thread::Builder::new()
             .name(format!("water-terminal-{terminal_id}"))
             .spawn(move || {
@@ -590,6 +615,7 @@ impl TerminalManager {
                             event_tx,
                             event_wakeup,
                             worker_wakeup,
+                            metadata_executor,
                         ),
                         super::worker::WorkerMetadata {
                             fallback_process_name,
@@ -746,5 +772,37 @@ mod tests {
         assert_eq!(budget.retained_lines(), 12);
         budget.unregister(second);
         assert_eq!(budget.retained_lines(), 0);
+    }
+
+    #[test]
+    fn terminal_output_notifications_coalesce_until_latest_snapshot_is_taken() {
+        let registry = TerminalRegistry::new();
+        let terminal_id = TerminalId::new(1);
+        let size = TerminalSize::new(8, 2);
+        let (command_tx, _command_rx) = mpsc::channel();
+        registry
+            .register(
+                terminal_id,
+                TerminalSnapshot::empty(terminal_id, size),
+                command_tx,
+                Arc::new(Mutex::new(None)),
+            )
+            .unwrap();
+
+        let mut first = TerminalSnapshot::empty(terminal_id, size);
+        first.revision = 1;
+        assert!(registry.publish(terminal_id, first, b"first"));
+
+        let mut latest = TerminalSnapshot::empty(terminal_id, size);
+        latest.revision = 2;
+        assert!(!registry.publish(terminal_id, latest, b"latest"));
+        assert_eq!(
+            registry.take_output_snapshot(terminal_id).unwrap().revision,
+            2
+        );
+
+        let mut next = TerminalSnapshot::empty(terminal_id, size);
+        next.revision = 3;
+        assert!(registry.publish(terminal_id, next, b"next"));
     }
 }

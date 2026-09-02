@@ -209,7 +209,8 @@ impl CommandDispatcher {
         for event in self.terminals.drain_events() {
             match event {
                 crate::terminal::TerminalManagerEvent::OutputChanged { terminal_id } => {
-                    if let Ok(snapshot) = self.terminals.registry().snapshot(terminal_id)
+                    if let Ok(snapshot) =
+                        self.terminals.registry().take_output_snapshot(terminal_id)
                         && self
                             .model
                             .set_terminal_output_revision(terminal_id, snapshot.revision)

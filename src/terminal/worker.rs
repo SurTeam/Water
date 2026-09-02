@@ -1,11 +1,12 @@
 use std::io::{self, ErrorKind, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::process::Command;
 use std::sync::Arc;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TryRecvError, TrySendError};
 use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
@@ -26,7 +27,64 @@ use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
 const READ_BUFFER_BYTES: usize = 16 * 1024;
+const MAX_COMMANDS_PER_TICK: usize = 64;
+const MAX_PENDING_METADATA_PROBES: usize = 64;
+const MAX_PTY_BYTES_PER_TICK: usize = 256 * 1024;
+const MAX_PTY_DRAIN_TIME: Duration = Duration::from_millis(4);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Shared background executor for process-name/cwd lookups. PTY workers only
+/// enqueue a probe and consume its result; no metadata query runs on the I/O
+/// thread.
+#[derive(Clone)]
+pub(crate) struct ProcessMetadataExecutor {
+    request_tx: SyncSender<ProcessMetadataRequest>,
+}
+
+struct ProcessMetadataRequest {
+    pid: Option<u32>,
+    fallback: Arc<ProcessMetadataFallback>,
+    result_tx: Sender<ProcessMetadata>,
+    wakeup: WakeupCallback,
+}
+
+impl ProcessMetadataExecutor {
+    pub(crate) fn new() -> Self {
+        Self::new_with_query(query_process_metadata)
+    }
+
+    fn new_with_query(
+        query: impl Fn(Option<u32>, &ProcessMetadataFallback) -> ProcessMetadata + Send + 'static,
+    ) -> Self {
+        let (request_tx, request_rx) =
+            mpsc::sync_channel::<ProcessMetadataRequest>(MAX_PENDING_METADATA_PROBES);
+        if let Err(error) = std::thread::Builder::new()
+            .name("water-terminal-metadata".to_owned())
+            .spawn(move || {
+                while let Ok(request) = request_rx.recv() {
+                    let metadata = query(request.pid, &request.fallback);
+                    if request.result_tx.send(metadata).is_ok() {
+                        (request.wakeup)();
+                    }
+                }
+            })
+        {
+            tracing::warn!(
+                target: "water::pty",
+                ?error,
+                "failed to start terminal metadata worker"
+            );
+        }
+        Self { request_tx }
+    }
+
+    fn request(&self, request: ProcessMetadataRequest) -> bool {
+        match self.request_tx.try_send(request) {
+            Ok(()) => true,
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => false,
+        }
+    }
+}
 
 pub(crate) struct WorkerConfig {
     terminal_id: TerminalId,
@@ -40,6 +98,7 @@ pub(crate) struct WorkerConfig {
     event_tx: Sender<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
     wakeup_slot: WakeupSlot,
+    metadata_executor: ProcessMetadataExecutor,
 }
 
 pub(crate) struct WorkerMetadata {
@@ -52,6 +111,7 @@ pub(crate) struct WorkerChannels {
     pub(crate) event_tx: Sender<TerminalManagerEvent>,
     pub(crate) event_wakeup: Option<WakeupCallback>,
     pub(crate) wakeup_slot: WakeupSlot,
+    pub(crate) metadata_executor: ProcessMetadataExecutor,
 }
 
 impl WorkerChannels {
@@ -60,12 +120,14 @@ impl WorkerChannels {
         event_tx: Sender<TerminalManagerEvent>,
         event_wakeup: Option<WakeupCallback>,
         wakeup_slot: WakeupSlot,
+        metadata_executor: ProcessMetadataExecutor,
     ) -> Self {
         Self {
             registry,
             event_tx,
             event_wakeup,
             wakeup_slot,
+            metadata_executor,
         }
     }
 }
@@ -92,6 +154,7 @@ impl WorkerConfig {
             event_tx: channels.event_tx,
             event_wakeup: channels.event_wakeup,
             wakeup_slot: channels.wakeup_slot,
+            metadata_executor: channels.metadata_executor,
         }
     }
 }
@@ -109,6 +172,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         event_tx,
         event_wakeup,
         wakeup_slot,
+        metadata_executor,
     } = config;
     let config = Config {
         scrolling_history: scrollback_lines,
@@ -121,7 +185,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut term = Term::new(config, &size, proxy);
     let mut scrollback = ScrollbackState::new(terminal_id, scrollback_lines, scrollback_budget);
     let _ = scrollback.reconcile(&mut term, false);
-    let mut process_metadata = query_process_metadata(&pty, &fallback_process_name, &fallback_cwd);
+    let metadata_fallback = Arc::new(ProcessMetadataFallback {
+        process_name: fallback_process_name,
+        cwd: fallback_cwd,
+    });
+    let mut process_metadata = ProcessMetadata::from_fallback(&metadata_fallback);
     let mut processor = Processor::new();
     let poller = match Poller::new() {
         Ok(poller) => Arc::new(poller),
@@ -173,16 +241,19 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     }
 
     let poller_for_wakeup = poller.clone();
-    *wakeup_slot.lock().expect("terminal wakeup poisoned") = Some(Arc::new(move || {
+    let worker_wakeup: WakeupCallback = Arc::new(move || {
         let _ = poller_for_wakeup.notify();
-    }) as WakeupCallback);
+    });
+    *wakeup_slot.lock().expect("terminal wakeup poisoned") = Some(worker_wakeup.clone());
 
+    let (metadata_result_tx, metadata_result_rx) = mpsc::channel();
+    let mut metadata_probe_in_flight = false;
     let mut events = Events::new();
     let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
     let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut snapshot_revision = 0_u64;
     let mut viewport_position = 0_i64;
-    let mut last_process_metadata_refresh = Instant::now();
+    let mut last_process_metadata_request = Instant::now();
     let mut stop_requested = false;
     let publisher = SnapshotPublisher {
         terminal_id,
@@ -205,30 +276,37 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         terminal_id,
         &process_metadata,
     );
+    let _ = request_process_metadata_refresh(
+        &metadata_executor,
+        &pty,
+        metadata_fallback.clone(),
+        &metadata_result_tx,
+        &worker_wakeup,
+        &mut metadata_probe_in_flight,
+    );
 
     'worker: loop {
-        while let Ok(command) = command_rx.try_recv() {
+        let mut command_batch_full = false;
+        let mut input_activity = false;
+        for command_index in 0..MAX_COMMANDS_PER_TICK {
+            let command = match command_rx.try_recv() {
+                Ok(command) => command,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    stop_requested = true;
+                    break;
+                }
+            };
+            command_batch_full = command_index + 1 == MAX_COMMANDS_PER_TICK;
             match apply_command(command, &mut pty, &mut term, &mut scrollback) {
                 Ok(CommandEffect::Continue {
                     dirty,
                     viewport_delta,
                     refresh_process,
                 }) => {
+                    input_activity |= refresh_process;
                     viewport_position = viewport_position.saturating_add(viewport_delta);
-                    let metadata_due = refresh_process
-                        && last_process_metadata_refresh.elapsed()
-                            >= PROCESS_METADATA_REFRESH_INTERVAL;
-                    let metadata_changed = metadata_due
-                        && refresh_process_metadata(
-                            &pty,
-                            &fallback_process_name,
-                            &fallback_cwd,
-                            &mut process_metadata,
-                        );
-                    if metadata_due {
-                        last_process_metadata_refresh = Instant::now();
-                    }
-                    if dirty || metadata_changed {
+                    if dirty {
                         snapshot_revision = snapshot_revision.saturating_add(1);
                         publish_snapshot(
                             &term,
@@ -237,14 +315,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                             &publisher,
                             &[],
                             viewport_position,
-                            &process_metadata,
-                        );
-                    }
-                    if metadata_changed {
-                        emit_process_metadata(
-                            &event_tx,
-                            event_wakeup.as_ref(),
-                            terminal_id,
                             &process_metadata,
                         );
                     }
@@ -269,8 +339,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
         events.clear();
         let metadata_timeout = PROCESS_METADATA_REFRESH_INTERVAL
-            .saturating_sub(last_process_metadata_refresh.elapsed());
-        if let Err(error) = poller.wait(&mut events, Some(metadata_timeout)) {
+            .saturating_sub(last_process_metadata_request.elapsed());
+        let poll_timeout = if command_batch_full {
+            Duration::ZERO
+        } else {
+            metadata_timeout
+        };
+        if let Err(error) = poller.wait(&mut events, Some(poll_timeout)) {
             tracing::warn!(
                 target: "water::pty",
                 terminal_id = %terminal_id,
@@ -299,7 +374,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         &mut read_buffer,
                         &mut output_buffer,
                     ) {
-                        Ok(ReadEffect::Continue) => {}
+                        Ok(ReadEffect::Continue | ReadEffect::BudgetExhausted) => {}
                         Ok(ReadEffect::Eof) => {
                             pty_eof = true;
                             let _ = poller.delete(pty.file());
@@ -337,21 +412,28 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             worker_stop = true;
         }
 
+        let metadata_changed = apply_process_metadata_result(
+            &metadata_result_rx,
+            &mut metadata_probe_in_flight,
+            &mut process_metadata,
+        );
         let metadata_due =
-            last_process_metadata_refresh.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
-        // Avoid spawning metadata helper processes while a terminal is
-        // actively streaming output. Once output goes quiet, the timeout
-        // path below refreshes the foreground process and cwd promptly.
-        let metadata_changed = metadata_due
-            && output_buffer.is_empty()
-            && refresh_process_metadata(
-                &pty,
-                &fallback_process_name,
-                &fallback_cwd,
-                &mut process_metadata,
-            );
+            last_process_metadata_request.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
+        // The lookup itself runs on the shared metadata thread. Defer merely
+        // scheduling new probes while output/input is active to avoid wasting
+        // work on short-lived foreground-process transitions.
         if metadata_due {
-            last_process_metadata_refresh = Instant::now();
+            if output_buffer.is_empty() && !input_activity {
+                let _ = request_process_metadata_refresh(
+                    &metadata_executor,
+                    &pty,
+                    metadata_fallback.clone(),
+                    &metadata_result_tx,
+                    &worker_wakeup,
+                    &mut metadata_probe_in_flight,
+                );
+            }
+            last_process_metadata_request = Instant::now();
         }
         if !output_buffer.is_empty() {
             let _ = scrollback.sync(&mut term);
@@ -582,9 +664,17 @@ fn apply_command(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReadEffect {
     Continue,
+    BudgetExhausted,
     Eof,
+}
+
+#[derive(Debug)]
+struct ProcessMetadataFallback {
+    process_name: String,
+    cwd: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -593,31 +683,34 @@ struct ProcessMetadata {
     cwd: String,
 }
 
-fn query_process_metadata(
-    pty: &Pty,
-    fallback_process_name: &str,
-    fallback_cwd: &Path,
-) -> ProcessMetadata {
-    let pid = foreground_process_id(pty);
+impl ProcessMetadata {
+    fn from_fallback(fallback: &ProcessMetadataFallback) -> Self {
+        Self {
+            process_name: fallback.process_name.clone(),
+            cwd: fallback.cwd.display().to_string(),
+        }
+    }
+}
+
+fn query_process_metadata(pid: Option<u32>, fallback: &ProcessMetadataFallback) -> ProcessMetadata {
     let process_name = pid
         .and_then(query_process_name)
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| fallback_process_name.to_owned());
+        .unwrap_or_else(|| fallback.process_name.clone());
     let cwd = pid
         .and_then(query_process_cwd)
-        .unwrap_or_else(|| fallback_cwd.display().to_string());
+        .unwrap_or_else(|| fallback.cwd.display().to_string());
     ProcessMetadata { process_name, cwd }
 }
 
 #[cfg(unix)]
 fn foreground_process_id(pty: &Pty) -> Option<u32> {
-    let fd = pty.file().as_raw_fd();
-    let foreground = unsafe { libc::tcgetpgrp(fd) };
+    let foreground = unsafe { libc::tcgetpgrp(pty.file().as_raw_fd()) };
     if foreground > 0 {
         return u32::try_from(foreground).ok();
     }
     let child = pty.child().id();
-    query_terminal_foreground_process(child).or((child > 0).then_some(child))
+    (child > 0).then_some(child)
 }
 
 #[cfg(not(unix))]
@@ -625,23 +718,32 @@ fn foreground_process_id(_pty: &Pty) -> Option<u32> {
     None
 }
 
-#[cfg(unix)]
-fn query_terminal_foreground_process(pid: u32) -> Option<u32> {
-    let output = Command::new("ps")
-        .args(["-o", "tpgid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<i32>()
-        .ok()
-        .filter(|process_group| *process_group > 0)
-        .and_then(|process_group| u32::try_from(process_group).ok())
+// Common platforms use native queries on the metadata worker instead of
+// spawning `ps`/`lsof`, keeping probes cheap even with many terminals.
+#[cfg(target_os = "linux")]
+fn query_process_name(pid: u32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = name.trim().trim_start_matches('-');
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
+#[cfg(target_os = "macos")]
+fn query_process_name(pid: u32) -> Option<String> {
+    let mut buffer = [0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length = unsafe {
+        libc::proc_name(
+            pid as libc::c_int,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    let length = usize::try_from(length).ok()?.min(buffer.len());
+    let name = String::from_utf8_lossy(&buffer[..length]);
+    let name = name.trim_end_matches('\0').trim().trim_start_matches('-');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn query_process_name(pid: u32) -> Option<String> {
     let output = Command::new("ps")
         .args(["-o", "comm=", "-p", &pid.to_string()])
@@ -655,44 +757,86 @@ fn query_process_name(pid: u32) -> Option<String> {
     (!name.is_empty()).then(|| name.to_owned())
 }
 
+#[cfg(target_os = "linux")]
 fn query_process_cwd(pid: u32) -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        return std::fs::read_link(format!("/proc/{pid}/cwd"))
-            .ok()
-            .map(|path| path.display().to_string());
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("lsof")
-            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix('n'))
-            .filter(|path| !path.is_empty())
-            .map(ToOwned::to_owned)
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let _ = pid;
-        None
-    }
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|path| path.display().to_string())
 }
 
-fn refresh_process_metadata(
+#[cfg(target_os = "macos")]
+fn query_process_cwd(pid: u32) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let info_size = std::mem::size_of::<libc::proc_vnodepathinfo>();
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            info_size as libc::c_int,
+        )
+    };
+    if bytes < info_size as libc::c_int {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    let path = info
+        .pvi_cdir
+        .vip_path
+        .iter()
+        .flatten()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .map(|byte| byte as u8)
+        .collect::<Vec<_>>();
+    let path = String::from_utf8_lossy(&path);
+    (!path.is_empty()).then(|| path.into_owned())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn query_process_cwd(_pid: u32) -> Option<String> {
+    None
+}
+
+fn request_process_metadata_refresh(
+    executor: &ProcessMetadataExecutor,
     pty: &Pty,
-    fallback_process_name: &str,
-    fallback_cwd: &Path,
+    fallback: Arc<ProcessMetadataFallback>,
+    result_tx: &Sender<ProcessMetadata>,
+    wakeup: &WakeupCallback,
+    in_flight: &mut bool,
+) -> bool {
+    if *in_flight {
+        return false;
+    }
+    let request = ProcessMetadataRequest {
+        pid: foreground_process_id(pty),
+        fallback,
+        result_tx: result_tx.clone(),
+        wakeup: wakeup.clone(),
+    };
+    if !executor.request(request) {
+        return false;
+    }
+    *in_flight = true;
+    true
+}
+
+fn apply_process_metadata_result(
+    result_rx: &Receiver<ProcessMetadata>,
+    in_flight: &mut bool,
     current: &mut ProcessMetadata,
 ) -> bool {
-    let next = query_process_metadata(pty, fallback_process_name, fallback_cwd);
+    let next = match result_rx.try_recv() {
+        Ok(next) => next,
+        Err(TryRecvError::Empty) => return false,
+        Err(TryRecvError::Disconnected) => {
+            *in_flight = false;
+            return false;
+        }
+    };
+    *in_flight = false;
     if next == *current {
         return false;
     }
@@ -761,12 +905,30 @@ fn drain_pty(
     read_buffer: &mut [u8],
     output_buffer: &mut Vec<u8>,
 ) -> io::Result<ReadEffect> {
+    drain_reader(pty.reader(), processor, term, read_buffer, output_buffer)
+}
+
+fn drain_reader<R: Read + ?Sized>(
+    reader: &mut R,
+    processor: &mut Processor,
+    term: &mut Term<WorkerEventProxy>,
+    read_buffer: &mut [u8],
+    output_buffer: &mut Vec<u8>,
+) -> io::Result<ReadEffect> {
+    let started = Instant::now();
+    let mut bytes_this_tick = 0_usize;
     loop {
-        match pty.reader().read(read_buffer) {
+        match reader.read(read_buffer) {
             Ok(0) => return Ok(ReadEffect::Eof),
             Ok(bytes_read) => {
                 output_buffer.extend_from_slice(&read_buffer[..bytes_read]);
                 processor.advance(term, &read_buffer[..bytes_read]);
+                bytes_this_tick = bytes_this_tick.saturating_add(bytes_read);
+                if bytes_this_tick >= MAX_PTY_BYTES_PER_TICK
+                    || started.elapsed() >= MAX_PTY_DRAIN_TIME
+                {
+                    return Ok(ReadEffect::BudgetExhausted);
+                }
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(ReadEffect::Continue),
             Err(error) => return Err(error),
@@ -838,16 +1000,18 @@ fn publish_snapshot(
     );
     snapshot.process_name = metadata.process_name.clone();
     snapshot.cwd = metadata.cwd.clone();
-    publisher
+    if publisher
         .registry
-        .publish(publisher.terminal_id, snapshot, output);
-    emit_manager_event(
-        publisher.event_tx,
-        publisher.event_wakeup,
-        TerminalManagerEvent::OutputChanged {
-            terminal_id: publisher.terminal_id,
-        },
-    );
+        .publish(publisher.terminal_id, snapshot, output)
+    {
+        emit_manager_event(
+            publisher.event_tx,
+            publisher.event_wakeup,
+            TerminalManagerEvent::OutputChanged {
+                terminal_id: publisher.terminal_id,
+            },
+        );
+    }
 }
 
 fn emit_manager_event(
@@ -910,6 +1074,87 @@ mod tests {
             &size,
             WorkerEventProxy { sender },
         )
+    }
+
+    #[test]
+    fn process_metadata_query_does_not_block_the_requesting_worker() {
+        let (query_started_tx, query_started_rx) = mpsc::channel();
+        let (query_release_tx, query_release_rx) = mpsc::channel();
+        let executor = ProcessMetadataExecutor::new_with_query(move |_pid, fallback| {
+            query_started_tx.send(()).unwrap();
+            query_release_rx.recv().unwrap();
+            ProcessMetadata::from_fallback(fallback)
+        });
+        let fallback = Arc::new(ProcessMetadataFallback {
+            process_name: "fallback".to_owned(),
+            cwd: std::env::current_dir().unwrap(),
+        });
+        let (result_tx, result_rx) = mpsc::channel();
+        let (wakeup_tx, wakeup_rx) = mpsc::channel();
+        let wakeup: WakeupCallback = Arc::new(move || {
+            let _ = wakeup_tx.send(());
+        });
+        let (request_done_tx, request_done_rx) = mpsc::channel();
+        let requester = std::thread::spawn(move || {
+            let accepted = executor.request(ProcessMetadataRequest {
+                pid: None,
+                fallback,
+                result_tx,
+                wakeup,
+            });
+            request_done_tx.send(accepted).unwrap();
+        });
+
+        query_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let accepted = request_done_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap_or_else(|error| {
+                let _ = query_release_tx.send(());
+                panic!("metadata request blocked behind its query: {error}");
+            });
+        assert!(accepted);
+        assert!(matches!(result_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        query_release_tx.send(()).unwrap();
+        let metadata = result_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        wakeup_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        requester.join().unwrap();
+
+        assert_eq!(metadata.process_name, "fallback");
+        assert!(!metadata.cwd.is_empty());
+    }
+
+    struct EndlessReader;
+
+    impl Read for EndlessReader {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            buffer.fill(b'x');
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn sustained_output_yields_after_the_read_budget() {
+        let mut reader = EndlessReader;
+        let mut term = test_term(TerminalSize::new(80, 24), 100);
+        let mut processor = Processor::new();
+        let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
+        let mut output = Vec::new();
+
+        let effect = drain_reader(
+            &mut reader,
+            &mut processor,
+            &mut term,
+            &mut read_buffer,
+            &mut output,
+        )
+        .unwrap();
+
+        assert_eq!(effect, ReadEffect::BudgetExhausted);
+        assert!(!output.is_empty());
+        assert!(output.len() <= MAX_PTY_BYTES_PER_TICK);
     }
 
     #[test]
