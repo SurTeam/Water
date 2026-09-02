@@ -1445,10 +1445,16 @@ mod tests {
         let second_tab_operation =
             dispatcher.dispatch(AppCommand::Tab(TabCommand::New { title: None }));
         assert_eq!(
-            dispatcher.wait_operation(second_tab_operation).unwrap().status,
+            dispatcher
+                .wait_operation(second_tab_operation)
+                .unwrap()
+                .status,
             OperationStatus::Succeeded
         );
-        assert_ne!(dispatcher.state_dump().active_workspace, Some(first_workspace));
+        assert_ne!(
+            dispatcher.state_dump().active_workspace,
+            Some(first_workspace)
+        );
 
         let focus_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Focus {
             pane_id: Some(first_pane),
@@ -1458,7 +1464,9 @@ mod tests {
         assert_eq!(focus_result.status, OperationStatus::Succeeded);
         assert_eq!(
             focus_result.result,
-            Some(OperationResult::PaneFocused { pane_id: right_pane })
+            Some(OperationResult::PaneFocused {
+                pane_id: right_pane
+            })
         );
         let state = dispatcher.state_dump();
         assert_eq!(state.active_workspace, Some(first_workspace));
