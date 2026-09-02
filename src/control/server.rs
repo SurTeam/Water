@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 
 use crate::app::CommandClient;
 use crate::command::DispatchError;
+use crate::ui::UiControlClient;
 
 use super::protocol::{
     PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, read_frame, write_frame,
@@ -46,6 +47,22 @@ impl Drop for ControlServerHandle {
 #[cfg(unix)]
 impl ControlServer {
     pub fn start(socket_path: PathBuf, client: CommandClient) -> io::Result<ControlServerHandle> {
+        Self::start_internal(socket_path, client, None)
+    }
+
+    pub fn start_with_ui(
+        socket_path: PathBuf,
+        client: CommandClient,
+        ui_client: UiControlClient,
+    ) -> io::Result<ControlServerHandle> {
+        Self::start_internal(socket_path, client, Some(ui_client))
+    }
+
+    fn start_internal(
+        socket_path: PathBuf,
+        client: CommandClient,
+        ui_client: Option<UiControlClient>,
+    ) -> io::Result<ControlServerHandle> {
         if socket_path.exists() {
             std::fs::remove_file(&socket_path)?;
         }
@@ -72,7 +89,7 @@ impl ControlServer {
                             if server_stop.load(Ordering::Acquire) {
                                 break;
                             }
-                            handle_connection(&mut stream, &client);
+                            handle_connection(&mut stream, &client, ui_client.as_ref());
                         }
                         Err(error) => {
                             tracing::warn!(
@@ -103,10 +120,25 @@ impl ControlServer {
             "Unix domain sockets are not available on this platform yet",
         ))
     }
+
+    pub fn start_with_ui(
+        _socket_path: PathBuf,
+        _client: CommandClient,
+        _ui_client: UiControlClient,
+    ) -> io::Result<ControlServerHandle> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Unix domain sockets are not available on this platform yet",
+        ))
+    }
 }
 
 #[cfg(unix)]
-fn handle_connection(stream: &mut std::os::unix::net::UnixStream, client: &CommandClient) {
+fn handle_connection(
+    stream: &mut std::os::unix::net::UnixStream,
+    client: &CommandClient,
+    ui_client: Option<&UiControlClient>,
+) {
     loop {
         let request = match read_frame::<_, RpcRequest>(stream) {
             Ok(request) => request,
@@ -118,7 +150,7 @@ fn handle_connection(stream: &mut std::os::unix::net::UnixStream, client: &Comma
                 break;
             }
         };
-        let response = handle_request(request, client);
+        let response = handle_request(request, client, ui_client);
         if write_frame(stream, &response).is_err() {
             break;
         }
@@ -126,7 +158,11 @@ fn handle_connection(stream: &mut std::os::unix::net::UnixStream, client: &Comma
 }
 
 #[cfg(unix)]
-fn handle_request(request: RpcRequest, client: &CommandClient) -> RpcResponse {
+fn handle_request(
+    request: RpcRequest,
+    client: &CommandClient,
+    ui_client: Option<&UiControlClient>,
+) -> RpcResponse {
     if request.protocol_version != PROTOCOL_VERSION {
         return RpcResponse::failure(
             request.request_id,
@@ -202,6 +238,38 @@ fn handle_request(request: RpcRequest, client: &CommandClient) -> RpcResponse {
                 Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
             }
         }
+        RpcMethod::UiKeystroke { keystroke } => match ui_client {
+            Some(ui_client) => match ui_client.dispatch_keystroke(keystroke) {
+                Ok(result) => RpcResponse::success(request.request_id, &result),
+                Err(error) => RpcResponse::failure(
+                    request.request_id,
+                    RpcError::new("UI_AUTOMATION_FAILED", error),
+                ),
+            },
+            None => RpcResponse::failure(
+                request.request_id,
+                RpcError::new(
+                    "UI_AUTOMATION_UNAVAILABLE",
+                    "UI automation is not installed",
+                ),
+            ),
+        },
+        RpcMethod::UiSnapshot => match ui_client {
+            Some(ui_client) => match ui_client.snapshot() {
+                Ok(snapshot) => RpcResponse::success(request.request_id, &snapshot),
+                Err(error) => RpcResponse::failure(
+                    request.request_id,
+                    RpcError::new("UI_AUTOMATION_FAILED", error),
+                ),
+            },
+            None => RpcResponse::failure(
+                request.request_id,
+                RpcError::new(
+                    "UI_AUTOMATION_UNAVAILABLE",
+                    "UI automation is not installed",
+                ),
+            ),
+        },
         RpcMethod::Ping => RpcResponse::success(
             request.request_id,
             &PingResponse {

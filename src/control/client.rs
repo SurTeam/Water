@@ -11,6 +11,7 @@ use crate::command::{AppCommand, OperationSnapshot};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::TerminalSnapshot;
+use crate::ui::{UiKeystrokeResult, UiSnapshot};
 
 use super::protocol::{
     PROTOCOL_VERSION, RpcMethod, RpcRequest, RpcResponse, read_frame, write_frame,
@@ -122,6 +123,19 @@ impl ControlClient {
         terminal_id: TerminalId,
     ) -> Result<TerminalSnapshot, ControlClientError> {
         self.call(RpcMethod::TerminalSnapshot { terminal_id })
+    }
+
+    pub fn ui_keystroke(
+        &self,
+        keystroke: impl Into<String>,
+    ) -> Result<UiKeystrokeResult, ControlClientError> {
+        self.call(RpcMethod::UiKeystroke {
+            keystroke: keystroke.into(),
+        })
+    }
+
+    pub fn ui_snapshot(&self) -> Result<UiSnapshot, ControlClientError> {
+        self.call(RpcMethod::UiSnapshot)
     }
 
     pub fn ping(&self) -> Result<(), ControlClientError> {
@@ -237,6 +251,17 @@ impl ControlClient {
         &self,
         _terminal_id: TerminalId,
     ) -> Result<TerminalSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
+    pub fn ui_keystroke(
+        &self,
+        _keystroke: impl Into<String>,
+    ) -> Result<UiKeystrokeResult, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
+    pub fn ui_snapshot(&self) -> Result<UiSnapshot, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 

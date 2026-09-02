@@ -6,13 +6,12 @@ use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
     FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, Task, TextAlign, TextInputConfiguration, TextRun, UTF16Selection,
-    UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, relative, rgb,
-    size,
+    StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, UTF16Selection, UnderlineStyle,
+    Window, canvas, div, fill, font, outline, point, prelude::*, px, relative, rgb, size,
 };
 
 use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
-use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
+use crate::app::{CommandClient, ModelSnapshot};
 use crate::command::{
     AppCommand, FocusDirection, PaneCommand, SplitDirection, TabCommand, TerminalCommand,
     WorkspaceCommand,
@@ -22,6 +21,10 @@ use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
 use crate::terminal::{TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
+
+use super::application::{
+    HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, SplitDown, SplitRight,
+};
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -457,6 +460,22 @@ impl WorkspaceView {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
+    }
+
+    pub(crate) fn new_terminal_tab(&mut self, cx: &mut Context<Self>) {
+        self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+    }
+
+    pub(crate) fn split_active_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+        if let Some(pane_id) = self.focused_pane {
+            self.dispatch(
+                AppCommand::Pane(PaneCommand::Split {
+                    pane_id: Some(pane_id),
+                    direction,
+                }),
+                cx,
+            );
+        }
     }
 
     fn update_sidebar_width(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
@@ -970,7 +989,7 @@ impl WorkspaceView {
                     return;
                 }
                 ("t", false) => {
-                    self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+                    self.new_terminal_tab(cx);
                     return;
                 }
                 ("t", true) => {
@@ -1021,27 +1040,11 @@ impl WorkspaceView {
                     return;
                 }
                 ("\\", false) => {
-                    if let Some(focused_pane) = self.focused_pane {
-                        self.dispatch(
-                            AppCommand::Pane(PaneCommand::Split {
-                                pane_id: Some(focused_pane),
-                                direction: SplitDirection::Right,
-                            }),
-                            cx,
-                        );
-                    }
+                    self.split_active_pane(SplitDirection::Right, cx);
                     return;
                 }
                 ("-", false) => {
-                    if let Some(focused_pane) = self.focused_pane {
-                        self.dispatch(
-                            AppCommand::Pane(PaneCommand::Split {
-                                pane_id: Some(focused_pane),
-                                direction: SplitDirection::Down,
-                            }),
-                            cx,
-                        );
-                    }
+                    self.split_active_pane(SplitDirection::Down, cx);
                     return;
                 }
                 ("v", false) => {
@@ -1160,7 +1163,7 @@ impl WorkspaceView {
         .detach();
     }
 
-    fn install_snapshot(&mut self, snapshot: ModelSnapshot, cx: &mut Context<Self>) {
+    pub(crate) fn install_snapshot(&mut self, snapshot: ModelSnapshot, cx: &mut Context<Self>) {
         if snapshot.state_revision <= self.snapshot.state_revision {
             return;
         }
@@ -1588,6 +1591,7 @@ impl WorkspaceView {
         self.render_pane_tree_with_grow(tree, 1.0, window_active, metrics, theme, view, cx)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_pane_tree_with_grow(
         &self,
         tree: &PaneTreeDump,
@@ -2492,9 +2496,8 @@ fn terminal_mouse_position(
         >= terminal_snap_to_device_pixel(f32::from(bounds.right()), metrics.scale_factor)
         || position_y
             >= terminal_snap_to_device_pixel(f32::from(bounds.bottom()), metrics.scale_factor)
+        || column_side == TerminalSelectionSide::Right
     {
-        TerminalSelectionSide::Right
-    } else if column_side == TerminalSelectionSide::Right {
         TerminalSelectionSide::Right
     } else {
         TerminalSelectionSide::Left
@@ -2810,6 +2813,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
     text
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_terminal_snapshot(
     snapshot: &TerminalSnapshot,
     selection: Option<TerminalSelection>,
@@ -3225,7 +3229,7 @@ fn terminal_row_data(
                 color: Some(color),
             }),
         };
-        let requires_cell_scaling = character.chars().any(|character| !character.is_ascii());
+        let requires_cell_scaling = !character.is_ascii();
         let text_cell = TerminalTextCell {
             text: character.clone(),
             run: run.clone(),
@@ -3549,9 +3553,39 @@ impl Render for WorkspaceView {
             self.render_sidebar(theme, cx)
         };
 
+        let action_view = cx.entity();
         div()
             .size_full()
             .flex()
+            .on_action(|_: &HideWindow, window, _cx| {
+                window.remove_window();
+            })
+            .on_action(|_: &MinimizeWindow, window, _cx| {
+                window.minimize_window();
+            })
+            .on_action(|_: &IgnoreQuit, _window, _cx| {})
+            .on_action({
+                let view = action_view.clone();
+                move |_: &NewTerminalTab, _window, cx| {
+                    view.update(cx, |workspace, cx| workspace.new_terminal_tab(cx));
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &SplitRight, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        workspace.split_active_pane(SplitDirection::Right, cx);
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view;
+                move |_: &SplitDown, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        workspace.split_active_pane(SplitDirection::Down, cx);
+                    });
+                }
+            })
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key_down(event, cx);
@@ -3562,32 +3596,6 @@ impl Render for WorkspaceView {
             .child(sidebar)
             .child(content)
     }
-}
-
-/// Bridges the model thread's change-only snapshot stream into the GPUI entity.
-/// The channel receive blocks only inside GPUI's background executor; the UI
-/// thread is resumed only when a new model revision exists.
-pub fn spawn_snapshot_listener(
-    cx: &mut App,
-    entity: Entity<WorkspaceView>,
-    receiver: ModelSnapshotReceiver,
-) -> Task<()> {
-    let receiver = Arc::new(receiver);
-    cx.spawn(async move |cx| {
-        loop {
-            let receiver_for_worker = receiver.clone();
-            let snapshot = cx
-                .background_executor()
-                .spawn(async move { receiver_for_worker.recv().ok() })
-                .await;
-            let Some(snapshot) = snapshot else {
-                break;
-            };
-            entity.update(cx, |view, cx| {
-                view.install_snapshot(snapshot, cx);
-            });
-        }
-    })
 }
 
 #[allow(dead_code)]
@@ -3948,7 +3956,10 @@ mod tests {
         assert_eq!(utf16_offset_to_byte(text, 3), 4);
         assert_eq!(utf16_offset_to_byte(text, 4), text.len());
         assert_eq!(normalize_utf16_range(0..99, 4), 0..4);
-        assert_eq!(normalize_utf16_range(3..1, 4), 1..1);
+        assert_eq!(
+            normalize_utf16_range(std::ops::Range { start: 3, end: 1 }, 4),
+            1..1
+        );
     }
 
     #[gpui::test]

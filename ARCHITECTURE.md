@@ -38,15 +38,19 @@ The API checklist verified at the pin is:
 | Need | GPUI surface | Phase 1 use |
 |---|---|---|
 | Startup/platform | `gpui_platform::application().run` | macOS Metal application loop |
-| Window | `App::open_window(WindowOptions, build_root_view)` | one native window |
+| Window | `App::open_window(WindowOptions, build_root_view)` | one or more native windows sharing the same model projection |
 | Entity/view | `AppContext::new` -> `Entity<T>` | `WorkspaceView` root entity |
 | Render | `Render::render(&mut self, &mut Window, &mut Context<Self>)` | projection of `ModelSnapshot` |
 | Input/focus | `MouseDownEvent`, `MouseMoveEvent`, `MouseUpEvent`, `KeyDownEvent`, `cx.listener`, `FocusHandle`/`Focusable` APIs | terminal focus, keyboard PTY routing, split shortcuts, selection, and mouse reporting |
-| Async/background | `App::spawn`, `AsyncApp`, `background_executor()` | snapshot listener blocks only off the UI thread |
+| Async/background | `App::spawn`, `AsyncApp`, `background_executor()` | the single model snapshot receiver blocks off the UI thread, then fans each latest projection out to weak window-view handles |
 | Layout/text | `div`, flex/layout methods, `SharedString`, element children | tab bar and recursive pane projection |
 | Testing | `#[gpui::test]`, `TestAppContext::add_window`, `run_until_parked` | focused terminal keyboard and split-shortcut view tests; domain/control tests remain headless |
 
 The current upstream examples explicitly use `AppContext` for `cx.new`, `cx.open_window`, `cx.activate(true)`, and `cx.listener`/mouse event handlers. We do not rely on a crates.io version that can drift from the pinned examples.
+
+`WaterApplication` owns native-window/menu lifecycle only. `Cmd-N` creates another `WorkspaceView`, while each view keeps its own focus, selection, IME, and layout transients. A GPUI-side latest-snapshot fan-out updates every live weak view handle; it does not own or mutate `ApplicationModel`. Window-local actions are installed on the focused `WorkspaceView` root so `Cmd-W`, `Cmd-M`, terminal-tab creation, and split actions receive the correct `Window` instead of depending on `App::active_window()`. `Cmd-Q` is both bound to a no-op focused action and consumed by an application keystroke interceptor. `QuitMode::Explicit` keeps the model and PTYs alive when the last window is hidden.
+
+The control socket exposes `ui.keystroke` and `ui.snapshot` as running-application test interfaces. UI requests cross a dedicated channel to the GPUI thread; synthetic keys are dispatched through `Window::dispatch_keystroke`, not translated into direct model mutation. Pane input remains `TerminalCommand::SendText` through the normal dispatcher path, while `waterctl pane content` resolves the pane's terminal snapshot and returns an exact viewport cell range. The macOS bundle is assembled by `scripts/build-macos-app.sh` from the release binary, `assets/macos/Info.plist`, and the Water-owned `.icns` resource.
 
 ## Ownership and data flow
 
@@ -94,7 +98,7 @@ Phase 2 adds a dedicated terminal runtime without changing the single applicatio
                                ▲
                                │ AppCommand
                                │
-                         GPUI WorkspaceView
+                 GPUI WaterApplication / WorkspaceViews
 ```
 
 The model thread is the sole owner of mutable application state. The socket thread and GPUI thread use handles/channels; neither receives a mutable model reference. The operation registry uses small per-operation synchronization cells, not a global application-state mutex, and retains at most 4,096 completed operations.

@@ -68,6 +68,25 @@ fn terminal_spawn_defaults_to_the_detected_real_shell() {
 }
 
 #[test]
+fn ui_automation_methods_use_stable_wire_names() {
+    let request = RpcRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 8,
+        method: RpcMethod::UiKeystroke {
+            keystroke: "cmd-m".to_owned(),
+        },
+    };
+    let value = serde_json::to_value(&request).expect("UI request serializes");
+    assert_eq!(value["method"], "ui.keystroke");
+    assert_eq!(value["params"]["keystroke"], "cmd-m");
+    let decoded: RpcRequest = serde_json::from_value(value).expect("UI request decodes");
+    assert!(matches!(
+        decoded.method,
+        RpcMethod::UiKeystroke { keystroke } if keystroke == "cmd-m"
+    ));
+}
+
+#[test]
 fn length_prefixed_protocol_round_trips() {
     let request = RpcRequest {
         protocol_version: PROTOCOL_VERSION,

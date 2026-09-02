@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
-use gpui::{App, AppContext, Bounds, Focusable, WindowBounds, WindowOptions, px, size};
+use gpui::App;
 use gpui_platform::application as platform_application;
 
 use water::app::{CommandClient, ModelHost};
@@ -9,7 +9,7 @@ use water::command::{AppCommand, OperationStatus, TabCommand, WorkspaceCommand};
 use water::config::AppConfig;
 use water::control::{ControlServer, default_socket_path};
 
-use water::ui::{WorkspaceView, spawn_snapshot_listener};
+use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
     init_tracing();
@@ -38,33 +38,16 @@ fn main() -> Result<()> {
         .state_dump()
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let snapshot_receiver = model_host.take_snapshot_receiver();
-    let mut control_server = ControlServer::start(startup.socket_path, client.clone())
-        .context("failed to start control socket")?;
-
-    platform_application().run(move |cx: &mut App| {
-        let root = cx.new(|cx| {
-            WorkspaceView::new_with_config(
-                client.clone(),
-                initial_snapshot.clone(),
-                cx.focus_handle(),
-                config.clone(),
-            )
-        });
-        let focus_handle = root.read(cx).focus_handle(cx);
-        spawn_snapshot_listener(cx, root.clone(), snapshot_receiver).detach();
-        let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            move |window, cx| {
-                window.focus(&focus_handle, cx);
-                root
-            },
-        )
-        .expect("failed to open water window");
-        cx.activate(true);
+    let (ui_control_client, ui_control_receiver) = ui_control_channel();
+    let mut control_server =
+        ControlServer::start_with_ui(startup.socket_path, client.clone(), ui_control_client)
+            .context("failed to start control socket")?;
+    let ui_application = WaterApplication::new(client, initial_snapshot, config);
+    let reopen_application = ui_application.clone();
+    let application = platform_application();
+    application.on_reopen(move |cx| reopen_application.reopen(cx));
+    application.run(move |cx: &mut App| {
+        ui_application.install(cx, snapshot_receiver, ui_control_receiver);
     });
 
     control_server.shutdown();

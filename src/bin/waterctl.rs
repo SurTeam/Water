@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use water::app::model::{PaneTreeDump, StateDump};
 use water::automation::{ControlBackend, Scenario, ScenarioRunner};
 use water::command::{
     AppCommand, FocusDirection, OperationStatus, PaneCommand, SplitDirection, SurfaceCommand,
@@ -10,7 +11,7 @@ use water::command::{
 };
 use water::control::{ControlClient, default_socket_path};
 use water::ids::{PaneId, TabId, TerminalId, WorkspaceId};
-use water::surface::SurfaceKind;
+use water::surface::{SurfaceKind, SurfaceState};
 use water::terminal::{default_shell_args, default_shell_program};
 
 fn main() -> Result<()> {
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
             println!("pong");
         }
         "state" => print_json(&client.state_dump().context("state request failed")?)?,
+        "ui" => run_ui(&client, &arguments[1..])?,
         "debug" => run_debug(&client, &arguments[1..])?,
         "workspace" => run_workspace(&client, &arguments[1..])?,
         "tab" => run_tab(&client, &arguments[1..])?,
@@ -38,6 +40,32 @@ fn main() -> Result<()> {
         "scenario" => run_scenario(&client, &arguments[1..])?,
         "--help" | "-h" => print_usage(),
         command => bail!("unknown command: {command}"),
+    }
+    Ok(())
+}
+
+fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        Some("key") | Some("keystroke") => {
+            let keystroke = optional_value(arguments, "--keystroke")?
+                .or_else(|| {
+                    arguments
+                        .get(1)
+                        .filter(|value| !value.starts_with('-'))
+                        .cloned()
+                })
+                .context("ui key requires a keystroke such as cmd-t")?;
+            print_json(
+                &client
+                    .ui_keystroke(keystroke)
+                    .context("UI keystroke failed")?,
+            )?;
+        }
+        Some("state") | Some("snapshot") => {
+            print_json(&client.ui_snapshot().context("UI state request failed")?)?;
+        }
+        Some(command) => bail!("unknown ui command: {command}"),
+        None => bail!("ui requires key or state"),
     }
     Ok(())
 }
@@ -189,6 +217,33 @@ fn run_pane(client: &ControlClient, arguments: &[String]) -> Result<()> {
                 AppCommand::Pane(PaneCommand::Resize { pane_id, ratio }),
             )?;
         }
+        "input" | "send" => {
+            let pane_id = optional_id::<PaneId>(arguments, "--pane")?
+                .or_else(|| bare_id::<PaneId>(&arguments[1..]).ok())
+                .context("pane input requires --pane")?;
+            let text = optional_value(arguments, "--text")?.unwrap_or_else(|| {
+                arguments
+                    .iter()
+                    .skip(1)
+                    .filter(|value| !value.starts_with('-'))
+                    .skip(1)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+            if text.is_empty() {
+                bail!("pane input requires --text")
+            }
+            dispatch_and_print(
+                client,
+                AppCommand::Terminal(TerminalCommand::SendText {
+                    terminal_id: None,
+                    pane_id: Some(pane_id),
+                    text,
+                }),
+            )?;
+        }
+        "content" => print_pane_content(client, arguments)?,
         _ => bail!("unknown pane command: {command}"),
     }
     Ok(())
@@ -357,6 +412,92 @@ fn run_terminal(client: &ControlClient, arguments: &[String]) -> Result<()> {
         _ => bail!("unknown terminal command: {command}"),
     }
     Ok(())
+}
+
+fn print_pane_content(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    let pane_id = optional_id::<PaneId>(arguments, "--pane")?
+        .or_else(|| bare_id::<PaneId>(&arguments[1..]).ok())
+        .context("pane content requires --pane")?;
+    let state = client.state_dump().context("state request failed")?;
+    let terminal_id = terminal_id_for_pane(&state, pane_id)
+        .context("the requested pane does not contain a terminal")?;
+    let snapshot = client
+        .terminal_snapshot(terminal_id)
+        .context("terminal snapshot failed")?;
+    let row = optional_usize(arguments, "--row")?.unwrap_or(0);
+    let column = optional_usize(arguments, "--column")?.unwrap_or(0);
+    let rows = optional_usize(arguments, "--rows")?
+        .unwrap_or_else(|| snapshot.size.lines.saturating_sub(row));
+    let columns = optional_usize(arguments, "--columns")?
+        .unwrap_or_else(|| snapshot.size.columns.saturating_sub(column));
+    let row_end = row.saturating_add(rows).min(snapshot.size.lines);
+    let column_end = column.saturating_add(columns).min(snapshot.size.columns);
+    let mut lines = Vec::with_capacity(row_end.saturating_sub(row));
+    for current_row in row.min(row_end)..row_end {
+        let mut line = String::new();
+        for current_column in column.min(column_end)..column_end {
+            if let Some(cell) = snapshot.cell(current_row, current_column)
+                && !cell.flags.wide_spacer
+                && !cell.flags.leading_wide_spacer
+            {
+                line.push(cell.character);
+                line.extend(cell.zerowidth.iter().copied());
+            }
+        }
+        lines.push(line);
+    }
+    print_json(&PaneContent {
+        pane_id,
+        terminal_id,
+        row,
+        column,
+        rows: row_end.saturating_sub(row),
+        columns: column_end.saturating_sub(column),
+        text: lines.join("\n"),
+        lines,
+    })
+}
+
+fn terminal_id_for_pane(state: &StateDump, pane_id: PaneId) -> Option<TerminalId> {
+    for workspace in &state.workspaces {
+        for tab in &workspace.tabs {
+            if let Some(terminal_id) = terminal_id_in_tree(&tab.tree, pane_id) {
+                return Some(terminal_id);
+            }
+        }
+    }
+    state.workspace.as_ref().and_then(|workspace| {
+        workspace
+            .tabs
+            .iter()
+            .find_map(|tab| terminal_id_in_tree(&tab.tree, pane_id))
+    })
+}
+
+fn terminal_id_in_tree(tree: &PaneTreeDump, pane_id: PaneId) -> Option<TerminalId> {
+    match tree {
+        PaneTreeDump::Leaf {
+            pane_id: leaf_pane_id,
+            surface_state: SurfaceState::Terminal(terminal),
+            ..
+        } if *leaf_pane_id == pane_id => Some(terminal.terminal_id),
+        PaneTreeDump::Leaf { .. } => None,
+        PaneTreeDump::Split { first, second, .. } => {
+            terminal_id_in_tree(first, pane_id).or_else(|| terminal_id_in_tree(second, pane_id))
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PaneContent {
+    pane_id: PaneId,
+    terminal_id: TerminalId,
+    row: usize,
+    column: usize,
+    rows: usize,
+    columns: usize,
+    text: String,
+    lines: Vec<String>,
 }
 
 fn terminal_positional(arguments: &[String]) -> Vec<&str> {
@@ -584,15 +725,19 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "waterctl [--socket PATH] <state|workspace|tab|pane|surface|terminal|operation|scenario|debug> ...\n\n\
+        "waterctl [--socket PATH] <state|ui|workspace|tab|pane|surface|terminal|operation|scenario|debug> ...\n\n\
          Examples:\n\
            waterctl state\n\
+           waterctl ui key cmd-t\n\
+           waterctl ui state\n\
            waterctl workspace new\n\
            waterctl workspace rename --workspace 1 --title Dev\n\
            waterctl tab new --title Main\n\
            waterctl tab rename --tab 2 --title Shell\n\
            waterctl pane split --right\n\
            waterctl pane focus 3\n\
+           waterctl pane input --pane 3 --text 'printf hello\\n'\n\
+           waterctl pane content --pane 3 --row 0 --rows 4 --column 0 --columns 80\n\
            waterctl operation wait 7\n\
            waterctl scenario run tests/scenarios/workspace_basic.json"
     );

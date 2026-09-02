@@ -15,11 +15,22 @@
 cargo run --bin water
 ```
 
-The app starts a local control socket at `/tmp/water.sock` by default and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-l` (login mode). New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
+The app starts a local control socket at `/tmp/water.sock` by default and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-l` (login mode). New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-N` opens another native Water window, `Cmd-W` hides the active window without terminating Water or its workspace state, `Cmd-M` minimizes it, and `Cmd-Q` is intentionally ignored. `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. The same commands are available from the macOS menu bar. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
 
 ```sh
 cargo run --bin water -- --control-socket /tmp/my-water.sock
 ```
+
+## Build a macOS `.app`
+
+On macOS, build the release binary, assemble `dist/Water.app`, install the Water icon, validate the plist, and ad-hoc sign the bundle with:
+
+```sh
+./scripts/build-macos-app.sh
+open dist/Water.app
+```
+
+The editable icon source is [`assets/macos/Water.svg`](assets/macos/Water.svg); the generated bundle resource is [`assets/macos/Water.icns`](assets/macos/Water.icns). For distribution signing, set `CODESIGN_IDENTITY` to a valid Developer ID Application identity before running the script. Notarization remains a separate release step.
 
 ## Application defaults
 
@@ -42,8 +53,15 @@ cp config.example.json "$HOME/Library/Application Support/water/config.json"
 
 ```sh
 cargo run --bin waterctl -- --socket /tmp/water.sock state
+# Dispatch a real GPUI keystroke through the focused native window/action tree.
+cargo run --bin waterctl -- --socket /tmp/water.sock ui key cmd-t
+cargo run --bin waterctl -- --socket /tmp/water.sock ui state
 cargo run --bin waterctl -- --socket /tmp/water.sock tab new       # creates a terminal tab
 cargo run --bin waterctl -- --socket /tmp/water.sock pane split --right  # creates a terminal pane
+# Pane-targeted input still mutates through AppCommand -> CommandDispatcher.
+cargo run --bin waterctl -- --socket /tmp/water.sock pane input --pane PANE_ID --text $'printf "__PANE__\\n"\n'
+# Query an exact viewport cell range without dumping the entire terminal.
+cargo run --bin waterctl -- --socket /tmp/water.sock pane content --pane PANE_ID --row 0 --rows 4 --column 0 --columns 80
 cargo run --bin waterctl -- --socket /tmp/water.sock debug memory
 cargo run --bin waterctl -- --socket /tmp/water.sock terminal spawn /bin/sh -c 'printf "__READY__\\n"'
 # Use the returned terminal ID for direct inspection or waits.
@@ -57,6 +75,14 @@ cargo run --bin waterctl -- --socket /tmp/water.sock terminal snapshot --termina
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
+./scripts/build-macos-app.sh
+# Real-app smoke setup: start the bundled executable on a dedicated socket, then
+# drive Cmd-N/W/M/Q, terminal shortcuts, pane input, and pane range queries via waterctl.
+dist/Water.app/Contents/MacOS/water --control-socket /tmp/water-e2e.sock
+cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-n
+cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-m
+cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-w
+cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-q
 # Start this in a separate terminal with --empty-workspace for the scenario baseline.
 cargo run --bin water -- --control-socket /tmp/water.sock --empty-workspace
 cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/workspace_basic.json
@@ -64,5 +90,7 @@ cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenario
 cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_basic.json
 cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_zsh.json
 ```
+
+`ui key` is a running-application test interface: the control thread hands the keystroke to the GPUI thread, which calls `Window::dispatch_keystroke` against the active/frontmost Water window. It therefore exercises the actual keymap and focused element action handlers instead of directly invoking model commands. `pane input` targets a pane through `TerminalCommand::SendText`, and `pane content` returns the requested viewport row/column range.
 
 The scenario runner waits on operation completion, terminal output, and process exit primitives. It does not use fixed sleeps, coordinates, or screenshots. When a terminal process exits, Water automatically closes its pane; if it was the tab's final pane, the tab is closed as well. The completed terminal snapshot remains available through bounded wait/query state so exit observers are not raced by the UI cleanup.
