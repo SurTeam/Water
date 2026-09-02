@@ -25,7 +25,7 @@
   "terminal": {
     "scrollback_lines": 10000,
     "max_total_scrollback_lines": 100000,
-    "font_family": "Menlo",
+    "font_family": "Sarasa Term SC Nerd Font",
     "font_size": 14.0,
     "line_height": 18.0
   }

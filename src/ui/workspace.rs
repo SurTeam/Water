@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
-    FontWeight, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    Point, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, font,
-    prelude::*, px, rgb,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
+    FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
+    StrikethroughStyle, Task, TextAlign, TextInputConfiguration, TextRun, UTF16Selection,
+    UnderlineStyle, Window, canvas, div, fill, font, outline, point, prelude::*, px, relative, rgb,
+    size,
 };
 
 use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
@@ -18,9 +21,7 @@ use crate::config::{AppConfig, ThemeColors};
 use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
-use crate::terminal::{
-    TerminalCellFlags, TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot,
-};
+use crate::terminal::{TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
@@ -34,6 +35,7 @@ const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 struct TerminalMetrics {
     cell_width: f32,
     line_height: f32,
+    scale_factor: f32,
 }
 
 impl Default for TerminalMetrics {
@@ -41,6 +43,7 @@ impl Default for TerminalMetrics {
         Self {
             cell_width: DEFAULT_TERMINAL_CELL_WIDTH,
             line_height: DEFAULT_TERMINAL_LINE_HEIGHT,
+            scale_factor: 1.0,
         }
     }
 }
@@ -107,10 +110,261 @@ struct TerminalRenderOptions {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct TerminalRunStyle {
-    metrics: TerminalMetrics,
-    theme: ThemeColors,
-    cursor_hollow: bool,
+struct TerminalBackgroundSpan {
+    start_column: usize,
+    width_columns: usize,
+    color: u32,
+}
+
+struct TerminalTextChunk {
+    start_column: usize,
+    width_columns: usize,
+    text: String,
+    runs: Vec<TextRun>,
+}
+
+struct TerminalTextPaint {
+    start_column: usize,
+    line: ShapedLine,
+}
+
+struct TerminalRowPaint {
+    text: Vec<TerminalTextPaint>,
+    backgrounds: Vec<TerminalBackgroundSpan>,
+}
+
+struct TerminalPrepaintState {
+    rows: Vec<TerminalRowPaint>,
+    ime_line: Option<(ShapedLine, usize, usize)>,
+}
+
+struct TerminalRenderElement {
+    snapshot: TerminalSnapshot,
+    selection: Option<TerminalSelection>,
+    options: TerminalRenderOptions,
+    font_family: String,
+    font_size: f32,
+    ime_text: Option<String>,
+    terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    input_handler: Option<(Entity<WorkspaceView>, FocusHandle)>,
+}
+
+struct TerminalInputHandler {
+    view: Entity<WorkspaceView>,
+    terminal_id: TerminalId,
+    element_bounds: Bounds<gpui::Pixels>,
+    cursor: (usize, usize),
+}
+
+impl TerminalInputHandler {
+    fn update_view<R>(
+        &self,
+        cx: &mut App,
+        update: impl FnOnce(&mut WorkspaceView, &mut Context<WorkspaceView>) -> R,
+    ) -> R {
+        let fallback_terminal_id = self.terminal_id;
+        self.view.update(cx, |view, cx| {
+            let terminal_id = view.active_terminal_id().unwrap_or(fallback_terminal_id);
+            view.ime_terminal = Some(terminal_id);
+            update(view, cx)
+        })
+    }
+}
+
+impl InputHandler for TerminalInputHandler {
+    fn selected_text_range(
+        &mut self,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<UTF16Selection> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::selected_text_range(
+                view,
+                ignore_disabled_input,
+                window,
+                cx,
+            )
+        })
+    }
+
+    fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::marked_text_range(view, window, cx)
+        })
+    }
+
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<String> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::text_for_range(
+                view,
+                range_utf16,
+                adjusted_range,
+                window,
+                cx,
+            )
+        })
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::replace_text_in_range(
+                view,
+                replacement_range,
+                text,
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::replace_and_mark_text_in_range(
+                view,
+                range_utf16,
+                new_text,
+                new_selected_range,
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::unmark_text(view, window, cx)
+        });
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        let element_bounds = self.element_bounds;
+        let fallback_terminal_id = self.terminal_id;
+        let fallback_cursor = self.cursor;
+        self.update_view(cx, |view, _cx| {
+            let terminal_id = view.active_terminal_id().unwrap_or(fallback_terminal_id);
+            let bounds = view
+                .terminal_bounds_for(terminal_id)
+                .unwrap_or(element_bounds);
+            let (cursor, width_columns) = view
+                .terminal_snapshot_for(terminal_id)
+                .map(|snapshot| {
+                    let cursor = terminal_cursor_position(snapshot);
+                    let width_columns = snapshot
+                        .cell(cursor.0, cursor.1)
+                        .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                        .unwrap_or(1);
+                    (cursor, width_columns)
+                })
+                .unwrap_or((fallback_cursor, 1));
+            Some(terminal_cell_bounds(
+                bounds,
+                view.terminal_metrics,
+                cursor.0,
+                cursor.1,
+                width_columns,
+            ))
+        })
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<gpui::Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<usize> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::character_index_for_point(
+                view, point, window, cx,
+            )
+        })
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::set_selected_text_range(
+                view,
+                range_utf16,
+                window,
+                cx,
+            )
+        });
+    }
+
+    fn element_bounds(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        Some(self.element_bounds)
+    }
+
+    fn text_length_utf16(&mut self, window: &mut Window, cx: &mut App) -> Option<usize> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::text_length_utf16(view, window, cx)
+        })
+    }
+
+    fn apple_press_and_hold_enabled(&mut self) -> bool {
+        false
+    }
+
+    fn accepts_text_input(&mut self, _window: &mut Window, cx: &mut App) -> bool {
+        let view = self.view.read(cx);
+        view.active_terminal_id().is_some() || view.ime_terminal == Some(self.terminal_id)
+    }
+
+    fn prefers_ime_for_printable_keys(&mut self, _window: &mut Window, cx: &mut App) -> bool {
+        let view = self.view.read(cx);
+        view.active_terminal_id().is_some() || view.ime_terminal == Some(self.terminal_id)
+    }
+
+    fn text_input_configuration(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> TextInputConfiguration {
+        TextInputConfiguration::default()
+    }
+
+    fn text_input_editable_range(
+        &mut self,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Range<usize>> {
+        self.update_view(cx, |view, cx| {
+            <WorkspaceView as EntityInputHandler>::text_input_editable_range(view, window, cx)
+        })
+    }
 }
 
 pub struct WorkspaceView {
@@ -121,8 +375,12 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     resize_requests: Arc<Mutex<BTreeMap<TerminalId, TerminalSize>>>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    input_handler_terminal: Option<TerminalId>,
     focused_pane: Option<PaneId>,
     selection: Option<TerminalSelection>,
+    ime_terminal: Option<TerminalId>,
+    ime_marked_text: String,
+    ime_selected_range: Range<usize>,
     dragging_terminal: Option<TerminalId>,
     reported_mouse: Option<(TerminalId, MouseButton)>,
     last_reported_mouse_cell: Option<(TerminalId, TerminalCellPosition)>,
@@ -153,8 +411,12 @@ impl WorkspaceView {
             focus_handle,
             resize_requests: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_bounds: Arc::new(Mutex::new(BTreeMap::new())),
+            input_handler_terminal: None,
             focused_pane,
             selection: None,
+            ime_terminal: None,
+            ime_marked_text: String::new(),
+            ime_selected_range: 0..0,
             dragging_terminal: None,
             reported_mouse: None,
             last_reported_mouse_cell: None,
@@ -306,6 +568,7 @@ impl WorkspaceView {
         TerminalMetrics {
             cell_width,
             line_height: self.config.terminal.line_height,
+            scale_factor: window.scale_factor(),
         }
     }
 
@@ -334,6 +597,22 @@ impl WorkspaceView {
         let active_tab_id = workspace.active_tab?;
         let tab = workspace.tabs.iter().find(|tab| tab.id == active_tab_id)?;
         terminal_snapshot_for_pane(&tab.tree, focused_pane)
+    }
+
+    fn ime_marked_text_for(&self, terminal_id: TerminalId) -> Option<String> {
+        (self.ime_terminal == Some(terminal_id) && !self.ime_marked_text.is_empty())
+            .then(|| self.ime_marked_text.clone())
+    }
+
+    fn clear_ime(&mut self) {
+        self.ime_terminal = None;
+        self.ime_marked_text.clear();
+        self.ime_selected_range = 0..0;
+    }
+
+    fn reset_ime_marked_text(&mut self) {
+        self.ime_marked_text.clear();
+        self.ime_selected_range = 0..0;
     }
 
     fn terminal_id_for_pane(&self, pane_id: PaneId) -> Option<TerminalId> {
@@ -431,6 +710,7 @@ impl WorkspaceView {
         ) else {
             return false;
         };
+        self.reset_ime_marked_text();
         self.enqueue_terminal_command(
             terminal_id,
             TerminalCommand::SendBytes {
@@ -459,6 +739,7 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        self.clear_ime();
         self.selection = Some(TerminalSelection {
             terminal_id,
             anchor: endpoint,
@@ -606,21 +887,14 @@ impl WorkspaceView {
     ) -> AnyElement {
         let client = self.client.clone();
         let resize_requests = self.resize_requests.clone();
-        let terminal_bounds = self.terminal_bounds.clone();
         canvas(
             move |bounds, _, _| {
-                terminal_bounds
-                    .lock()
-                    .expect("terminal bounds poisoned")
-                    .insert(terminal_id, bounds);
-                let width = f32::from(bounds.size.width);
-                let height = f32::from(bounds.size.height);
-                if width <= 0.0 || height <= 0.0 {
+                if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
                     return;
                 }
                 let size = TerminalSize::new(
-                    (width / metrics.cell_width).floor() as usize,
-                    (height / metrics.line_height).floor() as usize,
+                    terminal_columns_for_width(bounds, metrics),
+                    terminal_lines_for_height(bounds, metrics),
                 );
                 if size == current_size {
                     return;
@@ -829,7 +1103,15 @@ impl WorkspaceView {
         let Some(text) = terminal_input_for_keystroke_with_modes(keystroke, modes) else {
             return;
         };
+        if terminal_key_uses_text_input_handler(keystroke) && self.input_handler_terminal.is_some()
+        {
+            // GPUI dispatches the key event before forwarding printable text
+            // to the focused InputHandler. Let the handler own it so a
+            // printable character is never sent to the PTY twice.
+            return;
+        }
         self.selection = None;
+        self.clear_ime();
         self.enqueue_terminal_command(
             terminal_id,
             TerminalCommand::SendText {
@@ -876,6 +1158,9 @@ impl WorkspaceView {
         update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
         self.focused_pane = snapshot.focused_pane;
         self.snapshot = snapshot;
+        if self.ime_terminal.is_some() && self.ime_terminal != self.active_terminal_id() {
+            self.clear_ime();
+        }
         cx.notify();
     }
 
@@ -1290,7 +1575,8 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_pane_tree_with_grow(tree, 1.0, window_active, metrics, theme, cx)
+        let view = cx.entity();
+        self.render_pane_tree_with_grow(tree, 1.0, window_active, metrics, theme, view, cx)
     }
 
     fn render_pane_tree_with_grow(
@@ -1300,6 +1586,7 @@ impl WorkspaceView {
         window_active: bool,
         metrics: TerminalMetrics,
         theme: ThemeColors,
+        view: Entity<WorkspaceView>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match tree {
@@ -1348,6 +1635,9 @@ impl WorkspaceView {
                                 },
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
+                                self.ime_marked_text_for(snapshot.terminal_id),
+                                self.terminal_bounds.clone(),
+                                active.then(|| (view.clone(), self.focus_handle.clone())),
                             )
                         })
                         .unwrap_or_else(|| {
@@ -1497,6 +1787,7 @@ impl WorkspaceView {
                         window_active,
                         metrics,
                         theme,
+                        view.clone(),
                         cx,
                     ))
                     .child(self.render_pane_tree_with_grow(
@@ -1505,6 +1796,7 @@ impl WorkspaceView {
                         window_active,
                         metrics,
                         theme,
+                        view,
                         cx,
                     ))
                     .into_any_element()
@@ -1554,6 +1846,259 @@ impl Focusable for WorkspaceView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
+}
+
+impl EntityInputHandler for WorkspaceView {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let range = normalize_utf16_range(range_utf16, utf16_len(&self.ime_marked_text));
+        let start = utf16_offset_to_byte(&self.ime_marked_text, range.start);
+        let end = utf16_offset_to_byte_end(&self.ime_marked_text, range.end);
+        adjusted_range.replace(range);
+        Some(self.ime_marked_text[start..end].to_owned())
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        if self.active_terminal_id().is_none() && self.ime_terminal.is_none() {
+            return None;
+        }
+        let range = normalize_utf16_range(
+            self.ime_selected_range.clone(),
+            utf16_len(&self.ime_marked_text),
+        );
+        Some(UTF16Selection {
+            range: range.clone(),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        (!self.ime_marked_text.is_empty() && self.ime_terminal.is_some())
+            .then(|| 0..utf16_len(&self.ime_marked_text))
+    }
+
+    fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.reset_ime_marked_text();
+        cx.notify();
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        _range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal_id) = self.ime_terminal.or_else(|| self.active_terminal_id()) else {
+            return;
+        };
+        self.ime_terminal = Some(terminal_id);
+        self.selection = None;
+        self.reset_ime_marked_text();
+        if !new_text.is_empty() {
+            self.enqueue_terminal_command(
+                terminal_id,
+                TerminalCommand::SendText {
+                    terminal_id: Some(terminal_id),
+                    pane_id: None,
+                    text: new_text.to_owned(),
+                },
+            );
+        }
+        cx.notify();
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(terminal_id) = self.ime_terminal.or_else(|| self.active_terminal_id()) else {
+            return;
+        };
+        self.ime_terminal = Some(terminal_id);
+        let current = self.ime_marked_text.clone();
+        let replacement = range_utf16
+            .map(|range| normalize_utf16_range(range, utf16_len(&current)))
+            .unwrap_or_else(|| 0..utf16_len(&current));
+        let start = utf16_offset_to_byte(&current, replacement.start);
+        let end = utf16_offset_to_byte_end(&current, replacement.end);
+        let mut updated = String::with_capacity(
+            current.len().saturating_sub(end.saturating_sub(start)) + new_text.len(),
+        );
+        updated.push_str(&current[..start]);
+        updated.push_str(new_text);
+        updated.push_str(&current[end..]);
+        self.ime_marked_text = updated;
+        let new_length = utf16_len(new_text);
+        let replacement_start = replacement.start;
+        self.ime_selected_range = new_selected_range
+            .map(|range| {
+                let range = normalize_utf16_range(range, new_length);
+                replacement_start.saturating_add(range.start)
+                    ..replacement_start.saturating_add(range.end)
+            })
+            .unwrap_or_else(|| {
+                let end = replacement_start.saturating_add(new_length);
+                end..end
+            });
+        self.selection = None;
+        cx.notify();
+    }
+
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<gpui::Pixels>> {
+        let terminal_id = self.ime_terminal.or_else(|| self.active_terminal_id())?;
+        let snapshot = self.terminal_snapshot_for(terminal_id);
+        let (cursor, width_columns) = snapshot
+            .map(|snapshot| {
+                let cursor = terminal_cursor_position(snapshot);
+                let width_columns = snapshot
+                    .cell(cursor.0, cursor.1)
+                    .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                    .unwrap_or(1);
+                (cursor, width_columns)
+            })
+            .unwrap_or(((0, 0), 1));
+        Some(terminal_cell_bounds(
+            element_bounds,
+            self.terminal_metrics,
+            cursor.0,
+            cursor.1,
+            width_columns,
+        ))
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        point: Point<gpui::Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        let terminal_id = self.ime_terminal.or_else(|| self.active_terminal_id())?;
+        let bounds = self.terminal_bounds_for(terminal_id)?;
+        let mouse = terminal_mouse_position(point, Some(bounds), self.terminal_metrics);
+        let row = mouse.row.saturating_sub(1);
+        let column = mouse.column.saturating_sub(1);
+        let (cursor_row, cursor_column) = self
+            .terminal_snapshot_for(terminal_id)
+            .map(terminal_cursor_position)
+            .unwrap_or((0, 0));
+        let offset = if row == cursor_row && column >= cursor_column {
+            utf16_len(&self.ime_marked_text).min(column - cursor_column)
+        } else {
+            0
+        };
+        Some(offset)
+    }
+
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ime_selected_range =
+            normalize_utf16_range(range_utf16, utf16_len(&self.ime_marked_text));
+        cx.notify();
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        self.active_terminal_id()
+            .or(self.ime_terminal)
+            .map(|_| utf16_len(&self.ime_marked_text))
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.active_terminal_id().is_some() || self.ime_terminal.is_some()
+    }
+
+    fn text_input_configuration(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> TextInputConfiguration {
+        TextInputConfiguration::default()
+    }
+
+    fn text_input_editable_range(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.active_terminal_id()
+            .or(self.ime_terminal)
+            .map(|_| 0..utf16_len(&self.ime_marked_text))
+    }
+}
+
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+fn utf16_offset_to_byte(text: &str, offset: usize) -> usize {
+    let mut current = 0;
+    for (byte, character) in text.char_indices() {
+        if offset <= current {
+            return byte;
+        }
+        let next = current + character.len_utf16();
+        if offset < next {
+            return byte;
+        }
+        current = next;
+        if offset == current {
+            return byte + character.len_utf8();
+        }
+    }
+    text.len()
+}
+
+fn utf16_offset_to_byte_end(text: &str, offset: usize) -> usize {
+    let mut current = 0;
+    for (byte, character) in text.char_indices() {
+        let next = current + character.len_utf16();
+        if offset <= current {
+            return byte;
+        }
+        if offset <= next {
+            return byte + character.len_utf8();
+        }
+        current = next;
+    }
+    text.len()
+}
+
+fn normalize_utf16_range(range: Range<usize>, length: usize) -> Range<usize> {
+    let start = range.start.min(length);
+    let end = range.end.min(length);
+    if start <= end { start..end } else { end..end }
 }
 
 fn update_terminal_selection_for_snapshot(
@@ -1824,6 +2369,81 @@ fn mouse_button_code(button: MouseButton) -> Option<u16> {
     }
 }
 
+fn terminal_snap_to_device_pixel(value: f32, scale_factor: f32) -> f32 {
+    let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let scaled = value * scale_factor;
+    (scaled.abs() - 0.5).ceil().copysign(scaled) / scale_factor
+}
+
+fn terminal_grid_edge(origin: f32, advance: f32, index: usize, scale_factor: f32) -> f32 {
+    terminal_snap_to_device_pixel(origin + advance * index as f32, scale_factor)
+}
+
+fn terminal_grid_index_at(
+    coordinate: f32,
+    origin: f32,
+    advance: f32,
+    scale_factor: f32,
+    extent: f32,
+) -> (usize, TerminalSelectionSide) {
+    if coordinate < terminal_grid_edge(origin, advance, 0, scale_factor) {
+        return (0, TerminalSelectionSide::Left);
+    }
+
+    let max_index = (extent.max(0.0) / advance.max(f32::EPSILON)).ceil() as usize + 2;
+    let mut index = 0;
+    while index + 1 < max_index
+        && coordinate >= terminal_grid_edge(origin, advance, index + 1, scale_factor)
+    {
+        index += 1;
+    }
+    let left = terminal_grid_edge(origin, advance, index, scale_factor);
+    let right = terminal_grid_edge(origin, advance, index + 1, scale_factor);
+    let side = if coordinate >= (left + right) / 2.0 {
+        TerminalSelectionSide::Right
+    } else {
+        TerminalSelectionSide::Left
+    };
+    (index, side)
+}
+
+fn terminal_columns_for_width(bounds: Bounds<gpui::Pixels>, metrics: TerminalMetrics) -> usize {
+    let origin = f32::from(bounds.origin.x);
+    let right = terminal_snap_to_device_pixel(f32::from(bounds.right()), metrics.scale_factor);
+    let extent =
+        (right - terminal_grid_edge(origin, metrics.cell_width, 0, metrics.scale_factor)).max(0.0);
+    let estimate = (extent / metrics.cell_width.max(f32::EPSILON)).ceil() as usize + 2;
+    (0..estimate)
+        .take_while(|column| {
+            terminal_grid_edge(
+                origin,
+                metrics.cell_width,
+                *column + 1,
+                metrics.scale_factor,
+            ) <= right
+        })
+        .count()
+}
+
+fn terminal_lines_for_height(bounds: Bounds<gpui::Pixels>, metrics: TerminalMetrics) -> usize {
+    let origin = f32::from(bounds.origin.y);
+    let bottom = terminal_snap_to_device_pixel(f32::from(bounds.bottom()), metrics.scale_factor);
+    let extent = (bottom
+        - terminal_grid_edge(origin, metrics.line_height, 0, metrics.scale_factor))
+    .max(0.0);
+    let estimate = (extent / metrics.line_height.max(f32::EPSILON)).ceil() as usize + 2;
+    (0..estimate)
+        .take_while(|row| {
+            terminal_grid_edge(origin, metrics.line_height, *row + 1, metrics.scale_factor)
+                <= bottom
+        })
+        .count()
+}
+
 fn terminal_mouse_position(
     position: Point<gpui::Pixels>,
     bounds: Option<Bounds<gpui::Pixels>>,
@@ -1836,25 +2456,56 @@ fn terminal_mouse_position(
             side: TerminalSelectionSide::Left,
         };
     };
-    let relative_x = f32::from(position.x) - f32::from(bounds.origin.x);
-    let relative_y = f32::from(position.y) - f32::from(bounds.origin.y);
-    let x = relative_x.max(0.0);
-    let y = relative_y.max(0.0);
-    let side = if relative_x < 0.0 || relative_y < 0.0 {
-        TerminalSelectionSide::Left
-    } else if relative_x >= f32::from(bounds.size.width)
-        || relative_y >= f32::from(bounds.size.height)
-        || x % metrics.cell_width > metrics.cell_width / 2.0
+    let position_x = f32::from(position.x);
+    let position_y = f32::from(position.y);
+    let origin_x = f32::from(bounds.origin.x);
+    let origin_y = f32::from(bounds.origin.y);
+    let (column, column_side) = terminal_grid_index_at(
+        position_x,
+        origin_x,
+        metrics.cell_width,
+        metrics.scale_factor,
+        f32::from(bounds.size.width),
+    );
+    let (row, _) = terminal_grid_index_at(
+        position_y,
+        origin_y,
+        metrics.line_height,
+        metrics.scale_factor,
+        f32::from(bounds.size.height),
+    );
+    let side = if position_x
+        < terminal_grid_edge(origin_x, metrics.cell_width, 0, metrics.scale_factor)
+        || position_y < terminal_grid_edge(origin_y, metrics.line_height, 0, metrics.scale_factor)
     {
+        TerminalSelectionSide::Left
+    } else if position_x
+        >= terminal_snap_to_device_pixel(f32::from(bounds.right()), metrics.scale_factor)
+        || position_y
+            >= terminal_snap_to_device_pixel(f32::from(bounds.bottom()), metrics.scale_factor)
+    {
+        TerminalSelectionSide::Right
+    } else if column_side == TerminalSelectionSide::Right {
         TerminalSelectionSide::Right
     } else {
         TerminalSelectionSide::Left
     };
     TerminalMousePosition {
-        column: (x / metrics.cell_width).floor() as usize + 1,
-        row: (y / metrics.line_height).floor() as usize + 1,
+        column: column + 1,
+        row: row + 1,
         side,
     }
+}
+
+fn terminal_key_uses_text_input_handler(keystroke: &Keystroke) -> bool {
+    (keystroke.key_char.as_deref().is_some_and(|character| {
+        !character.is_empty() && character.chars().all(|character| !character.is_control())
+    }) || keystroke.key.chars().count() == 1
+        || keystroke.key == "space")
+        && !keystroke.modifiers.control
+        && !keystroke.modifiers.alt
+        && !keystroke.modifiers.platform
+        && !keystroke.modifiers.function
 }
 
 fn terminal_input_for_keystroke_with_modes(
@@ -2059,12 +2710,34 @@ fn selection_bounds(
         return None;
     }
 
-    if snapshot
-        .cells
-        .get(start)
-        .is_some_and(|cell| cell.flags.wide_spacer)
+    while start < end {
+        let Some(cell) = snapshot.cells.get(start) else {
+            break;
+        };
+        if cell.flags.leading_wide_spacer {
+            // This is the placeholder written at the end of a wrapped line
+            // before a wide character starts on the next line. It is not the
+            // second half of a character in this row.
+            start = start.saturating_add(1);
+        } else if cell.flags.wide_spacer {
+            // A trailing spacer belongs to the wide base immediately before
+            // it. Normalize an endpoint landing on either half to the base.
+            if start > 0 && snapshot.cells[start - 1].flags.wide {
+                start -= 1;
+            } else {
+                start = start.saturating_add(1);
+            }
+        } else {
+            break;
+        }
+    }
+    if end > start
+        && snapshot
+            .cells
+            .get(end.saturating_sub(1))
+            .is_some_and(|cell| cell.flags.leading_wide_spacer)
     {
-        start = start.saturating_sub(1);
+        end = end.saturating_sub(1);
     }
     if end > start
         && snapshot
@@ -2107,7 +2780,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
             let Some(cell) = snapshot.cell(row_index, column) else {
                 continue;
             };
-            if cell.flags.wide_spacer {
+            if cell.flags.wide_spacer || cell.flags.leading_wide_spacer {
                 continue;
             }
             text.push(cell.character);
@@ -2134,189 +2807,457 @@ fn render_terminal_snapshot(
     options: TerminalRenderOptions,
     font_family: &str,
     font_size: f32,
+    ime_text: Option<String>,
+    terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    input_handler: Option<(Entity<WorkspaceView>, FocusHandle)>,
 ) -> AnyElement {
-    let TerminalRenderOptions {
-        metrics,
-        theme,
-        cursor_focused,
-    } = options;
-    // Selection bounds are invariant for the snapshot; calculate them once
-    // instead of repeating the boundary and wide-character checks per cell.
-    let selected_bounds = selection
-        .filter(|selection| selection.terminal_id == snapshot.terminal_id)
-        .and_then(|selection| selection_bounds(snapshot, selection));
-    let mut terminal = div()
-        .size_full()
-        .flex()
-        .min_w(px(0.))
-        .min_h(px(0.))
-        .flex_col()
-        .overflow_hidden()
-        .font_family(font_family.to_owned())
-        .text_size(px(font_size))
-        .line_height(px(metrics.line_height))
-        .whitespace_nowrap()
-        .bg(rgb(theme.terminal_background));
-    for row in 0..snapshot.size.lines {
-        let mut row_element = div()
-            .relative()
-            .w(px(metrics.cell_width * snapshot.size.columns as f32))
-            .h(px(metrics.line_height))
-            .min_w(px(0.))
-            .flex_none()
-            .whitespace_nowrap();
-        let mut current: Option<(
-            usize,
-            TerminalColor,
-            TerminalColor,
-            TerminalCellFlags,
-            String,
-            usize,
-            bool,
-        )> = None;
-        for column in 0..snapshot.size.columns {
-            let Some(cell) = snapshot.cell(row, column) else {
-                continue;
-            };
-            if cell.flags.wide_spacer {
-                continue;
-            }
-            let mut foreground = cell.fg;
-            let mut background = cell.bg;
-            let default_colors = cell.fg == TerminalColor::Named { value: 256 }
-                && cell.bg == TerminalColor::Named { value: 257 };
-            if cell.flags.inverse {
-                std::mem::swap(&mut foreground, &mut background);
-                if default_colors {
-                    foreground = theme_color(theme.inverse_foreground);
-                    background = theme_color(theme.inverse_background);
-                }
-            }
-            let selected = selected_bounds.is_some_and(|(start, end)| {
-                (start..=end).contains(&TerminalCellPosition {
-                    row: row as i32,
-                    column,
-                })
-            });
-            if selected {
-                background = theme_color(theme.selection_background);
-            }
-            let cursor_at_cell = snapshot.cursor.visible
-                && snapshot.cursor.row == row
-                && snapshot.cursor.column == column;
-            if cursor_at_cell && cursor_focused {
-                foreground = theme_color(theme.cursor_foreground);
-                background = theme_color(theme.cursor_background);
-            }
-            let cursor_hollow = cursor_at_cell && !cursor_focused;
-            let mut character = String::new();
-            character.push(cell.character);
-            character.extend(cell.zerowidth.iter().copied());
-            let width_columns = if cell.flags.wide { 2 } else { 1 };
-            let should_merge = current
-                .as_ref()
-                .map(
-                    |(_, current_fg, current_bg, current_flags, _, _, current_cursor_hollow)| {
-                        *current_fg == foreground
-                            && *current_bg == background
-                            && *current_flags == cell.flags
-                            && *current_cursor_hollow == cursor_hollow
-                    },
-                )
-                .unwrap_or(false);
-            if should_merge {
-                if let Some((_, _, _, _, text, width_columns_total, _)) = current.as_mut() {
-                    text.push_str(&character);
-                    *width_columns_total += width_columns;
-                }
-            } else {
-                if let Some((start_column, fg, bg, flags, text, width_columns, cursor_hollow)) =
-                    current.take()
-                {
-                    row_element = row_element.child(render_terminal_run(
-                        start_column,
-                        fg,
-                        bg,
-                        flags,
-                        text,
-                        width_columns,
-                        TerminalRunStyle {
-                            metrics,
-                            theme,
-                            cursor_hollow,
-                        },
-                    ));
-                }
-                current = Some((
-                    column,
-                    foreground,
-                    background,
-                    cell.flags,
-                    character,
-                    width_columns,
-                    cursor_hollow,
-                ));
-            }
-        }
-        if let Some((start_column, fg, bg, flags, text, width_columns, cursor_hollow)) = current {
-            row_element = row_element.child(render_terminal_run(
-                start_column,
-                fg,
-                bg,
-                flags,
-                text,
-                width_columns,
-                TerminalRunStyle {
-                    metrics,
-                    theme,
-                    cursor_hollow,
-                },
-            ));
-        }
-        terminal = terminal.child(row_element);
+    TerminalRenderElement {
+        snapshot: snapshot.clone(),
+        selection,
+        options,
+        font_family: font_family.to_owned(),
+        font_size,
+        ime_text,
+        terminal_bounds,
+        input_handler,
     }
-    terminal.into_any_element()
+    .into_any_element()
 }
 
-fn render_terminal_run(
+impl gpui::IntoElement for TerminalRenderElement {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl gpui::Element for TerminalRenderElement {
+    type RequestLayoutState = ();
+    type PrepaintState = TerminalPrepaintState;
+
+    fn id(&self) -> Option<gpui::ElementId> {
+        None
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (gpui::LayoutId, Self::RequestLayoutState) {
+        let mut style = gpui::Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height =
+            px(self.options.metrics.line_height * self.snapshot.size.lines as f32).into();
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Self::PrepaintState {
+        self.terminal_bounds
+            .lock()
+            .expect("terminal bounds poisoned")
+            .insert(self.snapshot.terminal_id, bounds);
+
+        let selected_bounds = self
+            .selection
+            .filter(|selection| selection.terminal_id == self.snapshot.terminal_id)
+            .and_then(|selection| selection_bounds(&self.snapshot, selection));
+        let mut rows = Vec::with_capacity(self.snapshot.size.lines);
+        for row in 0..self.snapshot.size.lines {
+            let (chunks, backgrounds) = terminal_row_data(
+                &self.snapshot,
+                row,
+                selected_bounds,
+                self.options,
+                &self.font_family,
+            );
+            let text = chunks
+                .into_iter()
+                .map(|chunk| TerminalTextPaint {
+                    start_column: chunk.start_column,
+                    line: window.text_system().shape_line(
+                        SharedString::from(chunk.text),
+                        px(self.font_size),
+                        &chunk.runs,
+                        Some(px(
+                            self.options.metrics.cell_width * chunk.width_columns as f32
+                        )),
+                    ),
+                })
+                .collect();
+            rows.push(TerminalRowPaint { text, backgrounds });
+        }
+
+        let ime_line = self.ime_text.as_deref().and_then(|text| {
+            if text.is_empty() || !self.snapshot.cursor.visible {
+                return None;
+            }
+            let (row, column) = terminal_cursor_position(&self.snapshot);
+            let color = rgb(self.options.theme.terminal_foreground).into();
+            let run = TextRun {
+                len: text.len(),
+                font: font(self.font_family.clone()),
+                color,
+                background_color: None,
+                underline: Some(UnderlineStyle {
+                    thickness: px(1.),
+                    color: Some(color),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(
+                SharedString::from(text.to_owned()),
+                px(self.font_size),
+                &[run],
+                None,
+            );
+            Some((line, row, column))
+        });
+
+        TerminalPrepaintState { rows, ime_line }
+    }
+
+    fn paint(
+        &mut self,
+        _id: Option<&gpui::GlobalElementId>,
+        _inspector_id: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<gpui::Pixels>,
+        _request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let TerminalRenderOptions {
+            metrics,
+            theme,
+            cursor_focused,
+        } = self.options;
+        window.paint_quad(fill(bounds, rgb(theme.terminal_background)));
+
+        for (row, row_paint) in prepaint.rows.iter().enumerate() {
+            for background in &row_paint.backgrounds {
+                window.paint_quad(fill(
+                    terminal_cell_bounds(
+                        bounds,
+                        metrics,
+                        row,
+                        background.start_column,
+                        background.width_columns,
+                    ),
+                    rgb(background.color),
+                ));
+            }
+            for text in &row_paint.text {
+                let origin =
+                    terminal_cell_bounds(bounds, metrics, row, text.start_column, 1).origin;
+                let _ = text.line.paint(
+                    origin,
+                    px(metrics.line_height),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        }
+
+        if let Some((line, row, column)) = prepaint.ime_line.as_ref() {
+            let origin = terminal_cell_bounds(bounds, metrics, *row, *column, 1).origin;
+            let _ = line.paint(
+                origin,
+                px(metrics.line_height),
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+
+        if self.snapshot.cursor.visible && !cursor_focused {
+            let (row, column) = terminal_cursor_position(&self.snapshot);
+            let width_columns = self
+                .snapshot
+                .cell(row, column)
+                .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                .unwrap_or(1);
+            window.paint_quad(outline(
+                terminal_cell_bounds(bounds, metrics, row, column, width_columns),
+                rgb(theme.inactive_cursor),
+                gpui::BorderStyle::default(),
+            ));
+        }
+
+        if let Some((view, focus_handle)) = self.input_handler.take() {
+            window.handle_input(
+                &focus_handle,
+                TerminalInputHandler {
+                    view,
+                    terminal_id: self.snapshot.terminal_id,
+                    element_bounds: bounds,
+                    cursor: terminal_cursor_position(&self.snapshot),
+                },
+                cx,
+            );
+        }
+    }
+}
+
+fn terminal_row_data(
+    snapshot: &TerminalSnapshot,
+    row: usize,
+    selected_bounds: Option<(TerminalCellPosition, TerminalCellPosition)>,
+    options: TerminalRenderOptions,
+    font_family: &str,
+) -> (Vec<TerminalTextChunk>, Vec<TerminalBackgroundSpan>) {
+    let fonts = {
+        let normal = font(font_family.to_owned());
+        [
+            normal.clone(),
+            normal.clone().italic(),
+            normal.clone().bold(),
+            normal.bold().italic(),
+        ]
+    };
+    let mut chunks = Vec::new();
+    let mut current_text = String::new();
+    let mut current_runs = Vec::new();
+    let mut current_start = 0;
+
+    let flush_chunk = |chunks: &mut Vec<TerminalTextChunk>,
+                       current_text: &mut String,
+                       current_runs: &mut Vec<TextRun>,
+                       current_start: &mut usize| {
+        if !current_text.is_empty() {
+            chunks.push(TerminalTextChunk {
+                start_column: *current_start,
+                width_columns: 1,
+                text: std::mem::take(current_text),
+                runs: std::mem::take(current_runs),
+            });
+        }
+    };
+    let mut backgrounds = Vec::new();
+
+    for column in 0..snapshot.size.columns {
+        let Some(cell) = snapshot.cell(row, column) else {
+            continue;
+        };
+        if cell.flags.wide_spacer {
+            flush_chunk(
+                &mut chunks,
+                &mut current_text,
+                &mut current_runs,
+                &mut current_start,
+            );
+            continue;
+        }
+
+        let (mut foreground, mut background) = terminal_cell_colors(cell, options.theme);
+        let selected = selected_bounds.is_some_and(|(start, end)| {
+            (start..=end).contains(&TerminalCellPosition {
+                row: row as i32,
+                column,
+            })
+        });
+        if selected {
+            background = theme_color(options.theme.selection_background);
+        }
+        let cursor_at_cell =
+            snapshot.cursor.visible && terminal_cursor_position(snapshot) == (row, column);
+        if cursor_at_cell && options.cursor_focused {
+            foreground = theme_color(options.theme.cursor_foreground);
+            background = theme_color(options.theme.cursor_background);
+        }
+
+        let width_columns =
+            (if cell.flags.wide { 2 } else { 1 }).min(snapshot.size.columns.saturating_sub(column));
+        let background_color = color_to_rgb(background, false, options.theme);
+        if background_color != options.theme.terminal_background {
+            push_terminal_background(&mut backgrounds, column, width_columns, background_color);
+        }
+        if cell.flags.leading_wide_spacer {
+            flush_chunk(
+                &mut chunks,
+                &mut current_text,
+                &mut current_runs,
+                &mut current_start,
+            );
+            continue;
+        }
+
+        let mut character = String::new();
+        character.push(cell.character);
+        character.extend(cell.zerowidth.iter().copied());
+        let color = rgb(color_to_rgb(foreground, true, options.theme)).into();
+        let run = TextRun {
+            len: character.len(),
+            font: fonts[usize::from(cell.flags.italic) + usize::from(cell.flags.bold) * 2].clone(),
+            color,
+            background_color: None,
+            underline: cell.flags.underline.then(|| UnderlineStyle {
+                thickness: px(1.),
+                color: Some(color),
+                wavy: false,
+            }),
+            strikethrough: cell.flags.strike.then(|| StrikethroughStyle {
+                thickness: px(1.),
+                color: Some(color),
+            }),
+        };
+        if cell.flags.wide {
+            flush_chunk(
+                &mut chunks,
+                &mut current_text,
+                &mut current_runs,
+                &mut current_start,
+            );
+            chunks.push(TerminalTextChunk {
+                start_column: column,
+                width_columns,
+                text: character,
+                runs: vec![run],
+            });
+        } else {
+            if current_text.is_empty() {
+                current_start = column;
+            }
+            current_text.push_str(&character);
+            append_terminal_text_run(&mut current_runs, run);
+        }
+    }
+    flush_chunk(
+        &mut chunks,
+        &mut current_text,
+        &mut current_runs,
+        &mut current_start,
+    );
+
+    (chunks, backgrounds)
+}
+
+fn terminal_cell_colors(
+    cell: &crate::terminal::TerminalCell,
+    theme: ThemeColors,
+) -> (TerminalColor, TerminalColor) {
+    let mut foreground = cell.fg;
+    let mut background = cell.bg;
+    let default_colors = cell.fg == TerminalColor::Named { value: 256 }
+        && cell.bg == TerminalColor::Named { value: 257 };
+    if cell.flags.inverse {
+        std::mem::swap(&mut foreground, &mut background);
+        if default_colors {
+            foreground = theme_color(theme.inverse_foreground);
+            background = theme_color(theme.inverse_background);
+        }
+    }
+    (foreground, background)
+}
+
+fn append_terminal_text_run(runs: &mut Vec<TextRun>, run: TextRun) {
+    if let Some(previous) = runs.last_mut()
+        && previous.font == run.font
+        && previous.color == run.color
+        && previous.background_color == run.background_color
+        && previous.underline == run.underline
+        && previous.strikethrough == run.strikethrough
+    {
+        previous.len += run.len;
+    } else {
+        runs.push(run);
+    }
+}
+
+fn push_terminal_background(
+    backgrounds: &mut Vec<TerminalBackgroundSpan>,
     start_column: usize,
-    foreground: TerminalColor,
-    background: TerminalColor,
-    flags: TerminalCellFlags,
-    text: String,
     width_columns: usize,
-    style: TerminalRunStyle,
-) -> AnyElement {
-    let TerminalRunStyle {
-        metrics,
-        theme,
-        cursor_hollow,
-    } = style;
-    let mut run = div()
-        .absolute()
-        .left(px(metrics.cell_width * start_column as f32))
-        .top(px(0.))
-        .w(px(metrics.cell_width * width_columns as f32))
-        .h(px(metrics.line_height))
-        .flex_none()
-        .text_color(rgb(color_to_rgb(foreground, true, theme)))
-        .bg(rgb(color_to_rgb(background, false, theme)));
-    if cursor_hollow {
-        run = run.border_1().border_color(rgb(theme.inactive_cursor));
+    color: u32,
+) {
+    if width_columns == 0 {
+        return;
     }
-    if flags.bold {
-        run = run.font_weight(FontWeight::BOLD);
+    if let Some(previous) = backgrounds.last_mut()
+        && previous.color == color
+        && previous.start_column + previous.width_columns == start_column
+    {
+        previous.width_columns += width_columns;
+    } else {
+        backgrounds.push(TerminalBackgroundSpan {
+            start_column,
+            width_columns,
+            color,
+        });
     }
-    if flags.italic {
-        run = run.italic();
+}
+
+fn terminal_cell_bounds(
+    bounds: Bounds<gpui::Pixels>,
+    metrics: TerminalMetrics,
+    row: usize,
+    column: usize,
+    width_columns: usize,
+) -> Bounds<gpui::Pixels> {
+    let left = terminal_grid_edge(
+        f32::from(bounds.origin.x),
+        metrics.cell_width,
+        column,
+        metrics.scale_factor,
+    );
+    let right = terminal_grid_edge(
+        f32::from(bounds.origin.x),
+        metrics.cell_width,
+        column.saturating_add(width_columns),
+        metrics.scale_factor,
+    );
+    let top = terminal_grid_edge(
+        f32::from(bounds.origin.y),
+        metrics.line_height,
+        row,
+        metrics.scale_factor,
+    );
+    let bottom = terminal_grid_edge(
+        f32::from(bounds.origin.y),
+        metrics.line_height,
+        row.saturating_add(1),
+        metrics.scale_factor,
+    );
+    Bounds::new(
+        point(px(left), px(top)),
+        size(px((right - left).max(0.0)), px((bottom - top).max(0.0))),
+    )
+}
+
+fn terminal_cursor_position(snapshot: &TerminalSnapshot) -> (usize, usize) {
+    let row = snapshot
+        .cursor
+        .row
+        .min(snapshot.size.lines.saturating_sub(1));
+    let mut column = snapshot
+        .cursor
+        .column
+        .min(snapshot.size.columns.saturating_sub(1));
+    if snapshot
+        .cell(row, column)
+        .is_some_and(|cell| cell.flags.wide_spacer)
+    {
+        column = column.saturating_sub(1);
     }
-    if flags.underline {
-        run = run.underline();
-    }
-    if flags.strike {
-        run = run.line_through();
-    }
-    run.child(SharedString::from(text)).into_any_element()
+    (row, column)
 }
 
 fn color_to_rgb(color: TerminalColor, foreground: bool, theme: ThemeColors) -> u32 {
@@ -2378,6 +3319,9 @@ impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = self.measured_terminal_metrics(window);
         self.terminal_metrics = metrics;
+        self.input_handler_terminal = self
+            .active_terminal_snapshot()
+            .map(|snapshot| snapshot.terminal_id);
         let theme = self.config.theme.colors();
 
         let window_active = window.is_window_active() && self.focus_handle.is_focused(window);
@@ -2560,6 +3504,21 @@ mod tests {
 
     #[test]
     fn terminal_input_preserves_printable_text_and_control_bytes() {
+        assert!(terminal_key_uses_text_input_handler(&keystroke(
+            "a",
+            Some("a"),
+            Modifiers::none(),
+        )));
+        assert!(!terminal_key_uses_text_input_handler(&keystroke(
+            "enter",
+            Some("\r"),
+            Modifiers::none(),
+        )));
+        assert!(!terminal_key_uses_text_input_handler(&keystroke(
+            "return",
+            None,
+            Modifiers::none(),
+        )));
         assert_eq!(
             terminal_input_for_keystroke_with_modes(
                 &keystroke("a", Some("a"), Modifiers::none()),
@@ -2738,6 +3697,204 @@ mod tests {
             0,
             2,
         ));
+    }
+
+    #[test]
+    fn leading_wide_placeholders_do_not_become_a_second_character() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 2));
+        snapshot.cells[3].flags.leading_wide_spacer = true;
+        snapshot.cells[4].character = '界';
+        snapshot.cells[4].flags.wide = true;
+        snapshot.cells[5].flags.wide_spacer = true;
+
+        let wrapped_wide_character = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(0, 3, TerminalSelectionSide::Left),
+            head: endpoint(1, 0, TerminalSelectionSide::Right),
+        };
+        let (start, end) = selection_bounds(&snapshot, wrapped_wide_character).unwrap();
+        assert_eq!((start.row, start.column), (1, 0));
+        assert_eq!((end.row, end.column), (1, 1));
+        assert_eq!(
+            selected_terminal_text(&snapshot, wrapped_wide_character),
+            "界"
+        );
+
+        let placeholder_only = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(0, 3, TerminalSelectionSide::Left),
+            head: endpoint(0, 3, TerminalSelectionSide::Right),
+        };
+        assert!(selection_bounds(&snapshot, placeholder_only).is_none());
+    }
+
+    #[test]
+    fn terminal_rows_shape_wide_cells_with_two_cell_advances() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(5, 1));
+        snapshot.cells[0].character = 'a';
+        snapshot.cells[1].character = '界';
+        snapshot.cells[1].flags.wide = true;
+        snapshot.cells[2].flags.wide_spacer = true;
+        snapshot.cells[3].character = 'b';
+        let options = TerminalRenderOptions {
+            metrics: TerminalMetrics::default(),
+            theme: ThemeColors {
+                terminal_background: 0,
+                terminal_foreground: 1,
+                selection_background: 2,
+                cursor_foreground: 3,
+                cursor_background: 4,
+                inactive_cursor: 5,
+                inverse_foreground: 6,
+                inverse_background: 7,
+                pane_background: 8,
+                active_pane_border: 9,
+                inactive_pane_border: 10,
+                chrome_background: 11,
+                tab_active_background: 12,
+                tab_inactive_background: 13,
+                tab_add_background: 14,
+                ui_foreground: 15,
+            },
+            cursor_focused: false,
+        };
+        let (chunks, _) =
+            terminal_row_data(&snapshot, 0, None, options, "Sarasa Term SC Nerd Font");
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| (chunk.start_column, chunk.width_columns, chunk.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, "a"), (1, 2, "界"), (3, 1, "b ")]
+        );
+    }
+
+    #[test]
+    fn terminal_grid_geometry_is_shared_by_bounds_and_mouse_hit_testing() {
+        let metrics = TerminalMetrics {
+            cell_width: 8.4,
+            line_height: 17.3,
+            scale_factor: 2.0,
+        };
+        let bounds = Bounds::new(point(px(0.3), px(1.2)), size(px(42.0), px(35.0)));
+        let edges: Vec<_> = (0..8)
+            .map(|column| {
+                terminal_grid_edge(
+                    f32::from(bounds.origin.x),
+                    metrics.cell_width,
+                    column,
+                    metrics.scale_factor,
+                )
+            })
+            .collect();
+        assert!(edges.windows(2).all(|pair| pair[0] <= pair[1]));
+
+        let first = terminal_cell_bounds(bounds, metrics, 0, 0, 1);
+        let second = terminal_cell_bounds(bounds, metrics, 0, 1, 1);
+        let first_x = f32::from(first.origin.x) + f32::from(first.size.width) * 0.75;
+        let second_x = f32::from(second.origin.x) + f32::from(second.size.width) * 0.25;
+        let y = f32::from(first.origin.y) + f32::from(first.size.height) * 0.5;
+
+        let first_hit = terminal_mouse_position(point(px(first_x), px(y)), Some(bounds), metrics);
+        assert_eq!(
+            (first_hit.column, first_hit.side),
+            (1, TerminalSelectionSide::Right)
+        );
+        let second_hit = terminal_mouse_position(point(px(second_x), px(y)), Some(bounds), metrics);
+        assert_eq!(
+            (second_hit.column, second_hit.side),
+            (2, TerminalSelectionSide::Left)
+        );
+    }
+
+    #[test]
+    fn utf16_ime_offsets_follow_unicode_scalar_boundaries() {
+        let text = "a界😀";
+        assert_eq!(utf16_len(text), 4);
+        assert_eq!(utf16_offset_to_byte(text, 0), 0);
+        assert_eq!(utf16_offset_to_byte(text, 1), 1);
+        assert_eq!(utf16_offset_to_byte(text, 2), 4);
+        assert_eq!(utf16_offset_to_byte(text, 3), 4);
+        assert_eq!(utf16_offset_to_byte(text, 4), text.len());
+        assert_eq!(normalize_utf16_range(0..99, 4), 0..4);
+        assert_eq!(normalize_utf16_range(3..1, 4), 1..1);
+    }
+
+    #[gpui::test]
+    fn ime_composition_state_commits_once_to_the_focused_terminal(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client = host.client();
+        let workspace = client
+            .dispatch(crate::command::AppCommand::Workspace(
+                crate::command::WorkspaceCommand::Create,
+            ))
+            .unwrap();
+        client.wait_operation(workspace).unwrap();
+        let tab = client
+            .dispatch(crate::command::AppCommand::Tab(
+                crate::command::TabCommand::New { title: None },
+            ))
+            .unwrap();
+        client.wait_operation(tab).unwrap();
+        let program = crate::terminal::default_shell_program();
+        let spawn = client
+            .dispatch(crate::command::AppCommand::Terminal(
+                crate::command::TerminalCommand::Spawn {
+                    pane_id: None,
+                    args: crate::terminal::default_shell_args(&program),
+                    program,
+                    columns: 80,
+                    lines: 24,
+                },
+            ))
+            .unwrap();
+        let spawn = client.wait_operation(spawn).unwrap();
+        let terminal_id = match spawn.result.unwrap() {
+            crate::command::OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        let snapshot = client.state_dump().unwrap();
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new(client.clone(), snapshot.clone(), cx.focus_handle())
+        });
+        view.update_in(cx, |view, window, cx| {
+            window.focus(&view.focus_handle, cx);
+            view.ime_terminal = Some(terminal_id);
+            <WorkspaceView as EntityInputHandler>::replace_and_mark_text_in_range(
+                view,
+                None,
+                "拼音",
+                Some(2..2),
+                window,
+                cx,
+            );
+        });
+        let (marked_text, selected_range) = view.update_in(cx, |view, _, _| {
+            (
+                view.ime_marked_text.clone(),
+                view.ime_selected_range.clone(),
+            )
+        });
+        assert_eq!(marked_text, "拼音");
+        assert_eq!(selected_range, 2..2);
+
+        view.update_in(cx, |view, window, cx| {
+            <WorkspaceView as EntityInputHandler>::replace_text_in_range(
+                view,
+                None,
+                "print -r -- IME_中",
+                window,
+                cx,
+            );
+        });
+        assert!(view.update_in(cx, |view, _, _| view.ime_marked_text.is_empty()));
+        cx.simulate_keystrokes("enter");
+        client
+            .terminal_contains(terminal_id, "IME_中", std::time::Duration::from_secs(5))
+            .unwrap();
+        host.shutdown();
     }
 
     #[test]

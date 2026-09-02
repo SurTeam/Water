@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::terminal::{MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES};
 
-const DEFAULT_FONT_FAMILY: &str = "Menlo";
+const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC Nerd Font";
 const DEFAULT_FONT_SIZE: f32 = 14.0;
 const DEFAULT_LINE_HEIGHT: f32 = 18.0;
 

@@ -77,6 +77,7 @@ impl Default for TerminalColor {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TerminalCellFlags {
     pub inverse: bool,
     pub bold: bool,
@@ -85,6 +86,7 @@ pub struct TerminalCellFlags {
     pub strike: bool,
     pub wide: bool,
     pub wide_spacer: bool,
+    pub leading_wide_spacer: bool,
     pub wrapline: bool,
 }
 
@@ -190,6 +192,7 @@ impl TerminalSnapshot {
             for column in 0..self.size.columns {
                 if let Some(cell) = self.cell(row, column)
                     && !cell.flags.wide_spacer
+                    && !cell.flags.leading_wide_spacer
                 {
                     text.push(cell.character);
                     text.extend(cell.zerowidth.iter().copied());
@@ -281,6 +284,7 @@ impl TerminalSnapshot {
                 strike: cell.flags.contains(Flags::STRIKEOUT),
                 wide: cell.flags.contains(Flags::WIDE_CHAR),
                 wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+                leading_wide_spacer: cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER),
                 wrapline: cell.flags.contains(Flags::WRAPLINE),
             },
             zerowidth: cell.zerowidth().map(ToOwned::to_owned).unwrap_or_default(),
