@@ -7,7 +7,8 @@ use gpui::{
     FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
     StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, UTF16Selection, UnderlineStyle,
-    Window, canvas, div, fill, font, outline, point, prelude::*, px, relative, rgb, size,
+    Window, WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point,
+    prelude::*, px, relative, rgb, rgba, size,
 };
 
 use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
@@ -69,6 +70,25 @@ enum TerminalSelectionSide {
 enum RenameTarget {
     Workspace(WorkspaceId),
     Tab(TabId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ContextMenuState {
+    target: ContextMenuTarget,
+    position: Point<gpui::Pixels>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextMenuTarget {
+    Workspace(WorkspaceId),
+    Tab(TabId),
+}
+
+/// In-window dialogs are kept as view state so their presentation and
+/// dismissal share one path without introducing model-owned UI state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogState {
+    ConfirmCloseWorkspace { workspace_id: WorkspaceId },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -399,8 +419,11 @@ pub struct WorkspaceView {
     sidebar_collapsed: bool,
     sidebar_width: f32,
     dragging_sidebar: bool,
+    titlebar_dragging: bool,
     rename_target: Option<RenameTarget>,
     rename_value: String,
+    context_menu: Option<ContextMenuState>,
+    dialog: Option<DialogState>,
 }
 
 impl WorkspaceView {
@@ -435,8 +458,11 @@ impl WorkspaceView {
             sidebar_collapsed: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             dragging_sidebar: false,
+            titlebar_dragging: false,
             rename_target: None,
             rename_value: String::new(),
+            context_menu: None,
+            dialog: None,
         }
     }
 
@@ -489,19 +515,80 @@ impl WorkspaceView {
         }
     }
 
+    fn workspace_by_id(&self, workspace_id: WorkspaceId) -> Option<WorkspaceDump> {
+        self.workspace_dumps()
+            .into_iter()
+            .find(|workspace| workspace.id == workspace_id)
+    }
+
+    fn dispatch_close_workspace(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+        self.dispatch(
+            AppCommand::Workspace(WorkspaceCommand::Close {
+                workspace_id: Some(workspace_id),
+            }),
+            cx,
+        );
+    }
+
+    fn request_close_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace_by_id(workspace_id) else {
+            return;
+        };
+        self.context_menu = None;
+        if workspace.tabs.is_empty() {
+            self.dispatch_close_workspace(workspace_id, cx);
+        } else {
+            self.dialog = Some(DialogState::ConfirmCloseWorkspace { workspace_id });
+            self.focus_handle.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn confirm_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.dialog.take() else {
+            return;
+        };
+        match dialog {
+            DialogState::ConfirmCloseWorkspace { workspace_id } => {
+                self.dispatch_close_workspace(workspace_id, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    fn cancel_dialog(&mut self, cx: &mut Context<Self>) {
+        if self.dialog.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn handle_dialog_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.dialog.is_none() {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "enter" | "return" => self.confirm_dialog(cx),
+            "escape" => self.cancel_dialog(cx),
+            _ => {}
+        }
+        true
+    }
+
     fn begin_rename_workspace(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(workspace) = self
-            .workspace_dumps()
-            .into_iter()
-            .find(|workspace| workspace.id == workspace_id)
-        else {
+        let Some(workspace) = self.workspace_by_id(workspace_id) else {
             return;
         };
+        self.context_menu = None;
         self.rename_target = Some(RenameTarget::Workspace(workspace_id));
         self.rename_value = workspace.title.clone();
         self.focus_handle.focus(window, cx);
@@ -517,6 +604,7 @@ impl WorkspaceView {
         else {
             return;
         };
+        self.context_menu = None;
         self.rename_target = Some(RenameTarget::Tab(tab_id));
         self.rename_value = tab.title.clone();
         self.focus_handle.focus(window, cx);
@@ -956,6 +1044,13 @@ impl WorkspaceView {
     }
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if self.handle_dialog_key(event, cx) {
+            return;
+        }
+        if self.context_menu.take().is_some() {
+            cx.notify();
+            return;
+        }
         if self.handle_rename_key(event, cx) {
             return;
         }
@@ -1229,6 +1324,11 @@ impl WorkspaceView {
         } else {
             rgb(theme.tab_inactive_background)
         };
+        let title = if self.rename_target == Some(RenameTarget::Tab(tab_id)) {
+            format!("{}▌", self.rename_value)
+        } else {
+            title
+        };
         div()
             .h(px(32.))
             .px(px(12.))
@@ -1240,6 +1340,7 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                    this.context_menu = None;
                     this.focus_handle.focus(window, cx);
                     this.focused_pane = Some(active_pane);
                     this.selection = None;
@@ -1250,6 +1351,18 @@ impl WorkspaceView {
                         }),
                         cx,
                     );
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.context_menu = Some(ContextMenuState {
+                        target: ContextMenuTarget::Tab(tab_id),
+                        position: event.position,
+                    });
+                    this.focus_handle.focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
                 }),
             )
             .into_any_element()
@@ -1270,25 +1383,6 @@ impl WorkspaceView {
                     cx.notify();
                 }),
             )
-            .into_any_element()
-    }
-
-    fn render_sidebar_action(
-        &self,
-        label: &'static str,
-        theme: ThemeColors,
-        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .w(px(22.))
-            .h(px(24.))
-            .items_center()
-            .justify_center()
-            .flex()
-            .text_color(rgb(theme.terminal_foreground))
-            .child(label)
-            .on_mouse_down(MouseButton::Left, cx.listener(listener))
             .into_any_element()
     }
 
@@ -1316,6 +1410,7 @@ impl WorkspaceView {
             .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
             .map(|tab| tab.active_pane);
         let workspace_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+            this.context_menu = None;
             this.focus_handle.focus(window, cx);
             this.focused_pane = workspace_active_pane;
             this.selection = None;
@@ -1326,47 +1421,26 @@ impl WorkspaceView {
                 cx,
             );
         });
-        let rename_workspace = self.render_sidebar_action(
-            "✎",
-            theme,
-            move |this, _event: &MouseDownEvent, window, cx| {
-                cx.stop_propagation();
-                this.begin_rename_workspace(workspace_id, window, cx);
-            },
-            cx,
-        );
-        let delete_workspace = self.render_sidebar_action(
-            "×",
-            theme,
-            move |this, _event: &MouseDownEvent, _window, cx| {
-                cx.stop_propagation();
-                this.dispatch(
-                    AppCommand::Workspace(WorkspaceCommand::Delete {
-                        workspace_id: Some(workspace_id),
-                    }),
-                    cx,
-                );
-            },
-            cx,
-        );
-
         let workspace_row = div()
-            .h(px(30.))
+            .h(px(32.))
             .w_full()
-            .px(px(8.))
-            .gap(px(2.))
+            .px(px(10.))
             .items_center()
             .flex()
             .bg(workspace_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, workspace_activate)
-            .child(
-                div()
-                    .w(px(14.))
-                    .items_center()
-                    .justify_center()
-                    .flex()
-                    .child(if active { "▾" } else { "▸" }),
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.context_menu = Some(ContextMenuState {
+                        target: ContextMenuTarget::Workspace(workspace_id),
+                        position: event.position,
+                    });
+                    this.focus_handle.focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
             )
             .child(
                 div()
@@ -1374,91 +1448,9 @@ impl WorkspaceView {
                     .min_w(px(0.))
                     .truncate()
                     .child(SharedString::from(workspace_title)),
-            )
-            .child(rename_workspace)
-            .child(delete_workspace);
+            );
 
-        let mut tabs = div().w_full().flex_col();
-        for tab in workspace.tabs {
-            let tab_id = tab.id;
-            let tab_active = active && workspace.active_tab == Some(tab_id);
-            let tab_title = if self.rename_target == Some(RenameTarget::Tab(tab_id)) {
-                format!("{}▌", self.rename_value)
-            } else {
-                tab.title.clone()
-            };
-            let tab_background = if tab_active {
-                rgb(theme.tab_active_background)
-            } else {
-                rgb(theme.chrome_background)
-            };
-            let active_pane = tab.active_pane;
-            let activate_tab = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                this.focus_handle.focus(window, cx);
-                this.focused_pane = Some(active_pane);
-                this.selection = None;
-                this.dispatch(
-                    AppCommand::Tab(TabCommand::Activate {
-                        tab_id: Some(tab_id),
-                        index: None,
-                    }),
-                    cx,
-                );
-            });
-            let rename_tab = self.render_sidebar_action(
-                "✎",
-                theme,
-                move |this, _event: &MouseDownEvent, window, cx| {
-                    cx.stop_propagation();
-                    this.begin_rename_tab(tab_id, window, cx);
-                },
-                cx,
-            );
-            let close_tab = self.render_sidebar_action(
-                "×",
-                theme,
-                move |this, _event: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.dispatch(
-                        AppCommand::Tab(TabCommand::Close {
-                            tab_id: Some(tab_id),
-                        }),
-                        cx,
-                    );
-                },
-                cx,
-            );
-            tabs = tabs.child(
-                div()
-                    .h(px(28.))
-                    .w_full()
-                    .pl(px(28.))
-                    .pr(px(4.))
-                    .gap(px(2.))
-                    .items_center()
-                    .flex()
-                    .bg(tab_background)
-                    .text_color(rgb(theme.terminal_foreground))
-                    .on_mouse_down(MouseButton::Left, activate_tab)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .truncate()
-                            .child(SharedString::from(tab_title)),
-                    )
-                    .child(rename_tab)
-                    .child(close_tab),
-            );
-        }
-
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(workspace_row)
-            .child(tabs)
-            .into_any_element()
+        workspace_row.into_any_element()
     }
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -1492,7 +1484,7 @@ impl WorkspaceView {
                         div()
                             .h(px(40.))
                             .px(px(10.))
-                            .gap(px(4.))
+                            .gap(px(8.))
                             .items_center()
                             .flex()
                             .bg(rgb(theme.chrome_background))
@@ -1500,12 +1492,13 @@ impl WorkspaceView {
                             .child(div().flex_1())
                             .child(
                                 div()
-                                    .w(px(24.))
-                                    .h(px(24.))
+                                    .h(px(26.))
+                                    .px(px(8.))
                                     .items_center()
                                     .justify_center()
                                     .flex()
-                                    .child("+")
+                                    .text_color(rgb(theme.terminal_foreground))
+                                    .child("New")
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(
@@ -1520,12 +1513,13 @@ impl WorkspaceView {
                             )
                             .child(
                                 div()
-                                    .w(px(24.))
-                                    .h(px(24.))
+                                    .h(px(26.))
+                                    .px(px(8.))
                                     .items_center()
                                     .justify_center()
                                     .flex()
-                                    .child("‹")
+                                    .text_color(rgb(theme.terminal_foreground))
+                                    .child("Hide")
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(
@@ -1536,19 +1530,218 @@ impl WorkspaceView {
                                     ),
                             ),
                     )
-                    .child(
-                        div()
-                            .h(px(32.))
-                            .px(px(10.))
-                            .items_center()
-                            .flex()
-                            .text_color(rgb(theme.terminal_foreground))
-                            .child("New workspace: Cmd+Shift+N"),
-                    )
                     .child(list),
             )
             .child(self.sidebar_resize_handle(theme, cx))
             .into_any_element()
+    }
+
+    fn render_context_menu_item(
+        &self,
+        label: &'static str,
+        theme: ThemeColors,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .h(px(30.))
+            .w_full()
+            .px(px(10.))
+            .items_center()
+            .flex()
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down(MouseButton::Left, cx.listener(listener))
+            .child(label)
+            .into_any_element()
+    }
+
+    fn render_context_menu(
+        &self,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let context_menu = self.context_menu?;
+        let target = context_menu.target;
+        let rename = match target {
+            ContextMenuTarget::Workspace(workspace_id) => self.render_context_menu_item(
+                "Rename workspace",
+                theme,
+                move |this, _event, window, cx| {
+                    this.context_menu = None;
+                    this.begin_rename_workspace(workspace_id, window, cx);
+                },
+                cx,
+            ),
+            ContextMenuTarget::Tab(tab_id) => self.render_context_menu_item(
+                "Rename tab",
+                theme,
+                move |this, _event, window, cx| {
+                    this.context_menu = None;
+                    this.begin_rename_tab(tab_id, window, cx);
+                },
+                cx,
+            ),
+        };
+        let close = match target {
+            ContextMenuTarget::Workspace(workspace_id) => self.render_context_menu_item(
+                "Close workspace",
+                theme,
+                move |this, _event, window, cx| {
+                    this.request_close_workspace(workspace_id, window, cx);
+                },
+                cx,
+            ),
+            ContextMenuTarget::Tab(tab_id) => self.render_context_menu_item(
+                "Close tab",
+                theme,
+                move |this, _event, _window, cx| {
+                    this.context_menu = None;
+                    this.dispatch(
+                        AppCommand::Tab(TabCommand::Close {
+                            tab_id: Some(tab_id),
+                        }),
+                        cx,
+                    );
+                },
+                cx,
+            ),
+        };
+        let menu = div()
+            .id("workspace-context-menu")
+            .w(px(190.))
+            .p(px(4.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .bg(rgb(theme.chrome_background))
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .child(rename)
+            .child(close);
+        let position = context_menu.position;
+        Some(
+            deferred(
+                div()
+                    .size_full()
+                    .absolute()
+                    .inset_0()
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                            this.context_menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                            this.context_menu = None;
+                            cx.stop_propagation();
+                            cx.notify();
+                        }),
+                    )
+                    .child(
+                        anchored()
+                            .position(position)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(menu),
+                    ),
+            )
+            .with_priority(10)
+            .into_any_element(),
+        )
+    }
+
+    fn render_dialog(&self, theme: ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.dialog?;
+        let DialogState::ConfirmCloseWorkspace { workspace_id } = dialog;
+        let workspace = self.workspace_by_id(workspace_id)?;
+        let tab_count = workspace.tabs.len();
+        let tab_label = if tab_count == 1 { "tab" } else { "tabs" };
+        let message = format!(
+            "Close “{}” and its {tab_count} {tab_label}?",
+            workspace.title
+        );
+        let cancel = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .text_color(rgb(theme.ui_foreground))
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.cancel_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Cancel");
+        let confirm = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .bg(rgb(theme.tab_add_background))
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.confirm_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Close workspace");
+        let dialog = div()
+            .id("close-workspace-dialog")
+            .w(px(380.))
+            .p(px(20.))
+            .gap(px(12.))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.chrome_background))
+            .border_1()
+            .border_color(rgb(theme.active_pane_border))
+            .text_color(rgb(theme.ui_foreground))
+            .child(div().text_lg().child("Close workspace?"))
+            .child(SharedString::from(message))
+            .child(
+                div()
+                    .w_full()
+                    .gap(px(8.))
+                    .justify_end()
+                    .items_center()
+                    .flex()
+                    .child(cancel)
+                    .child(confirm),
+            );
+        Some(
+            deferred(
+                div()
+                    .size_full()
+                    .absolute()
+                    .inset_0()
+                    .items_center()
+                    .justify_center()
+                    .bg(rgba(0x00000099))
+                    .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        |_event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                        },
+                    )
+                    .child(dialog),
+            )
+            .with_priority(20)
+            .into_any_element(),
+        )
     }
 
     fn render_collapsed_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -1576,6 +1769,50 @@ impl WorkspaceView {
                     ),
             )
             .child(div().flex_1())
+            .into_any_element()
+    }
+
+    fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let workspace_title = self
+            .snapshot
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.title.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "Water".to_owned());
+        div()
+            .id("water-titlebar")
+            .h(px(36.))
+            .w_full()
+            .pl(px(78.))
+            .pr(px(12.))
+            .items_center()
+            .flex()
+            .window_control_area(WindowControlArea::Drag)
+            .bg(rgb(theme.chrome_background))
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down_out(cx.listener(|this, _event, _window, _cx| {
+                this.titlebar_dragging = false;
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, _cx| {
+                    this.titlebar_dragging = true;
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                    this.titlebar_dragging = false;
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, _event: &MouseMoveEvent, window, _cx| {
+                if this.titlebar_dragging {
+                    this.titlebar_dragging = false;
+                    window.start_window_move();
+                }
+            }))
+            .child(SharedString::from(format!("Water · {workspace_title}")))
             .into_any_element()
     }
 
@@ -3469,20 +3706,6 @@ impl Render for WorkspaceView {
                     .collect()
             })
             .unwrap_or_default();
-        let workspace_title = self
-            .snapshot
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.title.clone())
-            .unwrap_or_else(|| "No workspace".to_owned());
-        let workspace_id = self
-            .snapshot
-            .workspace
-            .as_ref()
-            .map(|workspace| workspace.id.to_string())
-            .unwrap_or_else(|| "none".to_owned());
-        let revision = self.snapshot.state_revision;
-
         let tab_bar = div()
             .h(px(40.))
             .px(px(8.))
@@ -3523,19 +3746,6 @@ impl Render for WorkspaceView {
             .min_w(px(0.))
             .min_h(px(0.))
             .bg(rgb(theme.terminal_background))
-            .child(
-                div()
-                    .h(px(36.))
-                    .px(px(12.))
-                    .items_center()
-                    .flex()
-                    .bg(rgb(theme.chrome_background))
-                    .child(SharedString::from(format!(
-                        "Water · {workspace_title} ({workspace_id}) · revision {revision}"
-                    )))
-                    .child(div().flex_1())
-                    .child("Cmd+E sidebar"),
-            )
             .child(tab_bar)
             .child(
                 div()
@@ -3554,9 +3764,20 @@ impl Render for WorkspaceView {
         };
 
         let action_view = cx.entity();
-        div()
+        let main_content = div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .child(sidebar)
+            .child(content);
+        let overlay = self
+            .render_dialog(theme, cx)
+            .or_else(|| self.render_context_menu(theme, cx));
+        let mut root = div()
             .size_full()
             .flex()
+            .flex_col()
             .on_action(|_: &HideWindow, window, _cx| {
                 window.remove_window();
             })
@@ -3593,8 +3814,12 @@ impl Render for WorkspaceView {
             .bg(rgb(theme.terminal_background))
             .text_color(rgb(theme.ui_foreground))
             .child(workspace_mouse_event_observer(cx.entity()))
-            .child(sidebar)
-            .child(content)
+            .child(self.render_titlebar(theme, cx))
+            .child(main_content);
+        if let Some(overlay) = overlay {
+            root = root.child(overlay);
+        }
+        root
     }
 }
 

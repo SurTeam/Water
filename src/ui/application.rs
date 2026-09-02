@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode,
-    SystemMenuType, Task, WeakEntity, WindowBounds, WindowOptions, actions, px, size,
+    SystemMenuType, Task, TitlebarOptions, WeakEntity, WindowBounds, WindowDecorations,
+    WindowOptions, actions, point, px, size,
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
@@ -101,17 +102,11 @@ impl WaterApplication {
         let weak_root = root.downgrade();
         let focus_handle = root.read(cx).focus_handle(cx);
         let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
-        match cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            move |window, cx| {
-                window.activate_window();
-                window.focus(&focus_handle, cx);
-                root
-            },
-        ) {
+        match cx.open_window(water_window_options(bounds), move |window, cx| {
+            window.activate_window();
+            window.focus(&focus_handle, cx);
+            root
+        }) {
             Ok(_) => self.state.views.borrow_mut().push(weak_root),
             Err(error) => tracing::error!(
                 target: "water::ui",
@@ -194,6 +189,24 @@ impl WaterApplication {
     }
 }
 
+fn water_window_options(bounds: Bounds<gpui::Pixels>) -> WindowOptions {
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // Water renders the titlebar inside WorkspaceView. The transparent
+        // titlebar keeps the platform traffic lights while hiding the native
+        // title text/background, and app-owned dragging avoids AppKit's native
+        // titlebar click delay.
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(9.), px(9.))),
+        }),
+        app_owns_titlebar_drag: true,
+        window_decorations: Some(WindowDecorations::Client),
+        ..Default::default()
+    }
+}
+
 fn dispatch_controlled_keystroke(source: &str, cx: &mut App) -> Result<bool, String> {
     let keystroke = Keystroke::parse(source).map_err(|error| error.to_string())?;
     let window = cx
@@ -242,6 +255,16 @@ fn application_menus() -> Vec<Menu> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_titlebar_window_options_hide_the_native_titlebar() {
+        let options = water_window_options(Bounds::default());
+        assert!(options.app_owns_titlebar_drag);
+        assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
+        let titlebar = options.titlebar.expect("Water uses an integrated titlebar");
+        assert!(titlebar.appears_transparent);
+        assert!(titlebar.title.is_none());
+    }
 
     #[test]
     fn menu_bar_has_window_controls_without_a_quit_item() {
