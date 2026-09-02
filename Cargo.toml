@@ -25,6 +25,7 @@ path = "src/bin/waterctl.rs"
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0"
+libc = "0.2"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", features = ["font-kit"] }
 polling = "3.8.0"

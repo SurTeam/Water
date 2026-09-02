@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -150,6 +151,11 @@ pub(crate) enum TerminalWorkerCommand {
 pub(crate) enum TerminalManagerEvent {
     OutputChanged {
         terminal_id: TerminalId,
+    },
+    ProcessChanged {
+        terminal_id: TerminalId,
+        process_name: String,
+        cwd: String,
     },
     TitleChanged {
         terminal_id: TerminalId,
@@ -416,6 +422,16 @@ fn trim_recent_output(output: &mut String) {
     output.drain(..remove);
 }
 
+fn process_name_from_program(program: &str) -> String {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("shell")
+        .trim_start_matches('-')
+        .to_owned()
+}
+
 pub struct TerminalManager {
     registry: TerminalRegistry,
     scrollback_lines: usize,
@@ -496,6 +512,17 @@ impl TerminalManager {
         args: Vec<String>,
         size: TerminalSize,
     ) -> Result<(), TerminalError> {
+        self.spawn_with_working_directory(terminal_id, program, args, size, None)
+    }
+
+    pub fn spawn_with_working_directory(
+        &mut self,
+        terminal_id: TerminalId,
+        program: String,
+        args: Vec<String>,
+        size: TerminalSize,
+        working_directory: Option<PathBuf>,
+    ) -> Result<(), TerminalError> {
         if program.is_empty() {
             return Err(TerminalError::SpawnFailed(
                 "terminal program must not be empty".to_owned(),
@@ -507,10 +534,16 @@ impl TerminalManager {
             )));
         }
 
+        let working_directory = working_directory.filter(|path| path.is_dir());
+        let fallback_cwd = working_directory
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let fallback_process_name = process_name_from_program(&program);
         alacritty_terminal::tty::setup_env();
         let options = alacritty_terminal::tty::Options {
             shell: Some(alacritty_terminal::tty::Shell::new(program, args)),
-            working_directory: None,
+            working_directory,
             drain_on_exit: false,
             env: Default::default(),
         };
@@ -522,7 +555,9 @@ impl TerminalManager {
         };
         let pty = alacritty_terminal::tty::new(&options, window_size, terminal_id.get())
             .map_err(|error| TerminalError::SpawnFailed(error.to_string()))?;
-        let initial_snapshot = TerminalSnapshot::empty(terminal_id, size);
+        let mut initial_snapshot = TerminalSnapshot::empty(terminal_id, size);
+        initial_snapshot.process_name = fallback_process_name.clone();
+        initial_snapshot.cwd = fallback_cwd.display().to_string();
         let (command_tx, command_rx) = mpsc::channel();
         let wakeup = Arc::new(Mutex::new(None));
         self.registry.register(
@@ -556,6 +591,10 @@ impl TerminalManager {
                             event_wakeup,
                             worker_wakeup,
                         ),
+                        super::worker::WorkerMetadata {
+                            fallback_process_name,
+                            fallback_cwd,
+                        },
                     ),
                     pty,
                 )

@@ -1,6 +1,12 @@
 use std::io::{self, ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -20,6 +26,7 @@ use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
 const READ_BUFFER_BYTES: usize = 16 * 1024;
+const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 
 pub(crate) struct WorkerConfig {
     terminal_id: TerminalId,
@@ -27,10 +34,17 @@ pub(crate) struct WorkerConfig {
     scrollback_lines: usize,
     scrollback_budget: ScrollbackBudget,
     command_rx: Receiver<TerminalWorkerCommand>,
+    fallback_process_name: String,
+    fallback_cwd: PathBuf,
     registry: TerminalRegistry,
     event_tx: Sender<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
     wakeup_slot: WakeupSlot,
+}
+
+pub(crate) struct WorkerMetadata {
+    pub(crate) fallback_process_name: String,
+    pub(crate) fallback_cwd: PathBuf,
 }
 
 pub(crate) struct WorkerChannels {
@@ -64,6 +78,7 @@ impl WorkerConfig {
         scrollback_budget: ScrollbackBudget,
         command_rx: Receiver<TerminalWorkerCommand>,
         channels: WorkerChannels,
+        metadata: WorkerMetadata,
     ) -> Self {
         Self {
             terminal_id,
@@ -71,6 +86,8 @@ impl WorkerConfig {
             scrollback_lines,
             scrollback_budget,
             command_rx,
+            fallback_process_name: metadata.fallback_process_name,
+            fallback_cwd: metadata.fallback_cwd,
             registry: channels.registry,
             event_tx: channels.event_tx,
             event_wakeup: channels.event_wakeup,
@@ -86,6 +103,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         scrollback_lines,
         scrollback_budget,
         command_rx,
+        fallback_process_name,
+        fallback_cwd,
         registry,
         event_tx,
         event_wakeup,
@@ -102,6 +121,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut term = Term::new(config, &size, proxy);
     let mut scrollback = ScrollbackState::new(terminal_id, scrollback_lines, scrollback_budget);
     let _ = scrollback.reconcile(&mut term, false);
+    let mut process_metadata = query_process_metadata(&pty, &fallback_process_name, &fallback_cwd);
     let mut processor = Processor::new();
     let poller = match Poller::new() {
         Ok(poller) => Arc::new(poller),
@@ -162,20 +182,28 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut snapshot_revision = 0_u64;
     let mut viewport_position = 0_i64;
+    let mut last_process_metadata_refresh = Instant::now();
     let mut stop_requested = false;
     let publisher = SnapshotPublisher {
+        terminal_id,
         registry: &registry,
         event_tx: &event_tx,
         event_wakeup: event_wakeup.as_ref(),
     };
     publish_snapshot(
-        terminal_id,
         &term,
         TerminalProcessState::Running,
         snapshot_revision,
         &publisher,
         &[],
         viewport_position,
+        &process_metadata,
+    );
+    emit_process_metadata(
+        &event_tx,
+        event_wakeup.as_ref(),
+        terminal_id,
+        &process_metadata,
     );
 
     'worker: loop {
@@ -184,18 +212,40 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 Ok(CommandEffect::Continue {
                     dirty,
                     viewport_delta,
+                    refresh_process,
                 }) => {
                     viewport_position = viewport_position.saturating_add(viewport_delta);
-                    if dirty {
+                    let metadata_due = refresh_process
+                        && last_process_metadata_refresh.elapsed()
+                            >= PROCESS_METADATA_REFRESH_INTERVAL;
+                    let metadata_changed = metadata_due
+                        && refresh_process_metadata(
+                            &pty,
+                            &fallback_process_name,
+                            &fallback_cwd,
+                            &mut process_metadata,
+                        );
+                    if metadata_due {
+                        last_process_metadata_refresh = Instant::now();
+                    }
+                    if dirty || metadata_changed {
                         snapshot_revision = snapshot_revision.saturating_add(1);
                         publish_snapshot(
-                            terminal_id,
                             &term,
                             TerminalProcessState::Running,
                             snapshot_revision,
                             &publisher,
                             &[],
                             viewport_position,
+                            &process_metadata,
+                        );
+                    }
+                    if metadata_changed {
+                        emit_process_metadata(
+                            &event_tx,
+                            event_wakeup.as_ref(),
+                            terminal_id,
+                            &process_metadata,
                         );
                     }
                 }
@@ -218,7 +268,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
 
         events.clear();
-        if let Err(error) = poller.wait(&mut events, None) {
+        if let Err(error) = poller.wait(&mut events, Some(std::time::Duration::from_millis(250))) {
             tracing::warn!(
                 target: "water::pty",
                 terminal_id = %terminal_id,
@@ -285,17 +335,40 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             worker_stop = true;
         }
 
+        let metadata_due =
+            last_process_metadata_refresh.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
+        let metadata_changed = metadata_due
+            && (!output_buffer.is_empty() || events.iter().next().is_none())
+            && refresh_process_metadata(
+                &pty,
+                &fallback_process_name,
+                &fallback_cwd,
+                &mut process_metadata,
+            );
+        if metadata_due {
+            last_process_metadata_refresh = Instant::now();
+        }
         if !output_buffer.is_empty() {
             let _ = scrollback.sync(&mut term);
+        }
+        if !output_buffer.is_empty() || metadata_changed {
             snapshot_revision = snapshot_revision.saturating_add(1);
             publish_snapshot(
-                terminal_id,
                 &term,
                 TerminalProcessState::Running,
                 snapshot_revision,
                 &publisher,
                 &output_buffer,
                 viewport_position,
+                &process_metadata,
+            );
+        }
+        if metadata_changed {
+            emit_process_metadata(
+                &event_tx,
+                event_wakeup.as_ref(),
+                terminal_id,
+                &process_metadata,
             );
         }
 
@@ -315,13 +388,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 let _ = scrollback.sync(&mut term);
                 snapshot_revision = snapshot_revision.saturating_add(1);
                 publish_snapshot(
-                    terminal_id,
                     &term,
                     TerminalProcessState::Running,
                     snapshot_revision,
                     &publisher,
                     &output_buffer,
                     viewport_position,
+                    &process_metadata,
                 );
             }
             emit_manager_event(
@@ -444,7 +517,11 @@ fn viewport_delta(old_offset: usize, new_offset: usize) -> i64 {
 }
 
 enum CommandEffect {
-    Continue { dirty: bool, viewport_delta: i64 },
+    Continue {
+        dirty: bool,
+        viewport_delta: i64,
+        refresh_process: bool,
+    },
     Stop,
 }
 
@@ -462,6 +539,7 @@ fn apply_command(
             Ok(CommandEffect::Continue {
                 dirty,
                 viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
+                refresh_process: true,
             })
         }
         TerminalWorkerCommand::Resize(size) => {
@@ -478,6 +556,7 @@ fn apply_command(
             Ok(CommandEffect::Continue {
                 dirty,
                 viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
+                refresh_process: false,
             })
         }
         TerminalWorkerCommand::Scroll(lines) => {
@@ -488,15 +567,186 @@ fn apply_command(
             Ok(CommandEffect::Continue {
                 dirty: dirty || old_offset != new_offset,
                 viewport_delta: viewport_delta(old_offset, new_offset),
+                refresh_process: false,
             })
         }
-        TerminalWorkerCommand::Shutdown => Ok(CommandEffect::Stop),
+        TerminalWorkerCommand::Shutdown => {
+            kill_process_group(&mut *pty);
+            Ok(CommandEffect::Stop)
+        }
     }
 }
 
 enum ReadEffect {
     Continue,
     Eof,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProcessMetadata {
+    process_name: String,
+    cwd: String,
+}
+
+fn query_process_metadata(
+    pty: &Pty,
+    fallback_process_name: &str,
+    fallback_cwd: &Path,
+) -> ProcessMetadata {
+    let pid = foreground_process_id(pty);
+    let process_name = pid
+        .and_then(query_process_name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| fallback_process_name.to_owned());
+    let cwd = pid
+        .and_then(query_process_cwd)
+        .unwrap_or_else(|| fallback_cwd.display().to_string());
+    ProcessMetadata { process_name, cwd }
+}
+
+#[cfg(unix)]
+fn foreground_process_id(pty: &Pty) -> Option<u32> {
+    let fd = pty.file().as_raw_fd();
+    let foreground = unsafe { libc::tcgetpgrp(fd) };
+    if foreground > 0 {
+        return u32::try_from(foreground).ok();
+    }
+    let child = pty.child().id();
+    query_terminal_foreground_process(child).or((child > 0).then_some(child))
+}
+
+#[cfg(not(unix))]
+fn foreground_process_id(_pty: &Pty) -> Option<u32> {
+    None
+}
+
+#[cfg(unix)]
+fn query_terminal_foreground_process(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "tpgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|process_group| *process_group > 0)
+        .and_then(|process_group| u32::try_from(process_group).ok())
+}
+
+fn query_process_name(pid: u32) -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout);
+    let name = name.trim().rsplit('/').next()?.trim_start_matches('-');
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
+fn query_process_cwd(pid: u32) -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        return std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .ok()
+            .map(|path| path.display().to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("lsof")
+            .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.strip_prefix('n'))
+            .filter(|path| !path.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+fn refresh_process_metadata(
+    pty: &Pty,
+    fallback_process_name: &str,
+    fallback_cwd: &Path,
+    current: &mut ProcessMetadata,
+) -> bool {
+    let next = query_process_metadata(pty, fallback_process_name, fallback_cwd);
+    if next == *current {
+        return false;
+    }
+    *current = next;
+    true
+}
+
+fn emit_process_metadata(
+    event_tx: &Sender<TerminalManagerEvent>,
+    event_wakeup: Option<&WakeupCallback>,
+    terminal_id: TerminalId,
+    metadata: &ProcessMetadata,
+) {
+    emit_manager_event(
+        event_tx,
+        event_wakeup,
+        TerminalManagerEvent::ProcessChanged {
+            terminal_id,
+            process_name: metadata.process_name.clone(),
+            cwd: metadata.cwd.clone(),
+        },
+    );
+}
+
+fn kill_process_group(pty: &mut Pty) {
+    #[cfg(unix)]
+    {
+        let current_pid = std::process::id() as libc::pid_t;
+        let current_pgid = unsafe { libc::getpgrp() };
+        let child_pid = pty.child().id() as libc::pid_t;
+        let foreground_pid = unsafe { libc::tcgetpgrp(pty.file().as_raw_fd()) };
+        let process_group = if foreground_pid > 1 {
+            foreground_pid
+        } else {
+            (child_pid > 1)
+                .then(|| foreground_process_id(pty).map(|pid| pid as libc::pid_t))
+                .flatten()
+                .unwrap_or_else(|| {
+                    if child_pid > 1 {
+                        unsafe { libc::getpgid(child_pid) }
+                    } else {
+                        -1
+                    }
+                })
+        };
+        if process_group > 1 && process_group != current_pid && process_group != current_pgid {
+            unsafe {
+                libc::killpg(process_group, libc::SIGKILL);
+            }
+        }
+        if child_pid > 1 && child_pid != current_pid && child_pid != current_pgid {
+            unsafe {
+                libc::kill(child_pid, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    let _ = pty;
 }
 
 fn drain_pty(
@@ -559,32 +809,39 @@ fn process_proxy_events(
 }
 
 struct SnapshotPublisher<'a> {
+    terminal_id: TerminalId,
     registry: &'a TerminalRegistry,
     event_tx: &'a Sender<TerminalManagerEvent>,
     event_wakeup: Option<&'a WakeupCallback>,
 }
 
 fn publish_snapshot(
-    terminal_id: TerminalId,
     term: &Term<WorkerEventProxy>,
     process: TerminalProcessState,
     revision: u64,
     publisher: &SnapshotPublisher<'_>,
     output: &[u8],
     viewport_position: i64,
+    metadata: &ProcessMetadata,
 ) {
-    let snapshot = TerminalSnapshot::from_term_with_viewport_position(
-        terminal_id,
+    let mut snapshot = TerminalSnapshot::from_term_with_viewport_position(
+        publisher.terminal_id,
         term,
         process,
         revision,
         viewport_position,
     );
-    publisher.registry.publish(terminal_id, snapshot, output);
+    snapshot.process_name = metadata.process_name.clone();
+    snapshot.cwd = metadata.cwd.clone();
+    publisher
+        .registry
+        .publish(publisher.terminal_id, snapshot, output);
     emit_manager_event(
         publisher.event_tx,
         publisher.event_wakeup,
-        TerminalManagerEvent::OutputChanged { terminal_id },
+        TerminalManagerEvent::OutputChanged {
+            terminal_id: publisher.terminal_id,
+        },
     );
 }
 

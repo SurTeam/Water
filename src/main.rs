@@ -32,12 +32,7 @@ fn main() -> Result<()> {
         dispatch_checked(&client, AppCommand::Workspace(WorkspaceCommand::Create))?;
     }
     if startup.initial_terminal {
-        dispatch_checked(
-            &client,
-            AppCommand::Tab(TabCommand::New {
-                title: Some("Terminal".to_owned()),
-            }),
-        )?;
+        dispatch_checked(&client, AppCommand::Tab(TabCommand::New { title: None }))?;
     }
     let initial_snapshot = client
         .state_dump()

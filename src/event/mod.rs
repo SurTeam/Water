@@ -10,7 +10,19 @@ pub enum AppEventKind {
     WorkspaceCreated {
         workspace_id: WorkspaceId,
     },
+    WorkspaceClosed {
+        workspace_id: WorkspaceId,
+    },
+    WorkspaceActivated {
+        workspace_id: WorkspaceId,
+    },
+    WorkspaceRenamed {
+        workspace_id: WorkspaceId,
+    },
     TabCreated {
+        tab_id: TabId,
+    },
+    TabRenamed {
         tab_id: TabId,
     },
     TabActivated {
@@ -60,13 +72,22 @@ pub enum AppEventKind {
         terminal_id: TerminalId,
         title: String,
     },
+    TerminalProcessChanged {
+        terminal_id: TerminalId,
+        process_name: String,
+        cwd: String,
+    },
 }
 
 impl AppEventKind {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::WorkspaceCreated { .. } => "workspace.created",
+            Self::WorkspaceClosed { .. } => "workspace.closed",
+            Self::WorkspaceActivated { .. } => "workspace.activated",
+            Self::WorkspaceRenamed { .. } => "workspace.renamed",
             Self::TabCreated { .. } => "tab.created",
+            Self::TabRenamed { .. } => "tab.renamed",
             Self::TabActivated { .. } => "tab.activated",
             Self::TabClosed { .. } => "tab.closed",
             Self::PaneCreated { .. } => "pane.created",
@@ -80,6 +101,7 @@ impl AppEventKind {
             Self::TerminalOutputChanged { .. } => "terminal.output_changed",
             Self::TerminalResized { .. } => "terminal.resized",
             Self::TerminalTitleChanged { .. } => "terminal.title_changed",
+            Self::TerminalProcessChanged { .. } => "terminal.process_changed",
         }
     }
 }

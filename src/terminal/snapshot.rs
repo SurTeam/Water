@@ -134,6 +134,13 @@ pub struct TerminalCursor {
 pub struct TerminalSnapshot {
     pub terminal_id: TerminalId,
     pub size: TerminalSize,
+    /// Current foreground process name, refreshed by the PTY worker.
+    #[serde(default)]
+    pub process_name: String,
+    /// Current foreground process working directory, refreshed by the PTY
+    /// worker and used as the inheritance source for new shells.
+    #[serde(default)]
+    pub cwd: String,
     pub display_offset: usize,
     /// Cumulative viewport movement caused by commands or resize.
     ///
@@ -155,6 +162,8 @@ impl TerminalSnapshot {
         Self {
             terminal_id,
             size,
+            process_name: String::new(),
+            cwd: String::new(),
             display_offset: 0,
             viewport_position: 0,
             cursor: TerminalCursor::default(),
@@ -247,6 +256,8 @@ impl TerminalSnapshot {
         Self {
             terminal_id,
             size,
+            process_name: String::new(),
+            cwd: String::new(),
             display_offset,
             viewport_position,
             cursor,

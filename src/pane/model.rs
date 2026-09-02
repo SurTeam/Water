@@ -11,6 +11,16 @@ pub enum SplitAxis {
     Vertical,
 }
 
+/// A directional focus request in pane geometry. This is deliberately kept in
+/// the pane module so topology does not depend on the command layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaneDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PaneNode {
     Leaf(PaneId),
@@ -140,6 +150,167 @@ impl PaneNode {
                 second.ratios(output);
             }
         }
+    }
+
+    /// Finds the nearest leaf in the requested visual direction. The tree is
+    /// laid out into normalized rectangles first, so focus remains spatially
+    /// correct for nested and uneven splits instead of relying on traversal
+    /// order.
+    pub fn directional_neighbor(&self, target: PaneId, direction: PaneDirection) -> Option<PaneId> {
+        let mut leaves = Vec::new();
+        collect_leaf_bounds(self, PaneBounds::full(), &mut leaves);
+        let current = leaves.iter().find(|leaf| leaf.id == target)?.bounds;
+        leaves
+            .into_iter()
+            .filter(|leaf| leaf.id != target && is_in_direction(leaf.bounds, current, direction))
+            .min_by(|left, right| {
+                candidate_score(left.bounds, current, direction)
+                    .partial_cmp(&candidate_score(right.bounds, current, direction))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|leaf| leaf.id)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PaneBounds {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+impl PaneBounds {
+    const fn full() -> Self {
+        Self {
+            left: 0.0,
+            top: 0.0,
+            right: 1.0,
+            bottom: 1.0,
+        }
+    }
+
+    fn center_x(self) -> f32 {
+        (self.left + self.right) / 2.0
+    }
+
+    fn center_y(self) -> f32 {
+        (self.top + self.bottom) / 2.0
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LeafBounds {
+    id: PaneId,
+    bounds: PaneBounds,
+}
+
+fn collect_leaf_bounds(node: &PaneNode, bounds: PaneBounds, output: &mut Vec<LeafBounds>) {
+    match node {
+        PaneNode::Leaf(id) => output.push(LeafBounds { id: *id, bounds }),
+        PaneNode::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } => {
+            let ratio = ratio.clamp(0.05, 0.95);
+            match axis {
+                SplitAxis::Horizontal => {
+                    let split_x = bounds.left + (bounds.right - bounds.left) * ratio;
+                    collect_leaf_bounds(
+                        first,
+                        PaneBounds {
+                            right: split_x,
+                            ..bounds
+                        },
+                        output,
+                    );
+                    collect_leaf_bounds(
+                        second,
+                        PaneBounds {
+                            left: split_x,
+                            ..bounds
+                        },
+                        output,
+                    );
+                }
+                SplitAxis::Vertical => {
+                    let split_y = bounds.top + (bounds.bottom - bounds.top) * ratio;
+                    collect_leaf_bounds(
+                        first,
+                        PaneBounds {
+                            bottom: split_y,
+                            ..bounds
+                        },
+                        output,
+                    );
+                    collect_leaf_bounds(
+                        second,
+                        PaneBounds {
+                            top: split_y,
+                            ..bounds
+                        },
+                        output,
+                    );
+                }
+            }
+        }
+    }
+}
+
+const GEOMETRY_EPSILON: f32 = 0.0001;
+
+fn is_in_direction(candidate: PaneBounds, current: PaneBounds, direction: PaneDirection) -> bool {
+    match direction {
+        PaneDirection::Left => candidate.right <= current.left + GEOMETRY_EPSILON,
+        PaneDirection::Right => candidate.left >= current.right - GEOMETRY_EPSILON,
+        PaneDirection::Up => candidate.bottom <= current.top + GEOMETRY_EPSILON,
+        PaneDirection::Down => candidate.top >= current.bottom - GEOMETRY_EPSILON,
+    }
+}
+
+fn candidate_score(
+    candidate: PaneBounds,
+    current: PaneBounds,
+    direction: PaneDirection,
+) -> (f32, f32, f32) {
+    let (primary_gap, cross_gap, center_distance) = match direction {
+        PaneDirection::Left => (
+            (current.left - candidate.right).max(0.0),
+            interval_gap(candidate.top, candidate.bottom, current.top, current.bottom),
+            (current.center_x() - candidate.center_x()).abs()
+                + (current.center_y() - candidate.center_y()).abs(),
+        ),
+        PaneDirection::Right => (
+            (candidate.left - current.right).max(0.0),
+            interval_gap(candidate.top, candidate.bottom, current.top, current.bottom),
+            (current.center_x() - candidate.center_x()).abs()
+                + (current.center_y() - candidate.center_y()).abs(),
+        ),
+        PaneDirection::Up => (
+            (current.top - candidate.bottom).max(0.0),
+            interval_gap(candidate.left, candidate.right, current.left, current.right),
+            (current.center_x() - candidate.center_x()).abs()
+                + (current.center_y() - candidate.center_y()).abs(),
+        ),
+        PaneDirection::Down => (
+            (candidate.top - current.bottom).max(0.0),
+            interval_gap(candidate.left, candidate.right, current.left, current.right),
+            (current.center_x() - candidate.center_x()).abs()
+                + (current.center_y() - candidate.center_y()).abs(),
+        ),
+    };
+    (primary_gap, cross_gap, center_distance)
+}
+
+fn interval_gap(first_start: f32, first_end: f32, second_start: f32, second_end: f32) -> f32 {
+    if first_end < second_start {
+        second_start - first_end
+    } else if second_end < first_start {
+        first_start - second_end
+    } else {
+        0.0
     }
 }
 

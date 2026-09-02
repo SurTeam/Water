@@ -432,6 +432,8 @@ mod tests {
         StateDump {
             state_revision: revision,
             workspace: None,
+            workspaces: Vec::new(),
+            active_workspace: None,
             focused_pane: None,
         }
     }

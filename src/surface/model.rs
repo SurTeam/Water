@@ -40,6 +40,13 @@ pub struct TerminalSurfaceState {
     pub session_id: SessionId,
     pub program: String,
     pub title: Option<String>,
+    /// The current foreground process name used by automatic tab titles.
+    #[serde(default)]
+    pub process_name: String,
+    /// The current foreground process working directory. New tabs and panes
+    /// inherit this value through the dispatcher.
+    #[serde(default)]
+    pub cwd: String,
     pub args: Vec<String>,
     pub status: TerminalStatus,
     pub columns: usize,

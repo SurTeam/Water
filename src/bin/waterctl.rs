@@ -9,7 +9,7 @@ use water::command::{
     TabCommand, TerminalCommand, WorkspaceCommand,
 };
 use water::control::{ControlClient, default_socket_path};
-use water::ids::{PaneId, TabId, TerminalId};
+use water::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use water::surface::SurfaceKind;
 use water::terminal::{default_shell_args, default_shell_program};
 
@@ -54,11 +54,49 @@ fn run_debug(client: &ControlClient, arguments: &[String]) -> Result<()> {
 fn run_workspace(client: &ControlClient, arguments: &[String]) -> Result<()> {
     match arguments.first().map(String::as_str) {
         Some("create") | Some("new") => {
-            dispatch_and_print(client, AppCommand::Workspace(WorkspaceCommand::Create))?
+            dispatch_and_print(client, AppCommand::Workspace(WorkspaceCommand::New))?
         }
         Some("list") => {
             let state = client.state_dump().context("state request failed")?;
-            print_json(&state.workspace)?;
+            print_json(&state.workspaces)?;
+        }
+        Some("activate") => {
+            let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
+                .or_else(|| bare_id::<WorkspaceId>(&arguments[1..]).ok())
+                .context("workspace activate requires an ID")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Workspace(WorkspaceCommand::Activate {
+                    workspace_id: Some(workspace_id),
+                }),
+            )?;
+        }
+        Some("rename") => {
+            let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
+                .or_else(|| bare_id::<WorkspaceId>(&arguments[1..]).ok());
+            let title = optional_value(arguments, "--title")?
+                .or_else(|| {
+                    arguments
+                        .get(1)
+                        .filter(|value| !value.starts_with('-'))
+                        .cloned()
+                })
+                .context("workspace rename requires --title")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Workspace(WorkspaceCommand::Rename {
+                    workspace_id,
+                    title,
+                }),
+            )?;
+        }
+        Some("close") | Some("delete") => {
+            let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
+                .or_else(|| bare_id::<WorkspaceId>(&arguments[1..]).ok());
+            dispatch_and_print(
+                client,
+                AppCommand::Workspace(WorkspaceCommand::Delete { workspace_id }),
+            )?;
         }
         Some(command) => bail!("unknown workspace command: {command}"),
         None => bail!("workspace requires a command"),
@@ -74,6 +112,22 @@ fn run_tab(client: &ControlClient, arguments: &[String]) -> Result<()> {
         "new" => {
             let title = optional_value(arguments, "--title")?;
             dispatch_and_print(client, AppCommand::Tab(TabCommand::New { title }))?;
+        }
+        "rename" => {
+            let tab_id = optional_id::<TabId>(arguments, "--tab")?
+                .or_else(|| bare_id::<TabId>(&arguments[1..]).ok());
+            let title = optional_value(arguments, "--title")?
+                .or_else(|| {
+                    arguments
+                        .get(1)
+                        .filter(|value| !value.starts_with('-'))
+                        .cloned()
+                })
+                .context("tab rename requires --title")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Tab(TabCommand::Rename { tab_id, title }),
+            )?;
         }
         "close" => {
             let tab_id = optional_id::<TabId>(arguments, "--tab")?
@@ -533,7 +587,10 @@ fn print_usage() {
         "waterctl [--socket PATH] <state|workspace|tab|pane|surface|terminal|operation|scenario|debug> ...\n\n\
          Examples:\n\
            waterctl state\n\
+           waterctl workspace new\n\
+           waterctl workspace rename --workspace 1 --title Dev\n\
            waterctl tab new --title Main\n\
+           waterctl tab rename --tab 2 --title Shell\n\
            waterctl pane split --right\n\
            waterctl pane focus 3\n\
            waterctl operation wait 7\n\

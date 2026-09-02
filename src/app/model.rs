@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId},
-    pane::{Pane, PaneNode, SplitAxis},
+    pane::{Pane, PaneDirection, PaneNode, SplitAxis},
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::TerminalSnapshot,
     workspace::{Tab, Workspace},
@@ -13,7 +13,13 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateDump {
     pub state_revision: u64,
+    /// Compatibility alias for the active workspace. New consumers should use
+    /// `workspaces` and `active_workspace`.
     pub workspace: Option<WorkspaceDump>,
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceDump>,
+    #[serde(default)]
+    pub active_workspace: Option<WorkspaceId>,
     pub focused_pane: Option<PaneId>,
 }
 
@@ -22,14 +28,22 @@ pub type ModelSnapshot = StateDump;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceDump {
     pub id: WorkspaceId,
+    #[serde(default = "default_workspace_dump_title")]
+    pub title: String,
     pub active_tab: Option<TabId>,
     pub tabs: Vec<TabDump>,
+}
+
+fn default_workspace_dump_title() -> String {
+    "Workspace".to_owned()
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabDump {
     pub id: TabId,
     pub title: String,
+    #[serde(default)]
+    pub title_override: Option<String>,
     pub active_pane: PaneId,
     pub tree: PaneTreeDump,
 }
@@ -100,7 +114,8 @@ pub(crate) struct SplitRequest {
 
 #[derive(Debug)]
 pub struct ApplicationModel {
-    workspace: Option<Workspace>,
+    workspaces: BTreeMap<WorkspaceId, Workspace>,
+    active_workspace: Option<WorkspaceId>,
     tabs: BTreeMap<TabId, Tab>,
     panes: BTreeMap<PaneId, Pane>,
     surfaces: BTreeMap<SurfaceId, SurfaceState>,
@@ -116,7 +131,8 @@ impl Default for ApplicationModel {
 impl ApplicationModel {
     pub fn new() -> Self {
         Self {
-            workspace: None,
+            workspaces: BTreeMap::new(),
+            active_workspace: None,
             tabs: BTreeMap::new(),
             panes: BTreeMap::new(),
             surfaces: BTreeMap::new(),
@@ -128,8 +144,23 @@ impl ApplicationModel {
         self.state_revision
     }
 
+    /// Returns the active workspace. This keeps the Phase 1/2 query shape
+    /// available while the model now owns multiple workspaces.
     pub fn workspace(&self) -> Option<&Workspace> {
-        self.workspace.as_ref()
+        self.active_workspace
+            .and_then(|workspace_id| self.workspaces.get(&workspace_id))
+    }
+
+    pub fn workspace_by_id(&self, workspace_id: WorkspaceId) -> Option<&Workspace> {
+        self.workspaces.get(&workspace_id)
+    }
+
+    pub fn workspaces(&self) -> impl Iterator<Item = &Workspace> {
+        self.workspaces.values()
+    }
+
+    pub fn active_workspace_id(&self) -> Option<WorkspaceId> {
+        self.active_workspace
     }
 
     pub fn tab(&self, tab_id: TabId) -> Option<&Tab> {
@@ -160,22 +191,92 @@ impl ApplicationModel {
         self.state_revision
     }
 
-    pub(crate) fn create_workspace(&mut self, workspace_id: WorkspaceId) -> bool {
-        if self.workspace.is_some() {
+    pub(crate) fn create_workspace_with_title(
+        &mut self,
+        workspace_id: WorkspaceId,
+        title: String,
+    ) -> bool {
+        if self.workspaces.contains_key(&workspace_id) {
             return false;
         }
-        self.workspace = Some(Workspace::new(workspace_id));
+        self.workspaces
+            .insert(workspace_id, Workspace::new_with_title(workspace_id, title));
+        self.active_workspace = Some(workspace_id);
         true
     }
 
-    pub(crate) fn create_tab(
+    pub(crate) fn activate_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<bool, &'static str> {
+        if !self.workspaces.contains_key(&workspace_id) {
+            return Err("workspace not found");
+        }
+        if self.active_workspace == Some(workspace_id) {
+            return Ok(false);
+        }
+        self.active_workspace = Some(workspace_id);
+        Ok(true)
+    }
+
+    pub(crate) fn rename_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        title: String,
+    ) -> Result<bool, &'static str> {
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or("workspace not found")?;
+        if workspace.title == title {
+            return Ok(false);
+        }
+        workspace.title = title;
+        Ok(true)
+    }
+
+    /// Removes a workspace and all of its tabs, panes, and surfaces. Terminal
+    /// workers are retired by the dispatcher immediately after this model
+    /// mutation, keeping process ownership outside the model.
+    pub(crate) fn close_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+    ) -> Result<Workspace, &'static str> {
+        let removed = self
+            .workspaces
+            .remove(&workspace_id)
+            .ok_or("workspace not found")?;
+        for tab_id in &removed.tabs {
+            let Some(tab) = self.tabs.remove(tab_id) else {
+                continue;
+            };
+            let mut pane_ids = Vec::new();
+            tab.root.leaf_ids(&mut pane_ids);
+            for pane_id in pane_ids {
+                if let Some(pane) = self.panes.remove(&pane_id) {
+                    self.surfaces.remove(&pane.surface);
+                }
+            }
+        }
+        if self.active_workspace == Some(workspace_id) {
+            self.active_workspace = self.workspaces.keys().next_back().copied();
+        }
+        Ok(removed)
+    }
+
+    pub(crate) fn create_tab_with_title_mode(
         &mut self,
         tab_id: TabId,
         title: String,
+        title_is_pinned: bool,
         pane_id: PaneId,
         surface_id: SurfaceId,
     ) -> Result<bool, &'static str> {
-        let workspace = self.workspace.as_mut().ok_or("workspace not found")?;
+        let workspace_id = self.active_workspace.ok_or("workspace not found")?;
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or("workspace not found")?;
         if self.tabs.contains_key(&tab_id) {
             return Ok(false);
         }
@@ -187,17 +288,18 @@ impl ApplicationModel {
             },
         );
         self.surfaces.insert(surface_id, SurfaceState::empty());
-        self.tabs.insert(tab_id, Tab::new(tab_id, title, pane_id));
+        let title_override = title_is_pinned.then(|| title.clone());
+        self.tabs.insert(
+            tab_id,
+            Tab::new_with_title(tab_id, title, pane_id, title_override),
+        );
         workspace.tabs.push(tab_id);
         workspace.active_tab = Some(tab_id);
         Ok(true)
     }
 
     pub(crate) fn close_tab(&mut self, tab_id: TabId) -> Result<Tab, &'static str> {
-        let workspace = self.workspace.as_mut().ok_or("workspace not found")?;
-        if !workspace.tabs.contains(&tab_id) {
-            return Err("tab not found");
-        }
+        let workspace_id = self.workspace_id_for_tab(tab_id).ok_or("tab not found")?;
         let tab = self.tabs.remove(&tab_id).ok_or("tab not found")?;
         let mut pane_ids = Vec::new();
         tab.root.leaf_ids(&mut pane_ids);
@@ -206,6 +308,10 @@ impl ApplicationModel {
                 self.surfaces.remove(&pane.surface);
             }
         }
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or("workspace not found")?;
         workspace.tabs.retain(|id| *id != tab_id);
         if workspace.active_tab == Some(tab_id) {
             workspace.active_tab = workspace.tabs.last().copied();
@@ -214,21 +320,20 @@ impl ApplicationModel {
     }
 
     pub(crate) fn activate_tab(&mut self, tab_id: TabId) -> Result<bool, &'static str> {
-        let workspace = self.workspace.as_mut().ok_or("workspace not found")?;
-        if !workspace.tabs.contains(&tab_id) {
-            return Err("tab not found");
-        }
-        if workspace.active_tab == Some(tab_id) {
-            return Ok(false);
-        }
+        let workspace_id = self.workspace_id_for_tab(tab_id).ok_or("tab not found")?;
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .ok_or("workspace not found")?;
+        let changed =
+            self.active_workspace != Some(workspace_id) || workspace.active_tab != Some(tab_id);
+        self.active_workspace = Some(workspace_id);
         workspace.active_tab = Some(tab_id);
-        Ok(true)
+        Ok(changed)
     }
 
     pub(crate) fn active_tab_id(&self) -> Option<TabId> {
-        self.workspace
-            .as_ref()
-            .and_then(|workspace| workspace.active_tab)
+        self.workspace().and_then(|workspace| workspace.active_tab)
     }
 
     pub(crate) fn tab_id_for_pane(&self, pane_id: PaneId) -> Option<TabId> {
@@ -236,6 +341,13 @@ impl ApplicationModel {
             .values()
             .find(|tab| tab.root.contains(pane_id))
             .map(|tab| tab.id)
+    }
+
+    pub(crate) fn workspace_id_for_tab(&self, tab_id: TabId) -> Option<WorkspaceId> {
+        self.workspaces
+            .iter()
+            .find(|(_, workspace)| workspace.tabs.contains(&tab_id))
+            .map(|(workspace_id, _)| *workspace_id)
     }
 
     pub(crate) fn active_pane(&self) -> Option<PaneId> {
@@ -248,6 +360,17 @@ impl ApplicationModel {
         let mut pane_ids = Vec::new();
         tab.root.leaf_ids(&mut pane_ids);
         Some(pane_ids)
+    }
+
+    pub(crate) fn directional_pane(
+        &self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        direction: PaneDirection,
+    ) -> Option<PaneId> {
+        self.tabs
+            .get(&tab_id)
+            .and_then(|tab| tab.root.directional_neighbor(pane_id, direction))
     }
 
     pub(crate) fn split_pane(&mut self, request: SplitRequest) -> Result<(), &'static str> {
@@ -279,6 +402,13 @@ impl ApplicationModel {
         );
         self.surfaces.insert(new_surface, SurfaceState::empty());
         tab.active_pane = new_pane;
+        if let Some(workspace_id) = self.workspace_id_for_tab(tab_id) {
+            self.active_workspace = Some(workspace_id);
+            self.workspaces
+                .get_mut(&workspace_id)
+                .expect("tab belongs to workspace")
+                .active_tab = Some(tab_id);
+        }
         Ok(())
     }
 
@@ -315,14 +445,24 @@ impl ApplicationModel {
         tab_id: TabId,
         pane_id: PaneId,
     ) -> Result<bool, &'static str> {
-        let workspace = self.workspace.as_mut().ok_or("workspace not found")?;
+        let workspace_id = self.workspace_id_for_tab(tab_id).ok_or("tab not found")?;
         let tab = self.tabs.get_mut(&tab_id).ok_or("tab not found")?;
         if !tab.root.contains(pane_id) {
             return Err("pane not found");
         }
-        let changed = tab.active_pane != pane_id || workspace.active_tab != Some(tab_id);
+        let changed = tab.active_pane != pane_id
+            || self.active_workspace != Some(workspace_id)
+            || self
+                .workspaces
+                .get(&workspace_id)
+                .and_then(|workspace| workspace.active_tab)
+                != Some(tab_id);
         tab.active_pane = pane_id;
-        workspace.active_tab = Some(tab_id);
+        self.active_workspace = Some(workspace_id);
+        self.workspaces
+            .get_mut(&workspace_id)
+            .expect("tab belongs to workspace")
+            .active_tab = Some(tab_id);
         Ok(changed)
     }
 
@@ -447,20 +587,99 @@ impl ApplicationModel {
         false
     }
 
+    /// Updates worker-owned terminal metadata and returns the affected pane if
+    /// anything changed. The caller decides whether the corresponding tab is
+    /// allowed to follow the process name.
+    pub(crate) fn set_terminal_process(
+        &mut self,
+        terminal_id: TerminalId,
+        process_name: String,
+        cwd: String,
+    ) -> Option<PaneId> {
+        for pane in self.panes.values() {
+            let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get(&pane.surface) else {
+                continue;
+            };
+            if terminal.terminal_id != terminal_id {
+                continue;
+            }
+            let changed = terminal.process_name != process_name || terminal.cwd != cwd;
+            if let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get_mut(&pane.surface) {
+                terminal.process_name = process_name;
+                terminal.cwd = cwd;
+            }
+            return changed.then_some(pane.id);
+        }
+        None
+    }
+
+    pub(crate) fn rename_tab(
+        &mut self,
+        tab_id: TabId,
+        title: String,
+    ) -> Result<bool, &'static str> {
+        let tab = self.tabs.get_mut(&tab_id).ok_or("tab not found")?;
+        if tab.title == title && tab.title_override.as_deref() == Some(title.as_str()) {
+            return Ok(false);
+        }
+        tab.title = title.clone();
+        tab.title_override = Some(title);
+        Ok(true)
+    }
+
+    pub(crate) fn update_tab_title_from_process(
+        &mut self,
+        tab_id: TabId,
+        pane_id: PaneId,
+        process_name: &str,
+    ) -> bool {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return false;
+        };
+        if tab.active_pane != pane_id || tab.title_override.is_some() || tab.title == process_name {
+            return false;
+        }
+        tab.title = process_name.to_owned();
+        true
+    }
+
+    pub(crate) fn refresh_tab_title_from_active_pane(&mut self, tab_id: TabId) -> bool {
+        let Some(tab) = self.tabs.get(&tab_id) else {
+            return false;
+        };
+        let pane_id = tab.active_pane;
+        let process_name = self
+            .terminal_id_for_pane(pane_id)
+            .and_then(|terminal_id| self.terminal_surface(terminal_id))
+            .map(|terminal| terminal.process_name.clone())
+            .filter(|name| !name.is_empty());
+        let Some(process_name) = process_name else {
+            return false;
+        };
+        self.update_tab_title_from_process(tab_id, pane_id, &process_name)
+    }
+
+    pub(crate) fn terminal_cwd(&self, terminal_id: TerminalId) -> Option<String> {
+        self.terminal_surface(terminal_id)
+            .map(|terminal| terminal.cwd.clone())
+            .filter(|cwd| !cwd.is_empty())
+    }
+
     pub fn snapshot(&self) -> StateDump {
-        let workspace = self.workspace.as_ref().map(|workspace| WorkspaceDump {
-            id: workspace.id,
-            active_tab: workspace.active_tab,
-            tabs: workspace
-                .tabs
-                .iter()
-                .filter_map(|tab_id| self.tabs.get(tab_id))
-                .map(|tab| self.tab_dump(tab))
-                .collect(),
-        });
+        let workspaces: Vec<_> = self
+            .workspaces
+            .values()
+            .map(|workspace| self.workspace_dump(workspace))
+            .collect();
+        let workspace = self
+            .active_workspace
+            .and_then(|workspace_id| self.workspaces.get(&workspace_id))
+            .map(|workspace| self.workspace_dump(workspace));
         StateDump {
             state_revision: self.state_revision,
             workspace,
+            workspaces,
+            active_workspace: self.active_workspace,
             focused_pane: self.active_pane(),
         }
     }
@@ -488,10 +707,25 @@ impl ApplicationModel {
         }
     }
 
+    fn workspace_dump(&self, workspace: &Workspace) -> WorkspaceDump {
+        WorkspaceDump {
+            id: workspace.id,
+            title: workspace.title.clone(),
+            active_tab: workspace.active_tab,
+            tabs: workspace
+                .tabs
+                .iter()
+                .filter_map(|tab_id| self.tabs.get(tab_id))
+                .map(|tab| self.tab_dump(tab))
+                .collect(),
+        }
+    }
+
     fn tab_dump(&self, tab: &Tab) -> TabDump {
         TabDump {
             id: tab.id,
             title: tab.title.clone(),
+            title_override: tab.title_override.clone(),
             active_pane: tab.active_pane,
             tree: self.pane_tree_dump(&tab.root),
         }

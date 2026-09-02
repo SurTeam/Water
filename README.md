@@ -15,7 +15,7 @@
 cargo run --bin water
 ```
 
-The app starts a local control socket at `/tmp/water.sock` by default and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-f`. New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
+The app starts a local control socket at `/tmp/water.sock` by default and opens one Terminal tab connected to the detected real zsh (preferring `/opt/homebrew/bin/zsh`) with `-l` (login mode). New tabs and split panes also create a real-shell terminal automatically. In the GUI, `Cmd-\\` splits right (horizontal left/right layout), `Cmd--` splits down (vertical up/down layout), and `Cmd-T` creates a new terminal tab. Use `--no-initial-terminal` to keep the workspace but omit the initial tab/PTY, or `--empty-workspace` for a completely clean model baseline. Override the socket with:
 
 ```sh
 cargo run --bin water -- --control-socket /tmp/my-water.sock

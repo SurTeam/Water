@@ -2,17 +2,20 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
-    AnyElement, App, Bounds, Context, DispatchPhase, Entity, FocusHandle, Focusable, FontWeight,
-    KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point,
-    ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, font, prelude::*, px,
-    rgb,
+    AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, FocusHandle, Focusable,
+    FontWeight, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Point, ScrollDelta, ScrollWheelEvent, SharedString, Task, Window, canvas, div, font,
+    prelude::*, px, rgb,
 };
 
-use crate::app::model::{PaneTreeDump, TabDump};
+use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
-use crate::command::{AppCommand, PaneCommand, SplitDirection, TabCommand, TerminalCommand};
+use crate::command::{
+    AppCommand, FocusDirection, PaneCommand, SplitDirection, TabCommand, TerminalCommand,
+    WorkspaceCommand,
+};
 use crate::config::{AppConfig, ThemeColors};
-use crate::ids::{PaneId, TabId, TerminalId};
+use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
 use crate::terminal::{
@@ -21,6 +24,11 @@ use crate::terminal::{
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
+const DEFAULT_SIDEBAR_WIDTH: f32 = 236.0;
+const COLLAPSED_SIDEBAR_WIDTH: f32 = 34.0;
+const MIN_SIDEBAR_WIDTH: f32 = 170.0;
+const MAX_SIDEBAR_WIDTH: f32 = 420.0;
+const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy)]
 struct TerminalMetrics {
@@ -49,6 +57,12 @@ struct TerminalCellPosition {
 enum TerminalSelectionSide {
     Left,
     Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenameTarget {
+    Workspace(WorkspaceId),
+    Tab(TabId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +126,11 @@ pub struct WorkspaceView {
     dragging_terminal: Option<TerminalId>,
     reported_mouse: Option<(TerminalId, MouseButton)>,
     last_reported_mouse_cell: Option<(TerminalId, TerminalCellPosition)>,
+    sidebar_collapsed: bool,
+    sidebar_width: f32,
+    dragging_sidebar: bool,
+    rename_target: Option<RenameTarget>,
+    rename_value: String,
 }
 
 impl WorkspaceView {
@@ -139,7 +158,139 @@ impl WorkspaceView {
             dragging_terminal: None,
             reported_mouse: None,
             last_reported_mouse_cell: None,
+            sidebar_collapsed: false,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            dragging_sidebar: false,
+            rename_target: None,
+            rename_value: String::new(),
         }
+    }
+
+    fn workspace_dumps(&self) -> Vec<WorkspaceDump> {
+        if self.snapshot.workspaces.is_empty() {
+            self.snapshot.workspace.clone().into_iter().collect()
+        } else {
+            self.snapshot.workspaces.clone()
+        }
+    }
+
+    fn active_workspace_id(&self) -> Option<WorkspaceId> {
+        self.snapshot.active_workspace.or_else(|| {
+            self.snapshot
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.id)
+        })
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        cx.notify();
+    }
+
+    fn update_sidebar_width(&mut self, x: gpui::Pixels, cx: &mut Context<Self>) {
+        if !self.dragging_sidebar || self.sidebar_collapsed {
+            return;
+        }
+        let width = f32::from(x).clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        if (self.sidebar_width - width).abs() > f32::EPSILON {
+            self.sidebar_width = width;
+            cx.notify();
+        }
+    }
+
+    fn begin_rename_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspace_dumps()
+            .into_iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            return;
+        };
+        self.rename_target = Some(RenameTarget::Workspace(workspace_id));
+        self.rename_value = workspace.title.clone();
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn begin_rename_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .workspace_dumps()
+            .into_iter()
+            .flat_map(|workspace| workspace.tabs)
+            .find(|tab| tab.id == tab_id)
+        else {
+            return;
+        };
+        self.rename_target = Some(RenameTarget::Tab(tab_id));
+        self.rename_value = tab.title.clone();
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.rename_target.take().is_some() {
+            self.rename_value.clear();
+            cx.notify();
+        }
+    }
+
+    fn commit_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.rename_target.take() else {
+            return;
+        };
+        let title = self.rename_value.trim().to_owned();
+        self.rename_value.clear();
+        if title.is_empty() {
+            cx.notify();
+            return;
+        }
+        let command = match target {
+            RenameTarget::Workspace(workspace_id) => {
+                AppCommand::Workspace(WorkspaceCommand::Rename {
+                    workspace_id: Some(workspace_id),
+                    title,
+                })
+            }
+            RenameTarget::Tab(tab_id) => AppCommand::Tab(TabCommand::Rename {
+                tab_id: Some(tab_id),
+                title,
+            }),
+        };
+        self.dispatch(command, cx);
+        cx.notify();
+    }
+
+    fn handle_rename_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if self.rename_target.is_none() {
+            return false;
+        }
+        let key = event.keystroke.key.as_str();
+        match key {
+            "enter" | "return" => self.commit_rename(cx),
+            "escape" => self.cancel_rename(cx),
+            "backspace" => {
+                self.rename_value.pop();
+                cx.notify();
+            }
+            _ if !event.keystroke.modifiers.platform
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && event.keystroke.key_char.is_some() =>
+            {
+                if let Some(character) = event.keystroke.key_char.as_deref() {
+                    self.rename_value.push_str(character);
+                    cx.notify();
+                }
+            }
+            _ => {}
+        }
+        true
     }
 
     fn measured_terminal_metrics(&self, window: &Window) -> TerminalMetrics {
@@ -503,28 +654,114 @@ impl WorkspaceView {
     }
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(focused_pane) = self.focused_pane else {
+        if self.handle_rename_key(event, cx) {
             return;
-        };
+        }
+
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
-            match keystroke.key.as_str() {
-                "\\" => self.dispatch(
-                    AppCommand::Pane(PaneCommand::Split {
-                        pane_id: Some(focused_pane),
-                        direction: SplitDirection::Right,
-                    }),
-                    cx,
-                ),
-                "-" => self.dispatch(
-                    AppCommand::Pane(PaneCommand::Split {
-                        pane_id: Some(focused_pane),
-                        direction: SplitDirection::Down,
-                    }),
-                    cx,
-                ),
-                "t" => self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx),
-                "v" => {
+            match (keystroke.key.as_str(), keystroke.modifiers.shift) {
+                ("e", false) => {
+                    self.toggle_sidebar(cx);
+                    return;
+                }
+                ("e", true) => {
+                    if let Some(workspace_id) = self.active_workspace_id() {
+                        // The view owns only transient editor state; the
+                        // committed title still travels through the command
+                        // dispatcher like every other model mutation.
+                        if let Some(workspace) = self
+                            .workspace_dumps()
+                            .into_iter()
+                            .find(|workspace| workspace.id == workspace_id)
+                        {
+                            self.rename_target = Some(RenameTarget::Workspace(workspace_id));
+                            self.rename_value = workspace.title.clone();
+                            cx.notify();
+                        }
+                    }
+                    return;
+                }
+                ("n", true) => {
+                    self.dispatch(AppCommand::Workspace(WorkspaceCommand::New), cx);
+                    return;
+                }
+                ("t", false) => {
+                    self.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+                    return;
+                }
+                ("t", true) => {
+                    if let Some(tab_id) = self
+                        .snapshot
+                        .workspace
+                        .as_ref()
+                        .and_then(|workspace| workspace.active_tab)
+                        && let Some(tab) = self.snapshot.workspace.as_ref().and_then(|workspace| {
+                            workspace.tabs.iter().find(|tab| tab.id == tab_id)
+                        })
+                    {
+                        self.rename_target = Some(RenameTarget::Tab(tab_id));
+                        self.rename_value = tab.title.clone();
+                        cx.notify();
+                    }
+                    return;
+                }
+                ("h", false) | ("j", false) | ("k", false) | ("l", false) => {
+                    if self.focused_pane.is_none() {
+                        return;
+                    }
+                    let direction = match keystroke.key.as_str() {
+                        "h" => FocusDirection::Left,
+                        "j" => FocusDirection::Down,
+                        "k" => FocusDirection::Up,
+                        "l" => FocusDirection::Right,
+                        _ => unreachable!(),
+                    };
+                    self.dispatch(
+                        AppCommand::Pane(PaneCommand::Focus {
+                            pane_id: None,
+                            direction: Some(direction),
+                        }),
+                        cx,
+                    );
+                    return;
+                }
+                ("w", true) => {
+                    if let Some(pane_id) = self.focused_pane {
+                        self.dispatch(
+                            AppCommand::Pane(PaneCommand::Close {
+                                pane_id: Some(pane_id),
+                            }),
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                ("\\", false) => {
+                    if let Some(focused_pane) = self.focused_pane {
+                        self.dispatch(
+                            AppCommand::Pane(PaneCommand::Split {
+                                pane_id: Some(focused_pane),
+                                direction: SplitDirection::Right,
+                            }),
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                ("-", false) => {
+                    if let Some(focused_pane) = self.focused_pane {
+                        self.dispatch(
+                            AppCommand::Pane(PaneCommand::Split {
+                                pane_id: Some(focused_pane),
+                                direction: SplitDirection::Down,
+                            }),
+                            cx,
+                        );
+                    }
+                    return;
+                }
+                ("v", false) => {
                     if let Some(terminal_id) = self.active_terminal_id() {
                         let modes = self
                             .active_terminal_snapshot()
@@ -536,8 +773,9 @@ impl WorkspaceView {
                             cx,
                         );
                     }
+                    return;
                 }
-                "c" => {
+                ("c", false) => {
                     if let Some(terminal_id) = self.active_terminal_id()
                         && !self.copy_terminal_selection(terminal_id, cx)
                     {
@@ -550,8 +788,9 @@ impl WorkspaceView {
                             },
                         );
                     }
+                    return;
                 }
-                "d" => {
+                ("d", false) => {
                     if let Some(terminal_id) = self.active_terminal_id() {
                         self.enqueue_terminal_command(
                             terminal_id,
@@ -562,11 +801,12 @@ impl WorkspaceView {
                             },
                         );
                     }
+                    return;
                 }
                 _ => {}
             }
-            return;
         }
+
         let Some(terminal_id) = self.active_terminal_id() else {
             return;
         };
@@ -715,6 +955,330 @@ impl WorkspaceView {
                     );
                 }),
             )
+            .into_any_element()
+    }
+
+    fn sidebar_resize_handle(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w(px(SIDEBAR_RESIZE_HANDLE_WIDTH))
+            .h_full()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .bg(rgb(theme.chrome_background))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    this.dragging_sidebar = true;
+                    this.focus_handle.focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_sidebar_action(
+        &self,
+        label: &'static str,
+        theme: ThemeColors,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .w(px(22.))
+            .h(px(24.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .text_color(rgb(theme.terminal_foreground))
+            .child(label)
+            .on_mouse_down(MouseButton::Left, cx.listener(listener))
+            .into_any_element()
+    }
+
+    fn render_sidebar_workspace(
+        &self,
+        workspace: WorkspaceDump,
+        active_workspace: Option<WorkspaceId>,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace_id = workspace.id;
+        let active = active_workspace == Some(workspace_id);
+        let workspace_title = if self.rename_target == Some(RenameTarget::Workspace(workspace_id)) {
+            format!("{}▌", self.rename_value)
+        } else {
+            workspace.title.clone()
+        };
+        let workspace_background = if active {
+            rgb(theme.tab_active_background)
+        } else {
+            rgb(theme.tab_inactive_background)
+        };
+        let workspace_active_pane = workspace
+            .active_tab
+            .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+            .map(|tab| tab.active_pane);
+        let workspace_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+            this.focus_handle.focus(window, cx);
+            this.focused_pane = workspace_active_pane;
+            this.selection = None;
+            this.dispatch(
+                AppCommand::Workspace(WorkspaceCommand::Activate {
+                    workspace_id: Some(workspace_id),
+                }),
+                cx,
+            );
+        });
+        let rename_workspace = self.render_sidebar_action(
+            "✎",
+            theme,
+            move |this, _event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                this.begin_rename_workspace(workspace_id, window, cx);
+            },
+            cx,
+        );
+        let delete_workspace = self.render_sidebar_action(
+            "×",
+            theme,
+            move |this, _event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.dispatch(
+                    AppCommand::Workspace(WorkspaceCommand::Delete {
+                        workspace_id: Some(workspace_id),
+                    }),
+                    cx,
+                );
+            },
+            cx,
+        );
+
+        let workspace_row = div()
+            .h(px(30.))
+            .w_full()
+            .px(px(8.))
+            .gap(px(2.))
+            .items_center()
+            .flex()
+            .bg(workspace_background)
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down(MouseButton::Left, workspace_activate)
+            .child(
+                div()
+                    .w(px(14.))
+                    .items_center()
+                    .justify_center()
+                    .flex()
+                    .child(if active { "▾" } else { "▸" }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .child(SharedString::from(workspace_title)),
+            )
+            .child(rename_workspace)
+            .child(delete_workspace);
+
+        let mut tabs = div().w_full().flex_col();
+        for tab in workspace.tabs {
+            let tab_id = tab.id;
+            let tab_active = active && workspace.active_tab == Some(tab_id);
+            let tab_title = if self.rename_target == Some(RenameTarget::Tab(tab_id)) {
+                format!("{}▌", self.rename_value)
+            } else {
+                tab.title.clone()
+            };
+            let tab_background = if tab_active {
+                rgb(theme.tab_active_background)
+            } else {
+                rgb(theme.chrome_background)
+            };
+            let active_pane = tab.active_pane;
+            let activate_tab = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                this.focus_handle.focus(window, cx);
+                this.focused_pane = Some(active_pane);
+                this.selection = None;
+                this.dispatch(
+                    AppCommand::Tab(TabCommand::Activate {
+                        tab_id: Some(tab_id),
+                        index: None,
+                    }),
+                    cx,
+                );
+            });
+            let rename_tab = self.render_sidebar_action(
+                "✎",
+                theme,
+                move |this, _event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    this.begin_rename_tab(tab_id, window, cx);
+                },
+                cx,
+            );
+            let close_tab = self.render_sidebar_action(
+                "×",
+                theme,
+                move |this, _event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.dispatch(
+                        AppCommand::Tab(TabCommand::Close {
+                            tab_id: Some(tab_id),
+                        }),
+                        cx,
+                    );
+                },
+                cx,
+            );
+            tabs = tabs.child(
+                div()
+                    .h(px(28.))
+                    .w_full()
+                    .pl(px(28.))
+                    .pr(px(4.))
+                    .gap(px(2.))
+                    .items_center()
+                    .flex()
+                    .bg(tab_background)
+                    .text_color(rgb(theme.terminal_foreground))
+                    .on_mouse_down(MouseButton::Left, activate_tab)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .truncate()
+                            .child(SharedString::from(tab_title)),
+                    )
+                    .child(rename_tab)
+                    .child(close_tab),
+            );
+        }
+
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(workspace_row)
+            .child(tabs)
+            .into_any_element()
+    }
+
+    fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let active_workspace = self.active_workspace_id();
+        let workspaces = self.workspace_dumps();
+        let mut list = div()
+            .id("workspace-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex_col();
+        for workspace in workspaces {
+            list =
+                list.child(self.render_sidebar_workspace(workspace, active_workspace, theme, cx));
+        }
+        div()
+            .w(px(self.sidebar_width))
+            .h_full()
+            .flex()
+            .flex_row()
+            .bg(rgb(theme.chrome_background))
+            .text_color(rgb(theme.ui_foreground))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .h_full()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .h(px(40.))
+                            .px(px(10.))
+                            .gap(px(4.))
+                            .items_center()
+                            .flex()
+                            .bg(rgb(theme.chrome_background))
+                            .child("WORKSPACES")
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .h(px(24.))
+                                    .items_center()
+                                    .justify_center()
+                                    .flex()
+                                    .child("+")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            |this, _event: &MouseDownEvent, _window, cx| {
+                                                this.dispatch(
+                                                    AppCommand::Workspace(WorkspaceCommand::New),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .w(px(24.))
+                                    .h(px(24.))
+                                    .items_center()
+                                    .justify_center()
+                                    .flex()
+                                    .child("‹")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            |this, _event: &MouseDownEvent, _window, cx| {
+                                                this.toggle_sidebar(cx);
+                                            },
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .h(px(32.))
+                            .px(px(10.))
+                            .items_center()
+                            .flex()
+                            .text_color(rgb(theme.terminal_foreground))
+                            .child("New workspace: Cmd+Shift+N"),
+                    )
+                    .child(list),
+            )
+            .child(self.sidebar_resize_handle(theme, cx))
+            .into_any_element()
+    }
+
+    fn render_collapsed_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .w(px(COLLAPSED_SIDEBAR_WIDTH))
+            .h_full()
+            .items_center()
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.chrome_background))
+            .text_color(rgb(theme.ui_foreground))
+            .child(
+                div()
+                    .h(px(40.))
+                    .w_full()
+                    .items_center()
+                    .justify_center()
+                    .flex()
+                    .child("W")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                            this.toggle_sidebar(cx);
+                        }),
+                    ),
+            )
+            .child(div().flex_1())
             .into_any_element()
     }
 
@@ -1098,7 +1662,11 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                     return;
                 }
                 move_entity.update(cx, |view, cx| {
-                    view.update_terminal_selection(event, cx);
+                    if view.dragging_sidebar {
+                        view.update_sidebar_width(event.position.x, cx);
+                    } else {
+                        view.update_terminal_selection(event, cx);
+                    }
                 });
             });
 
@@ -1108,7 +1676,12 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                     return;
                 }
                 up_entity.update(cx, |view, cx| {
-                    view.finish_terminal_selection(event, cx);
+                    if view.dragging_sidebar {
+                        view.dragging_sidebar = false;
+                        cx.notify();
+                    } else {
+                        view.finish_terminal_selection(event, cx);
+                    }
                 });
             });
         },
@@ -1815,6 +2388,12 @@ impl Render for WorkspaceView {
                     .collect()
             })
             .unwrap_or_default();
+        let workspace_title = self
+            .snapshot
+            .workspace
+            .as_ref()
+            .map(|workspace| workspace.title.clone())
+            .unwrap_or_else(|| "No workspace".to_owned());
         let workspace_id = self
             .snapshot
             .workspace
@@ -1856,17 +2435,13 @@ impl Render for WorkspaceView {
                     ),
             );
 
-        div()
-            .size_full()
+        let content = div()
+            .flex_1()
             .flex()
             .flex_col()
-            .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
-                this.handle_key_down(event, cx);
-            }))
+            .min_w(px(0.))
+            .min_h(px(0.))
             .bg(rgb(theme.terminal_background))
-            .text_color(rgb(theme.ui_foreground))
-            .child(workspace_mouse_event_observer(cx.entity()))
             .child(
                 div()
                     .h(px(36.))
@@ -1875,8 +2450,10 @@ impl Render for WorkspaceView {
                     .flex()
                     .bg(rgb(theme.chrome_background))
                     .child(SharedString::from(format!(
-                        "Water · Workspace {workspace_id} · revision {revision}"
-                    ))),
+                        "Water · {workspace_title} ({workspace_id}) · revision {revision}"
+                    )))
+                    .child(div().flex_1())
+                    .child("Cmd+E sidebar"),
             )
             .child(tab_bar)
             .child(
@@ -1887,7 +2464,26 @@ impl Render for WorkspaceView {
                     .min_h(px(0.))
                     .overflow_hidden()
                     .child(self.render_active_tab(window_active, metrics, theme, cx)),
-            )
+            );
+
+        let sidebar = if self.sidebar_collapsed {
+            self.render_collapsed_sidebar(theme, cx)
+        } else {
+            self.render_sidebar(theme, cx)
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                this.handle_key_down(event, cx);
+            }))
+            .bg(rgb(theme.terminal_background))
+            .text_color(rgb(theme.ui_foreground))
+            .child(workspace_mouse_event_observer(cx.entity()))
+            .child(sidebar)
+            .child(content)
     }
 }
 

@@ -75,8 +75,9 @@ Phase 2 adds a dedicated terminal runtime without changing the single applicatio
 │       ▼                                                              │
 │  ApplicationModel                                                    │
 │       │                                                              │
-│       ├── Workspace                                                  │
-│       │     └── Tab                                                  │
+│       ├── Workspaces (ordered by WorkspaceId)                       │
+│       │     └── Workspace                                             │
+│       │           └── Tab                                             │
 │       │           └── PaneNode                                       │
 │       │                 └── Pane                                     │
 │       │                       └── SurfaceId                          │
@@ -110,14 +111,15 @@ Phase 2 uses all seven IDs. `TerminalId` identifies the PTY/terminal core and `S
 
 ```text
 ApplicationModel
-├── workspace: Option<Workspace>
+├── workspaces: BTreeMap<WorkspaceId, Workspace>
+├── active_workspace: Option<WorkspaceId>
 ├── tabs: BTreeMap<TabId, Tab>
 ├── panes: BTreeMap<PaneId, Pane>
 ├── surfaces: BTreeMap<SurfaceId, SurfaceState>
 └── state_revision: u64
 
-Workspace { id, tabs: Vec<TabId>, active_tab: Option<TabId> }
-Tab       { id, title, root: PaneNode, active_pane: PaneId }
+Workspace { id, title, tabs: Vec<TabId>, active_tab: Option<TabId> }
+Tab       { id, title, title_override, root: PaneNode, active_pane: PaneId }
 PaneNode  = Leaf(PaneId)
           | Split { axis, ratio, first, second }
 Pane      { id, surface: SurfaceId }
@@ -127,8 +129,8 @@ Surface registry: SurfaceId -> SurfaceState
 `PaneNode` describes topology. `Pane` owns no split information. `SurfaceState` is an enum extension point; Phase 2 adds `Terminal(TerminalSurfaceState)` without making pane/workspace code depend on terminal behavior.
 
 ```text
-TerminalSurfaceState { terminal_id, session_id, program, title, args,
-                       status, columns, lines, last_output_revision }
+TerminalSurfaceState { terminal_id, session_id, program, title, process_name, cwd,
+                       args, status, columns, lines, last_output_revision }
 ```
 
 `TerminalSnapshot` is a bounded, row-major visible projection containing cell
@@ -159,13 +161,13 @@ AppCommand (serde)
 
 The command family is intentionally explicit:
 
-- `WorkspaceCommand`: create the workspace (idempotent)
-- `TabCommand`: new (with an automatic terminal), close, activate
-- `PaneCommand`: split (with an automatic terminal), close, focus, resize
+- `WorkspaceCommand`: create/new, ensure, activate, rename, and delete/close workspaces
+- `TabCommand`: new (with an automatic terminal), rename, close, and activate tabs
+- `PaneCommand`: split (with an automatic terminal), close, spatial focus, and resize
 - `SurfaceCommand`: replace an empty surface (future surface kinds return a typed availability error)
-- `TerminalCommand`: spawn detected real zsh (`/opt/homebrew/bin/zsh`, Intel Homebrew, or `/bin/zsh`) with `-f` by default, or an explicit program, send text/raw bytes, resize, and scroll
+- `TerminalCommand`: spawn detected real zsh (`/opt/homebrew/bin/zsh`, Intel Homebrew, or `/bin/zsh`) with `-l` by default, or an explicit program, send text/raw bytes, resize, and scroll
 
-Terminal worker notifications are applied by `CommandDispatcher::pump_background_events` on the model thread. A terminal exit emits `TerminalExited` and automatically removes its pane; if the pane is the tab's last leaf, the tab is removed as well. The terminal worker is retired while a bounded completed snapshot remains available to exit/output waiters, preventing cleanup from racing a query. No UI callback may push into `tabs`, rewrite a pane tree, replace a surface, or touch a `Term` directly.
+Terminal worker notifications are applied by `CommandDispatcher::pump_background_events` on the model thread. Foreground process name and cwd metadata are refreshed asynchronously by each PTY worker; automatic tab titles follow the active pane until `title_override` is set by an explicit rename. A terminal exit emits `TerminalExited` and automatically removes its pane; if the pane is the tab's last leaf, the tab is removed as well. Closing a pane, tab, or workspace sends a worker shutdown that terminates the positive foreground process group without signaling Water itself. The terminal worker is retired while a bounded completed snapshot remains available to exit/output waiters, preventing cleanup from racing a query. No UI callback may push into `tabs`, rewrite a pane tree, replace a surface, or touch a `Term` directly.
 
 ## Events and revisions
 
@@ -196,7 +198,7 @@ Windows will get a named-pipe transport later; domain commands and the scenario 
 
 ## GPUI projection
 
-`WorkspaceView` holds a `ModelSnapshot`, not the mutable model. It renders the tab bar, recursively projects the pane tree using each split ratio, and projects visible terminal rows from the included `TerminalSnapshot`. The workspace owns a focus handle; key events are translated to PTY bytes/VT sequences and enqueued through `CommandClient` without blocking the GPUI thread. Click-to-focus, keyboard PTY routing, Shift-PageUp/Down, mouse-wheel scroll (including application mouse reporting), configurable bracketed Cmd-V paste, drag selection/copy, and Cmd-C/Cmd-D control-byte shortcuts are supported for the current terminal surface. Selection maps against measured monospaced cell metrics, normalizes wide-character spacers, and paints each Unicode glyph as an all-or-nothing two-cell selection. Focused terminals use a solid cursor; inactive panes/windows use a hollow cursor. Button/mouse handlers that change model state start detached GPUI tasks; dispatch, operation wait, and snapshot fetch run on the background executor. No blocking filesystem, PTY, parser, or scrollback work is performed in the GPUI thread. The normal GUI startup creates one workspace, one Terminal tab, and connects it to the detected real zsh; new tabs and split panes use the same default shell automatically. `Cmd-\\` creates a right-side horizontal split, `Cmd--` creates a downward vertical split, and `Cmd-T` creates a new terminal tab. `--no-initial-terminal` keeps the workspace but omits the initial tab/PTY, while `--empty-workspace` starts with no workspace for scenarios that exercise workspace creation. The current Phase 3 renderer uses measured font metrics, configurable theme colors, and simple color runs; row/cell batching and font shaping remain future optimization work.
+`WorkspaceView` holds a `ModelSnapshot`, not the mutable model. It renders an always-visible, collapsible left workspace sidebar with ordered workspace rows, nested tab rows, activation, creation, deletion, inline rename controls, and a draggable width handle. The main area renders the tab bar, recursively projects the pane tree using each split ratio, and projects visible terminal rows from the included active-workspace `TerminalSnapshot`. The workspace owns a focus handle; key events are translated to PTY bytes/VT sequences and enqueued through `CommandClient` without blocking the GPUI thread. Click-to-focus, keyboard PTY routing, Shift-PageUp/Down, mouse-wheel scroll (including application mouse reporting), configurable bracketed Cmd-V paste, drag selection/copy, and Cmd-C/Cmd-D control-byte shortcuts are supported for the current terminal surface. `Cmd-E` toggles the sidebar, `Cmd-T` creates a tab, `Cmd-Shift-N` creates a workspace, `Cmd-Shift-E`/`Cmd-Shift-T` begin workspace/tab renames, `Cmd-H/J/K/L` moves to the nearest pane in the requested spatial direction, and `Cmd-Shift-W` closes the focused pane. Selection maps against measured monospaced cell metrics, normalizes wide-character spacers, and paints each Unicode glyph as an all-or-nothing two-cell selection. Focused terminals use a solid cursor; inactive panes/windows use a hollow cursor. Button/mouse handlers that change model state start detached GPUI tasks; dispatch, operation wait, and snapshot fetch run on the background executor. No blocking filesystem, PTY, parser, or scrollback work is performed in the GPUI thread. The normal GUI startup creates one workspace and one detected real-zsh terminal; new tabs and split panes inherit the focused pane's cwd and use the same default shell automatically. `Cmd-\\` creates a right-side horizontal split and `Cmd--` creates a downward vertical split. `--no-initial-terminal` keeps the workspace but omits the initial tab/PTY, while `--empty-workspace` starts with no workspace for scenarios that exercise workspace creation. The current Phase 3 renderer uses measured font metrics, configurable theme colors, and simple color runs; row/cell batching and font shaping remain future optimization work.
 
 The model thread publishes snapshots only after changes through a single-slot coalescing mailbox. The design leaves a GPUI async subscription path for external control updates; no timer-driven redraw loop is used for idle state. Scrollback reservations are coordinated by a small shared budget owned by terminal workers; it is not application-model state.
 
@@ -210,7 +212,7 @@ dispatch -> wait_operation -> next step
 
 The runner has only bounded wait primitives (`operation_complete`, `event`, `state_revision_at_least`, `app_idle`, `terminal_contains`, and `process_exit`). Terminal waits use a condition variable over the worker's published snapshot/output state; they do not sleep. Assertions inspect state dumps and terminal cells, not pixels, coordinates, or screenshots.
 
-Unit tests cover model topology, command behavior, terminal parsing, ANSI cell attributes, and worker synchronization. Headless tests start with an empty workspace; normal GUI startup creates one Terminal tab, `--no-initial-terminal` preserves a workspace without a tab, and `--empty-workspace` is the clean live baseline for workspace-creation smoke tests. The Phase 1 smoke scenario exercises workspace creation, tab lifecycle, split/focus/resize/close, and tab switching; the Phase 2 scenarios exercise PTY output, real zsh input, replacement, and process waits through the same serialized command path used by `waterctl`.
+Unit tests cover model topology, command behavior, terminal parsing, ANSI cell attributes, and worker synchronization. Headless tests start with an empty workspace; normal GUI startup creates one Terminal tab, `--no-initial-terminal` preserves a workspace without a tab, and `--empty-workspace` is the clean live baseline for workspace-creation smoke tests. The Phase 1 smoke scenario exercises workspace creation, tab lifecycle, split/focus/resize/close, and tab switching; the Phase 2 scenarios exercise PTY output, real zsh input, replacement, and process waits; Phase 3 tests cover workspace lifecycle, metadata-driven titles, cwd inheritance, and explicit rename pinning through the same serialized command path used by `waterctl`.
 
 ## Threading rules by module
 
@@ -227,7 +229,7 @@ Unit tests cover model topology, command behavior, terminal parsing, ANSI cell a
 
 - `cargo fmt --all -- --check`: passed
 - `cargo clippy --all-targets -- -D warnings`: passed
-- `cargo test --all-targets`: 20 tests passed
+- `cargo test --all-targets`: all 38 tests passed
 - `cargo build --release --bins`: passed on `aarch64-apple-darwin`
 - live `water --empty-workspace` + `waterctl scenario run tests/scenarios/workspace_basic.json`: passed
 - live `water` + `waterctl scenario run tests/scenarios/terminal_basic.json`: passed
@@ -240,8 +242,8 @@ The local Xcode installation required the `MetalToolchain` component for GPUI's 
 ## Phase gates
 
 - **Phase 1:** app shell, model, commands, operations, events, Unix control, `waterctl`, scenario runner, GPUI projection. Complete.
-- **Phase 2:** `alacritty_terminal` worker and terminal surface. Complete: PTY spawn, real zsh integration (`/opt/homebrew/bin/zsh` when available), input, output, resize, scroll, bounded waits, process status, ANSI cell projection, and live scenario validation.
-- **Phase 3:** in progress. Keyboard/PTY routing, focus, paste, navigation, mouse-wheel scrolling, measured cell rendering, split-aware resize, wide-character selection, configurable theme/features, and basic selection/copy are implemented; dirty rows, row/background batching, font shaping, and benchmarks remain.
+- **Phase 2:** `alacritty_terminal` worker and terminal surface. Complete: PTY spawn, real zsh integration (`/opt/homebrew/bin/zsh -l` when available for default terminals), input, output, resize, scroll, bounded waits, process status, ANSI cell projection, and live scenario validation.
+- **Phase 3:** in progress. Keyboard/PTY routing, multi-workspace/sidebar UX, workspace/tab lifecycle, cwd inheritance, asynchronous process titles, spatial pane focus, process-group shutdown, paste, navigation, mouse-wheel scrolling, measured cell rendering, split-aware resize, wide-character selection, configurable theme/features, and basic selection/copy are implemented; dirty rows, row/background batching, font shaping, and benchmarks remain.
 - **Phase 4:** file browser and image preview.
 - **Phase 5:** structured Agent Surface adapters.
 

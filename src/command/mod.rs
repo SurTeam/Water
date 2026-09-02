@@ -22,13 +22,37 @@ pub enum AppCommand {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum WorkspaceCommand {
+    /// Creates a new workspace and activates it. This is the command used by
+    /// the UI's "new workspace" action.
     Create,
+    /// Alias for `Create` for callers that prefer an explicit verb.
+    New,
+    /// Idempotent compatibility command for old startup/control callers.
+    Ensure,
+    Close {
+        workspace_id: Option<WorkspaceId>,
+    },
+    /// Alias for `Close` retained as a more explicit public command name.
+    Delete {
+        workspace_id: Option<WorkspaceId>,
+    },
+    Activate {
+        workspace_id: Option<WorkspaceId>,
+    },
+    Rename {
+        workspace_id: Option<WorkspaceId>,
+        title: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum TabCommand {
     New {
         title: Option<String>,
+    },
+    Rename {
+        tab_id: Option<TabId>,
+        title: String,
     },
     Close {
         tab_id: Option<TabId>,
@@ -123,7 +147,19 @@ pub enum OperationResult {
     WorkspaceCreated {
         workspace_id: WorkspaceId,
     },
+    WorkspaceClosed {
+        workspace_id: WorkspaceId,
+    },
+    WorkspaceActivated {
+        workspace_id: WorkspaceId,
+    },
+    WorkspaceRenamed {
+        workspace_id: WorkspaceId,
+    },
     TabCreated {
+        tab_id: TabId,
+    },
+    TabRenamed {
         tab_id: TabId,
     },
     TabClosed {
@@ -191,8 +227,28 @@ impl CommandError {
 enum AppCommandWire {
     #[serde(rename = "workspace.create")]
     WorkspaceCreate,
+    #[serde(rename = "workspace.new")]
+    WorkspaceNew,
+    #[serde(rename = "workspace.ensure")]
+    WorkspaceEnsure,
+    #[serde(rename = "workspace.close")]
+    WorkspaceClose { workspace_id: Option<WorkspaceId> },
+    #[serde(rename = "workspace.delete")]
+    WorkspaceDelete { workspace_id: Option<WorkspaceId> },
+    #[serde(rename = "workspace.activate")]
+    WorkspaceActivate { workspace_id: Option<WorkspaceId> },
+    #[serde(rename = "workspace.rename")]
+    WorkspaceRename {
+        workspace_id: Option<WorkspaceId>,
+        title: String,
+    },
     #[serde(rename = "tab.new")]
     TabNew { title: Option<String> },
+    #[serde(rename = "tab.rename")]
+    TabRename {
+        tab_id: Option<TabId>,
+        title: String,
+    },
     #[serde(rename = "tab.close")]
     TabClose { tab_id: Option<TabId> },
     #[serde(rename = "tab.activate")]
@@ -274,7 +330,35 @@ impl From<&AppCommand> for AppCommandWire {
     fn from(command: &AppCommand) -> Self {
         match command {
             AppCommand::Workspace(WorkspaceCommand::Create) => Self::WorkspaceCreate,
+            AppCommand::Workspace(WorkspaceCommand::New) => Self::WorkspaceNew,
+            AppCommand::Workspace(WorkspaceCommand::Ensure) => Self::WorkspaceEnsure,
+            AppCommand::Workspace(WorkspaceCommand::Close { workspace_id }) => {
+                Self::WorkspaceClose {
+                    workspace_id: *workspace_id,
+                }
+            }
+            AppCommand::Workspace(WorkspaceCommand::Delete { workspace_id }) => {
+                Self::WorkspaceDelete {
+                    workspace_id: *workspace_id,
+                }
+            }
+            AppCommand::Workspace(WorkspaceCommand::Activate { workspace_id }) => {
+                Self::WorkspaceActivate {
+                    workspace_id: *workspace_id,
+                }
+            }
+            AppCommand::Workspace(WorkspaceCommand::Rename {
+                workspace_id,
+                title,
+            }) => Self::WorkspaceRename {
+                workspace_id: *workspace_id,
+                title: title.clone(),
+            },
             AppCommand::Tab(TabCommand::New { title }) => Self::TabNew {
+                title: title.clone(),
+            },
+            AppCommand::Tab(TabCommand::Rename { tab_id, title }) => Self::TabRename {
+                tab_id: *tab_id,
                 title: title.clone(),
             },
             AppCommand::Tab(TabCommand::Close { tab_id }) => Self::TabClose { tab_id: *tab_id },
@@ -362,7 +446,28 @@ impl From<AppCommandWire> for AppCommand {
     fn from(command: AppCommandWire) -> Self {
         match command {
             AppCommandWire::WorkspaceCreate => Self::Workspace(WorkspaceCommand::Create),
+            AppCommandWire::WorkspaceNew => Self::Workspace(WorkspaceCommand::New),
+            AppCommandWire::WorkspaceEnsure => Self::Workspace(WorkspaceCommand::Ensure),
+            AppCommandWire::WorkspaceClose { workspace_id } => {
+                Self::Workspace(WorkspaceCommand::Close { workspace_id })
+            }
+            AppCommandWire::WorkspaceDelete { workspace_id } => {
+                Self::Workspace(WorkspaceCommand::Delete { workspace_id })
+            }
+            AppCommandWire::WorkspaceActivate { workspace_id } => {
+                Self::Workspace(WorkspaceCommand::Activate { workspace_id })
+            }
+            AppCommandWire::WorkspaceRename {
+                workspace_id,
+                title,
+            } => Self::Workspace(WorkspaceCommand::Rename {
+                workspace_id,
+                title,
+            }),
             AppCommandWire::TabNew { title } => Self::Tab(TabCommand::New { title }),
+            AppCommandWire::TabRename { tab_id, title } => {
+                Self::Tab(TabCommand::Rename { tab_id, title })
+            }
             AppCommandWire::TabClose { tab_id } => Self::Tab(TabCommand::Close { tab_id }),
             AppCommandWire::TabActivate { tab_id, index } => {
                 Self::Tab(TabCommand::Activate { tab_id, index })
@@ -465,7 +570,14 @@ impl AppCommand {
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Workspace(WorkspaceCommand::Create) => "workspace.create",
+            Self::Workspace(WorkspaceCommand::New) => "workspace.new",
+            Self::Workspace(WorkspaceCommand::Ensure) => "workspace.ensure",
+            Self::Workspace(WorkspaceCommand::Close { .. }) => "workspace.close",
+            Self::Workspace(WorkspaceCommand::Delete { .. }) => "workspace.delete",
+            Self::Workspace(WorkspaceCommand::Activate { .. }) => "workspace.activate",
+            Self::Workspace(WorkspaceCommand::Rename { .. }) => "workspace.rename",
             Self::Tab(TabCommand::New { .. }) => "tab.new",
+            Self::Tab(TabCommand::Rename { .. }) => "tab.rename",
             Self::Tab(TabCommand::Close { .. }) => "tab.close",
             Self::Tab(TabCommand::Activate { .. }) => "tab.activate",
             Self::Pane(PaneCommand::Split { .. }) => "pane.split",

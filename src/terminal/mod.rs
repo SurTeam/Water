@@ -24,13 +24,15 @@ pub fn default_shell_program() -> String {
         .unwrap_or_else(|| "zsh".to_owned())
 }
 
+/// Launch zsh as a login shell so the user's normal environment and startup
+/// configuration are available in every default Water terminal.
 pub fn default_shell_args(program: &str) -> Vec<String> {
     if Path::new(program)
         .file_name()
         .and_then(|name| name.to_str())
         == Some("zsh")
     {
-        vec!["-f".to_owned()]
+        vec!["-l".to_owned()]
     } else {
         Vec::new()
     }
@@ -44,3 +46,14 @@ pub use snapshot::{
     TerminalColor, TerminalCursor, TerminalModes, TerminalProcessState, TerminalSize,
     TerminalSnapshot,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::{HOMEBREW_ZSH, SYSTEM_ZSH, default_shell_args};
+
+    #[test]
+    fn zsh_defaults_to_login_mode() {
+        assert_eq!(default_shell_args(HOMEBREW_ZSH), vec!["-l"]);
+        assert_eq!(default_shell_args(SYSTEM_ZSH), vec!["-l"]);
+    }
+}

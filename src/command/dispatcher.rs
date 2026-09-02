@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::{
     app::model::{ApplicationModel, MemoryStats, PaneTreeDump, SplitRequest, StateDump},
     event::{AppEvent, AppEventKind, EventBus},
@@ -20,6 +22,7 @@ use super::{OperationSnapshot, OperationStatus};
 pub struct CommandDispatcher {
     model: ApplicationModel,
     ids: IdAllocator,
+    next_workspace_number: usize,
     events: EventBus,
     operations: OperationRegistry,
     terminals: TerminalManager,
@@ -87,6 +90,7 @@ impl CommandDispatcher {
         Self {
             model: ApplicationModel::new(),
             ids: IdAllocator::new(),
+            next_workspace_number: 1,
             events: EventBus::default(),
             operations,
             terminals: TerminalManager::new_with_wakeup_and_scrollback_and_total(
@@ -143,6 +147,9 @@ impl CommandDispatcher {
 
     pub fn state_dump(&self) -> StateDump {
         let mut state = self.model.snapshot();
+        // Keep the compatibility active-workspace projection rich with
+        // terminal cells. The all-workspaces list remains lightweight so
+        // sidebar updates do not copy every inactive terminal grid.
         if let Some(workspace) = state.workspace.as_mut() {
             for tab in &mut workspace.tabs {
                 attach_terminal_snapshots(&mut tab.tree, &self.terminals.registry());
@@ -220,6 +227,33 @@ impl CommandDispatcher {
                         changed = true;
                     }
                 }
+                crate::terminal::TerminalManagerEvent::ProcessChanged {
+                    terminal_id,
+                    process_name,
+                    cwd,
+                } => {
+                    if let Some(pane_id) = self.model.set_terminal_process(
+                        terminal_id,
+                        process_name.clone(),
+                        cwd.clone(),
+                    ) {
+                        if let Some(tab_id) = self.model.tab_id_for_pane(pane_id)
+                            && self.model.update_tab_title_from_process(
+                                tab_id,
+                                pane_id,
+                                &process_name,
+                            )
+                        {
+                            self.emit(AppEventKind::TabRenamed { tab_id });
+                        }
+                        self.emit(AppEventKind::TerminalProcessChanged {
+                            terminal_id,
+                            process_name,
+                            cwd,
+                        });
+                        changed = true;
+                    }
+                }
                 crate::terminal::TerminalManagerEvent::Exited { terminal_id, code } => {
                     if self
                         .model
@@ -251,6 +285,7 @@ impl CommandDispatcher {
         };
 
         if pane_ids.len() == 1 {
+            let was_active_tab = self.model.active_tab_id() == Some(tab_id);
             let terminal_ids: Vec<_> = pane_ids
                 .iter()
                 .filter_map(|pane_id| self.model.terminal_id_for_pane(*pane_id))
@@ -277,12 +312,22 @@ impl CommandDispatcher {
                 self.emit(AppEventKind::PaneClosed { pane_id });
             }
             self.emit(AppEventKind::TabClosed { tab_id });
+            if was_active_tab && let Some(tab_id) = self.model.active_tab_id() {
+                self.emit(AppEventKind::TabActivated { tab_id });
+            }
             return;
         }
 
+        let was_focused = self.model.active_pane() == Some(pane_id);
         match self.model.close_pane(tab_id, pane_id) {
             Ok(_) => {
                 self.terminals.retire(terminal_id);
+                if was_focused && let Some(pane_id) = self.model.active_pane() {
+                    self.emit(AppEventKind::PaneFocused { pane_id });
+                }
+                if self.model.refresh_tab_title_from_active_pane(tab_id) {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
+                }
                 self.emit(AppEventKind::PaneClosed { pane_id });
             }
             Err(message) => {
@@ -311,7 +356,7 @@ impl CommandDispatcher {
 
     fn apply(&mut self, command: AppCommand) -> Result<OperationResult, CommandError> {
         match command {
-            AppCommand::Workspace(WorkspaceCommand::Create) => self.create_workspace(),
+            AppCommand::Workspace(command) => self.apply_workspace(command),
             AppCommand::Tab(command) => self.apply_tab(command),
             AppCommand::Pane(command) => self.apply_pane(command),
             AppCommand::Surface(command) => self.apply_surface(command),
@@ -319,18 +364,95 @@ impl CommandDispatcher {
         }
     }
 
-    fn create_workspace(&mut self) -> Result<OperationResult, CommandError> {
-        if let Some(workspace) = self.model.workspace() {
-            return Ok(OperationResult::WorkspaceCreated {
-                workspace_id: workspace.id,
-            });
+    fn apply_workspace(
+        &mut self,
+        command: WorkspaceCommand,
+    ) -> Result<OperationResult, CommandError> {
+        match command {
+            WorkspaceCommand::Create | WorkspaceCommand::New => self.create_workspace(),
+            WorkspaceCommand::Ensure => {
+                if let Some(workspace) = self.model.workspace() {
+                    return Ok(OperationResult::WorkspaceCreated {
+                        workspace_id: workspace.id,
+                    });
+                }
+                self.create_workspace()
+            }
+            WorkspaceCommand::Close { workspace_id }
+            | WorkspaceCommand::Delete { workspace_id } => {
+                let workspace_id = self.resolve_workspace(workspace_id)?;
+                let was_active = self.model.active_workspace_id() == Some(workspace_id);
+                let tab_ids = self
+                    .model
+                    .workspace_by_id(workspace_id)
+                    .map(|workspace| workspace.tabs.clone())
+                    .unwrap_or_default();
+                let pane_ids: Vec<_> = tab_ids
+                    .iter()
+                    .flat_map(|tab_id| self.model.pane_ids_in_tab(*tab_id).unwrap_or_default())
+                    .collect();
+                let terminal_ids: Vec<_> = pane_ids
+                    .iter()
+                    .filter_map(|pane_id| self.model.terminal_id_for_pane(*pane_id))
+                    .collect();
+                let workspace = self
+                    .model
+                    .close_workspace(workspace_id)
+                    .map_err(|message| CommandError::new("WORKSPACE_NOT_FOUND", message))?;
+                for terminal_id in terminal_ids {
+                    self.terminals.remove(terminal_id);
+                }
+                for pane_id in pane_ids {
+                    self.emit(AppEventKind::PaneClosed { pane_id });
+                }
+                for tab_id in tab_ids {
+                    self.emit(AppEventKind::TabClosed { tab_id });
+                }
+                self.emit(AppEventKind::WorkspaceClosed { workspace_id });
+                if was_active && let Some(workspace_id) = self.model.active_workspace_id() {
+                    self.emit(AppEventKind::WorkspaceActivated { workspace_id });
+                }
+                Ok(OperationResult::WorkspaceClosed {
+                    workspace_id: workspace.id,
+                })
+            }
+            WorkspaceCommand::Activate { workspace_id } => {
+                let workspace_id = self.resolve_workspace(workspace_id)?;
+                let changed = self
+                    .model
+                    .activate_workspace(workspace_id)
+                    .map_err(|message| CommandError::new("WORKSPACE_NOT_FOUND", message))?;
+                if changed {
+                    self.emit(AppEventKind::WorkspaceActivated { workspace_id });
+                }
+                Ok(OperationResult::WorkspaceActivated { workspace_id })
+            }
+            WorkspaceCommand::Rename {
+                workspace_id,
+                title,
+            } => {
+                let title = normalize_title(title)?;
+                let workspace_id = self.resolve_workspace(workspace_id)?;
+                let changed = self
+                    .model
+                    .rename_workspace(workspace_id, title)
+                    .map_err(|message| CommandError::new("WORKSPACE_NOT_FOUND", message))?;
+                if changed {
+                    self.emit(AppEventKind::WorkspaceRenamed { workspace_id });
+                }
+                Ok(OperationResult::WorkspaceRenamed { workspace_id })
+            }
         }
+    }
 
+    fn create_workspace(&mut self) -> Result<OperationResult, CommandError> {
         let workspace_id = self.ids.alloc();
-        if !self.model.create_workspace(workspace_id) {
+        let title = format!("Workspace {}", self.next_workspace_number);
+        self.next_workspace_number = self.next_workspace_number.saturating_add(1);
+        if !self.model.create_workspace_with_title(workspace_id, title) {
             return Err(CommandError::new(
                 "WORKSPACE_CREATE_FAILED",
-                "workspace already exists",
+                "workspace ID already exists",
             ));
         }
         self.emit(AppEventKind::WorkspaceCreated { workspace_id });
@@ -346,23 +468,33 @@ impl CommandDispatcher {
                         "create a workspace before creating a tab",
                     ));
                 }
+                let inherited_cwd = self.current_working_directory();
+                let program = default_shell_program();
+                let args = default_shell_args(&program);
+                let title_is_pinned = title.is_some();
+                let title = title
+                    .map(normalize_title)
+                    .transpose()?
+                    .unwrap_or_else(|| default_process_name(&program));
                 let tab_id = self.ids.alloc();
                 let pane_id = self.ids.alloc();
                 let empty_surface_id = self.ids.alloc();
-                let title = title.unwrap_or_else(|| {
-                    format!("Tab {}", self.model.tabs().count().saturating_add(1))
-                });
                 self.model
-                    .create_tab(tab_id, title, pane_id, empty_surface_id)
+                    .create_tab_with_title_mode(
+                        tab_id,
+                        title,
+                        title_is_pinned,
+                        pane_id,
+                        empty_surface_id,
+                    )
                     .map_err(|message| CommandError::new("TAB_CREATE_FAILED", message))?;
 
-                let program = default_shell_program();
-                let args = default_shell_args(&program);
                 let terminal = match self.spawn_terminal_for_pane(
                     pane_id,
                     program,
                     args,
                     TerminalSize::default(),
+                    inherited_cwd,
                 ) {
                     Ok(terminal) => terminal,
                     Err(error) => {
@@ -382,8 +514,21 @@ impl CommandDispatcher {
                 });
                 Ok(OperationResult::TabCreated { tab_id })
             }
+            TabCommand::Rename { tab_id, title } => {
+                let tab_id = self.resolve_tab(tab_id, None)?;
+                let title = normalize_title(title)?;
+                let changed = self
+                    .model
+                    .rename_tab(tab_id, title)
+                    .map_err(|message| CommandError::new("TAB_NOT_FOUND", message))?;
+                if changed {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
+                }
+                Ok(OperationResult::TabRenamed { tab_id })
+            }
             TabCommand::Close { tab_id } => {
                 let tab_id = self.resolve_tab(tab_id, None)?;
+                let was_active = self.model.active_tab_id() == Some(tab_id);
                 let pane_ids = self.model.pane_ids_in_tab(tab_id).ok_or_else(|| {
                     CommandError::new("TAB_NOT_FOUND", format!("tab {tab_id} does not exist"))
                 })?;
@@ -401,6 +546,9 @@ impl CommandDispatcher {
                     self.emit(AppEventKind::PaneClosed { pane_id });
                 }
                 self.emit(AppEventKind::TabClosed { tab_id });
+                if was_active && let Some(tab_id) = self.model.active_tab_id() {
+                    self.emit(AppEventKind::TabActivated { tab_id });
+                }
                 Ok(OperationResult::TabClosed { tab_id })
             }
             TabCommand::Activate { tab_id, index } => {
@@ -421,6 +569,9 @@ impl CommandDispatcher {
         match command {
             PaneCommand::Split { pane_id, direction } => {
                 let (tab_id, target_pane) = self.resolve_pane(pane_id)?;
+                // Capture the source cwd before splitting because the model
+                // makes the new pane active as part of the topology mutation.
+                let inherited_cwd = self.working_directory_for_pane(target_pane);
                 let (axis, new_first) = match direction {
                     SplitDirection::Left => (SplitAxis::Horizontal, true),
                     SplitDirection::Right => (SplitAxis::Horizontal, false),
@@ -447,6 +598,7 @@ impl CommandDispatcher {
                     program,
                     args,
                     TerminalSize::default(),
+                    inherited_cwd,
                 ) {
                     Ok(terminal) => terminal,
                     Err(error) => {
@@ -454,6 +606,9 @@ impl CommandDispatcher {
                         return Err(error);
                     }
                 };
+                if self.model.refresh_tab_title_from_active_pane(tab_id) {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
+                }
                 self.emit(AppEventKind::PaneCreated { pane_id: new_pane });
                 self.emit(AppEventKind::PaneSplit {
                     target_pane,
@@ -472,11 +627,39 @@ impl CommandDispatcher {
             PaneCommand::Close { pane_id } => {
                 let (tab_id, pane_id) = self.resolve_pane(pane_id)?;
                 let terminal_id = self.model.terminal_id_for_pane(pane_id);
+                let was_active_tab = self.model.active_tab_id() == Some(tab_id);
+                let was_focused_pane = self.model.active_pane() == Some(pane_id);
+                let pane_ids = self.model.pane_ids_in_tab(tab_id).ok_or_else(|| {
+                    CommandError::new("TAB_NOT_FOUND", format!("tab {tab_id} does not exist"))
+                })?;
+                if pane_ids.len() == 1 {
+                    // Closing the final pane is the natural way to close its
+                    // tab. The workspace remains as an empty container so the
+                    // user can explicitly delete it from the sidebar.
+                    self.model
+                        .close_tab(tab_id)
+                        .map_err(|message| self.pane_error(message))?;
+                    if let Some(terminal_id) = terminal_id {
+                        self.terminals.remove(terminal_id);
+                    }
+                    self.emit(AppEventKind::PaneClosed { pane_id });
+                    self.emit(AppEventKind::TabClosed { tab_id });
+                    if was_active_tab && let Some(tab_id) = self.model.active_tab_id() {
+                        self.emit(AppEventKind::TabActivated { tab_id });
+                    }
+                    return Ok(OperationResult::PaneClosed { pane_id });
+                }
                 self.model
                     .close_pane(tab_id, pane_id)
                     .map_err(|message| self.pane_error(message))?;
                 if let Some(terminal_id) = terminal_id {
                     self.terminals.remove(terminal_id);
+                }
+                if was_focused_pane && let Some(pane_id) = self.model.active_pane() {
+                    self.emit(AppEventKind::PaneFocused { pane_id });
+                }
+                if self.model.refresh_tab_title_from_active_pane(tab_id) {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
                 }
                 self.emit(AppEventKind::PaneClosed { pane_id });
                 Ok(OperationResult::PaneClosed { pane_id })
@@ -491,6 +674,9 @@ impl CommandDispatcher {
                     self.emit(AppEventKind::PaneFocused {
                         pane_id: target_pane,
                     });
+                }
+                if self.model.refresh_tab_title_from_active_pane(tab_id) {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
                 }
                 Ok(OperationResult::PaneFocused {
                     pane_id: target_pane,
@@ -552,19 +738,33 @@ impl CommandDispatcher {
         program: String,
         args: Vec<String>,
         size: TerminalSize,
+        working_directory: Option<PathBuf>,
     ) -> Result<SpawnedTerminal, CommandError> {
         let old_terminal_id = self.model.terminal_id_for_pane(pane_id);
         let terminal_id: TerminalId = self.ids.alloc();
         let session_id: SessionId = self.ids.alloc();
         let surface_id = self.ids.alloc();
+        let process_name = default_process_name(&program);
+        let cwd = working_directory
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("."));
         self.terminals
-            .spawn(terminal_id, program.clone(), args.clone(), size)
+            .spawn_with_working_directory(
+                terminal_id,
+                program.clone(),
+                args.clone(),
+                size,
+                working_directory,
+            )
             .map_err(terminal_command_error)?;
         let terminal_surface = SurfaceState::Terminal(TerminalSurfaceState {
             terminal_id,
             session_id,
             program,
             title: None,
+            process_name,
+            cwd: cwd.display().to_string(),
             args,
             status: TerminalStatus::Running,
             columns: size.columns,
@@ -599,9 +799,14 @@ impl CommandDispatcher {
                 columns,
                 lines,
             } => {
-                let (_, pane_id) = self.resolve_pane(pane_id)?;
+                let (tab_id, pane_id) = self.resolve_pane(pane_id)?;
+                let inherited_cwd = self.working_directory_for_pane(pane_id);
                 let size = TerminalSize::new(columns, lines);
-                let terminal = self.spawn_terminal_for_pane(pane_id, program, args, size)?;
+                let terminal =
+                    self.spawn_terminal_for_pane(pane_id, program, args, size, inherited_cwd)?;
+                if self.model.refresh_tab_title_from_active_pane(tab_id) {
+                    self.emit(AppEventKind::TabRenamed { tab_id });
+                }
                 self.emit(AppEventKind::SurfaceChanged {
                     pane_id,
                     surface_id: terminal.surface_id,
@@ -671,6 +876,25 @@ impl CommandDispatcher {
                     .map_err(terminal_command_error)?;
                 Ok(OperationResult::TerminalScrolled { terminal_id, lines })
             }
+        }
+    }
+
+    fn resolve_workspace(
+        &self,
+        workspace_id: Option<crate::ids::WorkspaceId>,
+    ) -> Result<crate::ids::WorkspaceId, CommandError> {
+        let workspace_id = workspace_id
+            .or_else(|| self.model.active_workspace_id())
+            .ok_or_else(|| {
+                CommandError::new("WORKSPACE_NOT_FOUND", "there is no active workspace")
+            })?;
+        if self.model.workspace_by_id(workspace_id).is_some() {
+            Ok(workspace_id)
+        } else {
+            Err(CommandError::new(
+                "WORKSPACE_NOT_FOUND",
+                format!("workspace {workspace_id} does not exist"),
+            ))
         }
     }
 
@@ -765,21 +989,15 @@ impl CommandDispatcher {
         let Some(direction) = direction else {
             return Ok((tab_id, current));
         };
-        let pane_ids = self.model.pane_ids_in_tab(tab_id).ok_or_else(|| {
-            CommandError::new("TAB_NOT_FOUND", format!("tab {tab_id} does not exist"))
-        })?;
-        let index = pane_ids
-            .iter()
-            .position(|id| *id == current)
-            .ok_or_else(|| {
-                CommandError::new("PANE_NOT_FOUND", format!("pane {current} does not exist"))
-            })?;
-        let target_index = match direction {
-            FocusDirection::Left | FocusDirection::Up => index.checked_sub(1),
-            FocusDirection::Right | FocusDirection::Down => index.checked_add(1),
+        let direction = match direction {
+            FocusDirection::Left => crate::pane::PaneDirection::Left,
+            FocusDirection::Right => crate::pane::PaneDirection::Right,
+            FocusDirection::Up => crate::pane::PaneDirection::Up,
+            FocusDirection::Down => crate::pane::PaneDirection::Down,
         };
-        let target = target_index
-            .and_then(|index| pane_ids.get(index).copied())
+        let target = self
+            .model
+            .directional_pane(tab_id, current, direction)
             .ok_or_else(|| {
                 CommandError::new(
                     "FOCUS_TARGET_NOT_FOUND",
@@ -812,6 +1030,41 @@ impl CommandDispatcher {
             "application event"
         );
     }
+    fn current_working_directory(&self) -> Option<PathBuf> {
+        self.model
+            .active_pane()
+            .and_then(|pane_id| self.working_directory_for_pane(pane_id))
+    }
+
+    fn working_directory_for_pane(&self, pane_id: PaneId) -> Option<PathBuf> {
+        self.model
+            .terminal_id_for_pane(pane_id)
+            .and_then(|terminal_id| self.model.terminal_cwd(terminal_id))
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .or_else(|| std::env::current_dir().ok())
+    }
+}
+
+fn normalize_title(title: String) -> Result<String, CommandError> {
+    let title = title.trim().to_owned();
+    if title.is_empty() {
+        return Err(CommandError::new(
+            "INVALID_TITLE",
+            "title must not be empty",
+        ));
+    }
+    Ok(title)
+}
+
+fn default_process_name(program: &str) -> String {
+    std::path::Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("shell")
+        .trim_start_matches('-')
+        .to_owned()
 }
 
 fn terminal_dispatch_error(error: TerminalError) -> DispatchError {
