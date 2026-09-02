@@ -24,7 +24,8 @@ use crate::surface::SurfaceState;
 use crate::terminal::{TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
 
 use super::application::{
-    HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, SplitDown, SplitRight,
+    HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, NewWorkspace, RenameTab,
+    RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
@@ -483,6 +484,10 @@ impl WorkspaceView {
         })
     }
 
+    fn has_transient_ui(&self) -> bool {
+        self.rename_target.is_some() || self.context_menu.is_some() || self.dialog.is_some()
+    }
+
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
@@ -521,6 +526,37 @@ impl WorkspaceView {
             .find(|workspace| workspace.id == workspace_id)
     }
 
+    fn tab_by_id(&self, tab_id: TabId) -> Option<TabDump> {
+        self.workspace_dumps()
+            .into_iter()
+            .flat_map(|workspace| workspace.tabs)
+            .find(|tab| tab.id == tab_id)
+    }
+
+    fn context_menu_target_exists(&self, target: ContextMenuTarget) -> bool {
+        match target {
+            ContextMenuTarget::Workspace(workspace_id) => {
+                self.workspace_by_id(workspace_id).is_some()
+            }
+            ContextMenuTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
+        }
+    }
+
+    fn rename_target_exists(&self, target: RenameTarget) -> bool {
+        match target {
+            RenameTarget::Workspace(workspace_id) => self.workspace_by_id(workspace_id).is_some(),
+            RenameTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
+        }
+    }
+
+    fn dialog_target_exists(&self, dialog: DialogState) -> bool {
+        match dialog {
+            DialogState::ConfirmCloseWorkspace { workspace_id } => {
+                self.workspace_by_id(workspace_id).is_some()
+            }
+        }
+    }
+
     fn dispatch_close_workspace(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
         self.dispatch(
             AppCommand::Workspace(WorkspaceCommand::Close {
@@ -542,6 +578,7 @@ impl WorkspaceView {
         self.context_menu = None;
         if workspace.tabs.is_empty() {
             self.dispatch_close_workspace(workspace_id, cx);
+            cx.notify();
         } else {
             self.dialog = Some(DialogState::ConfirmCloseWorkspace { workspace_id });
             self.focus_handle.focus(window, cx);
@@ -579,12 +616,31 @@ impl WorkspaceView {
         true
     }
 
+    fn begin_rename_active_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(workspace_id) = self.active_workspace_id() {
+            self.begin_rename_workspace(workspace_id, window, cx);
+        }
+    }
+
+    fn begin_rename_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab_id = self
+            .active_workspace_id()
+            .and_then(|workspace_id| self.workspace_by_id(workspace_id))
+            .and_then(|workspace| workspace.active_tab);
+        if let Some(tab_id) = tab_id {
+            self.begin_rename_tab(tab_id, window, cx);
+        }
+    }
+
     fn begin_rename_workspace(
         &mut self,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.has_transient_ui() {
+            return;
+        }
         let Some(workspace) = self.workspace_by_id(workspace_id) else {
             return;
         };
@@ -596,6 +652,9 @@ impl WorkspaceView {
     }
 
     fn begin_rename_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_transient_ui() {
+            return;
+        }
         let Some(tab) = self
             .workspace_dumps()
             .into_iter()
@@ -1045,64 +1104,22 @@ impl WorkspaceView {
 
     fn handle_key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         if self.handle_dialog_key(event, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.context_menu.take().is_some() {
             cx.notify();
+            cx.stop_propagation();
             return;
         }
         if self.handle_rename_key(event, cx) {
+            cx.stop_propagation();
             return;
         }
 
         let keystroke = &event.keystroke;
         if keystroke.modifiers.platform {
             match (keystroke.key.as_str(), keystroke.modifiers.shift) {
-                ("e", false) => {
-                    self.toggle_sidebar(cx);
-                    return;
-                }
-                ("e", true) => {
-                    if let Some(workspace_id) = self.active_workspace_id() {
-                        // The view owns only transient editor state; the
-                        // committed title still travels through the command
-                        // dispatcher like every other model mutation.
-                        if let Some(workspace) = self
-                            .workspace_dumps()
-                            .into_iter()
-                            .find(|workspace| workspace.id == workspace_id)
-                        {
-                            self.rename_target = Some(RenameTarget::Workspace(workspace_id));
-                            self.rename_value = workspace.title.clone();
-                            cx.notify();
-                        }
-                    }
-                    return;
-                }
-                ("n", true) => {
-                    self.dispatch(AppCommand::Workspace(WorkspaceCommand::New), cx);
-                    return;
-                }
-                ("t", false) => {
-                    self.new_terminal_tab(cx);
-                    return;
-                }
-                ("t", true) => {
-                    if let Some(tab_id) = self
-                        .snapshot
-                        .workspace
-                        .as_ref()
-                        .and_then(|workspace| workspace.active_tab)
-                        && let Some(tab) = self.snapshot.workspace.as_ref().and_then(|workspace| {
-                            workspace.tabs.iter().find(|tab| tab.id == tab_id)
-                        })
-                    {
-                        self.rename_target = Some(RenameTarget::Tab(tab_id));
-                        self.rename_value = tab.title.clone();
-                        cx.notify();
-                    }
-                    return;
-                }
                 ("h", false) | ("j", false) | ("k", false) | ("l", false) => {
                     if self.focused_pane.is_none() {
                         return;
@@ -1132,14 +1149,6 @@ impl WorkspaceView {
                             cx,
                         );
                     }
-                    return;
-                }
-                ("\\", false) => {
-                    self.split_active_pane(SplitDirection::Right, cx);
-                    return;
-                }
-                ("-", false) => {
-                    self.split_active_pane(SplitDirection::Down, cx);
                     return;
                 }
                 ("v", false) => {
@@ -1265,6 +1274,25 @@ impl WorkspaceView {
         update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
         self.focused_pane = snapshot.focused_pane;
         self.snapshot = snapshot;
+        if self
+            .context_menu
+            .is_some_and(|menu| !self.context_menu_target_exists(menu.target))
+        {
+            self.context_menu = None;
+        }
+        if self
+            .rename_target
+            .is_some_and(|target| !self.rename_target_exists(target))
+        {
+            self.rename_target = None;
+            self.rename_value.clear();
+        }
+        if self
+            .dialog
+            .is_some_and(|dialog| !self.dialog_target_exists(dialog))
+        {
+            self.dialog = None;
+        }
         if self.ime_terminal.is_some() && self.ime_terminal != self.active_terminal_id() {
             self.clear_ime();
         }
@@ -1330,10 +1358,13 @@ impl WorkspaceView {
             title
         };
         div()
+            .id(format!("tab-{tab_id}"))
             .h(px(32.))
             .px(px(12.))
             .items_center()
             .flex()
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title))
@@ -1405,6 +1436,11 @@ impl WorkspaceView {
         } else {
             rgb(theme.tab_inactive_background)
         };
+        let workspace_hover_background = if active {
+            theme.tab_active_background
+        } else {
+            theme.tab_add_background
+        };
         let workspace_active_pane = workspace
             .active_tab
             .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
@@ -1422,11 +1458,14 @@ impl WorkspaceView {
             );
         });
         let workspace_row = div()
+            .id(format!("workspace-{workspace_id}"))
             .h(px(32.))
             .w_full()
             .px(px(10.))
             .items_center()
             .flex()
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(workspace_hover_background)))
             .bg(workspace_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, workspace_activate)
@@ -1549,8 +1588,16 @@ impl WorkspaceView {
             .px(px(10.))
             .items_center()
             .flex()
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tab_inactive_background)))
             .text_color(rgb(theme.ui_foreground))
-            .on_mouse_down(MouseButton::Left, cx.listener(listener))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    listener(this, event, window, cx);
+                    cx.stop_propagation();
+                }),
+            )
             .child(label)
             .into_any_element()
     }
@@ -1602,6 +1649,7 @@ impl WorkspaceView {
                         }),
                         cx,
                     );
+                    cx.notify();
                 },
                 cx,
             ),
@@ -1772,6 +1820,31 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    fn render_titlebar_control(
+        &self,
+        color: u32,
+        area: WindowControlArea,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size(px(12.))
+            .rounded(px(6.))
+            .bg(rgb(color))
+            .cursor_pointer()
+            .occlude()
+            .window_control_area(area)
+            .hover(|style| style.opacity(0.75))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    cx.stop_propagation();
+                    listener(this, event, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         let workspace_title = self
             .snapshot
@@ -1780,15 +1853,42 @@ impl WorkspaceView {
             .map(|workspace| workspace.title.clone())
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| "Water".to_owned());
+        let close = self.render_titlebar_control(
+            0xff5f57,
+            WindowControlArea::Close,
+            |_, _event, window, _cx| window.remove_window(),
+            cx,
+        );
+        let minimize = self.render_titlebar_control(
+            0xfebc2e,
+            WindowControlArea::Min,
+            |_, _event, window, _cx| window.minimize_window(),
+            cx,
+        );
+        let maximize = self.render_titlebar_control(
+            0x28c840,
+            WindowControlArea::Max,
+            |_, _event, window, _cx| window.zoom_window(),
+            cx,
+        );
+        let controls = div()
+            .h_full()
+            .gap(px(8.))
+            .items_center()
+            .flex()
+            .child(close)
+            .child(minimize)
+            .child(maximize);
         div()
             .id("water-titlebar")
             .h(px(36.))
             .w_full()
-            .pl(px(78.))
-            .pr(px(12.))
+            .px(px(14.))
             .items_center()
             .flex()
-            .window_control_area(WindowControlArea::Drag)
+            // The titlebar owns its drag gesture explicitly below. Only the
+            // three control hitboxes use WindowControlArea so they are not
+            // shadowed by a full-width Drag hitbox.
             .bg(rgb(theme.chrome_background))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down_out(cx.listener(|this, _event, _window, _cx| {
@@ -1812,7 +1912,18 @@ impl WorkspaceView {
                     window.start_window_move();
                 }
             }))
-            .child(SharedString::from(format!("Water · {workspace_title}")))
+            .child(controls)
+            .child(
+                div()
+                    .ml(px(18.))
+                    .gap(px(6.))
+                    .items_center()
+                    .flex()
+                    .child("Water")
+                    .child(div().text_color(rgb(theme.inactive_pane_border)).child("·"))
+                    .child(SharedString::from(workspace_title)),
+            )
+            .child(div().flex_1())
             .into_any_element()
     }
 
@@ -3648,9 +3759,11 @@ fn theme_color(value: u32) -> TerminalColor {
 }
 
 fn basic_color(index: usize) -> u32 {
+    // Match the 16-color palette from kitty_normal.conf so ANSI output and
+    // the Water chrome share the same visual language.
     const COLORS: [u32; 16] = [
-        0x1d2733, 0xcd3131, 0x0dbc79, 0xe5e510, 0x2472c8, 0xbc3fbc, 0x11a8cd, 0xe5e5e5, 0x666666,
-        0xf14c4c, 0x23d18b, 0xf5f543, 0x3b8eea, 0xd670d6, 0x29b8db, 0xffffff,
+        0x000000, 0xaa0000, 0x00aa00, 0xf57900, 0x1e8acb, 0xaa00aa, 0x00aaaa, 0xaaaaaa, 0x555555,
+        0xff5555, 0x339966, 0xffff55, 0x729fcf, 0xd530c6, 0x55ffff, 0xffffff,
     ];
     COLORS[index.min(COLORS.len() - 1)]
 }
@@ -3679,6 +3792,14 @@ fn indexed_color(index: u8) -> u32 {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(target_os = "macos")]
+        if !window.is_fullscreen() {
+            // AppKit keeps its standard traffic lights even with a transparent
+            // titlebar. Park them off-canvas so the custom controls below are
+            // the only visible controls in the integrated titlebar.
+            window.set_traffic_light_position(point(px(-100.), px(9.)));
+        }
+
         let metrics = self.measured_terminal_metrics(window);
         self.terminal_metrics = metrics;
         self.input_handler_terminal = self
@@ -3788,25 +3909,59 @@ impl Render for WorkspaceView {
             .on_action({
                 let view = action_view.clone();
                 move |_: &NewTerminalTab, _window, cx| {
-                    view.update(cx, |workspace, cx| workspace.new_terminal_tab(cx));
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.new_terminal_tab(cx);
+                        }
+                    });
                 }
             })
             .on_action({
                 let view = action_view.clone();
                 move |_: &SplitRight, _window, cx| {
                     view.update(cx, |workspace, cx| {
-                        workspace.split_active_pane(SplitDirection::Right, cx);
+                        if !workspace.has_transient_ui() {
+                            workspace.split_active_pane(SplitDirection::Right, cx);
+                        }
                     });
                 }
             })
             .on_action({
-                let view = action_view;
+                let view = action_view.clone();
                 move |_: &SplitDown, _window, cx| {
                     view.update(cx, |workspace, cx| {
-                        workspace.split_active_pane(SplitDirection::Down, cx);
+                        if !workspace.has_transient_ui() {
+                            workspace.split_active_pane(SplitDirection::Down, cx);
+                        }
                     });
                 }
             })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &NewWorkspace, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.dispatch(AppCommand::Workspace(WorkspaceCommand::New), cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ToggleSidebar, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.toggle_sidebar(cx);
+                        }
+                    });
+                }
+            })
+            .on_action(cx.listener(|workspace, _: &RenameWorkspace, window, cx| {
+                workspace.begin_rename_active_workspace(window, cx);
+            }))
+            .on_action(cx.listener(|workspace, _: &RenameTab, window, cx| {
+                workspace.begin_rename_active_tab(window, cx);
+            }))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key_down(event, cx);
@@ -4388,6 +4543,7 @@ mod tests {
             result => panic!("unexpected result: {result:?}"),
         };
         let snapshot = client.state_dump().unwrap();
+        cx.update(|cx| cx.bind_keys(crate::ui::application::window_key_bindings()));
         let (view, cx) = cx.add_window_view(|_, cx| {
             WorkspaceView::new(client.clone(), snapshot.clone(), cx.focus_handle())
         });

@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode,
-    SystemMenuType, Task, TitlebarOptions, WeakEntity, WindowBounds, WindowDecorations,
-    WindowOptions, actions, point, px, size,
+    SystemMenuType, Task, WeakEntity, WindowBounds, WindowDecorations, WindowOptions, actions, px,
+    size,
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
@@ -22,6 +22,10 @@ actions!(
         MinimizeWindow,
         IgnoreQuit,
         NewTerminalTab,
+        NewWorkspace,
+        ToggleSidebar,
+        RenameWorkspace,
+        RenameTab,
         SplitRight,
         SplitDown
     ]
@@ -192,15 +196,10 @@ impl WaterApplication {
 fn water_window_options(bounds: Bounds<gpui::Pixels>) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        // Water renders the titlebar inside WorkspaceView. The transparent
-        // titlebar keeps the platform traffic lights while hiding the native
-        // title text/background, and app-owned dragging avoids AppKit's native
-        // titlebar click delay.
-        titlebar: Some(TitlebarOptions {
-            title: None,
-            appears_transparent: true,
-            traffic_light_position: Some(point(px(9.), px(9.))),
-        }),
+        // Water renders the complete titlebar, including window controls,
+        // inside WorkspaceView. Do not leave the platform titlebar visible;
+        // client decorations are requested for platforms that support them.
+        titlebar: None,
         app_owns_titlebar_drag: true,
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
@@ -222,13 +221,17 @@ fn dispatch_controlled_keystroke(source: &str, cx: &mut App) -> Result<bool, Str
         .map_err(|error| error.to_string())
 }
 
-fn window_key_bindings() -> Vec<KeyBinding> {
+pub(crate) fn window_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding::new("cmd-n", NewWindow, None),
         KeyBinding::new("cmd-w", HideWindow, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
         KeyBinding::new("cmd-q", IgnoreQuit, None),
         KeyBinding::new("cmd-t", NewTerminalTab, None),
+        KeyBinding::new("cmd-shift-n", NewWorkspace, None),
+        KeyBinding::new("cmd-e", ToggleSidebar, None),
+        KeyBinding::new("cmd-shift-e", RenameWorkspace, None),
+        KeyBinding::new("cmd-shift-t", RenameTab, None),
         KeyBinding::new("cmd-\\", SplitRight, None),
         KeyBinding::new("cmd--", SplitDown, None),
     ]
@@ -239,9 +242,15 @@ fn application_menus() -> Vec<Menu> {
         Menu::new("Water").items([MenuItem::os_submenu("Services", SystemMenuType::Services)]),
         Menu::new("File").items([
             MenuItem::action("New Window", NewWindow),
+            MenuItem::action("New Workspace", NewWorkspace),
             MenuItem::action("New Terminal Tab", NewTerminalTab),
+            MenuItem::separator(),
+            MenuItem::action("Rename Workspace", RenameWorkspace),
+            MenuItem::action("Rename Tab", RenameTab),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::separator(),
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),
         ]),
@@ -261,9 +270,10 @@ mod tests {
         let options = water_window_options(Bounds::default());
         assert!(options.app_owns_titlebar_drag);
         assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
-        let titlebar = options.titlebar.expect("Water uses an integrated titlebar");
-        assert!(titlebar.appears_transparent);
-        assert!(titlebar.title.is_none());
+        assert!(
+            options.titlebar.is_none(),
+            "Water owns the complete titlebar"
+        );
     }
 
     #[test]
@@ -279,6 +289,23 @@ mod tests {
         assert!(menus.iter().all(|menu| menu.items.iter().all(|item| {
             !matches!(item, MenuItem::Action { name, .. } if name.contains("Quit"))
         })));
+    }
+
+    #[test]
+    fn menu_bar_surfaces_workspace_and_sidebar_actions() {
+        let menus = application_menus();
+        let labels = menus
+            .iter()
+            .flat_map(|menu| menu.items.iter())
+            .filter_map(|item| match item {
+                MenuItem::Action { name, .. } => Some(name.as_ref()),
+                MenuItem::Separator | MenuItem::Submenu(_) | MenuItem::SystemMenu(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"New Workspace"));
+        assert!(labels.contains(&"Rename Workspace"));
+        assert!(labels.contains(&"Rename Tab"));
+        assert!(labels.contains(&"Toggle Sidebar"));
     }
 
     #[gpui::test]
