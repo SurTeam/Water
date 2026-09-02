@@ -268,7 +268,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
 
         events.clear();
-        if let Err(error) = poller.wait(&mut events, Some(std::time::Duration::from_millis(250))) {
+        let metadata_timeout = PROCESS_METADATA_REFRESH_INTERVAL
+            .saturating_sub(last_process_metadata_refresh.elapsed());
+        if let Err(error) = poller.wait(&mut events, Some(metadata_timeout)) {
             tracing::warn!(
                 target: "water::pty",
                 terminal_id = %terminal_id,
@@ -337,8 +339,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
         let metadata_due =
             last_process_metadata_refresh.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
+        // Avoid spawning metadata helper processes while a terminal is
+        // actively streaming output. Once output goes quiet, the timeout
+        // path below refreshes the foreground process and cwd promptly.
         let metadata_changed = metadata_due
-            && (!output_buffer.is_empty() || events.iter().next().is_none())
+            && output_buffer.is_empty()
             && refresh_process_metadata(
                 &pty,
                 &fallback_process_name,

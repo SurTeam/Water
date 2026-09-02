@@ -2008,6 +2008,7 @@ fn function_key_sequence(number: u8, modifier: u8) -> String {
     format!("\u{1b}[1;{modifier}{final_character}")
 }
 
+#[cfg(test)]
 fn is_terminal_cell_selected(
     snapshot: &TerminalSnapshot,
     selection: Option<TerminalSelection>,
@@ -2139,6 +2140,11 @@ fn render_terminal_snapshot(
         theme,
         cursor_focused,
     } = options;
+    // Selection bounds are invariant for the snapshot; calculate them once
+    // instead of repeating the boundary and wide-character checks per cell.
+    let selected_bounds = selection
+        .filter(|selection| selection.terminal_id == snapshot.terminal_id)
+        .and_then(|selection| selection_bounds(snapshot, selection));
     let mut terminal = div()
         .size_full()
         .flex()
@@ -2186,7 +2192,13 @@ fn render_terminal_snapshot(
                     background = theme_color(theme.inverse_background);
                 }
             }
-            if is_terminal_cell_selected(snapshot, selection, snapshot.terminal_id, row, column) {
+            let selected = selected_bounds.is_some_and(|(start, end)| {
+                (start..=end).contains(&TerminalCellPosition {
+                    row: row as i32,
+                    column,
+                })
+            });
+            if selected {
                 background = theme_color(theme.selection_background);
             }
             let cursor_at_cell = snapshot.cursor.visible
