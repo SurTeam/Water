@@ -50,6 +50,12 @@ pub enum TabCommand {
     New {
         title: Option<String>,
     },
+    /// Creates a terminal tab in the specified workspace without changing the
+    /// process-global active workspace compatibility alias.
+    NewInWorkspace {
+        workspace_id: WorkspaceId,
+        title: Option<String>,
+    },
     Rename {
         tab_id: Option<TabId>,
         title: String,
@@ -244,6 +250,11 @@ enum AppCommandWire {
     },
     #[serde(rename = "tab.new")]
     TabNew { title: Option<String> },
+    #[serde(rename = "tab.new_in_workspace")]
+    TabNewInWorkspace {
+        workspace_id: WorkspaceId,
+        title: Option<String>,
+    },
     #[serde(rename = "tab.rename")]
     TabRename {
         tab_id: Option<TabId>,
@@ -357,6 +368,13 @@ impl From<&AppCommand> for AppCommandWire {
             AppCommand::Tab(TabCommand::New { title }) => Self::TabNew {
                 title: title.clone(),
             },
+            AppCommand::Tab(TabCommand::NewInWorkspace {
+                workspace_id,
+                title,
+            }) => Self::TabNewInWorkspace {
+                workspace_id: *workspace_id,
+                title: title.clone(),
+            },
             AppCommand::Tab(TabCommand::Rename { tab_id, title }) => Self::TabRename {
                 tab_id: *tab_id,
                 title: title.clone(),
@@ -465,6 +483,13 @@ impl From<AppCommandWire> for AppCommand {
                 title,
             }),
             AppCommandWire::TabNew { title } => Self::Tab(TabCommand::New { title }),
+            AppCommandWire::TabNewInWorkspace {
+                workspace_id,
+                title,
+            } => Self::Tab(TabCommand::NewInWorkspace {
+                workspace_id,
+                title,
+            }),
             AppCommandWire::TabRename { tab_id, title } => {
                 Self::Tab(TabCommand::Rename { tab_id, title })
             }
@@ -577,6 +602,7 @@ impl AppCommand {
             Self::Workspace(WorkspaceCommand::Activate { .. }) => "workspace.activate",
             Self::Workspace(WorkspaceCommand::Rename { .. }) => "workspace.rename",
             Self::Tab(TabCommand::New { .. }) => "tab.new",
+            Self::Tab(TabCommand::NewInWorkspace { .. }) => "tab.new_in_workspace",
             Self::Tab(TabCommand::Rename { .. }) => "tab.rename",
             Self::Tab(TabCommand::Close { .. }) => "tab.close",
             Self::Tab(TabCommand::Activate { .. }) => "tab.activate",

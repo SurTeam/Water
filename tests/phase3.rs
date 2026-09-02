@@ -8,6 +8,7 @@ use water::command::{
     AppCommand, CommandDispatcher, OperationResult, OperationStatus, PaneCommand, TabCommand,
     TerminalCommand, WorkspaceCommand,
 };
+use water::config::AppConfig;
 use water::surface::SurfaceState;
 
 fn dispatch_ok(dispatcher: &mut CommandDispatcher, command: AppCommand) -> OperationResult {
@@ -31,6 +32,19 @@ fn first_terminal(tree: &PaneTreeDump) -> Option<(water::ids::PaneId, water::ids
     }
 }
 
+fn first_terminal_snapshot(tree: &PaneTreeDump) -> Option<&water::terminal::TerminalSnapshot> {
+    match tree {
+        PaneTreeDump::Leaf {
+            terminal_snapshot: Some(snapshot),
+            ..
+        } => Some(snapshot),
+        PaneTreeDump::Leaf { .. } => None,
+        PaneTreeDump::Split { first, second, .. } => {
+            first_terminal_snapshot(first).or_else(|| first_terminal_snapshot(second))
+        }
+    }
+}
+
 #[test]
 fn workspaces_can_be_created_activated_renamed_and_deleted() {
     let mut dispatcher = CommandDispatcher::new();
@@ -41,10 +55,6 @@ fn workspaces_can_be_created_activated_renamed_and_deleted() {
         OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
         result => panic!("unexpected result: {result:?}"),
     };
-    dispatch_ok(
-        &mut dispatcher,
-        AppCommand::Tab(TabCommand::New { title: None }),
-    );
     let second = match dispatch_ok(
         &mut dispatcher,
         AppCommand::Workspace(WorkspaceCommand::New),
@@ -58,6 +68,8 @@ fn workspaces_can_be_created_activated_renamed_and_deleted() {
     assert_eq!(state.active_workspace, Some(second));
     assert_eq!(state.workspaces[0].title, "Workspace 1");
     assert_eq!(state.workspaces[1].title, "Workspace 2");
+    assert_eq!(state.workspaces[0].tabs.len(), 1);
+    assert_eq!(state.workspaces[1].tabs.len(), 1);
 
     dispatch_ok(
         &mut dispatcher,
@@ -84,7 +96,277 @@ fn workspaces_can_be_created_activated_renamed_and_deleted() {
     assert_eq!(state.workspaces.len(), 1);
     assert_eq!(state.active_workspace, Some(second));
     assert_eq!(state.workspaces[0].title, "Build");
+    assert_eq!(dispatcher.memory_stats().terminal_count, 1);
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Delete {
+            workspace_id: Some(second),
+        }),
+    );
     assert_eq!(dispatcher.memory_stats().terminal_count, 0);
+}
+
+#[test]
+fn new_workspace_has_one_configured_default_terminal_tab() {
+    let mut config = AppConfig::default();
+    config.shell.program = "/bin/sh".to_owned();
+    config.shell.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
+    config.terminal.default_columns = 37;
+    config.terminal.default_lines = 9;
+    let mut dispatcher = CommandDispatcher::with_config(config);
+
+    let workspace_id = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::New),
+    ) {
+        OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let state = dispatcher.state_dump();
+    assert_eq!(state.active_workspace, Some(workspace_id));
+    let workspace = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .expect("new workspace is projected");
+    assert_eq!(workspace.tabs.len(), 1);
+    assert_eq!(workspace.active_tab, Some(workspace.tabs[0].id));
+    let PaneTreeDump::Leaf {
+        surface_state: SurfaceState::Terminal(terminal),
+        ..
+    } = &workspace.tabs[0].tree
+    else {
+        panic!("new workspace did not contain one terminal tab");
+    };
+    assert_eq!(terminal.program, "/bin/sh");
+    assert_eq!(terminal.args, ["-c", "exec sleep 30"]);
+    assert_eq!(terminal.columns, 37);
+    assert_eq!(terminal.lines, 9);
+    assert_eq!(dispatcher.memory_stats().terminal_count, 1);
+}
+
+#[test]
+fn failed_new_workspace_rolls_back_model_terminals_and_events() {
+    let mut config = AppConfig::default();
+    config.shell.program = "/definitely/not/a/real/water-shell".to_owned();
+    let mut dispatcher = CommandDispatcher::with_config(config);
+
+    let operation_id = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::New));
+    let operation = dispatcher.wait_operation(operation_id).unwrap();
+    assert_eq!(operation.status, OperationStatus::Failed);
+    assert_eq!(operation.error.unwrap().code, "TERMINAL_SPAWN_FAILED");
+    let state = dispatcher.state_dump();
+    assert!(state.workspaces.is_empty());
+    assert_eq!(state.workspace, None);
+    assert_eq!(state.active_workspace, None);
+    assert_eq!(dispatcher.memory_stats().terminal_count, 0);
+    assert!(dispatcher.all_events().is_empty());
+}
+
+#[test]
+fn new_in_workspace_targets_an_inactive_workspace_and_inherits_its_cwd() {
+    let mut config = AppConfig::default();
+    config.shell.program = "/bin/sh".to_owned();
+    config.shell.args = vec!["-c".to_owned(), "exec sleep 30".to_owned()];
+    config.startup.default_cwd = Some("/".to_owned());
+    let mut dispatcher = CommandDispatcher::with_config(config);
+    let first = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    ) {
+        OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let first_tab = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    ) {
+        OperationResult::TabCreated { tab_id } => tab_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let second = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    ) {
+        OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let second_pane = dispatcher
+        .state_dump()
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == second)
+        .and_then(|workspace| workspace.tabs.first())
+        .map(|tab| tab.active_pane)
+        .expect("second workspace has its compatibility tab");
+    let second_terminal = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Terminal(TerminalCommand::Spawn {
+            pane_id: Some(second_pane),
+            program: "/bin/sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "cd /tmp; sleep 1; printf 'WATER_TARGET_CWD_READY\\n'; exec sleep 30".to_owned(),
+            ],
+            columns: 80,
+            lines: 24,
+        }),
+    ) {
+        OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    dispatcher
+        .wait_terminal_contains(
+            second_terminal,
+            "WATER_TARGET_CWD_READY",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    dispatcher.pump_background_events();
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Activate {
+            workspace_id: Some(first),
+        }),
+    );
+
+    let new_tab = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::NewInWorkspace {
+            workspace_id: second,
+            title: Some("Target".to_owned()),
+        }),
+    ) {
+        OperationResult::TabCreated { tab_id } => tab_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let state = dispatcher.state_dump();
+    assert_eq!(state.active_workspace, Some(first));
+    let first_workspace = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == first)
+        .unwrap();
+    assert_eq!(first_workspace.tabs.len(), 1);
+    assert_eq!(first_workspace.tabs[0].id, first_tab);
+    let second_workspace = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == second)
+        .unwrap();
+    assert_eq!(second_workspace.tabs.len(), 2);
+    assert_eq!(second_workspace.active_tab, Some(new_tab));
+    let new_tab = second_workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.id == new_tab)
+        .unwrap();
+    let PaneTreeDump::Leaf {
+        surface_state: SurfaceState::Terminal(terminal),
+        ..
+    } = &new_tab.tree
+    else {
+        panic!("targeted tab did not contain a terminal");
+    };
+    let expected_cwd = std::fs::canonicalize(Path::new("/tmp"))
+        .unwrap()
+        .display()
+        .to_string();
+    assert_eq!(terminal.cwd, expected_cwd);
+}
+
+#[test]
+fn all_workspace_projections_include_terminal_snapshots() {
+    let mut dispatcher = CommandDispatcher::new();
+    let first = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    ) {
+        OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let second = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    ) {
+        OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let second_pane = dispatcher
+        .state_dump()
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == second)
+        .and_then(|workspace| workspace.tabs.first())
+        .map(|tab| tab.active_pane)
+        .unwrap();
+    let second_terminal = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Terminal(TerminalCommand::Spawn {
+            pane_id: Some(second_pane),
+            program: "/bin/sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf 'WATER_INACTIVE_SNAPSHOT\\n'; exec sleep 30".to_owned(),
+            ],
+            columns: 80,
+            lines: 24,
+        }),
+    ) {
+        OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    dispatcher
+        .wait_terminal_contains(
+            second_terminal,
+            "WATER_INACTIVE_SNAPSHOT",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    dispatcher.pump_background_events();
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Activate {
+            workspace_id: Some(first),
+        }),
+    );
+
+    let state = dispatcher.state_dump();
+    assert_eq!(state.active_workspace, Some(first));
+    assert_eq!(state.workspace.as_ref().unwrap().id, first);
+    for workspace in &state.workspaces {
+        for tab in &workspace.tabs {
+            assert!(
+                first_terminal_snapshot(&tab.tree).is_some(),
+                "workspace {} tab {} lacks a terminal snapshot",
+                workspace.id,
+                tab.id
+            );
+        }
+    }
+    let second_workspace = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == second)
+        .unwrap();
+    let second_snapshot = first_terminal_snapshot(&second_workspace.tabs[0].tree).unwrap();
+    assert!(
+        second_snapshot
+            .visible_text()
+            .contains("WATER_INACTIVE_SNAPSHOT")
+    );
 }
 
 #[test]
@@ -92,7 +374,7 @@ fn process_metadata_drives_titles_and_cwd_inheritance_until_explicit_rename() {
     let mut dispatcher = CommandDispatcher::new();
     dispatch_ok(
         &mut dispatcher,
-        AppCommand::Workspace(WorkspaceCommand::New),
+        AppCommand::Workspace(WorkspaceCommand::Create),
     );
     dispatch_ok(
         &mut dispatcher,
@@ -233,7 +515,7 @@ fn closing_a_pane_terminates_the_terminal_process_group() {
     let mut dispatcher = CommandDispatcher::new();
     dispatch_ok(
         &mut dispatcher,
-        AppCommand::Workspace(WorkspaceCommand::New),
+        AppCommand::Workspace(WorkspaceCommand::Create),
     );
     dispatch_ok(
         &mut dispatcher,

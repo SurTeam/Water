@@ -273,10 +273,31 @@ impl ApplicationModel {
         surface_id: SurfaceId,
     ) -> Result<bool, &'static str> {
         let workspace_id = self.active_workspace.ok_or("workspace not found")?;
-        let workspace = self
-            .workspaces
-            .get_mut(&workspace_id)
-            .ok_or("workspace not found")?;
+        self.create_tab_with_title_mode_in_workspace(
+            workspace_id,
+            tab_id,
+            title,
+            title_is_pinned,
+            pane_id,
+            surface_id,
+        )
+    }
+
+    /// Creates a tab in an explicit workspace without changing the
+    /// process-global active workspace. The target workspace's active tab is
+    /// updated so a view scoped to that workspace can immediately render it.
+    pub(crate) fn create_tab_with_title_mode_in_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        tab_id: TabId,
+        title: String,
+        title_is_pinned: bool,
+        pane_id: PaneId,
+        surface_id: SurfaceId,
+    ) -> Result<bool, &'static str> {
+        if !self.workspaces.contains_key(&workspace_id) {
+            return Err("workspace not found");
+        }
         if self.tabs.contains_key(&tab_id) {
             return Ok(false);
         }
@@ -293,6 +314,10 @@ impl ApplicationModel {
             tab_id,
             Tab::new_with_title(tab_id, title, pane_id, title_override),
         );
+        let workspace = self
+            .workspaces
+            .get_mut(&workspace_id)
+            .expect("workspace was validated before mutation");
         workspace.tabs.push(tab_id);
         workspace.active_tab = Some(tab_id);
         Ok(true)
@@ -332,8 +357,15 @@ impl ApplicationModel {
         Ok(changed)
     }
 
+    pub(crate) fn active_tab_id_for_workspace(&self, workspace_id: WorkspaceId) -> Option<TabId> {
+        self.workspaces
+            .get(&workspace_id)
+            .and_then(|workspace| workspace.active_tab)
+    }
+
     pub(crate) fn active_tab_id(&self) -> Option<TabId> {
-        self.workspace().and_then(|workspace| workspace.active_tab)
+        self.active_workspace
+            .and_then(|workspace_id| self.active_tab_id_for_workspace(workspace_id))
     }
 
     pub(crate) fn tab_id_for_pane(&self, pane_id: PaneId) -> Option<TabId> {
@@ -343,6 +375,11 @@ impl ApplicationModel {
             .map(|tab| tab.id)
     }
 
+    pub(crate) fn workspace_id_for_pane(&self, pane_id: PaneId) -> Option<WorkspaceId> {
+        self.tab_id_for_pane(pane_id)
+            .and_then(|tab_id| self.workspace_id_for_tab(tab_id))
+    }
+
     pub(crate) fn workspace_id_for_tab(&self, tab_id: TabId) -> Option<WorkspaceId> {
         self.workspaces
             .iter()
@@ -350,9 +387,14 @@ impl ApplicationModel {
             .map(|(workspace_id, _)| *workspace_id)
     }
 
-    pub(crate) fn active_pane(&self) -> Option<PaneId> {
-        self.active_tab_id()
+    pub(crate) fn active_pane_for_workspace(&self, workspace_id: WorkspaceId) -> Option<PaneId> {
+        self.active_tab_id_for_workspace(workspace_id)
             .and_then(|tab_id| self.tabs.get(&tab_id).map(|tab| tab.active_pane))
+    }
+
+    pub(crate) fn active_pane(&self) -> Option<PaneId> {
+        self.active_workspace
+            .and_then(|workspace_id| self.active_pane_for_workspace(workspace_id))
     }
 
     pub(crate) fn pane_ids_in_tab(&self, tab_id: TabId) -> Option<Vec<PaneId>> {
@@ -511,6 +553,11 @@ impl ApplicationModel {
                 SurfaceState::Empty(_) | SurfaceState::Terminal(_) => None,
             }
         })
+    }
+
+    pub(crate) fn workspace_id_for_terminal(&self, terminal_id: TerminalId) -> Option<WorkspaceId> {
+        self.pane_id_for_terminal(terminal_id)
+            .and_then(|pane_id| self.workspace_id_for_pane(pane_id))
     }
 
     pub(crate) fn terminal_surface(

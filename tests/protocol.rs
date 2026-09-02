@@ -1,6 +1,8 @@
 use std::io::Cursor;
 
-use water::command::{AppCommand, PaneCommand, SplitDirection, TerminalCommand};
+use water::command::{
+    AppCommand, PaneCommand, SplitDirection, TabCommand, TerminalCommand, WorkspaceCommand,
+};
 use water::control::protocol::{PROTOCOL_VERSION, RpcMethod, RpcRequest, read_frame, write_frame};
 use water::terminal::{default_shell_args, default_shell_program};
 
@@ -13,6 +15,38 @@ fn commands_use_stable_dot_named_wire_types() {
     let value = serde_json::to_value(command).expect("command serializes");
     assert_eq!(value["type"], "pane.split");
     assert_eq!(value["direction"], "right");
+}
+
+#[test]
+fn workspace_create_and_new_keep_stable_wire_types() {
+    let create = AppCommand::Workspace(WorkspaceCommand::Create);
+    let create_value = serde_json::to_value(&create).expect("workspace create serializes");
+    assert_eq!(create_value["type"], "workspace.create");
+    assert_eq!(
+        serde_json::from_value::<AppCommand>(create_value).unwrap(),
+        create
+    );
+
+    let new = AppCommand::Workspace(WorkspaceCommand::New);
+    let new_value = serde_json::to_value(&new).expect("workspace new serializes");
+    assert_eq!(new_value["type"], "workspace.new");
+    assert_eq!(
+        serde_json::from_value::<AppCommand>(new_value).unwrap(),
+        new
+    );
+}
+
+#[test]
+fn tab_new_in_workspace_uses_a_stable_wire_type() {
+    let command = AppCommand::Tab(TabCommand::NewInWorkspace {
+        workspace_id: 42.into(),
+        title: Some("Build".to_owned()),
+    });
+    let value = serde_json::to_value(&command).expect("targeted tab command serializes");
+    assert_eq!(value["type"], "tab.new_in_workspace");
+    assert_eq!(value["workspace_id"], 42);
+    let decoded: AppCommand = serde_json::from_value(value).expect("targeted tab command decodes");
+    assert_eq!(decoded, command);
 }
 
 #[test]

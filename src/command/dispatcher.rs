@@ -4,7 +4,7 @@ use crate::{
     app::model::{ApplicationModel, MemoryStats, PaneTreeDump, SplitRequest, StateDump},
     config::AppConfig,
     event::{AppEvent, AppEventKind, EventBus},
-    ids::{IdAllocator, OperationId, PaneId, SessionId, TerminalId},
+    ids::{IdAllocator, OperationId, PaneId, SessionId, TerminalId, WorkspaceId},
     pane::SplitAxis,
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::{
@@ -219,12 +219,18 @@ impl CommandDispatcher {
 
     pub fn state_dump(&self) -> StateDump {
         let mut state = self.model.snapshot();
-        // Keep the compatibility active-workspace projection rich with
-        // terminal cells. The all-workspaces list remains lightweight so
-        // sidebar updates do not copy every inactive terminal grid.
+        let registry = self.terminals.registry();
+        // Every workspace projection is rich so a window can select an
+        // inactive workspace without racing a separate terminal query. Keep
+        // the compatibility active-workspace alias rich as well.
+        for workspace in &mut state.workspaces {
+            for tab in &mut workspace.tabs {
+                attach_terminal_snapshots(&mut tab.tree, &registry);
+            }
+        }
         if let Some(workspace) = state.workspace.as_mut() {
             for tab in &mut workspace.tabs {
-                attach_terminal_snapshots(&mut tab.tree, &self.terminals.registry());
+                attach_terminal_snapshots(&mut tab.tree, &registry);
             }
         }
         state
@@ -347,6 +353,9 @@ impl CommandDispatcher {
     }
 
     fn close_exited_terminal_pane(&mut self, terminal_id: TerminalId) {
+        let Some(workspace_id) = self.model.workspace_id_for_terminal(terminal_id) else {
+            return;
+        };
         let Some(pane_id) = self.model.pane_id_for_terminal(terminal_id) else {
             return;
         };
@@ -358,7 +367,8 @@ impl CommandDispatcher {
         };
 
         if pane_ids.len() == 1 {
-            let was_active_tab = self.model.active_tab_id() == Some(tab_id);
+            let was_active_tab =
+                self.model.active_tab_id_for_workspace(workspace_id) == Some(tab_id);
             let terminal_ids: Vec<_> = pane_ids
                 .iter()
                 .filter_map(|pane_id| self.model.terminal_id_for_pane(*pane_id))
@@ -385,17 +395,21 @@ impl CommandDispatcher {
                 self.emit(AppEventKind::PaneClosed { pane_id });
             }
             self.emit(AppEventKind::TabClosed { tab_id });
-            if was_active_tab && let Some(tab_id) = self.model.active_tab_id() {
+            if was_active_tab
+                && let Some(tab_id) = self.model.active_tab_id_for_workspace(workspace_id)
+            {
                 self.emit(AppEventKind::TabActivated { tab_id });
             }
             return;
         }
 
-        let was_focused = self.model.active_pane() == Some(pane_id);
+        let was_focused = self.model.active_pane_for_workspace(workspace_id) == Some(pane_id);
         match self.model.close_pane(tab_id, pane_id) {
             Ok(_) => {
                 self.terminals.retire(terminal_id);
-                if was_focused && let Some(pane_id) = self.model.active_pane() {
+                if was_focused
+                    && let Some(pane_id) = self.model.active_pane_for_workspace(workspace_id)
+                {
                     self.emit(AppEventKind::PaneFocused { pane_id });
                 }
                 if self.model.refresh_tab_title_from_active_pane(tab_id) {
@@ -442,7 +456,8 @@ impl CommandDispatcher {
         command: WorkspaceCommand,
     ) -> Result<OperationResult, CommandError> {
         match command {
-            WorkspaceCommand::Create | WorkspaceCommand::New => self.create_workspace(),
+            WorkspaceCommand::Create => self.create_workspace(),
+            WorkspaceCommand::New => self.create_workspace_with_terminal(),
             WorkspaceCommand::Ensure => {
                 if let Some(workspace) = self.model.workspace() {
                     return Ok(OperationResult::WorkspaceCreated {
@@ -532,60 +547,163 @@ impl CommandDispatcher {
         Ok(OperationResult::WorkspaceCreated { workspace_id })
     }
 
+    /// Creates the user-facing workspace shape atomically: one workspace,
+    /// one tab, one pane, and one configured shell terminal. No lifecycle
+    /// events are emitted until the terminal has been installed successfully,
+    /// so a spawn failure cannot leave a misleading partial history.
+    fn create_workspace_with_terminal(&mut self) -> Result<OperationResult, CommandError> {
+        let previous_active_workspace = self.model.active_workspace_id();
+        let workspace_id = self.ids.alloc();
+        let title = format!("Workspace {}", self.next_workspace_number);
+        self.next_workspace_number = self.next_workspace_number.saturating_add(1);
+        if !self.model.create_workspace_with_title(workspace_id, title) {
+            return Err(CommandError::new(
+                "WORKSPACE_CREATE_FAILED",
+                "workspace ID already exists",
+            ));
+        }
+
+        let program = self.shell_program.clone();
+        let args = self.shell_args.clone();
+        let tab_id = self.ids.alloc();
+        let pane_id = self.ids.alloc();
+        let empty_surface_id = self.ids.alloc();
+        let title = default_process_name(&program);
+        let inherited_cwd = self.current_working_directory_for_workspace(workspace_id);
+        if let Err(message) = self.model.create_tab_with_title_mode_in_workspace(
+            workspace_id,
+            tab_id,
+            title,
+            false,
+            pane_id,
+            empty_surface_id,
+        ) {
+            self.rollback_workspace_creation(workspace_id, previous_active_workspace);
+            return Err(CommandError::new("TAB_CREATE_FAILED", message));
+        }
+
+        let terminal = match self.spawn_terminal_for_pane(
+            pane_id,
+            program,
+            args,
+            self.default_terminal_size,
+            inherited_cwd,
+        ) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = self.model.close_tab(tab_id);
+                self.rollback_workspace_creation(workspace_id, previous_active_workspace);
+                return Err(error);
+            }
+        };
+
+        self.emit(AppEventKind::WorkspaceCreated { workspace_id });
+        self.emit(AppEventKind::TabCreated { tab_id });
+        self.emit(AppEventKind::PaneCreated { pane_id });
+        self.emit(AppEventKind::SurfaceChanged {
+            pane_id,
+            surface_id: terminal.surface_id,
+        });
+        self.emit(AppEventKind::TerminalSpawned {
+            terminal_id: terminal.terminal_id,
+            pane_id,
+        });
+        // The model creation above made this workspace active and no other
+        // command can interleave on the model thread, so this is an activated
+        // workspace by construction.
+        Ok(OperationResult::WorkspaceCreated { workspace_id })
+    }
+
+    fn rollback_workspace_creation(
+        &mut self,
+        workspace_id: WorkspaceId,
+        previous_active_workspace: Option<WorkspaceId>,
+    ) {
+        let _ = self.model.close_workspace(workspace_id);
+        if let Some(previous_active_workspace) = previous_active_workspace
+            && self
+                .model
+                .workspace_by_id(previous_active_workspace)
+                .is_some()
+        {
+            let _ = self.model.activate_workspace(previous_active_workspace);
+        }
+    }
+
+    fn create_tab_in_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        title: Option<String>,
+    ) -> Result<OperationResult, CommandError> {
+        let inherited_cwd = self.current_working_directory_for_workspace(workspace_id);
+        let program = self.shell_program.clone();
+        let args = self.shell_args.clone();
+        let title_is_pinned = title.is_some();
+        let title = title
+            .map(normalize_title)
+            .transpose()?
+            .unwrap_or_else(|| default_process_name(&program));
+        let tab_id = self.ids.alloc();
+        let pane_id = self.ids.alloc();
+        let empty_surface_id = self.ids.alloc();
+        let create_result = if self.model.active_workspace_id() == Some(workspace_id) {
+            self.model.create_tab_with_title_mode(
+                tab_id,
+                title,
+                title_is_pinned,
+                pane_id,
+                empty_surface_id,
+            )
+        } else {
+            self.model.create_tab_with_title_mode_in_workspace(
+                workspace_id,
+                tab_id,
+                title,
+                title_is_pinned,
+                pane_id,
+                empty_surface_id,
+            )
+        };
+        create_result.map_err(|message| CommandError::new("TAB_CREATE_FAILED", message))?;
+
+        let terminal = match self.spawn_terminal_for_pane(
+            pane_id,
+            program,
+            args,
+            self.default_terminal_size,
+            inherited_cwd,
+        ) {
+            Ok(terminal) => terminal,
+            Err(error) => {
+                let _ = self.model.close_tab(tab_id);
+                return Err(error);
+            }
+        };
+        self.emit(AppEventKind::TabCreated { tab_id });
+        self.emit(AppEventKind::PaneCreated { pane_id });
+        self.emit(AppEventKind::SurfaceChanged {
+            pane_id,
+            surface_id: terminal.surface_id,
+        });
+        self.emit(AppEventKind::TerminalSpawned {
+            terminal_id: terminal.terminal_id,
+            pane_id,
+        });
+        Ok(OperationResult::TabCreated { tab_id })
+    }
+
     fn apply_tab(&mut self, command: TabCommand) -> Result<OperationResult, CommandError> {
         match command {
             TabCommand::New { title } => {
-                if self.model.workspace().is_none() {
-                    return Err(CommandError::new(
-                        "WORKSPACE_NOT_FOUND",
-                        "create a workspace before creating a tab",
-                    ));
-                }
-                let inherited_cwd = self.current_working_directory();
-                let program = self.shell_program.clone();
-                let args = self.shell_args.clone();
-                let title_is_pinned = title.is_some();
-                let title = title
-                    .map(normalize_title)
-                    .transpose()?
-                    .unwrap_or_else(|| default_process_name(&program));
-                let tab_id = self.ids.alloc();
-                let pane_id = self.ids.alloc();
-                let empty_surface_id = self.ids.alloc();
-                self.model
-                    .create_tab_with_title_mode(
-                        tab_id,
-                        title,
-                        title_is_pinned,
-                        pane_id,
-                        empty_surface_id,
-                    )
-                    .map_err(|message| CommandError::new("TAB_CREATE_FAILED", message))?;
-
-                let terminal = match self.spawn_terminal_for_pane(
-                    pane_id,
-                    program,
-                    args,
-                    self.default_terminal_size,
-                    inherited_cwd,
-                ) {
-                    Ok(terminal) => terminal,
-                    Err(error) => {
-                        let _ = self.model.close_tab(tab_id);
-                        return Err(error);
-                    }
-                };
-                self.emit(AppEventKind::TabCreated { tab_id });
-                self.emit(AppEventKind::PaneCreated { pane_id });
-                self.emit(AppEventKind::SurfaceChanged {
-                    pane_id,
-                    surface_id: terminal.surface_id,
-                });
-                self.emit(AppEventKind::TerminalSpawned {
-                    terminal_id: terminal.terminal_id,
-                    pane_id,
-                });
-                Ok(OperationResult::TabCreated { tab_id })
+                let workspace_id = self.resolve_workspace(None)?;
+                self.create_tab_in_workspace(workspace_id, title)
+            }
+            TabCommand::NewInWorkspace {
+                workspace_id,
+                title,
+            } => {
+                let workspace_id = self.resolve_workspace(Some(workspace_id))?;
+                self.create_tab_in_workspace(workspace_id, title)
             }
             TabCommand::Rename { tab_id, title } => {
                 let tab_id = self.resolve_tab(tab_id, None)?;
@@ -1106,9 +1224,12 @@ impl CommandDispatcher {
             "application event"
         );
     }
-    fn current_working_directory(&self) -> Option<PathBuf> {
+    fn current_working_directory_for_workspace(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Option<PathBuf> {
         self.model
-            .active_pane()
+            .active_pane_for_workspace(workspace_id)
             .and_then(|pane_id| self.working_directory_for_pane(pane_id))
     }
 
