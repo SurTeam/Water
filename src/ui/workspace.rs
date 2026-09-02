@@ -31,7 +31,6 @@ use super::application::{
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
 const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = 18.0;
 const DEFAULT_SIDEBAR_WIDTH: f32 = 236.0;
-const COLLAPSED_SIDEBAR_WIDTH: f32 = 34.0;
 const MIN_SIDEBAR_WIDTH: f32 = 170.0;
 const MAX_SIDEBAR_WIDTH: f32 = 420.0;
 const SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
@@ -1359,10 +1358,11 @@ impl WorkspaceView {
         };
         div()
             .id(format!("tab-{tab_id}"))
-            .h(px(32.))
-            .px(px(12.))
+            .h(px(28.))
+            .px(px(10.))
             .items_center()
             .flex()
+            .flex_none()
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
@@ -1371,6 +1371,10 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                    if this.has_transient_ui() {
+                        cx.stop_propagation();
+                        return;
+                    }
                     this.context_menu = None;
                     this.focus_handle.focus(window, cx);
                     this.focused_pane = Some(active_pane);
@@ -1382,6 +1386,7 @@ impl WorkspaceView {
                         }),
                         cx,
                     );
+                    cx.stop_propagation();
                 }),
             )
             .on_mouse_down(
@@ -1521,53 +1526,13 @@ impl WorkspaceView {
                     .flex_col()
                     .child(
                         div()
-                            .h(px(40.))
+                            .h(px(36.))
                             .px(px(10.))
-                            .gap(px(8.))
                             .items_center()
                             .flex()
                             .bg(rgb(theme.chrome_background))
-                            .child("WORKSPACES")
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .h(px(26.))
-                                    .px(px(8.))
-                                    .items_center()
-                                    .justify_center()
-                                    .flex()
-                                    .text_color(rgb(theme.terminal_foreground))
-                                    .child("New")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            |this, _event: &MouseDownEvent, _window, cx| {
-                                                this.dispatch(
-                                                    AppCommand::Workspace(WorkspaceCommand::New),
-                                                    cx,
-                                                );
-                                            },
-                                        ),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .h(px(26.))
-                                    .px(px(8.))
-                                    .items_center()
-                                    .justify_center()
-                                    .flex()
-                                    .text_color(rgb(theme.terminal_foreground))
-                                    .child("Hide")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            |this, _event: &MouseDownEvent, _window, cx| {
-                                                this.toggle_sidebar(cx);
-                                            },
-                                        ),
-                                    ),
-                            ),
+                            .text_color(rgb(theme.inactive_pane_border))
+                            .child("WORKSPACES"),
                     )
                     .child(list),
             )
@@ -1792,34 +1757,6 @@ impl WorkspaceView {
         )
     }
 
-    fn render_collapsed_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .w(px(COLLAPSED_SIDEBAR_WIDTH))
-            .h_full()
-            .items_center()
-            .flex()
-            .flex_col()
-            .bg(rgb(theme.chrome_background))
-            .text_color(rgb(theme.ui_foreground))
-            .child(
-                div()
-                    .h(px(40.))
-                    .w_full()
-                    .items_center()
-                    .justify_center()
-                    .flex()
-                    .child("W")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                            this.toggle_sidebar(cx);
-                        }),
-                    ),
-            )
-            .child(div().flex_1())
-            .into_any_element()
-    }
-
     fn render_titlebar_control(
         &self,
         color: u32,
@@ -1845,14 +1782,70 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
-        let workspace_title = self
+    fn render_tab_bar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let tab_data: Vec<(TabId, String, bool, PaneId)> = self
             .snapshot
             .workspace
             .as_ref()
-            .map(|workspace| workspace.title.clone())
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| "Water".to_owned());
+            .map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        (
+                            tab.id,
+                            tab.title.clone(),
+                            workspace.active_tab == Some(tab.id),
+                            tab.active_pane,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut tab_bar = div()
+            .id("tab-bar")
+            .h_full()
+            .flex_1()
+            .min_w(px(0.))
+            .gap(px(2.))
+            .items_center()
+            .flex()
+            .overflow_x_hidden();
+        for (tab_id, title, active, active_pane) in tab_data {
+            tab_bar = tab_bar.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
+        }
+        tab_bar
+            .child(
+                div()
+                    .id("new-tab")
+                    .h(px(28.))
+                    .w(px(28.))
+                    .items_center()
+                    .justify_center()
+                    .flex()
+                    .flex_none()
+                    .cursor_pointer()
+                    .hover(|style| style.bg(rgb(theme.tab_add_background)))
+                    .bg(rgb(theme.tab_inactive_background))
+                    .text_color(rgb(theme.ui_foreground))
+                    .child("+")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                            if this.has_transient_ui() {
+                                cx.stop_propagation();
+                                return;
+                            }
+                            this.focus_handle.focus(window, cx);
+                            this.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
+                            cx.stop_propagation();
+                        }),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         let close = self.render_titlebar_control(
             0xff5f57,
             WindowControlArea::Close,
@@ -1876,14 +1869,34 @@ impl WorkspaceView {
             .gap(px(8.))
             .items_center()
             .flex()
+            .flex_none()
             .child(close)
             .child(minimize)
             .child(maximize);
+        let sidebar_toggle = div()
+            .id("sidebar-toggle")
+            .size(px(28.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .flex_none()
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
+            .text_color(rgb(theme.ui_foreground))
+            .child("▤")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.toggle_sidebar(cx);
+                    cx.stop_propagation();
+                }),
+            );
         div()
             .id("water-titlebar")
             .h(px(36.))
             .w_full()
-            .px(px(14.))
+            .gap(px(8.))
+            .px(px(10.))
             .items_center()
             .flex()
             // The titlebar owns its drag gesture explicitly below. Only the
@@ -1913,17 +1926,8 @@ impl WorkspaceView {
                 }
             }))
             .child(controls)
-            .child(
-                div()
-                    .ml(px(18.))
-                    .gap(px(6.))
-                    .items_center()
-                    .flex()
-                    .child("Water")
-                    .child(div().text_color(rgb(theme.inactive_pane_border)).child("·"))
-                    .child(SharedString::from(workspace_title)),
-            )
-            .child(div().flex_1())
+            .child(sidebar_toggle)
+            .child(self.render_tab_bar(theme, cx))
             .into_any_element()
     }
 
@@ -3808,90 +3812,22 @@ impl Render for WorkspaceView {
         let theme = self.config.theme.colors();
 
         let window_active = window.is_window_active() && self.focus_handle.is_focused(window);
-        let tab_data: Vec<(TabId, String, bool, PaneId)> = self
-            .snapshot
-            .workspace
-            .as_ref()
-            .map(|workspace| {
-                workspace
-                    .tabs
-                    .iter()
-                    .map(|tab| {
-                        (
-                            tab.id,
-                            tab.title.clone(),
-                            workspace.active_tab == Some(tab.id),
-                            tab.active_pane,
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let tab_bar = div()
-            .h(px(40.))
-            .px(px(8.))
-            .gap(px(4.))
-            .items_center()
-            .flex()
-            .bg(rgb(theme.chrome_background))
-            .children(
-                tab_data
-                    .into_iter()
-                    .map(|(tab_id, title, active, active_pane)| {
-                        self.tab_button(tab_id, title, active, active_pane, theme, cx)
-                    }),
-            )
-            .child(
-                div()
-                    .h(px(32.))
-                    .w(px(32.))
-                    .items_center()
-                    .justify_center()
-                    .flex()
-                    .bg(rgb(theme.tab_add_background))
-                    .text_color(rgb(theme.ui_foreground))
-                    .child("+")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                            this.focus_handle.focus(window, cx);
-                            this.dispatch(AppCommand::Tab(TabCommand::New { title: None }), cx);
-                        }),
-                    ),
-            );
-
         let content = div()
             .flex_1()
             .flex()
             .flex_col()
             .min_w(px(0.))
             .min_h(px(0.))
+            .overflow_hidden()
             .bg(rgb(theme.terminal_background))
-            .child(tab_bar)
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .min_w(px(0.))
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .child(self.render_active_tab(window_active, metrics, theme, cx)),
-            );
-
-        let sidebar = if self.sidebar_collapsed {
-            self.render_collapsed_sidebar(theme, cx)
-        } else {
-            self.render_sidebar(theme, cx)
-        };
+            .child(self.render_active_tab(window_active, metrics, theme, cx));
 
         let action_view = cx.entity();
-        let main_content = div()
-            .flex_1()
-            .min_w(px(0.))
-            .min_h(px(0.))
-            .flex()
-            .child(sidebar)
-            .child(content);
+        let mut main_content = div().flex_1().min_w(px(0.)).min_h(px(0.)).flex();
+        if !self.sidebar_collapsed {
+            main_content = main_content.child(self.render_sidebar(theme, cx));
+        }
+        let main_content = main_content.child(content);
         let overlay = self
             .render_dialog(theme, cx)
             .or_else(|| self.render_context_menu(theme, cx));
