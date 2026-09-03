@@ -228,6 +228,21 @@ fn run_pane(client: &ControlClient, arguments: &[String]) -> Result<()> {
                 AppCommand::Pane(PaneCommand::Resize { pane_id, ratio }),
             )?;
         }
+        "rename-agent" | "agent-rename" => {
+            let pane_id = optional_id::<PaneId>(arguments, "--pane")?;
+            let label = optional_value(arguments, "--label")?
+                .or_else(|| {
+                    arguments
+                        .get(1)
+                        .filter(|value| !value.starts_with('-'))
+                        .cloned()
+                })
+                .context("pane rename-agent requires --label")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Pane(PaneCommand::RenameAgent { pane_id, label }),
+            )?;
+        }
         "input" | "send" => {
             let pane_id = optional_id::<PaneId>(arguments, "--pane")?
                 .or_else(|| bare_id::<PaneId>(&arguments[1..]).ok())
@@ -748,6 +763,7 @@ fn print_usage() {
            waterctl tab rename --tab 2 --title Shell\n\
            waterctl pane split --right\n\
            waterctl pane focus 3\n\
+           waterctl pane rename-agent --pane 3 --label BuildBot\n\
            waterctl pane input --pane 3 --text 'printf hello\\n'\n\
            waterctl pane content --pane 3 --row 0 --rows 4 --column 0 --columns 80\n\
            waterctl operation wait 7\n\

@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
-use crate::config::AppConfig;
+use crate::config::{AppConfig, switch_tab_binding};
 
 use super::WorkspaceView;
 #[cfg(feature = "runtime-screenshot")]
@@ -30,6 +30,20 @@ actions!(
         ToggleSidebar,
         RenameWorkspace,
         RenameTab,
+        ActivateTab1,
+        ActivateTab2,
+        ActivateTab3,
+        ActivateTab4,
+        ActivateTab5,
+        ActivateTab6,
+        ActivateTab7,
+        ActivateTab8,
+        ActivateTab9,
+        ActivateTab10,
+        NextTab,
+        PreviousTab,
+        NextWorkspace,
+        PreviousWorkspace,
         SplitRight,
         SplitDown,
         OpenSettings,
@@ -518,7 +532,7 @@ pub(crate) fn window_key_bindings() -> Vec<KeyBinding> {
 
 pub(crate) fn configured_window_key_bindings(config: &AppConfig) -> Vec<KeyBinding> {
     let shortcuts = &config.shortcuts;
-    vec![
+    let mut bindings = vec![
         safe_key_binding(&shortcuts.open_settings, "cmd-,", OpenSettings),
         safe_key_binding(&shortcuts.new_window, "cmd-n", NewWindow),
         safe_key_binding(&shortcuts.hide_window, "cmd-w", HideWindow),
@@ -529,9 +543,69 @@ pub(crate) fn configured_window_key_bindings(config: &AppConfig) -> Vec<KeyBindi
         safe_key_binding(&shortcuts.toggle_sidebar, "cmd-e", ToggleSidebar),
         safe_key_binding(&shortcuts.rename_workspace, "cmd-shift-e", RenameWorkspace),
         safe_key_binding(&shortcuts.rename_tab, "cmd-shift-t", RenameTab),
+        safe_key_binding(&shortcuts.next_tab, "cmd-]", NextTab),
+        safe_key_binding(&shortcuts.previous_tab, "cmd-[", PreviousTab),
+        safe_key_binding(&shortcuts.next_workspace, "ctrl-tab", NextWorkspace),
+        safe_key_binding(
+            &shortcuts.previous_workspace,
+            "ctrl-shift-tab",
+            PreviousWorkspace,
+        ),
         safe_key_binding(&shortcuts.split_right, "cmd-\\", SplitRight),
         safe_key_binding(&shortcuts.split_down, "cmd--", SplitDown),
-    ]
+    ];
+
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 0),
+        "cmd-1",
+        ActivateTab1,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 1),
+        "cmd-2",
+        ActivateTab2,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 2),
+        "cmd-3",
+        ActivateTab3,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 3),
+        "cmd-4",
+        ActivateTab4,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 4),
+        "cmd-5",
+        ActivateTab5,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 5),
+        "cmd-6",
+        ActivateTab6,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 6),
+        "cmd-7",
+        ActivateTab7,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 7),
+        "cmd-8",
+        ActivateTab8,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 8),
+        "cmd-9",
+        ActivateTab9,
+    ));
+    bindings.push(safe_key_binding(
+        &switch_tab_binding(&shortcuts.switch_tab, 9),
+        "cmd-0",
+        ActivateTab10,
+    ));
+    bindings
 }
 
 fn safe_key_binding<A: gpui::Action>(source: &str, fallback: &str, action: A) -> KeyBinding {
@@ -595,6 +669,11 @@ fn application_menus() -> Vec<Menu> {
         ]),
         Menu::new("View").items([
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
+            MenuItem::separator(),
+            MenuItem::action("Next Tab", NextTab),
+            MenuItem::action("Previous Tab", PreviousTab),
+            MenuItem::action("Next Workspace", NextWorkspace),
+            MenuItem::action("Previous Workspace", PreviousWorkspace),
             MenuItem::separator(),
             MenuItem::action("Split Right", SplitRight),
             MenuItem::action("Split Down", SplitDown),

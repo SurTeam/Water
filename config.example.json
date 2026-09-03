@@ -34,7 +34,25 @@
     "tab_active_background": "#339966",
     "tab_inactive_background": "#000000",
     "tab_add_background": "#555555",
-    "ui_foreground": "#e4e4e4"
+    "ui_foreground": "#e4e4e4",
+    "sidebar_background": "#000000",
+    "sidebar_workspace_background": "#000000",
+    "sidebar_agent_background": "#000000",
+    "agent_colors": {
+      "claude_code": "#d97757",
+      "codex": "#2f9e63",
+      "opencode": "#22a7f0",
+      "gemini_cli": "#7b68ee",
+      "aider": "#f2b134",
+      "cursor_agent": "#e0e0e0",
+      "amp": "#ff6b9d",
+      "crush": "#00bcd4",
+      "goose": "#9ccc65",
+      "qwen_code": "#5c7cfa",
+      "droid": "#b07c5a",
+      "grok": "#d4d4d8",
+      "pi": "#f97316"
+    }
   },
   "terminal": {
     "default_columns": 80,
@@ -49,6 +67,7 @@
   "ui": {
     "font_size": 14.0,
     "sidebar_visible": true,
+    "sidebar_show_agent_count": true,
     "sidebar_width": 170.0,
     "sidebar_min_width": 170.0,
     "sidebar_max_width": 420.0,
@@ -68,6 +87,11 @@
     "new_terminal_tab": "cmd-t",
     "new_workspace": "cmd-shift-n",
     "toggle_sidebar": "cmd-e",
+    "switch_tab": "cmd-#",
+    "next_tab": "cmd-]",
+    "previous_tab": "cmd-[",
+    "next_workspace": "ctrl-tab",
+    "previous_workspace": "ctrl-shift-tab",
     "rename_workspace": "cmd-shift-e",
     "rename_tab": "cmd-shift-t",
     "split_right": "cmd-\\",

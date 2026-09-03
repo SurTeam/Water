@@ -88,6 +88,10 @@ pub enum AppEventKind {
         pane_id: PaneId,
         kind: AgentKind,
     },
+    AgentRenamed {
+        pane_id: PaneId,
+        label: Option<String>,
+    },
 }
 
 impl AppEventKind {
@@ -115,6 +119,7 @@ impl AppEventKind {
             Self::TerminalProcessChanged { .. } => "terminal.process_changed",
             Self::AgentStarted { .. } => "agent.started",
             Self::AgentStopped { .. } => "agent.stopped",
+            Self::AgentRenamed { .. } => "agent.renamed",
         }
     }
 }

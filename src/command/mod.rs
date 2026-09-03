@@ -105,6 +105,12 @@ pub enum PaneCommand {
         pane_id: Option<PaneId>,
         ratio: f32,
     },
+    /// Sets the display label for the detected agent running in a pane.
+    /// An empty label clears the override; `None` targets the active pane.
+    RenameAgent {
+        pane_id: Option<PaneId>,
+        label: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +288,11 @@ enum AppCommandWire {
     },
     #[serde(rename = "pane.resize")]
     PaneResize { pane_id: Option<PaneId>, ratio: f32 },
+    #[serde(rename = "pane.agent_rename")]
+    PaneAgentRename {
+        pane_id: Option<PaneId>,
+        label: String,
+    },
     #[serde(rename = "surface.replace")]
     SurfaceReplace {
         pane_id: Option<PaneId>,
@@ -400,6 +411,12 @@ impl From<&AppCommand> for AppCommandWire {
                 pane_id: *pane_id,
                 ratio: *ratio,
             },
+            AppCommand::Pane(PaneCommand::RenameAgent { pane_id, label }) => {
+                Self::PaneAgentRename {
+                    pane_id: *pane_id,
+                    label: label.clone(),
+                }
+            }
             AppCommand::Surface(SurfaceCommand::Replace { pane_id, kind }) => {
                 Self::SurfaceReplace {
                     pane_id: *pane_id,
@@ -508,6 +525,9 @@ impl From<AppCommandWire> for AppCommand {
             AppCommandWire::PaneResize { pane_id, ratio } => {
                 Self::Pane(PaneCommand::Resize { pane_id, ratio })
             }
+            AppCommandWire::PaneAgentRename { pane_id, label } => {
+                Self::Pane(PaneCommand::RenameAgent { pane_id, label })
+            }
             AppCommandWire::SurfaceReplace { pane_id, kind } => {
                 Self::Surface(SurfaceCommand::Replace { pane_id, kind })
             }
@@ -611,6 +631,7 @@ impl AppCommand {
             Self::Pane(PaneCommand::Close { .. }) => "pane.close",
             Self::Pane(PaneCommand::Focus { .. }) => "pane.focus",
             Self::Pane(PaneCommand::Resize { .. }) => "pane.resize",
+            Self::Pane(PaneCommand::RenameAgent { .. }) => "pane.agent_rename",
             Self::Surface(SurfaceCommand::Replace { .. }) => "surface.replace",
             Self::Terminal(TerminalCommand::Spawn { .. }) => "terminal.spawn",
             Self::Terminal(TerminalCommand::SendText { .. }) => "terminal.send_text",

@@ -949,6 +949,22 @@ impl CommandDispatcher {
                     ratio,
                 })
             }
+            PaneCommand::RenameAgent { pane_id, label } => {
+                let (_, target_pane) = self.resolve_pane(pane_id)?;
+                let label = label.trim().to_owned();
+                let event_label = (!label.is_empty()).then(|| label.clone());
+                let changed = self
+                    .model
+                    .rename_agent(target_pane, label)
+                    .map_err(|message| CommandError::new("AGENT_NOT_FOUND", message))?;
+                if changed {
+                    self.emit(AppEventKind::AgentRenamed {
+                        pane_id: target_pane,
+                        label: event_label,
+                    });
+                }
+                Ok(OperationResult::None)
+            }
         }
     }
 
@@ -1030,6 +1046,7 @@ impl CommandDispatcher {
             lines: size.lines,
             last_output_revision: 0,
             agent,
+            agent_label: None,
         });
         if let Err(message) = self
             .model
@@ -1389,7 +1406,9 @@ fn attach_terminal_projections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{AgentKind, DetectedAgent};
     use crate::command::{PaneCommand, TabCommand};
+    use crate::ids::{SessionId, SurfaceId};
 
     fn create_dispatcher() -> CommandDispatcher {
         let mut dispatcher = CommandDispatcher::new();
@@ -1397,6 +1416,48 @@ mod tests {
         let snapshot = dispatcher.wait_operation(operation).unwrap();
         assert_eq!(snapshot.status, OperationStatus::Succeeded);
         dispatcher
+    }
+
+    fn dispatcher_with_agent() -> (CommandDispatcher, PaneId, TerminalId) {
+        let mut dispatcher = CommandDispatcher::new();
+        let workspace_id = WorkspaceId::new(1);
+        let tab_id = crate::ids::TabId::new(2);
+        let pane_id = PaneId::new(3);
+        let surface_id = SurfaceId::new(4);
+        let terminal_id = TerminalId::new(5);
+        dispatcher
+            .model
+            .create_workspace_with_title(workspace_id, "Workspace".to_owned());
+        dispatcher
+            .model
+            .create_tab_with_title_mode(tab_id, "Terminal".to_owned(), false, pane_id, surface_id)
+            .unwrap();
+        dispatcher
+            .model
+            .replace_surface(
+                pane_id,
+                SurfaceId::new(6),
+                SurfaceState::Terminal(TerminalSurfaceState {
+                    terminal_id,
+                    session_id: SessionId::new(7),
+                    program: "/bin/zsh".to_owned(),
+                    title: None,
+                    process_name: "claude".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    args: vec!["claude".to_owned()],
+                    status: TerminalStatus::Running,
+                    columns: 80,
+                    lines: 24,
+                    last_output_revision: 0,
+                    agent: Some(DetectedAgent {
+                        kind: AgentKind::ClaudeCode,
+                        active: true,
+                    }),
+                    agent_label: None,
+                }),
+            )
+            .unwrap();
+        (dispatcher, pane_id, terminal_id)
     }
 
     #[test]
@@ -1586,6 +1647,77 @@ mod tests {
             events.last().unwrap().state_revision,
             dispatcher.model().state_revision()
         );
+    }
+
+    #[test]
+    fn rename_agent_dispatches_display_label_changes_and_clears_it() {
+        let (mut dispatcher, pane_id, terminal_id) = dispatcher_with_agent();
+
+        let rename = dispatcher.dispatch(AppCommand::Pane(PaneCommand::RenameAgent {
+            pane_id: Some(pane_id),
+            label: "  Build Bot  ".to_owned(),
+        }));
+        let result = dispatcher.wait_operation(rename).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(result.result, Some(OperationResult::None));
+        let agent = &dispatcher.state_dump().agents[0];
+        assert_eq!(agent.custom_label.as_deref(), Some("Build Bot"));
+        assert_eq!(agent.display_label(), "Build Bot");
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            &event.kind,
+            AppEventKind::AgentRenamed {
+                pane_id: event_pane,
+                label: Some(label),
+            } if *event_pane == pane_id && label == "Build Bot"
+        )));
+
+        let clear = dispatcher.dispatch(AppCommand::Pane(PaneCommand::RenameAgent {
+            pane_id: None,
+            label: "   ".to_owned(),
+        }));
+        let result = dispatcher.wait_operation(clear).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(dispatcher.state_dump().agents[0].custom_label, None);
+        assert!(
+            dispatcher
+                .model()
+                .terminal_surface(terminal_id)
+                .unwrap()
+                .agent_label
+                .is_none()
+        );
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            &event.kind,
+            AppEventKind::AgentRenamed {
+                pane_id: event_pane,
+                label: None,
+            } if *event_pane == pane_id
+        )));
+    }
+
+    #[test]
+    fn rename_agent_fails_as_an_observable_operation_without_an_agent() {
+        let (mut dispatcher, pane_id, terminal_id) = dispatcher_with_agent();
+        assert_eq!(
+            dispatcher.model.set_terminal_process(
+                terminal_id,
+                "zsh".to_owned(),
+                "/tmp".to_owned(),
+                vec!["-zsh".to_owned()],
+                false,
+            ),
+            Some(pane_id)
+        );
+
+        let operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::RenameAgent {
+            pane_id: Some(pane_id),
+            label: "No Agent".to_owned(),
+        }));
+        let result = dispatcher.wait_operation(operation).unwrap();
+        assert_eq!(result.status, OperationStatus::Failed);
+        let error = result.error.unwrap();
+        assert_eq!(error.code, "AGENT_NOT_FOUND");
+        assert!(error.message.contains("detected agent"));
     }
 
     #[test]

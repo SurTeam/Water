@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::agent::AgentKind;
 use crate::terminal::{
     DEFAULT_COLUMNS, DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_LINES,
     DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES,
@@ -400,6 +402,8 @@ pub struct UiConfig {
     /// Base font size for Water chrome, workspace labels, and settings text.
     pub font_size: f32,
     pub sidebar_visible: bool,
+    /// Whether workspace rows show a count of currently running agents.
+    pub sidebar_show_agent_count: bool,
     pub sidebar_width: f32,
     pub sidebar_min_width: f32,
     pub sidebar_max_width: f32,
@@ -416,6 +420,7 @@ impl Default for UiConfig {
         Self {
             font_size: DEFAULT_UI_FONT_SIZE,
             sidebar_visible: true,
+            sidebar_show_agent_count: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_min_width: DEFAULT_SIDEBAR_MIN_WIDTH,
             sidebar_max_width: DEFAULT_SIDEBAR_MAX_WIDTH,
@@ -458,6 +463,12 @@ pub struct ShortcutConfig {
     pub new_terminal_tab: String,
     pub new_workspace: String,
     pub toggle_sidebar: String,
+    /// Template for tab-index bindings; # is replaced by 1..9 and 0.
+    pub switch_tab: String,
+    pub next_tab: String,
+    pub previous_tab: String,
+    pub next_workspace: String,
+    pub previous_workspace: String,
     pub rename_workspace: String,
     pub rename_tab: String,
     pub split_right: String,
@@ -485,6 +496,11 @@ impl Default for ShortcutConfig {
             new_terminal_tab: "cmd-t".to_owned(),
             new_workspace: "cmd-shift-n".to_owned(),
             toggle_sidebar: "cmd-e".to_owned(),
+            switch_tab: "cmd-#".to_owned(),
+            next_tab: "cmd-]".to_owned(),
+            previous_tab: "cmd-[".to_owned(),
+            next_workspace: "ctrl-tab".to_owned(),
+            previous_workspace: "ctrl-shift-tab".to_owned(),
             rename_workspace: "cmd-shift-e".to_owned(),
             rename_tab: "cmd-shift-t".to_owned(),
             split_right: "cmd-\\".to_owned(),
@@ -501,6 +517,38 @@ impl Default for ShortcutConfig {
             scroll_page_down: "shift-pagedown".to_owned(),
         }
     }
+}
+
+/// Returns the concrete key binding for a tab index in the configurable
+/// `switch_tab` template. Indexes 0..=8 map to 1..=9 and index 9 maps to 0.
+/// Invalid or missing templates use the built-in `cmd-#` template. Indexes
+/// outside the first ten tabs are returned unchanged for callers that need to
+/// report or handle them explicitly.
+pub fn switch_tab_binding(switch_tab_source: &str, tab_index: usize) -> String {
+    if tab_index >= 10 {
+        return switch_tab_source.to_owned();
+    }
+    let source = if is_valid_switch_tab_source(switch_tab_source) {
+        switch_tab_source.trim()
+    } else {
+        "cmd-#"
+    };
+    let digit = if tab_index == 9 {
+        '0'
+    } else {
+        char::from(b'1' + tab_index as u8)
+    };
+    source.replace('#', &digit.to_string())
+}
+
+/// Validates the `ShortcutConfig::switch_tab` template. It must contain one
+/// `#` placeholder and become a valid GPUI keystroke when that placeholder is
+/// replaced with a digit.
+pub fn is_valid_switch_tab_source(source: &str) -> bool {
+    let source = source.trim();
+    source.matches('#').count() == 1
+        && source.split_whitespace().count() == 1
+        && gpui::Keystroke::parse(&source.replace('#', "1")).is_ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +571,14 @@ pub struct ThemeConfig {
     pub tab_inactive_background: String,
     pub tab_add_background: String,
     pub ui_foreground: String,
+    /// Background of the sidebar behind workspace and agent rows.
+    pub sidebar_background: String,
+    /// Background of an unselected workspace row in the sidebar.
+    pub sidebar_workspace_background: String,
+    /// Background of an unselected agent row in the sidebar.
+    pub sidebar_agent_background: String,
+    /// Per-agent accent colors keyed by [`AgentKind::config_key`].
+    pub agent_colors: BTreeMap<String, String>,
 }
 
 /// Water owns these built-in defaults; they mirror the dark Kitty palette
@@ -546,8 +602,24 @@ impl Default for ThemeConfig {
             tab_inactive_background: "#000000".to_owned(),
             tab_add_background: "#555555".to_owned(),
             ui_foreground: "#e4e4e4".to_owned(),
+            sidebar_background: "#000000".to_owned(),
+            sidebar_workspace_background: "#000000".to_owned(),
+            sidebar_agent_background: "#000000".to_owned(),
+            agent_colors: default_agent_colors(),
         }
     }
+}
+
+fn default_agent_colors() -> BTreeMap<String, String> {
+    AgentKind::all()
+        .into_iter()
+        .map(|kind| {
+            (
+                kind.config_key().to_owned(),
+                format!("#{:06x}", kind.default_color()),
+            )
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -568,10 +640,22 @@ pub struct ThemeColors {
     pub tab_inactive_background: u32,
     pub tab_add_background: u32,
     pub ui_foreground: u32,
+    pub sidebar_background: u32,
+    pub sidebar_workspace_background: u32,
+    pub sidebar_agent_background: u32,
+    pub agent_colors: [u32; 13],
 }
 
 impl ThemeConfig {
     pub fn colors(&self) -> ThemeColors {
+        let mut agent_colors = [0; 13];
+        for (index, kind) in AgentKind::all().into_iter().enumerate() {
+            agent_colors[index] = self
+                .agent_colors
+                .get(kind.config_key())
+                .map(|value| parse_color(value, kind.default_color()))
+                .unwrap_or_else(|| kind.default_color());
+        }
         ThemeColors {
             terminal_background: parse_color(&self.terminal_background, 0x2c2c2c),
             terminal_foreground: parse_color(&self.terminal_foreground, 0xe4e4e4),
@@ -589,11 +673,25 @@ impl ThemeConfig {
             tab_inactive_background: parse_color(&self.tab_inactive_background, 0x000000),
             tab_add_background: parse_color(&self.tab_add_background, 0x555555),
             ui_foreground: parse_color(&self.ui_foreground, 0xe4e4e4),
+            sidebar_background: parse_color(&self.sidebar_background, 0x000000),
+            sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x000000),
+            sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x000000),
+            agent_colors,
         }
     }
 
     pub fn is_valid_color(value: &str) -> bool {
         parse_color_option(value).is_some()
+    }
+}
+
+impl ThemeColors {
+    pub fn agent_color(&self, kind: AgentKind) -> u32 {
+        AgentKind::all()
+            .into_iter()
+            .position(|candidate| candidate == kind)
+            .map(|index| self.agent_colors[index])
+            .unwrap_or_else(|| kind.default_color())
     }
 }
 
@@ -745,6 +843,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.sidebar_visible {
                 config.ui.sidebar_visible = value;
             }
+            if let Some(value) = ui.sidebar_show_agent_count {
+                config.ui.sidebar_show_agent_count = value;
+            }
             if let Some(value) = ui.sidebar_width {
                 config.ui.sidebar_width = value;
             }
@@ -826,6 +927,10 @@ pub struct ThemeConfigOverrides {
     pub tab_inactive_background: Option<String>,
     pub tab_add_background: Option<String>,
     pub ui_foreground: Option<String>,
+    pub sidebar_background: Option<String>,
+    pub sidebar_workspace_background: Option<String>,
+    pub sidebar_agent_background: Option<String>,
+    pub agent_colors: Option<BTreeMap<String, String>>,
 }
 
 impl ThemeConfigOverrides {
@@ -853,6 +958,16 @@ impl ThemeConfigOverrides {
         apply!(tab_inactive_background);
         apply!(tab_add_background);
         apply!(ui_foreground);
+        apply!(sidebar_background);
+        apply!(sidebar_workspace_background);
+        apply!(sidebar_agent_background);
+        if let Some(agent_colors) = &self.agent_colors {
+            for (key, value) in agent_colors {
+                if AgentKind::from_config_key(key).is_some() {
+                    theme.agent_colors.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
 }
 
@@ -874,6 +989,7 @@ pub struct TerminalConfigOverrides {
 pub struct UiConfigOverrides {
     pub font_size: Option<f32>,
     pub sidebar_visible: Option<bool>,
+    pub sidebar_show_agent_count: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_min_width: Option<f32>,
     pub sidebar_max_width: Option<f32>,
@@ -896,6 +1012,11 @@ pub struct ShortcutConfigOverrides {
     pub new_terminal_tab: Option<String>,
     pub new_workspace: Option<String>,
     pub toggle_sidebar: Option<String>,
+    pub switch_tab: Option<String>,
+    pub next_tab: Option<String>,
+    pub previous_tab: Option<String>,
+    pub next_workspace: Option<String>,
+    pub previous_workspace: Option<String>,
     pub rename_workspace: Option<String>,
     pub rename_tab: Option<String>,
     pub split_right: Option<String>,
@@ -929,6 +1050,11 @@ impl ShortcutConfigOverrides {
         apply!(new_terminal_tab);
         apply!(new_workspace);
         apply!(toggle_sidebar);
+        apply!(switch_tab);
+        apply!(next_tab);
+        apply!(previous_tab);
+        apply!(next_workspace);
+        apply!(previous_workspace);
         apply!(rename_workspace);
         apply!(rename_tab);
         apply!(split_right);
@@ -966,6 +1092,19 @@ mod tests {
         assert_eq!(config.theme.colors().terminal_foreground, 0xe4e4e4);
         assert_eq!(config.theme.colors().active_pane_border, 0x339966);
         assert_eq!(config.theme.colors().tab_active_background, 0x339966);
+        assert_eq!(config.theme.colors().sidebar_background, 0x000000);
+        assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
+        assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
+        assert_eq!(
+            config.theme.colors().agent_color(AgentKind::ClaudeCode),
+            0xd97757
+        );
+        assert!(config.ui.sidebar_show_agent_count);
+        assert_eq!(config.shortcuts.switch_tab, "cmd-#");
+        assert_eq!(config.shortcuts.next_tab, "cmd-]");
+        assert_eq!(config.shortcuts.previous_tab, "cmd-[");
+        assert_eq!(config.shortcuts.next_workspace, "ctrl-tab");
+        assert_eq!(config.shortcuts.previous_workspace, "ctrl-shift-tab");
         assert_eq!(parse_color("not-a-color", 0x123456), 0x123456);
         assert!(!ThemeConfig::is_valid_color("not-a-color"));
     }
@@ -997,6 +1136,50 @@ mod tests {
         assert!(config.features.selection);
         assert_eq!(config.theme.terminal_background, "#2c2c2c");
         assert_eq!(config.shell.args, default_shell_args(&config.shell.program));
+    }
+
+    #[test]
+    fn agent_theme_overrides_merge_known_keys_and_ignore_unknown_keys() {
+        let path = write_temp_config(
+            r##"{
+                "theme": {
+                    "agent_colors": {
+                        "codex": "#abcdef",
+                        "not_an_agent": "#123456"
+                    }
+                }
+            }"##,
+        );
+        let config = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            config.theme.agent_colors.get("codex"),
+            Some(&"#abcdef".to_owned())
+        );
+        assert!(!config.theme.agent_colors.contains_key("not_an_agent"));
+        assert_eq!(
+            config.theme.colors().agent_color(AgentKind::Codex),
+            0xabcdef
+        );
+        assert_eq!(
+            config.theme.colors().agent_color(AgentKind::ClaudeCode),
+            AgentKind::ClaudeCode.default_color()
+        );
+    }
+
+    #[test]
+    fn switch_tab_binding_substitutes_digits_and_falls_back() {
+        assert_eq!(switch_tab_binding("cmd-#", 0), "cmd-1");
+        assert_eq!(switch_tab_binding("cmd-#", 8), "cmd-9");
+        assert_eq!(switch_tab_binding("cmd-#", 9), "cmd-0");
+        assert_eq!(switch_tab_binding("cmd-shift-#", 1), "cmd-shift-2");
+        assert_eq!(switch_tab_binding("", 0), "cmd-1");
+        assert_eq!(switch_tab_binding("cmd-x-#", 0), "cmd-1");
+        assert_eq!(switch_tab_binding("cmd-#", 10), "cmd-#");
+        assert!(is_valid_switch_tab_source("cmd-#"));
+        assert!(is_valid_switch_tab_source("cmd-shift-#"));
+        assert!(!is_valid_switch_tab_source("cmd-x-#"));
+        assert!(!is_valid_switch_tab_source("cmd-##"));
     }
 
     #[test]
@@ -1041,7 +1224,12 @@ mod tests {
                 "startup": {"default_cwd": "~/Projects", "window_width": 1500},
                 "shell": {"program": "/bin/sh"},
                 "theme": {"active_pane_border": "#abcdef"},
-                "shortcuts": {"open_settings": "cmd-shift-,"}
+                "ui": {"sidebar_show_agent_count": false},
+                "shortcuts": {
+                    "open_settings": "cmd-shift-,",
+                    "switch_tab": "cmd-alt-#",
+                    "next_tab": "cmd-shift-]"
+                }
             }"##,
         );
         let config = AppConfig::load_from_path(&path).unwrap();
@@ -1052,7 +1240,10 @@ mod tests {
         assert!(config.shell.args.is_empty());
         assert_eq!(config.theme.active_pane_border, "#abcdef");
         assert_eq!(config.shortcuts.open_settings, "cmd-shift-,");
+        assert_eq!(config.shortcuts.switch_tab, "cmd-alt-#");
+        assert_eq!(config.shortcuts.next_tab, "cmd-shift-]");
         assert_eq!(config.shortcuts.new_window, "cmd-n");
+        assert!(!config.ui.sidebar_show_agent_count);
     }
 
     #[test]

@@ -63,6 +63,51 @@ impl AgentKind {
         }
     }
 
+    /// Stable key used by configuration files for per-agent settings.
+    pub const fn config_key(self) -> &'static str {
+        match self {
+            Self::ClaudeCode => "claude_code",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+            Self::GeminiCli => "gemini_cli",
+            Self::Aider => "aider",
+            Self::CursorAgent => "cursor_agent",
+            Self::Amp => "amp",
+            Self::Crush => "crush",
+            Self::Goose => "goose",
+            Self::QwenCode => "qwen_code",
+            Self::Droid => "droid",
+            Self::Grok => "grok",
+            Self::Pi => "pi",
+        }
+    }
+
+    /// Converts a configuration key back to its registered agent kind.
+    pub fn from_config_key(key: &str) -> Option<Self> {
+        Self::all()
+            .into_iter()
+            .find(|kind| kind.config_key() == key)
+    }
+
+    /// Built-in accent color used when a theme does not override this agent.
+    pub const fn default_color(self) -> u32 {
+        match self {
+            Self::ClaudeCode => 0xd97757,
+            Self::Codex => 0x2f9e63,
+            Self::OpenCode => 0x22a7f0,
+            Self::GeminiCli => 0x7b68ee,
+            Self::Aider => 0xf2b134,
+            Self::CursorAgent => 0xe0e0e0,
+            Self::Amp => 0xff6b9d,
+            Self::Crush => 0x00bcd4,
+            Self::Goose => 0x9ccc65,
+            Self::QwenCode => 0x5c7cfa,
+            Self::Droid => 0xb07c5a,
+            Self::Grok => 0xd4d4d8,
+            Self::Pi => 0xf97316,
+        }
+    }
+
     /// Exact executable/argv basenames that identify this agent.
     const fn names(self) -> &'static [&'static str] {
         match self {
@@ -173,6 +218,26 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn config_keys_round_trip_and_default_colors_are_distinct() {
+        let kinds = AgentKind::all();
+        for kind in kinds {
+            assert_eq!(AgentKind::from_config_key(kind.config_key()), Some(kind));
+        }
+        assert_eq!(AgentKind::from_config_key("unknown"), None);
+
+        for (index, kind) in kinds.iter().enumerate() {
+            assert!(
+                kinds
+                    .iter()
+                    .skip(index + 1)
+                    .all(|other| kind.default_color() != other.default_color()),
+                "default color for {} is duplicated",
+                kind.config_key()
+            );
+        }
     }
 
     #[test]

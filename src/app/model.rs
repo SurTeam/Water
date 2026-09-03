@@ -104,6 +104,10 @@ fn default_workspace_dump_title() -> String {
 pub struct AgentDump {
     pub kind: AgentKind,
     pub label: String,
+    /// Optional user-defined display label. `label` remains the detected kind
+    /// label for wire compatibility.
+    #[serde(default)]
+    pub custom_label: Option<String>,
     #[serde(default)]
     pub active: bool,
     pub workspace_id: WorkspaceId,
@@ -113,6 +117,12 @@ pub struct AgentDump {
     #[serde(default)]
     pub cwd: String,
     pub status: TerminalStatus,
+}
+
+impl AgentDump {
+    pub fn display_label(&self) -> &str {
+        self.custom_label.as_deref().unwrap_or(self.label.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -750,6 +760,34 @@ impl ApplicationModel {
         false
     }
 
+    /// Updates the display label of the currently detected agent in a pane.
+    /// The label is metadata on the terminal surface and never changes the
+    /// detected agent identity.
+    pub(crate) fn rename_agent(
+        &mut self,
+        pane_id: PaneId,
+        label: String,
+    ) -> Result<bool, &'static str> {
+        let surface_id = self.panes.get(&pane_id).ok_or("pane not found")?.surface;
+        let surface = self
+            .surfaces
+            .get_mut(&surface_id)
+            .ok_or("surface not found")?;
+        let SurfaceState::Terminal(terminal) = surface else {
+            return Err("pane does not contain a terminal");
+        };
+        if terminal.agent.is_none() {
+            return Err("pane does not contain a detected agent");
+        }
+        let label = label.trim();
+        let label = (!label.is_empty()).then(|| label.to_owned());
+        if terminal.agent_label == label {
+            return Ok(false);
+        }
+        terminal.agent_label = label;
+        Ok(true)
+    }
+
     /// Updates worker-owned terminal metadata and returns the affected pane if
     /// anything changed. The caller decides whether the corresponding tab is
     /// allowed to follow the process name. The agent binding is derived here,
@@ -777,7 +815,12 @@ impl ApplicationModel {
             let changed = terminal.process_name != process_name
                 || terminal.cwd != cwd
                 || terminal.agent != agent;
+            let previous_kind = terminal.agent.map(|agent| agent.kind);
+            let next_kind = agent.map(|agent| agent.kind);
             if let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get_mut(&pane.surface) {
+                if previous_kind != next_kind {
+                    terminal.agent_label = None;
+                }
                 terminal.process_name = process_name;
                 terminal.cwd = cwd;
                 terminal.agent = agent;
@@ -885,6 +928,7 @@ impl ApplicationModel {
                     agents.push(AgentDump {
                         kind: agent.kind,
                         label: agent.kind.label().to_owned(),
+                        custom_label: terminal.agent_label.clone(),
                         active: agent.active,
                         workspace_id: workspace.id,
                         tab_id: tab.id,
@@ -1019,6 +1063,7 @@ mod tests {
                     lines: 24,
                     last_output_revision: 0,
                     agent: None,
+                    agent_label: None,
                 }),
             )
             .unwrap();
@@ -1028,6 +1073,11 @@ mod tests {
     #[test]
     fn agent_binding_follows_process_metadata_updates() {
         let (mut model, pane_id, terminal_id, tab_id, workspace_id) = model_with_terminal_pane();
+
+        assert_eq!(
+            model.rename_agent(pane_id, "Build Bot".to_owned()),
+            Err("pane does not contain a detected agent")
+        );
 
         let update = model.set_terminal_process(
             terminal_id,
@@ -1048,8 +1098,22 @@ mod tests {
         assert_eq!(agent.workspace_id, workspace_id);
         assert_eq!(agent.terminal_id, terminal_id);
         assert_eq!(agent.cwd, "/proj");
+        assert_eq!(agent.custom_label, None);
 
-        // An activity-only flip is a change: the sidebar indicator needs it.
+        assert!(
+            model
+                .rename_agent(pane_id, "  Build Bot  ".to_owned())
+                .unwrap()
+        );
+        let snapshot = model.snapshot();
+        assert_eq!(
+            snapshot.agents[0].custom_label.as_deref(),
+            Some("Build Bot")
+        );
+        assert_eq!(snapshot.agents[0].display_label(), "Build Bot");
+
+        // An activity-only flip is a change: the sidebar indicator needs it,
+        // but it must not discard the user's display label.
         assert_eq!(
             model.set_terminal_process(
                 terminal_id,
@@ -1061,8 +1125,28 @@ mod tests {
             Some(pane_id)
         );
         assert!(!model.snapshot().agents[0].active);
+        assert_eq!(
+            model.snapshot().agents[0].custom_label.as_deref(),
+            Some("Build Bot")
+        );
 
-        // The agent exiting to the shell removes the binding.
+        // Changing to a different detected kind clears the old label.
+        assert_eq!(
+            model.set_terminal_process(
+                terminal_id,
+                "codex".to_owned(),
+                "/proj".to_owned(),
+                vec!["codex".to_owned()],
+                true,
+            ),
+            Some(pane_id)
+        );
+        assert_eq!(model.snapshot().agents[0].kind, AgentKind::Codex);
+        assert_eq!(model.snapshot().agents[0].custom_label, None);
+
+        // The agent exiting to the shell removes the binding and clears its
+        // label metadata as well.
+        assert!(model.rename_agent(pane_id, "Codex Bot".to_owned()).unwrap());
         assert_eq!(
             model.set_terminal_process(
                 terminal_id,
@@ -1074,6 +1158,10 @@ mod tests {
             Some(pane_id)
         );
         assert!(model.snapshot().agents.is_empty());
+        assert_eq!(
+            model.terminal_surface(terminal_id).unwrap().agent_label,
+            None
+        );
 
         // An unchanged probe reports no update at all.
         assert_eq!(
@@ -1097,5 +1185,27 @@ mod tests {
         let legacy = r#"{"state_revision": 3, "workspace": null, "workspaces": [], "active_workspace": null, "focused_pane": null}"#;
         let parsed: StateDump = serde_json::from_str(legacy).unwrap();
         assert!(parsed.agents.is_empty());
+
+        let legacy_agent = serde_json::json!({
+            "kind": "claude_code",
+            "label": "Claude Code",
+            "active": true,
+            "workspace_id": 1,
+            "tab_id": 2,
+            "pane_id": 3,
+            "terminal_id": 5,
+            "cwd": "/tmp",
+            "status": "running"
+        });
+        let parsed: StateDump = serde_json::from_value(serde_json::json!({
+            "state_revision": 3,
+            "workspace": null,
+            "workspaces": [],
+            "active_workspace": null,
+            "focused_pane": null,
+            "agents": [legacy_agent]
+        }))
+        .unwrap();
+        assert_eq!(parsed.agents[0].custom_label, None);
     }
 }

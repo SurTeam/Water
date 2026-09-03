@@ -1,14 +1,14 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
     FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollWheelEvent, ShapedLine, SharedString,
-    StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, UTF16Selection, UnderlineStyle,
-    Window, WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point,
-    prelude::*, px, relative, rgb, rgba, size,
+    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine,
+    SharedString, StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, UTF16Selection,
+    UnderlineStyle, Window, WindowControlArea, anchored, canvas, deferred, div, fill, font,
+    outline, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
@@ -24,8 +24,11 @@ use crate::surface::SurfaceState;
 use crate::terminal::{TerminalCell, TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
 
 use super::application::{
-    HideWindow, IgnoreQuit, MinimizeWindow, NewTerminalTab, NewWorkspace, RenameTab,
-    RenameWorkspace, SplitDown, SplitRight, ToggleSidebar, shortcut_matches_or_default,
+    ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
+    ActivateTab7, ActivateTab8, ActivateTab9, ActivateTab10, HideWindow, IgnoreQuit,
+    MinimizeWindow, NewTerminalTab, NewWorkspace, NextTab, NextWorkspace, PreviousTab,
+    PreviousWorkspace, RenameTab, RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
+    shortcut_matches_or_default,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
@@ -65,6 +68,7 @@ enum TerminalSelectionSide {
 enum RenameTarget {
     Workspace(WorkspaceId),
     Tab(TabId),
+    Agent(PaneId),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +81,7 @@ struct ContextMenuState {
 enum ContextMenuTarget {
     Workspace(WorkspaceId),
     Tab(TabId),
+    Agent(PaneId),
 }
 
 /// In-window dialogs are kept as view state so their presentation and
@@ -424,6 +429,9 @@ pub struct WorkspaceView {
     reported_mouse: Option<(TerminalId, MouseButton)>,
     last_reported_mouse_cell: Option<(TerminalId, TerminalCellPosition)>,
     sidebar_collapsed: bool,
+    collapsed_workspaces: BTreeSet<WorkspaceId>,
+    sidebar_scroll: ScrollHandle,
+    tab_scroll: ScrollHandle,
     sidebar_width: f32,
     dragging_sidebar: bool,
     titlebar_dragging: bool,
@@ -470,6 +478,9 @@ impl WorkspaceView {
             reported_mouse: None,
             last_reported_mouse_cell: None,
             sidebar_collapsed,
+            collapsed_workspaces: BTreeSet::new(),
+            sidebar_scroll: ScrollHandle::new(),
+            tab_scroll: ScrollHandle::new(),
             sidebar_width,
             dragging_sidebar: false,
             titlebar_dragging: false,
@@ -519,6 +530,99 @@ impl WorkspaceView {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
+    }
+
+    fn toggle_workspace_collapsed(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
+        if !self.workspace_exists(workspace_id) {
+            return;
+        }
+        if !self.collapsed_workspaces.remove(&workspace_id) {
+            self.collapsed_workspaces.insert(workspace_id);
+        }
+        cx.notify();
+    }
+
+    fn workspace_exists(&self, workspace_id: WorkspaceId) -> bool {
+        workspace_exists_in_snapshot(&self.snapshot, workspace_id)
+    }
+
+    fn scroll_tab_bar(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let delta = event.delta.pixel_delta(px(24.));
+        let delta = if f32::from(delta.x).abs() > f32::EPSILON {
+            delta.x
+        } else {
+            delta.y
+        };
+        if f32::from(delta).abs() <= f32::EPSILON {
+            return;
+        }
+        let offset = self.tab_scroll.offset();
+        let max_offset = self.tab_scroll.max_offset();
+        let next_x = (f32::from(offset.x) + f32::from(delta)).clamp(-f32::from(max_offset.x), 0.0);
+        self.tab_scroll.set_offset(point(px(next_x), offset.y));
+        cx.notify();
+        cx.stop_propagation();
+    }
+
+    fn activate_tab_index(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self
+            .selected_workspace_dump()
+            .and_then(|workspace| workspace.tabs.get(index))
+        else {
+            return;
+        };
+        let tab_id = tab.id;
+        self.focused_pane = Some(tab.active_pane);
+        self.selection = None;
+        self.clear_ime();
+        self.dispatch(
+            AppCommand::Tab(TabCommand::Activate {
+                tab_id: Some(tab_id),
+                index: None,
+            }),
+            cx,
+        );
+    }
+
+    fn activate_relative_tab(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let Some(workspace) = self.selected_workspace_dump() else {
+            return;
+        };
+        if workspace.tabs.is_empty() {
+            return;
+        }
+        let active_index = workspace
+            .active_tab
+            .and_then(|tab_id| workspace.tabs.iter().position(|tab| tab.id == tab_id))
+            .unwrap_or(0);
+        let tab_count = workspace.tabs.len() as isize;
+        let next_index = (active_index as isize + direction).rem_euclid(tab_count) as usize;
+        self.activate_tab_index(next_index, cx);
+    }
+
+    fn activate_relative_workspace(&mut self, direction: isize, cx: &mut Context<Self>) {
+        let workspaces = self.workspace_dumps();
+        if workspaces.is_empty() {
+            return;
+        }
+        let current_index = self
+            .selected_workspace
+            .and_then(|workspace_id| {
+                workspaces
+                    .iter()
+                    .position(|workspace| workspace.id == workspace_id)
+            })
+            .unwrap_or(0);
+        let workspace_count = workspaces.len() as isize;
+        let next_index = (current_index as isize + direction).rem_euclid(workspace_count) as usize;
+        let workspace_id = workspaces[next_index].id;
+        self.select_workspace_locally(workspace_id, cx);
+        self.dispatch(
+            AppCommand::Workspace(WorkspaceCommand::Activate {
+                workspace_id: Some(workspace_id),
+            }),
+            cx,
+        );
     }
 
     pub(crate) fn apply_config(&mut self, config: AppConfig, cx: &mut Context<Self>) {
@@ -576,6 +680,21 @@ impl WorkspaceView {
         workspace_dump_for_snapshot(&self.snapshot, workspace_id)
     }
 
+    fn workspace_dumps(&self) -> Vec<&WorkspaceDump> {
+        if self.snapshot.workspaces.is_empty() {
+            self.snapshot.workspace.iter().collect()
+        } else {
+            self.snapshot.workspaces.iter().collect()
+        }
+    }
+
+    fn agent_by_pane_id(&self, pane_id: PaneId) -> Option<&AgentDump> {
+        self.snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.pane_id == pane_id)
+    }
+
     fn workspace_contains_pane(&self, workspace_id: WorkspaceId, pane_id: PaneId) -> bool {
         self.workspace_by_id(workspace_id)
             .is_some_and(|workspace| workspace_active_tab_contains_pane(workspace, pane_id))
@@ -594,6 +713,11 @@ impl WorkspaceView {
                 self.workspace_by_id(workspace_id).is_some()
             }
             ContextMenuTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
+            ContextMenuTarget::Agent(pane_id) => {
+                self.agent_by_pane_id(pane_id).is_some_and(|agent| {
+                    matches!(agent.status, crate::surface::TerminalStatus::Running)
+                })
+            }
         }
     }
 
@@ -601,6 +725,9 @@ impl WorkspaceView {
         match target {
             RenameTarget::Workspace(workspace_id) => self.workspace_by_id(workspace_id).is_some(),
             RenameTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
+            RenameTarget::Agent(pane_id) => self.agent_by_pane_id(pane_id).is_some_and(|agent| {
+                matches!(agent.status, crate::surface::TerminalStatus::Running)
+            }),
         }
     }
 
@@ -728,6 +855,24 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    fn begin_rename_agent(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_transient_ui() {
+            return;
+        }
+        let Some(agent_label) = self
+            .agent_by_pane_id(pane_id)
+            .filter(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running))
+            .map(|agent| agent.display_label().to_owned())
+        else {
+            return;
+        };
+        self.context_menu = None;
+        self.rename_target = Some(RenameTarget::Agent(pane_id));
+        self.rename_value = agent_label;
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
     fn cancel_rename(&mut self, cx: &mut Context<Self>) {
         if self.rename_target.take().is_some() {
             self.rename_value.clear();
@@ -741,7 +886,7 @@ impl WorkspaceView {
         };
         let title = self.rename_value.trim().to_owned();
         self.rename_value.clear();
-        if title.is_empty() {
+        if title.is_empty() && !matches!(target, RenameTarget::Agent(_)) {
             cx.notify();
             return;
         }
@@ -755,6 +900,10 @@ impl WorkspaceView {
             RenameTarget::Tab(tab_id) => AppCommand::Tab(TabCommand::Rename {
                 tab_id: Some(tab_id),
                 title,
+            }),
+            RenameTarget::Agent(pane_id) => AppCommand::Pane(PaneCommand::RenameAgent {
+                pane_id: Some(pane_id),
+                label: title,
             }),
         };
         self.dispatch(command, cx);
@@ -1380,6 +1529,8 @@ impl WorkspaceView {
             workspace_selection_after_snapshot(self.selected_workspace, &snapshot);
         self.focused_pane =
             focused_pane_for_workspace(&snapshot, self.selected_workspace, self.focused_pane);
+        self.collapsed_workspaces
+            .retain(|workspace_id| workspace_exists_in_snapshot(&snapshot, *workspace_id));
         self.snapshot = snapshot;
         self.scroll_accumulators.retain(|terminal_id, _| {
             terminal_projection_in_snapshot(&self.snapshot, *terminal_id).is_some()
@@ -1654,7 +1805,7 @@ impl WorkspaceView {
             .w(px(self.config.ui.sidebar_resize_handle_width))
             .h_full()
             .cursor(CursorStyle::ResizeLeftRight)
-            .bg(rgb(theme.chrome_background))
+            .bg(rgb(theme.sidebar_background))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
@@ -1670,12 +1821,18 @@ impl WorkspaceView {
     fn render_sidebar_workspace(
         &self,
         workspace: &WorkspaceDump,
+        agents: &[&AgentDump],
         active_workspace: Option<WorkspaceId>,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace_id = workspace.id;
         let active = active_workspace == Some(workspace_id);
+        let collapsed = self.collapsed_workspaces.contains(&workspace_id);
+        let running_agent_count = agents
+            .iter()
+            .filter(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running))
+            .count();
         let workspace_title = if self.rename_target == Some(RenameTarget::Workspace(workspace_id)) {
             format!("{}▌", self.rename_value)
         } else {
@@ -1684,7 +1841,7 @@ impl WorkspaceView {
         let workspace_background = if active {
             rgb(theme.tab_active_background)
         } else {
-            rgb(theme.tab_inactive_background)
+            rgb(theme.sidebar_workspace_background)
         };
         let workspace_hover_background = if active {
             theme.tab_active_background
@@ -1707,7 +1864,24 @@ impl WorkspaceView {
                 cx,
             );
         });
-        let workspace_row = div()
+        let disclosure = div()
+            .id(format!("workspace-disclosure-{workspace_id}"))
+            .w(px(18.))
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .flex()
+            .cursor_pointer()
+            .text_color(rgb(theme.ui_foreground))
+            .child(SharedString::from(if collapsed { "▸" } else { "▾" }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                    this.toggle_workspace_collapsed(workspace_id, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let mut workspace_row = div()
             .id(format!("workspace-{workspace_id}"))
             .h(px(32.))
             .w_full()
@@ -1731,6 +1905,7 @@ impl WorkspaceView {
                     cx.notify();
                 }),
             )
+            .child(disclosure)
             .child(
                 div()
                     .flex_1()
@@ -1738,8 +1913,27 @@ impl WorkspaceView {
                     .truncate()
                     .child(SharedString::from(workspace_title)),
             );
+        if self.config.ui.sidebar_show_agent_count && running_agent_count > 0 {
+            workspace_row = workspace_row.child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(SharedString::from(running_agent_count.to_string())),
+            );
+        }
 
-        workspace_row.into_any_element()
+        let mut group = div()
+            .id(format!("workspace-group-{workspace_id}"))
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(workspace_row);
+        if !collapsed {
+            for agent in agents {
+                group = group.child(self.render_sidebar_agent(agent, theme, cx));
+            }
+        }
+        group.into_any_element()
     }
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -1749,53 +1943,41 @@ impl WorkspaceView {
             .flex_1()
             .min_h(px(0.))
             .overflow_y_scroll()
+            .track_scroll(&self.sidebar_scroll)
             .flex_col();
-        if self.snapshot.workspaces.is_empty() {
-            if let Some(workspace) = self.snapshot.workspace.as_ref() {
-                list = list.child(self.render_sidebar_workspace(
-                    workspace,
-                    active_workspace,
-                    theme,
-                    cx,
-                ));
-            }
-        } else {
-            for workspace in &self.snapshot.workspaces {
-                list = list.child(self.render_sidebar_workspace(
-                    workspace,
-                    active_workspace,
-                    theme,
-                    cx,
-                ));
-            }
+        for workspace in self.workspace_dumps() {
+            let agents = self
+                .snapshot
+                .agents
+                .iter()
+                .filter(|agent| agent.workspace_id == workspace.id)
+                .collect::<Vec<_>>();
+            list = list.child(self.render_sidebar_workspace(
+                workspace,
+                &agents,
+                active_workspace,
+                theme,
+                cx,
+            ));
         }
-        let mut agent_list = div()
-            .id("agent-list")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .flex_col();
         if self.snapshot.agents.is_empty() {
-            agent_list = agent_list.child(
+            list = list.child(
                 div()
                     .h(px(22.))
+                    .w_full()
                     .px(px(10.))
                     .items_center()
                     .flex()
                     .text_color(rgb(theme.inactive_pane_border))
                     .child("No agents detected"),
             );
-        } else {
-            for agent in &self.snapshot.agents {
-                agent_list = agent_list.child(self.render_sidebar_agent(agent, theme, cx));
-            }
         }
         div()
             .w(px(self.sidebar_width))
             .h_full()
             .flex()
             .flex_row()
-            .bg(rgb(theme.chrome_background))
+            .bg(rgb(theme.sidebar_background))
             .text_color(rgb(theme.ui_foreground))
             .child(
                 div()
@@ -1804,51 +1986,15 @@ impl WorkspaceView {
                     .h_full()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .h(px(self.config.ui.sidebar_header_height))
-                            .px(px(10.))
-                            .items_center()
-                            .flex()
-                            .bg(rgb(theme.chrome_background))
-                            .text_color(rgb(theme.inactive_pane_border))
-                            .child("WORKSPACES"),
-                    )
-                    .child(list)
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .h(relative(0.35))
-                            .min_h(px(0.))
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .h(px(1.))
-                                    .my(px(4.))
-                                    .bg(rgb(theme.inactive_pane_border)),
-                            )
-                            .child(
-                                div()
-                                    .h(px(self.config.ui.sidebar_header_height))
-                                    .px(px(10.))
-                                    .items_center()
-                                    .flex()
-                                    .bg(rgb(theme.chrome_background))
-                                    .text_color(rgb(theme.inactive_pane_border))
-                                    .child("AGENTS"),
-                            )
-                            .child(agent_list),
-                    ),
+                    .child(list),
             )
             .child(self.sidebar_resize_handle(theme, cx))
             .into_any_element()
     }
 
-    /// One row in the sidebar Agents section. The row is the pane binding's
-    /// UI surface: clicking activates the pane's full location through the
-    /// regular command path (`pane.focus` re-activates the owning workspace
-    /// and tab in the model), so this never needs a mutation path of its own.
+    /// One row in the sidebar. Clicking activates the pane's full location
+    /// through the regular command path (`pane.focus` re-activates the owning
+    /// workspace and tab in the model).
     fn render_sidebar_agent(
         &self,
         agent: &AgentDump,
@@ -1862,7 +2008,7 @@ impl WorkspaceView {
         let row_background = if focused_here {
             rgb(theme.tab_active_background)
         } else {
-            rgb(theme.chrome_background)
+            rgb(theme.sidebar_agent_background)
         };
         let hover_background = if focused_here {
             theme.tab_active_background
@@ -1871,16 +2017,8 @@ impl WorkspaceView {
         };
         let dot_color = match agent.status {
             crate::surface::TerminalStatus::Exited { .. } => theme.inactive_pane_border,
-            crate::surface::TerminalStatus::Running if agent.active => {
-                // The focused row paints on the green accent; keep the busy
-                // dot readable against it.
-                if focused_here {
-                    theme.terminal_background
-                } else {
-                    theme.active_pane_border
-                }
-            }
-            crate::surface::TerminalStatus::Running => theme.tab_add_background,
+            crate::surface::TerminalStatus::Running if focused_here => theme.terminal_background,
+            crate::surface::TerminalStatus::Running => theme.agent_color(agent.kind),
         };
         let project = agent
             .cwd
@@ -1888,6 +2026,11 @@ impl WorkspaceView {
             .find(|segment| !segment.is_empty())
             .unwrap_or("")
             .to_owned();
+        let agent_label = if self.rename_target == Some(RenameTarget::Agent(pane_id)) {
+            format!("{}▌", self.rename_value)
+        } else {
+            agent.display_label().to_owned()
+        };
         let agent_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
@@ -1901,7 +2044,7 @@ impl WorkspaceView {
                 cx,
             );
         });
-        div()
+        let mut row = div()
             .id(format!("agent-pane-{pane_id}"))
             .h(px(28.))
             .w_full()
@@ -1914,13 +2057,14 @@ impl WorkspaceView {
             .bg(row_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
+            .child(div().w(px(18.)).flex_shrink_0())
             .child(
                 div()
                     .flex_shrink_0()
                     .text_color(rgb(dot_color))
                     .child(SharedString::from("●")),
             )
-            .child(SharedString::from(agent.label.clone()))
+            .child(SharedString::from(agent_label))
             .child(
                 div()
                     .flex_1()
@@ -1929,8 +2073,22 @@ impl WorkspaceView {
                     .truncate()
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(SharedString::from(project)),
-            )
-            .into_any_element()
+            );
+        if matches!(agent.status, crate::surface::TerminalStatus::Running) {
+            row = row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.context_menu = Some(ContextMenuState {
+                        target: ContextMenuTarget::Agent(pane_id),
+                        position: event.position,
+                    });
+                    this.focus_handle.focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            );
+        }
+        row.into_any_element()
     }
 
     fn render_context_menu_item(
@@ -1986,17 +2144,26 @@ impl WorkspaceView {
                 },
                 cx,
             ),
+            ContextMenuTarget::Agent(pane_id) => self.render_context_menu_item(
+                "Rename agent",
+                theme,
+                move |this, _event, window, cx| {
+                    this.context_menu = None;
+                    this.begin_rename_agent(pane_id, window, cx);
+                },
+                cx,
+            ),
         };
         let close = match target {
-            ContextMenuTarget::Workspace(workspace_id) => self.render_context_menu_item(
+            ContextMenuTarget::Workspace(workspace_id) => Some(self.render_context_menu_item(
                 "Close workspace",
                 theme,
                 move |this, _event, window, cx| {
                     this.request_close_workspace(workspace_id, window, cx);
                 },
                 cx,
-            ),
-            ContextMenuTarget::Tab(tab_id) => self.render_context_menu_item(
+            )),
+            ContextMenuTarget::Tab(tab_id) => Some(self.render_context_menu_item(
                 "Close tab",
                 theme,
                 move |this, _event, _window, cx| {
@@ -2010,9 +2177,10 @@ impl WorkspaceView {
                     cx.notify();
                 },
                 cx,
-            ),
+            )),
+            ContextMenuTarget::Agent(_) => None,
         };
-        let menu = div()
+        let mut menu = div()
             .id("workspace-context-menu")
             .w(px(190.))
             .p(px(4.))
@@ -2022,8 +2190,10 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .child(rename)
-            .child(close);
+            .child(rename);
+        if let Some(close) = close {
+            menu = menu.child(close);
+        }
         let position = context_menu.position;
         Some(
             deferred(
@@ -2197,7 +2367,57 @@ impl WorkspaceView {
                     .collect()
             })
             .unwrap_or_default();
-        let mut tab_bar = div()
+        let mut tab_content = div()
+            .id("tab-bar-content")
+            .h_full()
+            .gap(px(2.))
+            .items_center()
+            .flex()
+            .flex_none()
+            // The scroll container's built-in handler is registered after
+            // child listeners. Handling the gesture here lets us keep the
+            // wheel movement pixel-precise without applying it twice.
+            .on_scroll_wheel(cx.listener(|this, event, _window, cx| {
+                this.scroll_tab_bar(event, cx);
+            }));
+        for (tab_id, title, active, active_pane) in tab_data {
+            tab_content =
+                tab_content.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
+        }
+        let tab_viewport = div()
+            .id("tab-bar-scroll")
+            .h_full()
+            .flex_1()
+            .min_w(px(0.))
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
+            .child(tab_content);
+        let new_tab = div()
+            .id("new-tab")
+            .h(px(self.config.ui.tab_height))
+            .w(px(28.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .flex_none()
+            .cursor_pointer()
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
+            .bg(rgb(theme.tab_inactive_background))
+            .text_color(rgb(theme.ui_foreground))
+            .child("+")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    if this.has_transient_ui() {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.focus_handle.focus(window, cx);
+                    this.new_terminal_tab(cx);
+                    cx.stop_propagation();
+                }),
+            );
+        div()
             .id("tab-bar")
             .h_full()
             .flex_1()
@@ -2205,38 +2425,8 @@ impl WorkspaceView {
             .gap(px(2.))
             .items_center()
             .flex()
-            .overflow_x_hidden();
-        for (tab_id, title, active, active_pane) in tab_data {
-            tab_bar = tab_bar.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
-        }
-        tab_bar
-            .child(
-                div()
-                    .id("new-tab")
-                    .h(px(self.config.ui.tab_height))
-                    .w(px(28.))
-                    .items_center()
-                    .justify_center()
-                    .flex()
-                    .flex_none()
-                    .cursor_pointer()
-                    .hover(|style| style.bg(rgb(theme.tab_add_background)))
-                    .bg(rgb(theme.tab_inactive_background))
-                    .text_color(rgb(theme.ui_foreground))
-                    .child("+")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _event: &MouseDownEvent, window, cx| {
-                            if this.has_transient_ui() {
-                                cx.stop_propagation();
-                                return;
-                            }
-                            this.focus_handle.focus(window, cx);
-                            this.new_terminal_tab(cx);
-                            cx.stop_propagation();
-                        }),
-                    ),
-            )
+            .child(tab_viewport)
+            .child(new_tab)
             .into_any_element()
     }
 
@@ -2278,11 +2468,29 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .text_color(rgb(theme.ui_foreground))
-            .child("▤")
+            .child("▧")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
                     this.toggle_sidebar(cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let right_sidebar_placeholder = div()
+            .id("right-sidebar-placeholder")
+            .size(px(28.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .flex_none()
+            .opacity(0.45)
+            .text_color(rgb(theme.ui_foreground))
+            .child("▨")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
+                    // Reserve this hitbox without allowing the titlebar drag
+                    // handler to interpret the future sidebar control.
                     cx.stop_propagation();
                 }),
             );
@@ -2323,6 +2531,7 @@ impl WorkspaceView {
             .child(controls)
             .child(sidebar_toggle)
             .child(self.render_tab_bar(theme, cx))
+            .child(right_sidebar_placeholder)
             .into_any_element()
     }
 
@@ -4678,6 +4887,146 @@ impl Render for WorkspaceView {
                     });
                 }
             })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab1, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(0, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab2, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(1, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab3, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(2, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab4, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(3, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab5, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(4, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab6, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(5, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab7, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(6, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab8, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(7, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab9, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(8, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ActivateTab10, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_tab_index(9, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &NextTab, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_relative_tab(1, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &PreviousTab, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_relative_tab(-1, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &NextWorkspace, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_relative_workspace(1, cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &PreviousWorkspace, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.activate_relative_workspace(-1, cx);
+                        }
+                    });
+                }
+            })
             .on_action(cx.listener(|workspace, _: &RenameWorkspace, window, cx| {
                 workspace.begin_rename_active_workspace(window, cx);
             }))
@@ -5103,6 +5452,10 @@ mod tests {
                 tab_inactive_background: 13,
                 tab_add_background: 14,
                 ui_foreground: 15,
+                sidebar_background: 16,
+                sidebar_workspace_background: 17,
+                sidebar_agent_background: 18,
+                agent_colors: [19; 13],
             },
             cursor_focused: false,
             scroll_remainder: 0.0,

@@ -3,7 +3,8 @@ use gpui::{
     MouseMoveEvent, MouseUpEvent, SharedString, Window, div, font, prelude::*, px, rgb,
 };
 
-use crate::config::{AppConfig, ThemeConfig};
+use crate::agent::AgentKind;
+use crate::config::{AppConfig, ThemeConfig, is_valid_switch_tab_source};
 
 use super::application::{HideWindow, IgnoreQuit, MinimizeWindow, WaterApplication};
 
@@ -49,6 +50,7 @@ enum SettingField {
     Selection,
     UiFontSize,
     SidebarVisible,
+    SidebarShowAgentCount,
     SidebarWidth,
     SidebarMinWidth,
     SidebarMaxWidth,
@@ -74,6 +76,10 @@ enum SettingField {
     ThemeTabInactiveBackground,
     ThemeTabAddBackground,
     ThemeUiForeground,
+    ThemeSidebarBackground,
+    ThemeSidebarWorkspaceBackground,
+    ThemeSidebarAgentBackground,
+    AgentColor(AgentKind),
     ShortcutOpenSettings,
     ShortcutNewWindow,
     ShortcutHideWindow,
@@ -82,6 +88,11 @@ enum SettingField {
     ShortcutNewTerminalTab,
     ShortcutNewWorkspace,
     ShortcutToggleSidebar,
+    ShortcutSwitchTab,
+    ShortcutNextTab,
+    ShortcutPreviousTab,
+    ShortcutNextWorkspace,
+    ShortcutPreviousWorkspace,
     ShortcutRenameWorkspace,
     ShortcutRenameTab,
     ShortcutSplitRight,
@@ -99,8 +110,8 @@ enum SettingField {
 }
 
 impl SettingField {
-    fn id(self) -> &'static str {
-        match self {
+    fn id(self) -> String {
+        let id = match self {
             Self::DefaultCwd => "default-cwd",
             Self::ControlSocket => "control-socket",
             Self::InitialWorkspace => "initial-workspace",
@@ -124,6 +135,7 @@ impl SettingField {
             Self::Selection => "selection",
             Self::UiFontSize => "ui-font-size",
             Self::SidebarVisible => "sidebar-visible",
+            Self::SidebarShowAgentCount => "sidebar-show-agent-count",
             Self::SidebarWidth => "sidebar-width",
             Self::SidebarMinWidth => "sidebar-min-width",
             Self::SidebarMaxWidth => "sidebar-max-width",
@@ -149,6 +161,10 @@ impl SettingField {
             Self::ThemeTabInactiveBackground => "theme-tab-inactive-background",
             Self::ThemeTabAddBackground => "theme-tab-add-background",
             Self::ThemeUiForeground => "theme-ui-foreground",
+            Self::ThemeSidebarBackground => "theme-sidebar-background",
+            Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
+            Self::ThemeSidebarAgentBackground => "theme-sidebar-agent-background",
+            Self::AgentColor(kind) => return format!("agent-color-{}", kind.config_key()),
             Self::ShortcutOpenSettings => "shortcut-open-settings",
             Self::ShortcutNewWindow => "shortcut-new-window",
             Self::ShortcutHideWindow => "shortcut-hide-window",
@@ -157,6 +173,11 @@ impl SettingField {
             Self::ShortcutNewTerminalTab => "shortcut-new-terminal-tab",
             Self::ShortcutNewWorkspace => "shortcut-new-workspace",
             Self::ShortcutToggleSidebar => "shortcut-toggle-sidebar",
+            Self::ShortcutSwitchTab => "shortcut-switch-tab",
+            Self::ShortcutNextTab => "shortcut-next-tab",
+            Self::ShortcutPreviousTab => "shortcut-previous-tab",
+            Self::ShortcutNextWorkspace => "shortcut-next-workspace",
+            Self::ShortcutPreviousWorkspace => "shortcut-previous-workspace",
             Self::ShortcutRenameWorkspace => "shortcut-rename-workspace",
             Self::ShortcutRenameTab => "shortcut-rename-tab",
             Self::ShortcutSplitRight => "shortcut-split-right",
@@ -171,7 +192,8 @@ impl SettingField {
             Self::ShortcutEof => "shortcut-eof",
             Self::ShortcutScrollPageUp => "shortcut-scroll-page-up",
             Self::ShortcutScrollPageDown => "shortcut-scroll-page-down",
-        }
+        };
+        id.to_owned()
     }
 
     fn is_boolean(self) -> bool {
@@ -183,6 +205,7 @@ impl SettingField {
                 | Self::BracketedPaste
                 | Self::Selection
                 | Self::SidebarVisible
+                | Self::SidebarShowAgentCount
         )
     }
 
@@ -205,6 +228,10 @@ impl SettingField {
                 | Self::ThemeTabInactiveBackground
                 | Self::ThemeTabAddBackground
                 | Self::ThemeUiForeground
+                | Self::ThemeSidebarBackground
+                | Self::ThemeSidebarWorkspaceBackground
+                | Self::ThemeSidebarAgentBackground
+                | Self::AgentColor(_)
         )
     }
 }
@@ -311,6 +338,9 @@ impl SettingsView {
             }
             SettingField::SidebarVisible => {
                 self.config.ui.sidebar_visible = !self.config.ui.sidebar_visible
+            }
+            SettingField::SidebarShowAgentCount => {
+                self.config.ui.sidebar_show_agent_count = !self.config.ui.sidebar_show_agent_count
             }
             _ => return,
         }
@@ -536,6 +566,9 @@ impl SettingsView {
             SettingField::Selection => self.config.features.selection.to_string(),
             SettingField::UiFontSize => format_float(self.config.ui.font_size),
             SettingField::SidebarVisible => self.config.ui.sidebar_visible.to_string(),
+            SettingField::SidebarShowAgentCount => {
+                self.config.ui.sidebar_show_agent_count.to_string()
+            }
             SettingField::SidebarWidth => format_float(self.config.ui.sidebar_width),
             SettingField::SidebarMinWidth => format_float(self.config.ui.sidebar_min_width),
             SettingField::SidebarMaxWidth => format_float(self.config.ui.sidebar_max_width),
@@ -569,6 +602,20 @@ impl SettingsView {
             }
             SettingField::ThemeTabAddBackground => self.config.theme.tab_add_background.clone(),
             SettingField::ThemeUiForeground => self.config.theme.ui_foreground.clone(),
+            SettingField::ThemeSidebarBackground => self.config.theme.sidebar_background.clone(),
+            SettingField::ThemeSidebarWorkspaceBackground => {
+                self.config.theme.sidebar_workspace_background.clone()
+            }
+            SettingField::ThemeSidebarAgentBackground => {
+                self.config.theme.sidebar_agent_background.clone()
+            }
+            SettingField::AgentColor(kind) => self
+                .config
+                .theme
+                .agent_colors
+                .get(kind.config_key())
+                .cloned()
+                .unwrap_or_else(|| format!("#{:06x}", kind.default_color())),
             SettingField::ShortcutOpenSettings => self.config.shortcuts.open_settings.clone(),
             SettingField::ShortcutNewWindow => self.config.shortcuts.new_window.clone(),
             SettingField::ShortcutHideWindow => self.config.shortcuts.hide_window.clone(),
@@ -577,6 +624,13 @@ impl SettingsView {
             SettingField::ShortcutNewTerminalTab => self.config.shortcuts.new_terminal_tab.clone(),
             SettingField::ShortcutNewWorkspace => self.config.shortcuts.new_workspace.clone(),
             SettingField::ShortcutToggleSidebar => self.config.shortcuts.toggle_sidebar.clone(),
+            SettingField::ShortcutSwitchTab => self.config.shortcuts.switch_tab.clone(),
+            SettingField::ShortcutNextTab => self.config.shortcuts.next_tab.clone(),
+            SettingField::ShortcutPreviousTab => self.config.shortcuts.previous_tab.clone(),
+            SettingField::ShortcutNextWorkspace => self.config.shortcuts.next_workspace.clone(),
+            SettingField::ShortcutPreviousWorkspace => {
+                self.config.shortcuts.previous_workspace.clone()
+            }
             SettingField::ShortcutRenameWorkspace => self.config.shortcuts.rename_workspace.clone(),
             SettingField::ShortcutRenameTab => self.config.shortcuts.rename_tab.clone(),
             SettingField::ShortcutSplitRight => self.config.shortcuts.split_right.clone(),
@@ -694,8 +748,11 @@ impl SettingsView {
                 set_theme_field(&mut self.config.theme, field, value)?;
             }
             field if is_shortcut(field) => {
-                if !shortcut_is_valid(&value) {
-                    return Err("快捷键格式无效，请使用 cmd-k、ctrl-k 或 shift-pageup".to_owned());
+                if !shortcut_is_valid_for(field, &value) {
+                    return Err(
+                        "快捷键格式无效，请使用 cmd-k、ctrl-k、shift-pageup，或用 # 表示标签序号"
+                            .to_owned(),
+                    );
                 }
                 set_shortcut_field(&mut self.config.shortcuts, field, value)?;
             }
@@ -704,7 +761,8 @@ impl SettingsView {
             | SettingField::MouseReporting
             | SettingField::BracketedPaste
             | SettingField::Selection
-            | SettingField::SidebarVisible => {
+            | SettingField::SidebarVisible
+            | SettingField::SidebarShowAgentCount => {
                 return Err("布尔项请直接点击开关".to_owned());
             }
             _ => return Err("暂不支持编辑此设置".to_owned()),
@@ -723,6 +781,7 @@ impl SettingsView {
             SettingField::BracketedPaste => on_off(self.config.features.bracketed_paste),
             SettingField::Selection => on_off(self.config.features.selection),
             SettingField::SidebarVisible => on_off(self.config.ui.sidebar_visible),
+            SettingField::SidebarShowAgentCount => on_off(self.config.ui.sidebar_show_agent_count),
             SettingField::DefaultCwd => self
                 .config
                 .startup
@@ -1244,6 +1303,14 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
+                SettingField::SidebarShowAgentCount,
+                "显示运行中 Agent 数量",
+                "在每个工作区右侧显示当前运行中的 Agent 数量",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
                 SettingField::SidebarWidth,
                 "侧边栏宽度",
                 "逻辑像素，拖拽范围由最小/最大宽度限制",
@@ -1335,6 +1402,15 @@ impl Render for SettingsView {
             (SettingField::ThemeTabInactiveBackground, "非活动标签背景色"),
             (SettingField::ThemeTabAddBackground, "标签悬停/添加背景色"),
             (SettingField::ThemeUiForeground, "界面前景色"),
+            (SettingField::ThemeSidebarBackground, "侧边栏背景色"),
+            (
+                SettingField::ThemeSidebarWorkspaceBackground,
+                "未选中工作区背景色",
+            ),
+            (
+                SettingField::ThemeSidebarAgentBackground,
+                "未选中 Agent 背景色",
+            ),
         ];
         let theme_rows = theme_fields
             .into_iter()
@@ -1351,6 +1427,21 @@ impl Render for SettingsView {
             .collect();
         content = content.child(self.render_section("配色", theme_rows, theme));
 
+        let agent_color_rows = AgentKind::all()
+            .into_iter()
+            .map(|kind| {
+                self.render_setting(
+                    SettingField::AgentColor(kind),
+                    kind.label(),
+                    "Agent 代表色；支持 #rgb、#rrggbb、0xrrggbb",
+                    ApplyKind::Immediate,
+                    theme,
+                    cx,
+                )
+            })
+            .collect();
+        content = content.child(self.render_section("Agent Colors", agent_color_rows, theme));
+
         let shortcut_fields = [
             (SettingField::ShortcutOpenSettings, "打开设置"),
             (SettingField::ShortcutNewWindow, "新建窗口"),
@@ -1360,6 +1451,11 @@ impl Render for SettingsView {
             (SettingField::ShortcutNewTerminalTab, "新建终端标签"),
             (SettingField::ShortcutNewWorkspace, "新建工作区"),
             (SettingField::ShortcutToggleSidebar, "切换侧边栏"),
+            (SettingField::ShortcutSwitchTab, "切换到指定标签"),
+            (SettingField::ShortcutNextTab, "下一个标签"),
+            (SettingField::ShortcutPreviousTab, "上一个标签"),
+            (SettingField::ShortcutNextWorkspace, "下一个工作区"),
+            (SettingField::ShortcutPreviousWorkspace, "上一个工作区"),
             (SettingField::ShortcutRenameWorkspace, "重命名工作区"),
             (SettingField::ShortcutRenameTab, "重命名标签"),
             (SettingField::ShortcutSplitRight, "右侧分屏"),
@@ -1381,7 +1477,11 @@ impl Render for SettingsView {
                 self.render_setting(
                     field,
                     label,
-                    "GPUI keystroke 格式，例如 cmd-shift-n",
+                    if field == SettingField::ShortcutSwitchTab {
+                        "GPUI keystroke 格式，例如 cmd-#（# 会替换为标签序号）"
+                    } else {
+                        "GPUI keystroke 格式，例如 cmd-shift-n"
+                    },
                     ApplyKind::Immediate,
                     theme,
                     cx,
@@ -1467,9 +1567,18 @@ fn clipboard_text(item: gpui::ClipboardItem) -> Option<String> {
 fn shortcut_is_valid(value: &str) -> bool {
     let value = value.trim();
     !value.is_empty()
+        && !value.contains('#')
         && value
             .split_whitespace()
             .all(|keystroke| gpui::Keystroke::parse(keystroke).is_ok())
+}
+
+fn shortcut_is_valid_for(field: SettingField, value: &str) -> bool {
+    if field == SettingField::ShortcutSwitchTab {
+        is_valid_switch_tab_source(value)
+    } else {
+        shortcut_is_valid(value)
+    }
 }
 
 fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), String> {
@@ -1482,6 +1591,11 @@ fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), S
         ("新建终端标签", &shortcuts.new_terminal_tab),
         ("新建工作区", &shortcuts.new_workspace),
         ("切换侧边栏", &shortcuts.toggle_sidebar),
+        ("切换标签", &shortcuts.switch_tab),
+        ("下一个标签", &shortcuts.next_tab),
+        ("上一个标签", &shortcuts.previous_tab),
+        ("下一个工作区", &shortcuts.next_workspace),
+        ("上一个工作区", &shortcuts.previous_workspace),
         ("重命名工作区", &shortcuts.rename_workspace),
         ("重命名标签", &shortcuts.rename_tab),
         ("右侧分屏", &shortcuts.split_right),
@@ -1498,7 +1612,12 @@ fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), S
         ("向下滚动一页", &shortcuts.scroll_page_down),
     ];
     for (index, (label, value)) in values.iter().enumerate() {
-        if !shortcut_is_valid(value) {
+        let valid = if *label == "切换标签" {
+            is_valid_switch_tab_source(value)
+        } else {
+            shortcut_is_valid(value)
+        };
+        if !valid {
             return Err(format!("{label}的快捷键格式无效"));
         }
         for (other_label, other_value) in values.iter().skip(index + 1) {
@@ -1521,6 +1640,11 @@ fn is_shortcut(field: SettingField) -> bool {
             | SettingField::ShortcutNewTerminalTab
             | SettingField::ShortcutNewWorkspace
             | SettingField::ShortcutToggleSidebar
+            | SettingField::ShortcutSwitchTab
+            | SettingField::ShortcutNextTab
+            | SettingField::ShortcutPreviousTab
+            | SettingField::ShortcutNextWorkspace
+            | SettingField::ShortcutPreviousWorkspace
             | SettingField::ShortcutRenameWorkspace
             | SettingField::ShortcutRenameTab
             | SettingField::ShortcutSplitRight
@@ -1560,6 +1684,14 @@ fn set_theme_field(
         SettingField::ThemeTabInactiveBackground => theme.tab_inactive_background = value,
         SettingField::ThemeTabAddBackground => theme.tab_add_background = value,
         SettingField::ThemeUiForeground => theme.ui_foreground = value,
+        SettingField::ThemeSidebarBackground => theme.sidebar_background = value,
+        SettingField::ThemeSidebarWorkspaceBackground => theme.sidebar_workspace_background = value,
+        SettingField::ThemeSidebarAgentBackground => theme.sidebar_agent_background = value,
+        SettingField::AgentColor(kind) => {
+            theme
+                .agent_colors
+                .insert(kind.config_key().to_owned(), value);
+        }
         _ => return Err("不是颜色设置".to_owned()),
     }
     Ok(())
@@ -1579,6 +1711,11 @@ fn set_shortcut_field(
         SettingField::ShortcutNewTerminalTab => shortcuts.new_terminal_tab = value,
         SettingField::ShortcutNewWorkspace => shortcuts.new_workspace = value,
         SettingField::ShortcutToggleSidebar => shortcuts.toggle_sidebar = value,
+        SettingField::ShortcutSwitchTab => shortcuts.switch_tab = value,
+        SettingField::ShortcutNextTab => shortcuts.next_tab = value,
+        SettingField::ShortcutPreviousTab => shortcuts.previous_tab = value,
+        SettingField::ShortcutNextWorkspace => shortcuts.next_workspace = value,
+        SettingField::ShortcutPreviousWorkspace => shortcuts.previous_workspace = value,
         SettingField::ShortcutRenameWorkspace => shortcuts.rename_workspace = value,
         SettingField::ShortcutRenameTab => shortcuts.rename_tab = value,
         SettingField::ShortcutSplitRight => shortcuts.split_right = value,
@@ -1620,6 +1757,10 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         SettingField::ThemeTabInactiveBackground => colors.tab_inactive_background,
         SettingField::ThemeTabAddBackground => colors.tab_add_background,
         SettingField::ThemeUiForeground => colors.ui_foreground,
+        SettingField::ThemeSidebarBackground => colors.sidebar_background,
+        SettingField::ThemeSidebarWorkspaceBackground => colors.sidebar_workspace_background,
+        SettingField::ThemeSidebarAgentBackground => colors.sidebar_agent_background,
+        SettingField::AgentColor(kind) => colors.agent_color(kind),
         _ => return None,
     })
 }

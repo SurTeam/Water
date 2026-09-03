@@ -59,6 +59,10 @@ pub struct TerminalSurfaceState {
     /// future agent surfaces; it is never a UI-side guess.
     #[serde(default)]
     pub agent: Option<DetectedAgent>,
+    /// Optional user-facing label override for the currently detected agent;
+    /// this is display metadata, not agent identity.
+    #[serde(default)]
+    pub agent_label: Option<String>,
 }
 
 /// Surface state remains an enum rather than a trait object so registry access

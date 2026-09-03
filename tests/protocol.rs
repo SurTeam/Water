@@ -52,6 +52,20 @@ fn commands_use_stable_dot_named_wire_types() {
 }
 
 #[test]
+fn pane_agent_rename_uses_a_stable_wire_type() {
+    let command = AppCommand::Pane(PaneCommand::RenameAgent {
+        pane_id: Some(42.into()),
+        label: "Build Bot".to_owned(),
+    });
+    let value = serde_json::to_value(&command).expect("agent rename serializes");
+    assert_eq!(value["type"], "pane.agent_rename");
+    assert_eq!(value["pane_id"], 42);
+    assert_eq!(value["label"], "Build Bot");
+    let decoded: AppCommand = serde_json::from_value(value).expect("agent rename decodes");
+    assert_eq!(decoded, command);
+}
+
+#[test]
 fn workspace_create_and_new_keep_stable_wire_types() {
     let create = AppCommand::Workspace(WorkspaceCommand::Create);
     let create_value = serde_json::to_value(&create).expect("workspace create serializes");
