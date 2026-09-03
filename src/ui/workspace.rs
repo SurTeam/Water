@@ -1465,9 +1465,26 @@ impl WorkspaceView {
                     .selected_workspace_dump()
                     .is_some_and(|workspace| workspace_active_pane(workspace) == Some(pane_id))
                 {
+                    // Mouse-down begins the selection locally and then
+                    // dispatches the focus command; when the operation
+                    // result comes back, a selection that belongs to this
+                    // pane's terminal is the in-progress drag, not stale
+                    // state. Only drop selections from a different terminal
+                    // (focus moved to another pane/terminal, or the pane
+                    // has no terminal at all).
+                    let pane_terminal = self.terminal_id_for_pane(pane_id);
+                    let selection_belongs_to_pane = self
+                        .selection
+                        .as_ref()
+                        .is_some_and(|selection| pane_terminal == Some(selection.terminal_id));
+                    let was_focused = self.focused_pane == Some(pane_id);
                     self.focused_pane = Some(pane_id);
-                    self.selection = None;
-                    self.clear_ime();
+                    if !selection_belongs_to_pane {
+                        self.selection = None;
+                    }
+                    if !was_focused || !selection_belongs_to_pane {
+                        self.clear_ime();
+                    }
                     cx.notify();
                 }
             }
@@ -5245,6 +5262,114 @@ mod tests {
         assert_tree_is_terminal(&workspace.tabs[1].tree);
 
         host.shutdown();
+    }
+
+    #[gpui::test]
+    fn mouse_selection_begins_and_survives_reinstall(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client = host.client();
+        let workspace = client
+            .dispatch(crate::command::AppCommand::Workspace(
+                crate::command::WorkspaceCommand::Create,
+            ))
+            .unwrap();
+        client.wait_operation(workspace).unwrap();
+        let tab = client
+            .dispatch(crate::command::AppCommand::Tab(
+                crate::command::TabCommand::New { title: None },
+            ))
+            .unwrap();
+        client.wait_operation(tab).unwrap();
+
+        let dump = client.state_dump().unwrap();
+        let terminal_id = displayed_terminal_id(&dump);
+        client
+            .dispatch(crate::command::AppCommand::Terminal(
+                crate::command::TerminalCommand::SendText {
+                    terminal_id: Some(terminal_id),
+                    pane_id: None,
+                    text: "echo MOUSE_SEL_A\n".to_owned(),
+                },
+            ))
+            .unwrap();
+        client
+            .terminal_contains(
+                terminal_id,
+                "MOUSE_SEL_A",
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+        let dump = client.state_dump().unwrap();
+
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new(client.clone(), dump.clone(), cx.focus_handle())
+        });
+        view.update_in(cx, |view, _window, cx| {
+            // Give hit-testing a stable, measured grid (the real window
+            // measures via request_layout; the test host does not paint).
+            view.terminal_metrics = TerminalMetrics {
+                cell_width: 8.0,
+                line_height: 16.0,
+                scale_factor: 1.0,
+            };
+            view.terminal_bounds
+                .lock()
+                .expect("bounds poisoned")
+                .insert(
+                    terminal_id,
+                    Bounds::new(point(px(0.0), px(0.0)), size(px(640.0), px(384.0))),
+                );
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            let selection = view
+                .selection
+                .expect("mouse selection must begin on the shown tab");
+            assert_eq!(selection.terminal_id, terminal_id);
+
+            // A later revision that still projects the terminal must not
+            // clear the in-flight selection.
+            let fresh = client.state_dump().unwrap();
+            view.install_snapshot(fresh, cx);
+            assert!(
+                view.selection.is_some(),
+                "selection must survive a snapshot reinstall"
+            );
+
+            // The full mousedown flow then applies the PaneFocus operation
+            // result; selecting inside the already-active pane must not be
+            // wiped by that step.
+            let pane_id = view.focused_pane.unwrap();
+            view.apply_operation_result(
+                crate::command::OperationResult::PaneFocused { pane_id },
+                cx,
+            );
+            assert!(
+                view.selection.is_some(),
+                "selection must survive the PaneFocus operation result"
+            );
+        });
+        host.shutdown();
+    }
+
+    fn displayed_terminal_id(dump: &crate::app::model::ModelSnapshot) -> crate::ids::TerminalId {
+        let workspace = dump.workspace.as_ref().expect("active workspace");
+        let tab = &workspace.tabs[workspace.tabs.len() - 1];
+        fn find(tree: &PaneTreeDump) -> Option<crate::ids::TerminalId> {
+            match tree {
+                PaneTreeDump::Leaf {
+                    surface_state,
+                    terminal,
+                    ..
+                } => match (
+                    surface_state,
+                    terminal.as_ref().and_then(|p| p.snapshot.as_ref()),
+                ) {
+                    (SurfaceState::Terminal(state), Some(_)) => Some(state.terminal_id),
+                    _ => None,
+                },
+                PaneTreeDump::Split { first, second, .. } => find(first).or_else(|| find(second)),
+            }
+        }
+        find(&tab.tree).expect("displayed tab projects a grid")
     }
 
     fn assert_tree_is_terminal(tree: &PaneTreeDump) {
