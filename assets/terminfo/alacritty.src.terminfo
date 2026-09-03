@@ -3,11 +3,16 @@
 # Named "alacritty" because Water embeds alacritty_terminal and its
 # `tty::setup_env` selects TERM=alacritty when this entry is discoverable
 # through TERMINFO_DIRS. Derived from the official alacritty terminfo
-# (https://github.com/alacritty/alacritty, Apache-2.0) with one intentional
-# deviation: `clear` appends CSI 3 J so scrollback is erased together with
-# the viewport. Without 3 J, alacritty's ESC[2J semantics push the screen
-# into history, so `clear` leaves the command line and prompt ghosted one
-# row above the fresh viewport (kitty ships the same 2J+3J combination).
+# (https://github.com/alacritty/alacritty, Apache-2.0).
+#
+# `clear` deliberately stays the standard \E[H\E[2J: zle's Ctrl-L
+# (clear-screen) and /usr/bin/clear read the same capability, and Ctrl-L
+# must keep pushing the current screen into scrollback (alacritty's ESC[2J
+# semantics) instead of erasing history. The "clear also erases scrollback"
+# behavior is provided separately by Water's zsh integration, which wraps
+# the `clear` command and appends raw CSI 3 J (the `E3` capability below
+# is advertised for tput users; older tic builds drop it). Same division
+# as kitty: plain terminfo + shell-integration-level scrollback erase.
 #
 # Compile with: tic -x -o assets/terminfo assets/terminfo/alacritty.src.terminfo
 
@@ -16,7 +21,6 @@ alacritty|alacritty terminal emulator,
     AX,
     XT,
     E3=\E[3J,
-    clear=\E[H\E[2J\E[3J,
     Smulx=\E[4\:%p1%dm,
     Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
     Cs=\E]12;%p1%s\007,

@@ -726,7 +726,7 @@ fn send_text(dispatcher: &mut CommandDispatcher, terminal_id: water::ids::Termin
 }
 
 #[test]
-fn clear_command_erases_scrollback_via_bundled_terminfo() {
+fn clear_command_erases_scrollback_via_shell_integration() {
     let mut dispatcher = CommandDispatcher::new();
     dispatch_ok(
         &mut dispatcher,
@@ -750,7 +750,9 @@ fn clear_command_erases_scrollback_via_bundled_terminfo() {
 
     // The marker must be distinguishable from the shell's raw input echo:
     // the typed command shows `RESULT_$((6*7))` while only the executed
-    // output contains `RESULT_42`.
+    // output contains `RESULT_42`. The bundled terminfo keeps the standard
+    // clear capability; Water's zsh integration wraps the `clear` command
+    // itself with CSI 3 J.
     send_text(
         &mut dispatcher,
         terminal_id,
@@ -769,7 +771,52 @@ fn clear_command_erases_scrollback_via_bundled_terminfo() {
     );
     assert!(
         snapshot.rows_before.is_empty(),
-        "clear must erase scrollback; CSI 3J support is provided by the bundled terminfo entry"
+        "clear must erase scrollback; the E3 append comes from the zsh integration"
+    );
+}
+
+#[test]
+fn ctrl_l_pushes_the_prompt_to_the_top_without_erasing_scrollback() {
+    let mut dispatcher = CommandDispatcher::new();
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let terminal_id = focused_terminal_id(&dispatcher);
+    let registry = dispatcher.terminal_registry();
+
+    send_text(
+        &mut dispatcher,
+        terminal_id,
+        "for i in $(seq 1 30); do echo CTRL_L_HISTORY$i; done\n",
+    );
+    registry
+        .contains_text(terminal_id, "CTRL_L_HISTORY30", Duration::from_secs(10))
+        .expect("flood reaches the terminal");
+
+    // Ctrl-L goes through zle's clear-screen widget, which emits the
+    // terminfo `clear` string. That string must stay free of CSI 3 J so
+    // the previous screen is only pushed into scrollback.
+    send_text(&mut dispatcher, terminal_id, "\u{c}");
+    send_text(&mut dispatcher, terminal_id, "echo CTRL_L_KEPT_$((6*7))\n");
+    registry
+        .contains_text(terminal_id, "CTRL_L_KEPT_42", Duration::from_secs(10))
+        .expect("post-ctrl-l marker executed");
+
+    let snapshot = registry.snapshot(terminal_id).unwrap();
+    let visible = snapshot.visible_text();
+    assert!(visible.contains("CTRL_L_KEPT_42"));
+    assert!(
+        !visible.contains("CTRL_L_HISTORY15"),
+        "the viewport should be redrawn with the prompt near the top: {visible}"
+    );
+    assert!(
+        !snapshot.rows_before.is_empty(),
+        "ctrl-l must keep the previous screen in scrollback (terminfo clear must not carry CSI 3J)"
     );
 }
 

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 mod model;
+mod shell_integration;
 mod snapshot;
 mod worker;
 

@@ -786,13 +786,14 @@ impl TerminalManager {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let fallback_process_name = process_name_from_program(&program);
+        let shell_env = super::shell_integration::child_environment(&program);
         ensure_bundled_terminfo_env();
         alacritty_terminal::tty::setup_env();
         let options = alacritty_terminal::tty::Options {
             shell: Some(alacritty_terminal::tty::Shell::new(program, args)),
             working_directory,
             drain_on_exit: false,
-            env: Default::default(),
+            env: shell_env,
         };
         let window_size = alacritty_terminal::event::WindowSize {
             num_lines: size.lines as u16,
