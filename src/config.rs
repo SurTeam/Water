@@ -410,6 +410,8 @@ pub struct UiConfig {
     pub sidebar_resize_handle_width: f32,
     pub titlebar_height: f32,
     pub tab_height: f32,
+    /// Height of a workspace group row in the sidebar. These rows are the
+    /// sidebar's section headers since agents nest under their workspace.
     pub sidebar_header_height: f32,
     pub pane_margin: f32,
     pub pane_padding: f32,

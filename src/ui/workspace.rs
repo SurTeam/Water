@@ -32,6 +32,9 @@ use super::application::{
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
+/// Width of the sidebar disclosure column. Agent rows indent by the same
+/// amount so nested rows line up with their workspace title.
+const SIDEBAR_DISCLOSURE_WIDTH: f32 = 18.0;
 
 #[derive(Debug, Clone, Copy)]
 struct TerminalMetrics {
@@ -432,6 +435,9 @@ pub struct WorkspaceView {
     collapsed_workspaces: BTreeSet<WorkspaceId>,
     sidebar_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
+    /// Optimistic tab target for relative tab navigation (Cmd-[ / Cmd-])
+    /// while an activation command is still in flight.
+    pending_tab: Option<TabId>,
     sidebar_width: f32,
     dragging_sidebar: bool,
     titlebar_dragging: bool,
@@ -481,6 +487,7 @@ impl WorkspaceView {
             collapsed_workspaces: BTreeSet::new(),
             sidebar_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
+            pending_tab: None,
             sidebar_width,
             dragging_sidebar: false,
             titlebar_dragging: false,
@@ -515,6 +522,7 @@ impl WorkspaceView {
             self.selected_workspace != Some(workspace_id) || self.focused_pane != focused_pane;
         self.selected_workspace = Some(workspace_id);
         self.focused_pane = focused_pane;
+        self.pending_tab = None;
         self.selection = None;
         self.clear_ime();
         if changed {
@@ -571,8 +579,9 @@ impl WorkspaceView {
         else {
             return;
         };
-        let tab_id = tab.id;
-        self.focused_pane = Some(tab.active_pane);
+        let (tab_id, tab_active_pane) = (tab.id, tab.active_pane);
+        self.pending_tab = Some(tab_id);
+        self.focused_pane = Some(tab_active_pane);
         self.selection = None;
         self.clear_ime();
         self.dispatch(
@@ -591,10 +600,16 @@ impl WorkspaceView {
         if workspace.tabs.is_empty() {
             return;
         }
-        let active_index = workspace
+        let snapshot_index = workspace
             .active_tab
             .and_then(|tab_id| workspace.tabs.iter().position(|tab| tab.id == tab_id))
             .unwrap_or(0);
+        // Keep advancing from the optimistic target while the previous
+        // activation is still in flight, so rapid presses each move once.
+        let active_index = self
+            .pending_tab
+            .and_then(|pending| workspace.tabs.iter().position(|tab| tab.id == pending))
+            .unwrap_or(snapshot_index);
         let tab_count = workspace.tabs.len() as isize;
         let next_index = (active_index as isize + direction).rem_euclid(tab_count) as usize;
         self.activate_tab_index(next_index, cx);
@@ -1532,6 +1547,14 @@ impl WorkspaceView {
         self.collapsed_workspaces
             .retain(|workspace_id| workspace_exists_in_snapshot(&snapshot, *workspace_id));
         self.snapshot = snapshot;
+        if let Some(pending) = self.pending_tab {
+            let confirmed = self
+                .selected_workspace_dump()
+                .is_some_and(|workspace| workspace.active_tab == Some(pending));
+            if confirmed || self.tab_by_id(pending).is_none() {
+                self.pending_tab = None;
+            }
+        }
         self.scroll_accumulators.retain(|terminal_id, _| {
             terminal_projection_in_snapshot(&self.snapshot, *terminal_id).is_some()
         });
@@ -1866,7 +1889,7 @@ impl WorkspaceView {
         });
         let disclosure = div()
             .id(format!("workspace-disclosure-{workspace_id}"))
-            .w(px(18.))
+            .w(px(SIDEBAR_DISCLOSURE_WIDTH))
             .flex_shrink_0()
             .items_center()
             .justify_center()
@@ -1883,7 +1906,7 @@ impl WorkspaceView {
             );
         let mut workspace_row = div()
             .id(format!("workspace-{workspace_id}"))
-            .h(px(32.))
+            .h(px(self.config.ui.sidebar_header_height))
             .w_full()
             .px(px(10.))
             .items_center()
@@ -2015,11 +2038,32 @@ impl WorkspaceView {
         } else {
             theme.tab_add_background
         };
-        let dot_color = match agent.status {
-            crate::surface::TerminalStatus::Exited { .. } => theme.inactive_pane_border,
-            crate::surface::TerminalStatus::Running if focused_here => theme.terminal_background,
-            crate::surface::TerminalStatus::Running => theme.agent_color(agent.kind),
+        // The configured per-kind color is the row's identity: full strength
+        // while the agent is producing output, dimmed toward the row
+        // background when idle, and neutral once the process exited. A
+        // focused row paints on the accent background, so a kind color too
+        // close to the accent is blended toward the terminal background to
+        // stay readable.
+        let kind_color = theme.agent_color(agent.kind);
+        let running = matches!(agent.status, crate::surface::TerminalStatus::Running);
+        let mut dot_color = if !running {
+            theme.inactive_pane_border
+        } else if agent.active {
+            kind_color
+        } else {
+            let background = if focused_here {
+                theme.tab_active_background
+            } else {
+                theme.sidebar_agent_background
+            };
+            mix_rgb(kind_color, background, 0.45)
         };
+        if running
+            && focused_here
+            && channel_distance(dot_color, theme.tab_active_background) < 0x30
+        {
+            dot_color = mix_rgb(dot_color, theme.terminal_background, 0.5);
+        }
         let project = agent
             .cwd
             .rsplit('/')
@@ -2057,7 +2101,7 @@ impl WorkspaceView {
             .bg(row_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
-            .child(div().w(px(18.)).flex_shrink_0())
+            .child(div().w(px(SIDEBAR_DISCLOSURE_WIDTH)).flex_shrink_0())
             .child(
                 div()
                     .flex_shrink_0()
@@ -2468,7 +2512,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .text_color(rgb(theme.ui_foreground))
-            .child("▧")
+            .child("◧")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -2485,7 +2529,7 @@ impl WorkspaceView {
             .flex_none()
             .opacity(0.45)
             .text_color(rgb(theme.ui_foreground))
-            .child("▨")
+            .child("◨")
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|_this, _event: &MouseDownEvent, _window, cx| {
@@ -5056,6 +5100,25 @@ fn _pane_id_is_explicitly_typed(_pane_id: PaneId) {}
 #[allow(dead_code)]
 fn _tab_dump_is_a_projection(_tab: &TabDump) {}
 
+/// Blend two packed RGB colors; `factor` weights `from` (1.0 keeps `from`).
+fn mix_rgb(from: u32, to: u32, factor: f32) -> u32 {
+    let channel = |value: u32, shift: u32| ((value >> shift) & 0xff) as f32;
+    let blended = |shift: u32| {
+        let mixed = channel(from, shift) * factor + channel(to, shift) * (1.0 - factor);
+        mixed.round().clamp(0.0, 255.0) as u32
+    };
+    (blended(16) << 16) | (blended(8) << 8) | blended(0)
+}
+
+/// Maximum per-channel distance between two packed RGB colors (0..=255).
+fn channel_distance(a: u32, b: u32) -> u32 {
+    let channel = |value: u32, shift: u32| ((value >> shift) & 0xff) as i32;
+    (0..3)
+        .map(|shift| (channel(a, shift * 8) - channel(b, shift * 8)).abs())
+        .max()
+        .unwrap_or(0) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5639,6 +5702,16 @@ mod tests {
             ),
             Some(b"\x1b[<64;1;1M".to_vec())
         );
+    }
+
+    #[test]
+    fn sidebar_color_helpers_mix_and_measure() {
+        assert_eq!(mix_rgb(0xff0000, 0x0000ff, 1.0), 0xff0000);
+        assert_eq!(mix_rgb(0xff0000, 0x0000ff, 0.0), 0x0000ff);
+        assert_eq!(mix_rgb(0x808080, 0x000000, 0.5), 0x404040);
+        assert_eq!(channel_distance(0x102030, 0x102030), 0);
+        assert_eq!(channel_distance(0x00ff00, 0x000000), 0xff);
+        assert_eq!(channel_distance(0x0a141e, 0x000000), 0x1e);
     }
 
     #[test]

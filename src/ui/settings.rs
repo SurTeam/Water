@@ -4,7 +4,7 @@ use gpui::{
 };
 
 use crate::agent::AgentKind;
-use crate::config::{AppConfig, ThemeConfig, is_valid_switch_tab_source};
+use crate::config::{AppConfig, ThemeConfig, is_valid_switch_tab_source, switch_tab_binding};
 
 use super::application::{HideWindow, IgnoreQuit, MinimizeWindow, WaterApplication};
 
@@ -1581,6 +1581,19 @@ fn shortcut_is_valid_for(field: SettingField, value: &str) -> bool {
     }
 }
 
+/// Concrete keystroke(s) a shortcut value can produce at runtime. The
+/// tab-template (`cmd-#`) expands to its ten digit bindings; every other
+/// shortcut contributes exactly itself.
+fn shortcut_expansions(label: &str, value: &str) -> Vec<String> {
+    if label == "切换标签" {
+        (0..10)
+            .map(|index| switch_tab_binding(value, index))
+            .collect()
+    } else {
+        vec![value.trim().to_owned()]
+    }
+}
+
 fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), String> {
     let values = [
         ("打开设置", &shortcuts.open_settings),
@@ -1620,9 +1633,11 @@ fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), S
         if !valid {
             return Err(format!("{label}的快捷键格式无效"));
         }
+        let expansions = shortcut_expansions(label, value);
         for (other_label, other_value) in values.iter().skip(index + 1) {
-            if value.trim() == other_value.trim() {
-                return Err(format!("快捷键冲突：{label}和{other_label}都使用 {value}"));
+            let others = shortcut_expansions(other_label, other_value);
+            if let Some(hit) = expansions.iter().find(|e| others.contains(e)) {
+                return Err(format!("快捷键冲突：{label}和{other_label}都使用 {hit}"));
             }
         }
     }
