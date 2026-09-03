@@ -4,6 +4,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{
+    agent::{AgentKind, DetectedAgent, detect_agent},
     ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId},
     pane::{Pane, PaneDirection, PaneNode, SplitAxis},
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
@@ -22,6 +23,13 @@ pub struct StateDump {
     #[serde(default)]
     pub active_workspace: Option<WorkspaceId>,
     pub focused_pane: Option<PaneId>,
+    /// Flattened pane<->agent bindings for every workspace and tab, ordered
+    /// by workspace, tab, then pane-tree position. This is the stable data
+    /// contract for the sidebar Agents section, `waterctl state.dump`, and
+    /// future agent surfaces; consumers never re-walk the pane tree to find
+    /// agents themselves.
+    #[serde(default)]
+    pub agents: Vec<AgentDump>,
 }
 
 impl<'de> Deserialize<'de> for StateDump {
@@ -40,6 +48,8 @@ impl<'de> Deserialize<'de> for StateDump {
             active_workspace: Option<WorkspaceId>,
             #[serde(default)]
             focused_pane: Option<PaneId>,
+            #[serde(default)]
+            agents: Vec<AgentDump>,
         }
 
         let fields = StateDumpFields::deserialize(deserializer)?;
@@ -67,6 +77,7 @@ impl<'de> Deserialize<'de> for StateDump {
             workspaces,
             active_workspace,
             focused_pane: fields.focused_pane,
+            agents: fields.agents,
         })
     }
 }
@@ -84,6 +95,24 @@ pub struct WorkspaceDump {
 
 fn default_workspace_dump_title() -> String {
     "Workspace".to_owned()
+}
+
+/// A detected coding agent projected together with the full identity path
+/// (workspace, tab, pane, terminal) that owns it. Activating the agent's
+/// location is `pane.focus` on `pane_id`; no secondary lookup table exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentDump {
+    pub kind: AgentKind,
+    pub label: String,
+    #[serde(default)]
+    pub active: bool,
+    pub workspace_id: WorkspaceId,
+    pub tab_id: TabId,
+    pub pane_id: PaneId,
+    pub terminal_id: TerminalId,
+    #[serde(default)]
+    pub cwd: String,
+    pub status: TerminalStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -723,13 +752,21 @@ impl ApplicationModel {
 
     /// Updates worker-owned terminal metadata and returns the affected pane if
     /// anything changed. The caller decides whether the corresponding tab is
-    /// allowed to follow the process name.
+    /// allowed to follow the process name. The agent binding is derived here,
+    /// on the model thread, from every process-metadata refresh:
+    /// reclassification of the foreground process (agent appears, changes, or
+    /// exits) is a terminal-metadata update like any other, so the binding
+    /// can never drift from the process actually running in the pane.
     pub(crate) fn set_terminal_process(
         &mut self,
         terminal_id: TerminalId,
         process_name: String,
         cwd: String,
+        cmdline: Vec<String>,
+        active: bool,
     ) -> Option<PaneId> {
+        let agent =
+            detect_agent(&process_name, &cmdline).map(|kind| DetectedAgent { kind, active });
         for pane in self.panes.values() {
             let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get(&pane.surface) else {
                 continue;
@@ -737,10 +774,13 @@ impl ApplicationModel {
             if terminal.terminal_id != terminal_id {
                 continue;
             }
-            let changed = terminal.process_name != process_name || terminal.cwd != cwd;
+            let changed = terminal.process_name != process_name
+                || terminal.cwd != cwd
+                || terminal.agent != agent;
             if let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get_mut(&pane.surface) {
                 terminal.process_name = process_name;
                 terminal.cwd = cwd;
+                terminal.agent = agent;
             }
             return changed.then_some(pane.id);
         }
@@ -815,7 +855,48 @@ impl ApplicationModel {
             workspaces,
             active_workspace: self.active_workspace,
             focused_pane: self.active_pane(),
+            agents: self.collect_agents(),
         }
+    }
+
+    /// Flattens the pane<->agent bindings in stable order (workspace, tab,
+    /// pane tree). Hidden tabs included: clicking a sidebar agent row jumps
+    /// across tabs and workspaces through the regular command path.
+    fn collect_agents(&self) -> Vec<AgentDump> {
+        let mut agents = Vec::new();
+        for workspace in self.workspaces.values() {
+            for tab_id in &workspace.tabs {
+                let Some(tab) = self.tabs.get(tab_id) else {
+                    continue;
+                };
+                let mut pane_ids = Vec::new();
+                tab.root.leaf_ids(&mut pane_ids);
+                for pane_id in pane_ids {
+                    let Some(SurfaceState::Terminal(terminal)) = self
+                        .panes
+                        .get(&pane_id)
+                        .and_then(|pane| self.surfaces.get(&pane.surface))
+                    else {
+                        continue;
+                    };
+                    let Some(agent) = terminal.agent else {
+                        continue;
+                    };
+                    agents.push(AgentDump {
+                        kind: agent.kind,
+                        label: agent.kind.label().to_owned(),
+                        active: agent.active,
+                        workspace_id: workspace.id,
+                        tab_id: tab.id,
+                        pane_id,
+                        terminal_id: terminal.terminal_id,
+                        cwd: terminal.cwd.clone(),
+                        status: terminal.status,
+                    });
+                }
+            }
+        }
+        agents
     }
 
     pub fn memory_stats(&self) -> MemoryStats {
@@ -901,5 +982,120 @@ impl ApplicationModel {
                 second: Box::new(self.pane_tree_dump(second)),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::SessionId;
+
+    fn model_with_terminal_pane() -> (ApplicationModel, PaneId, TerminalId, TabId, WorkspaceId) {
+        let mut model = ApplicationModel::new();
+        let workspace_id = WorkspaceId::new(1);
+        let tab_id = TabId::new(2);
+        let pane_id = PaneId::new(3);
+        let surface_id = SurfaceId::new(4);
+        let terminal_surface_id = SurfaceId::new(7);
+        let terminal_id = TerminalId::new(5);
+        model.create_workspace_with_title(workspace_id, "w".to_owned());
+        model
+            .create_tab_with_title_mode(tab_id, "t".to_owned(), false, pane_id, surface_id)
+            .unwrap();
+        model
+            .replace_surface(
+                pane_id,
+                terminal_surface_id,
+                SurfaceState::Terminal(TerminalSurfaceState {
+                    terminal_id,
+                    session_id: SessionId::new(6),
+                    program: "/bin/zsh".to_owned(),
+                    title: None,
+                    process_name: "zsh".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    args: vec!["-l".to_owned()],
+                    status: TerminalStatus::Running,
+                    columns: 80,
+                    lines: 24,
+                    last_output_revision: 0,
+                    agent: None,
+                }),
+            )
+            .unwrap();
+        (model, pane_id, terminal_id, tab_id, workspace_id)
+    }
+
+    #[test]
+    fn agent_binding_follows_process_metadata_updates() {
+        let (mut model, pane_id, terminal_id, tab_id, workspace_id) = model_with_terminal_pane();
+
+        let update = model.set_terminal_process(
+            terminal_id,
+            "claude".to_owned(),
+            "/proj".to_owned(),
+            vec!["claude".to_owned(), "--resume".to_owned()],
+            true,
+        );
+        assert_eq!(update, Some(pane_id));
+        let snapshot = model.snapshot();
+        assert_eq!(snapshot.agents.len(), 1);
+        let agent = &snapshot.agents[0];
+        assert_eq!(agent.kind, AgentKind::ClaudeCode);
+        assert_eq!(agent.label, "Claude Code");
+        assert!(agent.active);
+        assert_eq!(agent.pane_id, pane_id);
+        assert_eq!(agent.tab_id, tab_id);
+        assert_eq!(agent.workspace_id, workspace_id);
+        assert_eq!(agent.terminal_id, terminal_id);
+        assert_eq!(agent.cwd, "/proj");
+
+        // An activity-only flip is a change: the sidebar indicator needs it.
+        assert_eq!(
+            model.set_terminal_process(
+                terminal_id,
+                "claude".to_owned(),
+                "/proj".to_owned(),
+                vec!["claude".to_owned(), "--resume".to_owned()],
+                false,
+            ),
+            Some(pane_id)
+        );
+        assert!(!model.snapshot().agents[0].active);
+
+        // The agent exiting to the shell removes the binding.
+        assert_eq!(
+            model.set_terminal_process(
+                terminal_id,
+                "zsh".to_owned(),
+                "/proj".to_owned(),
+                vec!["-zsh".to_owned()],
+                false,
+            ),
+            Some(pane_id)
+        );
+        assert!(model.snapshot().agents.is_empty());
+
+        // An unchanged probe reports no update at all.
+        assert_eq!(
+            model.set_terminal_process(
+                terminal_id,
+                "zsh".to_owned(),
+                "/proj".to_owned(),
+                vec!["-zsh".to_owned()],
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn agents_field_is_backward_compatible_in_wire_json() {
+        let (model, ..) = model_with_terminal_pane();
+        let json = serde_json::to_string(&model.snapshot()).unwrap();
+        let roundtrip: StateDump = serde_json::from_str(&json).unwrap();
+        assert!(roundtrip.agents.is_empty());
+        let legacy = r#"{"state_revision": 3, "workspace": null, "workspaces": [], "active_workspace": null, "focused_pane": null}"#;
+        let parsed: StateDump = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.agents.is_empty());
     }
 }

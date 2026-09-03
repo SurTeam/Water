@@ -48,6 +48,15 @@ const INPUT_COALESCE_GAP: Duration = Duration::from_millis(60);
 const INPUT_COALESCE_MAX_WAIT: Duration = Duration::from_millis(24);
 const INPUT_COALESCE_MAX_BYTES: usize = 4096;
 
+/// PTY output within this window marks the foreground process as active for
+/// agent-status purposes. The flip to quiet is observed on the regular
+/// metadata refresh cycle, so it adds at most one event per output burst.
+const PROCESS_ACTIVE_WINDOW: Duration = Duration::from_millis(2000);
+/// Bound the argv probe so a pathological command line cannot inflate
+/// metadata events or the model's detection input.
+const MAX_CMDLINE_TOKENS: usize = 12;
+const MAX_CMDLINE_TOKEN_BYTES: usize = 256;
+
 /// Shared background executor for process-name/cwd lookups. PTY workers only
 /// enqueue a probe and consume its result; no metadata query runs on the I/O
 /// thread.
@@ -110,6 +119,7 @@ pub(crate) struct WorkerConfig {
     command_rx: Receiver<TerminalWorkerCommand>,
     fallback_process_name: String,
     fallback_cwd: PathBuf,
+    fallback_cmdline: Vec<String>,
     registry: TerminalRegistry,
     event_tx: Sender<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
@@ -121,6 +131,7 @@ pub(crate) struct WorkerConfig {
 pub(crate) struct WorkerMetadata {
     pub(crate) fallback_process_name: String,
     pub(crate) fallback_cwd: PathBuf,
+    pub(crate) fallback_cmdline: Vec<String>,
 }
 
 pub(crate) struct WorkerChannels {
@@ -170,6 +181,7 @@ impl WorkerConfig {
             command_rx,
             fallback_process_name: metadata.fallback_process_name,
             fallback_cwd: metadata.fallback_cwd,
+            fallback_cmdline: metadata.fallback_cmdline,
             registry: channels.registry,
             event_tx: channels.event_tx,
             event_wakeup: channels.event_wakeup,
@@ -195,6 +207,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         command_rx,
         fallback_process_name,
         fallback_cwd,
+        fallback_cmdline,
         registry,
         event_tx,
         event_wakeup,
@@ -222,6 +235,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let metadata_fallback = Arc::new(ProcessMetadataFallback {
         process_name: fallback_process_name,
         cwd: fallback_cwd,
+        cmdline: fallback_cmdline,
     });
     let mut process_metadata = ProcessMetadata::from_fallback(&metadata_fallback);
     let mut processor = Processor::new();
@@ -282,6 +296,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
     let (metadata_result_tx, metadata_result_rx) = mpsc::channel();
     let mut metadata_probe_in_flight = false;
+    let mut last_output_at = Instant::now();
     let mut events = Events::new();
     let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
     let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
@@ -338,11 +353,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             };
             command_batch_full = command_index + 1 == MAX_COMMANDS_PER_TICK;
             let effect = match command {
-                TerminalWorkerCommand::SendText(bytes) | TerminalWorkerCommand::SendBytes(bytes) => {
+                TerminalWorkerCommand::SendText(bytes)
+                | TerminalWorkerCommand::SendBytes(bytes) => {
                     let now = Instant::now();
                     let coalescing = !pending_input.is_empty()
-                        || last_input_at
-                            .is_some_and(|at| now.saturating_duration_since(at) <= INPUT_COALESCE_GAP);
+                        || last_input_at.is_some_and(|at| {
+                            now.saturating_duration_since(at) <= INPUT_COALESCE_GAP
+                        });
                     last_input_at = Some(now);
                     input_activity = true;
                     if coalescing {
@@ -353,7 +370,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         if pending_input.len() < INPUT_COALESCE_MAX_BYTES {
                             continue;
                         }
-                        write_pending_input(&mut pending_input, &mut pty, &mut term, &mut scrollback)
+                        write_pending_input(
+                            &mut pending_input,
+                            &mut pty,
+                            &mut term,
+                            &mut scrollback,
+                        )
                     } else {
                         apply_command(
                             TerminalWorkerCommand::SendBytes(bytes),
@@ -432,8 +454,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             metadata_timeout
         };
         if !pending_input.is_empty() && !command_batch_full {
-            poll_timeout = poll_timeout
-                .min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
+            poll_timeout =
+                poll_timeout.min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
         }
         if let Err(error) = poller.wait(&mut events, Some(poll_timeout)) {
             tracing::warn!(
@@ -510,11 +532,22 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             worker_stop = true;
         }
 
-        let metadata_changed = apply_process_metadata_result(
+        if !output_buffer.is_empty() {
+            last_output_at = Instant::now();
+        }
+        let mut metadata_changed = apply_process_metadata_result(
             &metadata_result_rx,
             &mut metadata_probe_in_flight,
             &mut process_metadata,
         );
+        // The worker owns the activity signal: probe results carry it through
+        // unchanged, and it flips on output-burst edges without waiting for
+        // the next probe round trip.
+        let output_active = last_output_at.elapsed() < PROCESS_ACTIVE_WINDOW;
+        if output_active != process_metadata.active {
+            process_metadata.active = output_active;
+            metadata_changed = true;
+        }
         let metadata_due =
             last_process_metadata_request.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
         // The lookup itself runs on the shared metadata thread. Defer merely
@@ -898,12 +931,18 @@ enum ReadEffect {
 struct ProcessMetadataFallback {
     process_name: String,
     cwd: PathBuf,
+    cmdline: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessMetadata {
     process_name: String,
     cwd: String,
+    /// Foreground process argv (bounded) used for coding-agent detection.
+    cmdline: Vec<String>,
+    /// True while the PTY has produced output inside PROCESS_ACTIVE_WINDOW.
+    /// Computed on the worker thread, never by the metadata probe.
+    active: bool,
 }
 
 impl ProcessMetadata {
@@ -911,6 +950,8 @@ impl ProcessMetadata {
         Self {
             process_name: fallback.process_name.clone(),
             cwd: fallback.cwd.display().to_string(),
+            cmdline: fallback.cmdline.clone(),
+            active: false,
         }
     }
 }
@@ -923,7 +964,16 @@ fn query_process_metadata(pid: Option<u32>, fallback: &ProcessMetadataFallback) 
     let cwd = pid
         .and_then(query_process_cwd)
         .unwrap_or_else(|| fallback.cwd.display().to_string());
-    ProcessMetadata { process_name, cwd }
+    let cmdline = pid
+        .and_then(query_process_cmdline)
+        .filter(|argv| !argv.is_empty())
+        .unwrap_or_else(|| fallback.cmdline.clone());
+    ProcessMetadata {
+        process_name,
+        cwd,
+        cmdline,
+        active: false,
+    }
 }
 
 #[cfg(unix)]
@@ -1022,6 +1072,99 @@ fn query_process_cwd(_pid: u32) -> Option<String> {
     None
 }
 
+/// Bounded, control-character-free token for a cmdline argv entry.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn cmdline_token(token: &[u8]) -> String {
+    let token = &token[..token.len().min(MAX_CMDLINE_TOKEN_BYTES)];
+    let mut text = String::from_utf8_lossy(token).into_owned();
+    text.retain(|ch| !ch.is_control());
+    text
+}
+
+#[cfg(target_os = "macos")]
+fn query_process_cmdline(pid: u32) -> Option<Vec<String>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size = 0_usize;
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || size <= std::mem::size_of::<libc::c_int>() {
+        return None;
+    }
+    let mut buffer = vec![0_u8; size];
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    parse_kern_procargs2(&buffer)
+}
+
+/// KERN_PROCARGS2 layout: `argc`, the NUL-terminated exec path, alignment
+/// padding, then `argc` NUL-terminated argv strings followed by the
+/// environment. Only argv is parsed; malformed input yields `None`.
+#[cfg(target_os = "macos")]
+fn parse_kern_procargs2(buffer: &[u8]) -> Option<Vec<String>> {
+    let int_size = std::mem::size_of::<libc::c_int>();
+    let argc: usize = libc::c_int::from_ne_bytes(buffer[..int_size].try_into().ok()?)
+        .try_into()
+        .ok()?;
+    if argc == 0 || argc > 4096 {
+        return None;
+    }
+    let mut cursor = int_size;
+    let exec_end = buffer[cursor..].iter().position(|byte| *byte == 0)?;
+    cursor += exec_end + 1;
+    while buffer.get(cursor).copied() == Some(0) {
+        cursor += 1;
+    }
+    let mut argv = Vec::with_capacity(argc.min(MAX_CMDLINE_TOKENS));
+    for _ in 0..argc {
+        let Some(end) = buffer[cursor..].iter().position(|byte| *byte == 0) else {
+            break;
+        };
+        argv.push(cmdline_token(&buffer[cursor..cursor + end]));
+        cursor += end + 1;
+        if argv.len() >= MAX_CMDLINE_TOKENS {
+            break;
+        }
+    }
+    (!argv.is_empty()).then_some(argv)
+}
+
+#[cfg(target_os = "linux")]
+fn query_process_cmdline(pid: u32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let argv: Vec<String> = raw
+        .split(|byte| *byte == 0)
+        .filter(|token| !token.is_empty())
+        .take(MAX_CMDLINE_TOKENS)
+        .map(cmdline_token)
+        .collect();
+    (!argv.is_empty()).then_some(argv)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn query_process_cmdline(_pid: u32) -> Option<Vec<String>> {
+    None
+}
+
 fn request_process_metadata_refresh(
     executor: &ProcessMetadataExecutor,
     pty: &Pty,
@@ -1051,7 +1194,7 @@ fn apply_process_metadata_result(
     in_flight: &mut bool,
     current: &mut ProcessMetadata,
 ) -> bool {
-    let next = match result_rx.try_recv() {
+    let mut next = match result_rx.try_recv() {
         Ok(next) => next,
         Err(TryRecvError::Empty) => return false,
         Err(TryRecvError::Disconnected) => {
@@ -1059,6 +1202,9 @@ fn apply_process_metadata_result(
             return false;
         }
     };
+    // Activity is measured by the worker loop, not the probe thread; the
+    // probe result always reports `false` here, so keep the live value.
+    next.active = current.active;
     *in_flight = false;
     if next == *current {
         return false;
@@ -1080,6 +1226,8 @@ fn emit_process_metadata(
             terminal_id,
             process_name: metadata.process_name.clone(),
             cwd: metadata.cwd.clone(),
+            cmdline: metadata.cmdline.clone(),
+            active: metadata.active,
         },
     );
 }
@@ -1348,6 +1496,7 @@ mod tests {
         let fallback = Arc::new(ProcessMetadataFallback {
             process_name: "fallback".to_owned(),
             cwd: std::env::current_dir().unwrap(),
+            cmdline: Vec::new(),
         });
         let (result_tx, result_rx) = mpsc::channel();
         let (wakeup_tx, wakeup_rx) = mpsc::channel();

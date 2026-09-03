@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod app;
 pub mod automation;
 pub mod command;
@@ -11,6 +12,7 @@ pub mod terminal;
 pub mod ui;
 pub mod workspace;
 
+pub use agent::{AgentKind, DetectedAgent, detect_agent};
 pub use app::{
     ApplicationModel, CommandClient, MemoryStats, ModelHost, ModelSnapshot, ModelSnapshotReceiver,
     StateDump,

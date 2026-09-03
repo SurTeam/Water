@@ -305,11 +305,20 @@ impl CommandDispatcher {
                     terminal_id,
                     process_name,
                     cwd,
+                    cmdline,
+                    active,
                 } => {
+                    let agent_before = self
+                        .model
+                        .terminal_surface(terminal_id)
+                        .and_then(|terminal| terminal.agent)
+                        .map(|agent| agent.kind);
                     if let Some(pane_id) = self.model.set_terminal_process(
                         terminal_id,
                         process_name.clone(),
                         cwd.clone(),
+                        cmdline,
+                        active,
                     ) {
                         if let Some(tab_id) = self.model.tab_id_for_pane(pane_id)
                             && self.model.update_tab_title_from_process(
@@ -325,10 +334,22 @@ impl CommandDispatcher {
                             process_name,
                             cwd,
                         });
+                        let agent_after = self
+                            .model
+                            .terminal_surface(terminal_id)
+                            .and_then(|terminal| terminal.agent)
+                            .map(|agent| agent.kind);
+                        self.emit_agent_transition(terminal_id, pane_id, agent_before, agent_after);
                         changed = true;
                     }
                 }
                 crate::terminal::TerminalManagerEvent::Exited { terminal_id, code } => {
+                    let agent_kind = self
+                        .model
+                        .terminal_surface(terminal_id)
+                        .and_then(|terminal| terminal.agent)
+                        .map(|agent| agent.kind);
+                    let agent_pane_id = self.model.pane_id_for_terminal(terminal_id);
                     if self
                         .model
                         .set_terminal_status(terminal_id, TerminalStatus::Exited { code })
@@ -337,6 +358,13 @@ impl CommandDispatcher {
                             terminal_id,
                             exit_code: code,
                         });
+                        if let (Some(kind), Some(pane_id)) = (agent_kind, agent_pane_id) {
+                            self.emit(AppEventKind::AgentStopped {
+                                terminal_id,
+                                pane_id,
+                                kind,
+                            });
+                        }
                         changed = true;
 
                         self.close_exited_terminal_pane(terminal_id);
@@ -349,6 +377,35 @@ impl CommandDispatcher {
         // state dump is projected.
         self.sync_focused_terminal();
         changed
+    }
+
+    /// Emits `agent.stopped`/`agent.started` for a kind transition of a
+    /// pane's detected agent. Activity-only changes are silent; automations
+    /// and future adapters react to identity, not to output cadence.
+    fn emit_agent_transition(
+        &mut self,
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+        before: Option<crate::agent::AgentKind>,
+        after: Option<crate::agent::AgentKind>,
+    ) {
+        if before == after {
+            return;
+        }
+        if let Some(kind) = before {
+            self.emit(AppEventKind::AgentStopped {
+                terminal_id,
+                pane_id,
+                kind,
+            });
+        }
+        if let Some(kind) = after {
+            self.emit(AppEventKind::AgentStarted {
+                terminal_id,
+                pane_id,
+                kind,
+            });
+        }
     }
 
     fn close_exited_terminal_pane(&mut self, terminal_id: TerminalId) {
@@ -935,6 +992,15 @@ impl CommandDispatcher {
         let session_id: SessionId = self.ids.alloc();
         let surface_id = self.ids.alloc();
         let process_name = default_process_name(&program);
+        let cmdline: Vec<String> = std::iter::once(program.clone())
+            .chain(args.iter().cloned())
+            .collect();
+        let agent = crate::agent::detect_agent(&process_name, &cmdline).map(|kind| {
+            crate::agent::DetectedAgent {
+                kind,
+                active: false,
+            }
+        });
         let working_directory = working_directory
             .or_else(|| self.default_cwd.clone())
             .filter(|path| path.is_dir());
@@ -963,6 +1029,7 @@ impl CommandDispatcher {
             columns: size.columns,
             lines: size.lines,
             last_output_revision: 0,
+            agent,
         });
         if let Err(message) = self
             .model
@@ -970,6 +1037,13 @@ impl CommandDispatcher {
         {
             self.terminals.remove(terminal_id);
             return Err(self.pane_error(message));
+        }
+        if let Some(agent) = agent {
+            self.emit(AppEventKind::AgentStarted {
+                terminal_id,
+                pane_id,
+                kind: agent.kind,
+            });
         }
         if let Some(old_terminal_id) = old_terminal_id {
             self.terminals.remove(old_terminal_id);
@@ -1512,5 +1586,77 @@ mod tests {
             events.last().unwrap().state_revision,
             dispatcher.model().state_revision()
         );
+    }
+
+    #[test]
+    fn agent_bindings_emit_start_and_stop_around_process_lifecycle() {
+        if !std::path::Path::new("/bin/zsh").is_file() {
+            return;
+        }
+
+        let mut dispatcher = CommandDispatcher::new();
+        let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::New));
+        assert_eq!(
+            dispatcher.wait_operation(workspace).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        let pane_id = dispatcher.state_dump().workspace.unwrap().tabs[0].active_pane;
+
+        // The agent is exec'd by the shell, not by the spawn command, so it
+        // can only reach the model through the foreground-process probe.
+        let spawn = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+            pane_id: Some(pane_id),
+            program: "/bin/zsh".to_owned(),
+            args: vec!["-c".to_owned(), "exec -a claude sleep 2".to_owned()],
+            columns: 80,
+            lines: 24,
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(spawn).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        assert!(dispatcher.state_dump().agents.is_empty());
+
+        // The event history is cumulative, so match into idempotent flags.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut saw_started = false;
+        let mut saw_stopped = false;
+        let mut saw_binding = false;
+        while std::time::Instant::now() < deadline {
+            dispatcher.pump_background_events();
+            if dispatcher.state_dump().agents.iter().any(|agent| {
+                agent.pane_id == pane_id && agent.kind == crate::agent::AgentKind::ClaudeCode
+            }) {
+                saw_binding = true;
+            }
+            for event in dispatcher.all_events() {
+                match event.kind {
+                    AppEventKind::AgentStarted {
+                        kind,
+                        pane_id: event_pane,
+                        ..
+                    } if event_pane == pane_id && kind == crate::agent::AgentKind::ClaudeCode => {
+                        saw_started = true;
+                    }
+                    AppEventKind::AgentStopped {
+                        kind,
+                        pane_id: event_pane,
+                        ..
+                    } if event_pane == pane_id && kind == crate::agent::AgentKind::ClaudeCode => {
+                        saw_stopped = true;
+                    }
+                    _ => {}
+                }
+            }
+            if saw_started && saw_stopped && saw_binding {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        assert!(saw_binding, "the agent was never attached to the pane");
+        assert!(saw_started, "agent.started was never observed");
+        assert!(saw_stopped, "agent.stopped was never observed");
+        assert!(dispatcher.state_dump().agents.is_empty());
     }
 }

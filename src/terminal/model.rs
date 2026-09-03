@@ -226,6 +226,11 @@ pub(crate) enum TerminalManagerEvent {
         terminal_id: TerminalId,
         process_name: String,
         cwd: String,
+        /// Bounded foreground argv used by the model for agent detection.
+        cmdline: Vec<String>,
+        /// True while the PTY has produced output within the worker's
+        /// activity window; drives the agent busy/idle indicator.
+        active: bool,
     },
     TitleChanged {
         terminal_id: TerminalId,
@@ -786,6 +791,9 @@ impl TerminalManager {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let fallback_process_name = process_name_from_program(&program);
+        let fallback_cmdline = std::iter::once(program.clone())
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
         let shell_env = super::shell_integration::child_environment(&program);
         ensure_bundled_terminfo_env();
         alacritty_terminal::tty::setup_env();
@@ -847,6 +855,7 @@ impl TerminalManager {
                         super::worker::WorkerMetadata {
                             fallback_process_name,
                             fallback_cwd,
+                            fallback_cmdline,
                         },
                     )
                     .with_theme(theme),

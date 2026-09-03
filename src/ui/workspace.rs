@@ -11,7 +11,7 @@ use gpui::{
     prelude::*, px, relative, rgb, rgba, size,
 };
 
-use crate::app::model::{PaneTreeDump, TabDump, WorkspaceDump};
+use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
 use crate::app::{CommandClient, ModelSnapshot};
 use crate::command::{
     AppCommand, FocusDirection, OperationResult, PaneCommand, SplitDirection, TabCommand,
@@ -1769,6 +1769,27 @@ impl WorkspaceView {
                 ));
             }
         }
+        let mut agent_list = div()
+            .id("agent-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .flex_col();
+        if self.snapshot.agents.is_empty() {
+            agent_list = agent_list.child(
+                div()
+                    .h(px(22.))
+                    .px(px(10.))
+                    .items_center()
+                    .flex()
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child("No agents detected"),
+            );
+        } else {
+            for agent in &self.snapshot.agents {
+                agent_list = agent_list.child(self.render_sidebar_agent(agent, theme, cx));
+            }
+        }
         div()
             .w(px(self.sidebar_width))
             .h_full()
@@ -1793,9 +1814,122 @@ impl WorkspaceView {
                             .text_color(rgb(theme.inactive_pane_border))
                             .child("WORKSPACES"),
                     )
-                    .child(list),
+                    .child(list)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .h(relative(0.35))
+                            .min_h(px(0.))
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .h(px(1.))
+                                    .my(px(4.))
+                                    .bg(rgb(theme.inactive_pane_border)),
+                            )
+                            .child(
+                                div()
+                                    .h(px(self.config.ui.sidebar_header_height))
+                                    .px(px(10.))
+                                    .items_center()
+                                    .flex()
+                                    .bg(rgb(theme.chrome_background))
+                                    .text_color(rgb(theme.inactive_pane_border))
+                                    .child("AGENTS"),
+                            )
+                            .child(agent_list),
+                    ),
             )
             .child(self.sidebar_resize_handle(theme, cx))
+            .into_any_element()
+    }
+
+    /// One row in the sidebar Agents section. The row is the pane binding's
+    /// UI surface: clicking activates the pane's full location through the
+    /// regular command path (`pane.focus` re-activates the owning workspace
+    /// and tab in the model), so this never needs a mutation path of its own.
+    fn render_sidebar_agent(
+        &self,
+        agent: &AgentDump,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let workspace_id = agent.workspace_id;
+        let pane_id = agent.pane_id;
+        let focused_here =
+            self.selected_workspace == Some(workspace_id) && self.focused_pane == Some(pane_id);
+        let row_background = if focused_here {
+            rgb(theme.tab_active_background)
+        } else {
+            rgb(theme.chrome_background)
+        };
+        let hover_background = if focused_here {
+            theme.tab_active_background
+        } else {
+            theme.tab_add_background
+        };
+        let dot_color = match agent.status {
+            crate::surface::TerminalStatus::Exited { .. } => theme.inactive_pane_border,
+            crate::surface::TerminalStatus::Running if agent.active => {
+                // The focused row paints on the green accent; keep the busy
+                // dot readable against it.
+                if focused_here {
+                    theme.terminal_background
+                } else {
+                    theme.active_pane_border
+                }
+            }
+            crate::surface::TerminalStatus::Running => theme.tab_add_background,
+        };
+        let project = agent
+            .cwd
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or("")
+            .to_owned();
+        let agent_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+            this.context_menu = None;
+            this.focus_handle.focus(window, cx);
+            this.select_workspace_locally(workspace_id, cx);
+            this.focused_pane = Some(pane_id);
+            this.dispatch(
+                AppCommand::Pane(PaneCommand::Focus {
+                    pane_id: Some(pane_id),
+                    direction: None,
+                }),
+                cx,
+            );
+        });
+        div()
+            .id(format!("agent-pane-{pane_id}"))
+            .h(px(28.))
+            .w_full()
+            .px(px(10.))
+            .items_center()
+            .gap(px(6.))
+            .flex()
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(hover_background)))
+            .bg(row_background)
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down(MouseButton::Left, agent_activate)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(rgb(dot_color))
+                    .child(SharedString::from("●")),
+            )
+            .child(SharedString::from(agent.label.clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .text_right()
+                    .truncate()
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(SharedString::from(project)),
+            )
             .into_any_element()
     }
 
@@ -4619,6 +4753,7 @@ mod tests {
             workspaces,
             active_workspace,
             focused_pane: None,
+            agents: Vec::new(),
         }
     }
 

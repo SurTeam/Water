@@ -1,0 +1,49 @@
+{
+  "name": "agent_detection",
+  "steps": [
+    {
+      "command": {
+        "type": "workspace.create"
+      }
+    },
+    {
+      "command": {
+        "type": "tab.new",
+        "title": "Agent"
+      }
+    },
+    {
+      "command": {
+        "type": "terminal.spawn",
+        "program": "/bin/zsh",
+        "args": ["-c", "exec -a claude sleep 2"],
+        "columns": 80,
+        "lines": 24
+      }
+    },
+    {
+      "wait": {
+        "type": "process_exit",
+        "timeout_ms": 15000
+      }
+    },
+    {
+      "wait": {
+        "type": "event",
+        "event_type": "agent.started"
+      }
+    },
+    {
+      "assert": {
+        "type": "tab_count",
+        "value": 0
+      }
+    },
+    {
+      "assert": {
+        "type": "pane_count",
+        "value": 0
+      }
+    }
+  ]
+}

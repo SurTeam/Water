@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent::DetectedAgent;
 use crate::ids::{SessionId, TerminalId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +53,12 @@ pub struct TerminalSurfaceState {
     pub columns: usize,
     pub lines: usize,
     pub last_output_revision: u64,
+    /// The coding agent currently running in the terminal's foreground,
+    /// reclassified on every process-metadata refresh. This is the canonical
+    /// pane<->agent binding consumed by the sidebar, the state dump, and
+    /// future agent surfaces; it is never a UI-side guess.
+    #[serde(default)]
+    pub agent: Option<DetectedAgent>,
 }
 
 /// Surface state remains an enum rather than a trait object so registry access

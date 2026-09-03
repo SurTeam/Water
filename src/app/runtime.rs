@@ -435,6 +435,7 @@ mod tests {
             workspaces: Vec::new(),
             active_workspace: None,
             focused_pane: None,
+            agents: Vec::new(),
         }
     }
 

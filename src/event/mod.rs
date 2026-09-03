@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::AgentKind;
 use crate::ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -77,6 +78,16 @@ pub enum AppEventKind {
         process_name: String,
         cwd: String,
     },
+    AgentStarted {
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+        kind: AgentKind,
+    },
+    AgentStopped {
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+        kind: AgentKind,
+    },
 }
 
 impl AppEventKind {
@@ -102,6 +113,8 @@ impl AppEventKind {
             Self::TerminalResized { .. } => "terminal.resized",
             Self::TerminalTitleChanged { .. } => "terminal.title_changed",
             Self::TerminalProcessChanged { .. } => "terminal.process_changed",
+            Self::AgentStarted { .. } => "agent.started",
+            Self::AgentStopped { .. } => "agent.stopped",
         }
     }
 }
