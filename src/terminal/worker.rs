@@ -91,6 +91,7 @@ pub(crate) struct WorkerConfig {
     terminal_id: TerminalId,
     size: TerminalSize,
     scrollback_lines: usize,
+    inactive_scrollback_lines: usize,
     scrollback_budget: ScrollbackBudget,
     command_rx: Receiver<TerminalWorkerCommand>,
     fallback_process_name: String,
@@ -135,10 +136,12 @@ impl WorkerChannels {
 }
 
 impl WorkerConfig {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         terminal_id: TerminalId,
         size: TerminalSize,
         scrollback_lines: usize,
+        inactive_scrollback_lines: usize,
         scrollback_budget: ScrollbackBudget,
         command_rx: Receiver<TerminalWorkerCommand>,
         channels: WorkerChannels,
@@ -148,6 +151,7 @@ impl WorkerConfig {
             terminal_id,
             size,
             scrollback_lines,
+            inactive_scrollback_lines,
             scrollback_budget,
             command_rx,
             fallback_process_name: metadata.fallback_process_name,
@@ -172,6 +176,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         terminal_id,
         size,
         scrollback_lines,
+        inactive_scrollback_lines,
         scrollback_budget,
         command_rx,
         fallback_process_name,
@@ -193,8 +198,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         theme,
     };
     let mut term = Term::new(config, &size, proxy);
-    let mut scrollback = ScrollbackState::new(terminal_id, scrollback_lines, scrollback_budget);
-    let _ = scrollback.reconcile(&mut term, false);
+    let mut scrollback = ScrollbackState::new(
+        terminal_id,
+        scrollback_lines,
+        inactive_scrollback_lines,
+        scrollback_budget,
+    );
+    let _ = scrollback.reconcile(&mut term);
     let metadata_fallback = Arc::new(ProcessMetadataFallback {
         process_name: fallback_process_name,
         cwd: fallback_cwd,
@@ -535,23 +545,50 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 struct ScrollbackState {
     terminal_id: TerminalId,
     base_limit: usize,
+    inactive_limit: usize,
     current_limit: usize,
+    focused: bool,
     budget: ScrollbackBudget,
 }
 
 impl ScrollbackState {
-    fn new(terminal_id: TerminalId, base_limit: usize, budget: ScrollbackBudget) -> Self {
+    fn new(
+        terminal_id: TerminalId,
+        base_limit: usize,
+        inactive_limit: usize,
+        budget: ScrollbackBudget,
+    ) -> Self {
         Self {
             terminal_id,
             base_limit,
+            inactive_limit,
             current_limit: base_limit,
+            focused: false,
             budget,
         }
     }
 
+    /// Applies a focus transition. Returns whether the state changed.
+    fn set_focused(&mut self, focused: bool) -> bool {
+        if self.focused == focused {
+            return false;
+        }
+        self.focused = focused;
+        true
+    }
+
+    /// Rows a terminal keeps without borrowing: the full configured limit
+    /// while focused, the smaller inactive tail after focus is lost.
+    fn effective_base(&self) -> usize {
+        if self.focused {
+            self.base_limit
+        } else {
+            self.base_limit.min(self.inactive_limit)
+        }
+    }
+
     fn prepare_for_output(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
-        let active = self.is_pinned(term);
-        self.reconcile(term, active)
+        self.reconcile(term)
     }
 
     fn focus_latest(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
@@ -559,13 +596,14 @@ impl ScrollbackState {
         if old_offset != 0 {
             term.scroll_display(Scroll::Bottom);
         }
-        let changed = self.reconcile(term, false);
+        let changed = self.reconcile(term);
         changed || old_offset != term.grid().display_offset()
     }
 
-    fn reconcile(&mut self, term: &mut Term<WorkerEventProxy>, active: bool) -> bool {
+    fn reconcile(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
         let old_offset = term.grid().display_offset();
         let old_limit = self.current_limit;
+        let columns = term.columns();
         let alternate_screen = term.mode().contains(TermMode::ALT_SCREEN);
         let retained = if alternate_screen {
             0
@@ -578,28 +616,33 @@ impl ScrollbackState {
             // the alternate grid bounded as well.
             let _ = self
                 .budget
-                .limit_for(self.terminal_id, 0, self.base_limit, false);
+                .limit_for(self.terminal_id, 0, columns, 0, false);
             0
         } else {
-            self.budget
-                .limit_for(self.terminal_id, retained, self.base_limit, active)
+            // Only a focused terminal that has been scrolled away from live
+            // output borrows the unused global budget. Background tabs are
+            // trimmed to their inactive tail and release their reservation.
+            let borrow = self.focused && self.is_pinned(term);
+            self.budget.limit_for(
+                self.terminal_id,
+                retained,
+                columns,
+                self.effective_base(),
+                borrow,
+            )
         };
         if target_limit != self.current_limit {
             term.grid_mut().update_history(target_limit);
             self.current_limit = target_limit;
         }
         let new_offset = term.grid().display_offset();
-        self.budget.sync(
-            self.terminal_id,
-            terminal_history_size(term),
-            self.is_pinned(term),
-        );
+        self.budget
+            .sync(self.terminal_id, terminal_history_size(term), columns);
         old_limit != self.current_limit || old_offset != new_offset
     }
 
     fn sync(&mut self, term: &mut Term<WorkerEventProxy>) -> bool {
-        let active = self.is_pinned(term);
-        self.reconcile(term, active)
+        self.reconcile(term)
     }
 
     fn unregister(&self) {
@@ -657,7 +700,7 @@ fn apply_command(
             };
             pty.on_resize(window_size);
             term.resize(size);
-            let _ = scrollback.reconcile(term, scrollback.is_pinned(term));
+            let _ = scrollback.reconcile(term);
             // Resizing changes the published cell grid even when scrollback
             // limits and the viewport offset remain unchanged.
             Ok(CommandEffect::Continue {
@@ -669,7 +712,18 @@ fn apply_command(
         TerminalWorkerCommand::Scroll(lines) => {
             let old_offset = term.grid().display_offset();
             term.scroll_display(Scroll::Delta(lines));
-            let dirty = scrollback.reconcile(term, scrollback.is_pinned(term));
+            let dirty = scrollback.reconcile(term);
+            let new_offset = term.grid().display_offset();
+            Ok(CommandEffect::Continue {
+                dirty: dirty || old_offset != new_offset,
+                viewport_delta: viewport_delta(old_offset, new_offset),
+                refresh_process: false,
+            })
+        }
+        TerminalWorkerCommand::SetFocused(focused) => {
+            scrollback.set_focused(focused);
+            let old_offset = term.grid().display_offset();
+            let dirty = scrollback.reconcile(term);
             let new_offset = term.grid().display_offset();
             Ok(CommandEffect::Continue {
                 dirty: dirty || old_offset != new_offset,
@@ -1216,11 +1270,13 @@ mod tests {
 
     #[test]
     fn pinned_view_stays_fixed_while_output_grows_temporary_scrollback() {
+        use crate::terminal::scrollback_row_bytes;
         let terminal_id = TerminalId::new(1);
         let size = TerminalSize::new(16, 3);
-        let budget = ScrollbackBudget::new(100);
-        budget.register(terminal_id, 2);
-        let mut scrollback = ScrollbackState::new(terminal_id, 2, budget);
+        let budget = ScrollbackBudget::new(scrollback_row_bytes(size.columns) * 100);
+        budget.register(terminal_id, 2, size.columns);
+        let mut scrollback = ScrollbackState::new(terminal_id, 2, 2, budget);
+        scrollback.set_focused(true);
         let mut term = test_term(size, 2);
         let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
 
@@ -1230,7 +1286,7 @@ mod tests {
         );
         let _ = scrollback.sync(&mut term);
         term.scroll_display(Scroll::Delta(1));
-        assert!(scrollback.reconcile(&mut term, true));
+        assert!(scrollback.reconcile(&mut term));
         let before =
             TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 1);
 
@@ -1250,5 +1306,30 @@ mod tests {
         assert_eq!(term.grid().display_offset(), 0);
         assert_eq!(scrollback.current_limit, scrollback.base_limit);
         assert!(terminal_history_size(&term) <= scrollback.base_limit);
+    }
+
+    #[test]
+    fn losing_focus_trims_history_to_the_inactive_tail() {
+        use crate::terminal::scrollback_row_bytes;
+        let terminal_id = TerminalId::new(2);
+        let size = TerminalSize::new(16, 3);
+        let budget = ScrollbackBudget::new(scrollback_row_bytes(size.columns) * 1_000);
+        budget.register(terminal_id, 50, size.columns);
+        let mut scrollback = ScrollbackState::new(terminal_id, 50, 5, budget);
+        scrollback.set_focused(true);
+        let mut term = test_term(size, 50);
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+
+        let filler: String = (0..40).map(|row| format!("line {row}\r\n")).collect();
+        processor.advance(&mut term, filler.as_bytes());
+        let _ = scrollback.sync(&mut term);
+        assert_eq!(scrollback.current_limit, 50);
+
+        // Losing focus reclaims the history down to the inactive tail.
+        scrollback.set_focused(false);
+        let dirty = scrollback.reconcile(&mut term);
+        assert!(dirty);
+        assert_eq!(scrollback.current_limit, 5);
+        assert!(terminal_history_size(&term) <= 5);
     }
 }

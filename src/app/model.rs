@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -6,7 +7,7 @@ use crate::{
     ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId},
     pane::{Pane, PaneDirection, PaneNode, SplitAxis},
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
-    terminal::TerminalSnapshot,
+    terminal::{TerminalSnapshot, TerminalSummary},
     workspace::{Tab, Workspace},
 };
 
@@ -95,6 +96,17 @@ pub struct TabDump {
     pub tree: PaneTreeDump,
 }
 
+/// Terminal state carried by a projected pane leaf.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalProjection {
+    pub summary: TerminalSummary,
+    /// Shared (not copied) grid from the terminal registry. Present only on
+    /// the displayed tab of each workspace; waiters and waterctl fetch the
+    /// grid for any single terminal through the registry RPC instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<Arc<TerminalSnapshot>>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PaneTreeDump {
@@ -103,7 +115,11 @@ pub enum PaneTreeDump {
         surface_id: SurfaceId,
         surface_kind: SurfaceKind,
         surface_state: SurfaceState,
-        terminal_snapshot: Option<Box<TerminalSnapshot>>,
+        /// Cell-free metadata plus, for displayed tabs only, a shared
+        /// reference to the registry's single grid snapshot. Hidden tabs
+        /// never duplicate their grid into the projection layer.
+        #[serde(default)]
+        terminal: Option<Box<TerminalProjection>>,
     },
     Split {
         axis: SplitAxis,
@@ -139,7 +155,19 @@ impl PaneTreeDump {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStats {
     pub terminal_count: usize,
+    /// Configured per-terminal scrollback limit (focused rows).
     pub scrollback_lines: usize,
+    /// Rows the focused terminal retains after losing focus.
+    pub inactive_scrollback_lines: usize,
+    /// Aggregate byte ceiling shared by all terminal scrollback grids.
+    pub max_total_scrollback_bytes: usize,
+    /// Currently retained scrollback across all workers (budget accounting).
+    pub retained_scrollback_lines: usize,
+    pub retained_scrollback_bytes: usize,
+    /// Estimated heap bytes pinned by snapshot grids and recent-output
+    /// buffers still held by the terminal registry (including retired
+    /// terminals inside the auto-close race window).
+    pub registry_snapshot_bytes: usize,
     pub visible_cells: usize,
     pub surface_count: usize,
     pub shape_cache_entries: usize,
@@ -442,6 +470,18 @@ impl ApplicationModel {
     pub(crate) fn active_pane(&self) -> Option<PaneId> {
         self.active_workspace
             .and_then(|workspace_id| self.active_pane_for_workspace(workspace_id))
+    }
+
+    /// The terminal that currently owns the user's attention. Used to
+    /// propagate focus to PTY workers so background tabs can be trimmed to
+    /// their inactive scrollback tail.
+    pub(crate) fn focused_terminal_id(&self) -> Option<TerminalId> {
+        let pane_id = self.active_pane()?;
+        let pane = self.panes.get(&pane_id)?;
+        match self.surfaces.get(&pane.surface)? {
+            SurfaceState::Terminal(terminal) => Some(terminal.terminal_id),
+            SurfaceState::Empty(_) => None,
+        }
     }
 
     pub(crate) fn pane_ids_in_tab(&self, tab_id: TabId) -> Option<Vec<PaneId>> {
@@ -786,7 +826,12 @@ impl ApplicationModel {
             .count();
         MemoryStats {
             terminal_count,
-            scrollback_lines: terminal_count * crate::terminal::MAX_SCROLLBACK_LINES,
+            scrollback_lines: 0,
+            inactive_scrollback_lines: 0,
+            max_total_scrollback_bytes: 0,
+            retained_scrollback_lines: 0,
+            retained_scrollback_bytes: 0,
+            registry_snapshot_bytes: 0,
             visible_cells: self
                 .surfaces
                 .values()
@@ -841,7 +886,7 @@ impl ApplicationModel {
                     surface_id: pane.surface,
                     surface_kind: surface.kind(),
                     surface_state: surface.clone(),
-                    terminal_snapshot: None,
+                    terminal: None,
                 }
             }
             PaneNode::Split {

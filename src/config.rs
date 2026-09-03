@@ -6,8 +6,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::terminal::{
-    DEFAULT_COLUMNS, DEFAULT_LINES, MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES,
-    MAX_TOTAL_SCROLLBACK_LINES, default_shell_args, default_shell_program,
+    DEFAULT_COLUMNS, DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_LINES,
+    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES,
+    MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES,
+    default_shell_args, default_shell_program,
 };
 
 const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC Nerd Font";
@@ -177,7 +179,8 @@ impl AppConfig {
             || self.startup.initial_terminal != next.startup.initial_terminal
             || self.shell != next.shell
             || self.terminal.scrollback_lines != next.terminal.scrollback_lines
-            || self.terminal.max_total_scrollback_lines != next.terminal.max_total_scrollback_lines
+            || self.terminal.inactive_scrollback_lines != next.terminal.inactive_scrollback_lines
+            || self.terminal.max_total_scrollback_bytes != next.terminal.max_total_scrollback_bytes
             || self.terminal.default_columns != next.terminal.default_columns
             || self.terminal.default_lines != next.terminal.default_lines
     }
@@ -321,12 +324,14 @@ pub struct TerminalConfig {
     /// Initial terminal dimensions before GPUI reports the actual pane size.
     pub default_columns: usize,
     pub default_lines: usize,
-    /// Maximum number of normal scrollback rows retained by each terminal.
+    /// Maximum number of scrollback rows retained by the focused terminal.
     pub scrollback_lines: usize,
-    /// Maximum number of scrollback rows retained by all terminals together,
-    /// including temporary rows kept while a terminal is pinned away from live
-    /// output.
-    pub max_total_scrollback_lines: usize,
+    /// Maximum number of scrollback rows retained by a terminal once it has
+    /// lost focus. Background tabs keep only this tail until refocused.
+    pub inactive_scrollback_lines: usize,
+    /// Aggregate byte budget shared by the scrollback grids of all
+    /// terminals. Bytes (not rows) because a row's cost scales with width.
+    pub max_total_scrollback_bytes: usize,
     /// Font family used by terminal rows.
     pub font_family: String,
     /// Terminal font size in logical pixels.
@@ -340,8 +345,9 @@ impl Default for TerminalConfig {
         Self {
             default_columns: DEFAULT_COLUMNS,
             default_lines: DEFAULT_LINES,
-            scrollback_lines: MAX_SCROLLBACK_LINES,
-            max_total_scrollback_lines: MAX_TOTAL_SCROLLBACK_LINES,
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            inactive_scrollback_lines: DEFAULT_INACTIVE_SCROLLBACK_LINES,
+            max_total_scrollback_bytes: DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -354,9 +360,13 @@ impl TerminalConfig {
         self.default_columns = self.default_columns.clamp(2, MAX_COLUMNS);
         self.default_lines = self.default_lines.clamp(1, MAX_LINES);
         self.scrollback_lines = self.scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
-        self.max_total_scrollback_lines = self
-            .max_total_scrollback_lines
-            .clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
+        self.inactive_scrollback_lines = self
+            .inactive_scrollback_lines
+            .clamp(1, MAX_SCROLLBACK_LINES)
+            .min(self.scrollback_lines);
+        self.max_total_scrollback_bytes = self
+            .max_total_scrollback_bytes
+            .clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES);
         if self.font_family.trim().is_empty() {
             self.font_family = DEFAULT_FONT_FAMILY.to_owned();
         } else {
@@ -690,8 +700,11 @@ impl AppConfigOverrides {
             if let Some(value) = terminal.scrollback_lines {
                 config.terminal.scrollback_lines = value;
             }
-            if let Some(value) = terminal.max_total_scrollback_lines {
-                config.terminal.max_total_scrollback_lines = value;
+            if let Some(value) = terminal.inactive_scrollback_lines {
+                config.terminal.inactive_scrollback_lines = value;
+            }
+            if let Some(value) = terminal.max_total_scrollback_bytes {
+                config.terminal.max_total_scrollback_bytes = value;
             }
             if let Some(value) = &terminal.font_family {
                 config.terminal.font_family = value.clone();
@@ -825,7 +838,8 @@ pub struct TerminalConfigOverrides {
     pub default_columns: Option<usize>,
     pub default_lines: Option<usize>,
     pub scrollback_lines: Option<usize>,
-    pub max_total_scrollback_lines: Option<usize>,
+    pub inactive_scrollback_lines: Option<usize>,
+    pub max_total_scrollback_bytes: Option<usize>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
@@ -915,10 +929,14 @@ mod tests {
     #[test]
     fn missing_config_uses_defaults_and_invalid_colors_fall_back() {
         let config = AppConfig::default();
-        assert_eq!(config.terminal.scrollback_lines, MAX_SCROLLBACK_LINES);
+        assert_eq!(config.terminal.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(
-            config.terminal.max_total_scrollback_lines,
-            MAX_TOTAL_SCROLLBACK_LINES
+            config.terminal.inactive_scrollback_lines,
+            DEFAULT_INACTIVE_SCROLLBACK_LINES
+        );
+        assert_eq!(
+            config.terminal.max_total_scrollback_bytes,
+            DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES
         );
         assert_eq!(config.theme.colors().terminal_background, 0x2c2c2c);
         assert_eq!(config.theme.colors().terminal_foreground, 0xe4e4e4);
@@ -945,9 +963,11 @@ mod tests {
         let config: AppConfig = AppConfig::load_from_path(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(config.terminal.scrollback_lines, 321);
+        // Normalization keeps the inactive tail within the per-terminal cap.
+        assert_eq!(config.terminal.inactive_scrollback_lines, 321);
         assert_eq!(
-            config.terminal.max_total_scrollback_lines,
-            MAX_TOTAL_SCROLLBACK_LINES
+            config.terminal.max_total_scrollback_bytes,
+            DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES
         );
         assert_eq!(config.terminal.default_columns, DEFAULT_COLUMNS);
         assert!(config.features.selection);
@@ -1030,7 +1050,8 @@ mod tests {
                 default_columns: usize::MAX,
                 default_lines: usize::MAX,
                 scrollback_lines: usize::MAX,
-                max_total_scrollback_lines: usize::MAX,
+                inactive_scrollback_lines: usize::MAX,
+                max_total_scrollback_bytes: usize::MAX,
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,
@@ -1049,8 +1070,12 @@ mod tests {
         assert_eq!(config.terminal.default_lines, MAX_LINES);
         assert_eq!(config.terminal.scrollback_lines, MAX_SCROLLBACK_LINES);
         assert_eq!(
-            config.terminal.max_total_scrollback_lines,
-            MAX_TOTAL_SCROLLBACK_LINES
+            config.terminal.inactive_scrollback_lines,
+            MAX_SCROLLBACK_LINES
+        );
+        assert_eq!(
+            config.terminal.max_total_scrollback_bytes,
+            MAX_TOTAL_SCROLLBACK_BYTES
         );
         assert_eq!(config.terminal.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.terminal.font_size, 8.0);

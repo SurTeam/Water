@@ -64,13 +64,15 @@ pub fn default_shell_args(program: &str) -> Vec<String> {
     }
 }
 
-pub use model::{TerminalError, TerminalManager, TerminalRegistry};
+pub use model::{TerminalError, TerminalLimits, TerminalManager, TerminalRegistry};
 pub(crate) use model::{TerminalManagerEvent, WakeupCallback};
 pub use snapshot::{
-    DEFAULT_COLUMNS, DEFAULT_LINES, MAX_COLUMNS, MAX_LINES, MAX_RECENT_OUTPUT_BYTES,
-    MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES, TerminalCell, TerminalCellFlags,
-    TerminalColor, TerminalCursor, TerminalModes, TerminalProcessState, TerminalSize,
-    TerminalSnapshot,
+    DEFAULT_COLUMNS, DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_LINES,
+    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES,
+    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_BYTES,
+    MIN_MAX_TOTAL_SCROLLBACK_BYTES, TerminalCell, TerminalCellFlags, TerminalColor, TerminalCursor,
+    TerminalModes, TerminalProcessState, TerminalSize, TerminalSnapshot, TerminalSummary,
+    scrollback_row_bytes,
 };
 
 #[cfg(test)]

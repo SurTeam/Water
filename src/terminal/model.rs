@@ -9,27 +9,75 @@ use thiserror::Error;
 
 use crate::ids::TerminalId;
 
+use super::TerminalSnapshot;
 use super::TerminalTheme;
 use super::snapshot::{
-    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES,
-    TerminalProcessState, TerminalSize, TerminalSnapshot,
+    DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
+    DEFAULT_SCROLLBACK_LINES, MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES,
+    MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES, TerminalProcessState, TerminalSize,
+    TerminalSummary, scrollback_row_bytes,
 };
 
 pub(crate) const TERMINAL_WAKE_KEY: usize = usize::MAX - 1;
-const MAX_RETIRED_TERMINALS: usize = 64;
+/// Retired terminals keep a compact final snapshot for waiters that race
+/// with pane auto-close. The window stays small so closed tabs cannot pin
+/// memory long after they were closed.
+const MAX_RETIRED_TERMINALS: usize = 16;
+/// Viewport rows kept when a retired terminal's snapshot is compacted.
+const RETIRED_SNAPSHOT_TAIL_LINES: usize = 24;
+/// Recent-output bytes kept when a retired terminal is compacted.
+const RETIRED_RECENT_OUTPUT_BYTES: usize = 8 * 1024;
 pub(crate) type WakeupCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 pub(crate) type WakeupSlot = Arc<Mutex<Option<WakeupCallback>>>;
 
-/// Coordinates temporary scrollback growth across terminal workers.
+/// Per-terminal and aggregate scrollback limits resolved from `AppConfig`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalLimits {
+    /// Scrollback rows a focused terminal may retain.
+    pub scrollback_lines: usize,
+    /// Scrollback rows a terminal retains once it loses focus.
+    pub inactive_scrollback_lines: usize,
+    /// Aggregate byte budget shared by all terminal scrollback grids.
+    pub max_total_scrollback_bytes: usize,
+}
+
+impl Default for TerminalLimits {
+    fn default() -> Self {
+        Self {
+            scrollback_lines: DEFAULT_SCROLLBACK_LINES,
+            inactive_scrollback_lines: DEFAULT_INACTIVE_SCROLLBACK_LINES,
+            max_total_scrollback_bytes: DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
+        }
+    }
+}
+
+impl TerminalLimits {
+    pub(crate) fn normalized(mut self) -> Self {
+        self.scrollback_lines = self.scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
+        self.inactive_scrollback_lines = self
+            .inactive_scrollback_lines
+            .clamp(1, MAX_SCROLLBACK_LINES)
+            .min(self.scrollback_lines);
+        self.max_total_scrollback_bytes = self
+            .max_total_scrollback_bytes
+            .clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES);
+        self
+    }
+}
+
+/// Coordinates scrollback growth across terminal workers in bytes.
 ///
-/// A terminal that is scrolled away from the live output gets a reservation
-/// for the unused global budget. The reservation is released when the user
-/// returns to the live end or sends input, so a busy terminal cannot grow
-/// without bound while another terminal is open.
+/// The budget is accounted in estimated heap bytes, not rows, because a
+/// row's cost scales with the terminal width. A focused terminal that is
+/// scrolled away from live output borrows the unused global budget so new
+/// output cannot evict the rows the user is looking at. A terminal that
+/// loses focus is trimmed to its inactive tail and releases the rest of its
+/// reservation, mirroring how tmux keeps only `history-limit` rows per
+/// window and how herdr keeps background panes cheap.
 #[derive(Clone, Debug)]
 pub(crate) struct ScrollbackBudget {
     state: Arc<Mutex<ScrollbackBudgetState>>,
-    max_lines: usize,
+    max_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -39,20 +87,20 @@ struct ScrollbackBudgetState {
 
 #[derive(Debug, Clone, Copy)]
 struct ScrollbackBudgetEntry {
-    retained: usize,
-    reservation: usize,
-    active: bool,
+    retained_rows: usize,
+    retained_bytes: usize,
+    reservation_bytes: usize,
 }
 
 impl ScrollbackBudget {
-    pub(crate) fn new(max_lines: usize) -> Self {
+    pub(crate) fn new(max_bytes: usize) -> Self {
         Self {
             state: Arc::new(Mutex::new(ScrollbackBudgetState::default())),
-            max_lines: max_lines.clamp(1, MAX_TOTAL_SCROLLBACK_LINES),
+            max_bytes: max_bytes.clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES),
         }
     }
 
-    pub(crate) fn register(&self, terminal_id: TerminalId, base_limit: usize) {
+    pub(crate) fn register(&self, terminal_id: TerminalId, base_limit_rows: usize, columns: usize) {
         let mut state = self.state.lock().expect("scrollback budget poisoned");
         if state.entries.contains_key(&terminal_id) {
             return;
@@ -60,15 +108,17 @@ impl ScrollbackBudget {
         let reserved = state
             .entries
             .values()
-            .map(|entry| entry.reservation)
+            .map(|entry| entry.reservation_bytes)
             .sum::<usize>();
-        let reservation = base_limit.min(self.max_lines.saturating_sub(reserved));
+        let reservation = base_limit_rows
+            .saturating_mul(scrollback_row_bytes(columns))
+            .min(self.max_bytes.saturating_sub(reserved));
         state.entries.insert(
             terminal_id,
             ScrollbackBudgetEntry {
-                retained: 0,
-                reservation,
-                active: false,
+                retained_rows: 0,
+                retained_bytes: 0,
+                reservation_bytes: reservation,
             },
         );
     }
@@ -81,41 +131,47 @@ impl ScrollbackBudget {
             .remove(&terminal_id);
     }
 
-    /// Returns the history limit this terminal may use right now.
+    /// Returns the history row limit this terminal may use right now.
     ///
-    /// Inactive terminals retain their normal per-terminal reservation. An
-    /// active terminal may borrow all budget not reserved by the other
-    /// terminals. Updating the reservation before the worker changes its
-    /// `Grid` makes concurrent PTY workers observe the same global ceiling.
+    /// `base_limit_rows` already reflects focus (an unfocused terminal passes
+    /// its smaller inactive limit). Only a focused terminal that is scrolled
+    /// away from live output (`borrow`) may expand into the unused budget.
+    /// Updating the reservation before the worker changes its `Grid` makes
+    /// concurrent PTY workers observe the same global ceiling.
     pub(crate) fn limit_for(
         &self,
         terminal_id: TerminalId,
-        retained: usize,
-        base_limit: usize,
-        active: bool,
+        retained_rows: usize,
+        columns: usize,
+        base_limit_rows: usize,
+        borrow: bool,
     ) -> usize {
+        let row_bytes = scrollback_row_bytes(columns);
         let mut state = self.state.lock().expect("scrollback budget poisoned");
         let reserved_by_others = state
             .entries
             .iter()
             .filter(|(id, _)| **id != terminal_id)
-            .map(|(_, entry)| entry.reservation)
+            .map(|(_, entry)| entry.reservation_bytes)
             .sum::<usize>();
-        let available = self.max_lines.saturating_sub(reserved_by_others);
-        let limit = if active {
-            available
+        let available_bytes = self.max_bytes.saturating_sub(reserved_by_others);
+        let base_bytes = base_limit_rows.saturating_mul(row_bytes);
+        let limit_bytes = if borrow {
+            available_bytes.max(base_bytes)
         } else {
-            base_limit.min(available)
+            base_bytes.min(available_bytes)
         };
+        let limit_rows = limit_bytes / row_bytes;
         if let Some(entry) = state.entries.get_mut(&terminal_id) {
-            entry.retained = retained;
-            entry.reservation = limit;
-            entry.active = active;
+            entry.retained_rows = retained_rows;
+            entry.retained_bytes = retained_rows.saturating_mul(row_bytes);
+            entry.reservation_bytes = limit_rows.saturating_mul(row_bytes);
         }
-        limit
+        limit_rows
     }
 
-    pub(crate) fn sync(&self, terminal_id: TerminalId, retained: usize, active: bool) {
+    pub(crate) fn sync(&self, terminal_id: TerminalId, retained_rows: usize, columns: usize) {
+        let row_bytes = scrollback_row_bytes(columns);
         if let Some(entry) = self
             .state
             .lock()
@@ -123,18 +179,28 @@ impl ScrollbackBudget {
             .entries
             .get_mut(&terminal_id)
         {
-            entry.retained = retained;
-            entry.active = active;
+            entry.retained_rows = retained_rows;
+            entry.retained_bytes = retained_rows.saturating_mul(row_bytes);
         }
     }
 
-    pub(crate) fn retained_lines(&self) -> usize {
+    pub(crate) fn retained_rows(&self) -> usize {
         self.state
             .lock()
             .expect("scrollback budget poisoned")
             .entries
             .values()
-            .map(|entry| entry.retained)
+            .map(|entry| entry.retained_rows)
+            .sum()
+    }
+
+    pub(crate) fn retained_bytes(&self) -> usize {
+        self.state
+            .lock()
+            .expect("scrollback budget poisoned")
+            .entries
+            .values()
+            .map(|entry| entry.retained_bytes)
             .sum()
     }
 }
@@ -145,6 +211,9 @@ pub(crate) enum TerminalWorkerCommand {
     SendBytes(Vec<u8>),
     Resize(TerminalSize),
     Scroll(i32),
+    /// Informs the worker whether its terminal is the focused one, so the
+    /// scrollback reconciler applies the focused or the inactive limit.
+    SetFocused(bool),
     Shutdown,
 }
 
@@ -207,7 +276,7 @@ impl std::fmt::Debug for TerminalEntry {
 
 #[derive(Debug)]
 struct TerminalEntryState {
-    snapshot: TerminalSnapshot,
+    snapshot: Arc<TerminalSnapshot>,
     recent_output: String,
     output_event_pending: bool,
 }
@@ -234,7 +303,7 @@ impl TerminalRegistry {
     ) -> Result<(), TerminalError> {
         let entry = Arc::new(TerminalEntry {
             state: Mutex::new(TerminalEntryState {
-                snapshot,
+                snapshot: Arc::new(snapshot),
                 recent_output: String::new(),
                 output_event_pending: false,
             }),
@@ -259,6 +328,16 @@ impl TerminalRegistry {
     }
 
     pub fn snapshot(&self, terminal_id: TerminalId) -> Result<TerminalSnapshot, TerminalError> {
+        Ok(self.snapshot_arc(terminal_id)?.as_ref().clone())
+    }
+
+    /// Shares the registry's snapshot without copying its grid cells. State
+    /// dumps and the UI projection layer use this so exactly one full grid
+    /// exists per terminal (the tmux/herdr single-source-of-truth split).
+    pub fn snapshot_arc(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<Arc<TerminalSnapshot>, TerminalError> {
         let entry = self.entry(terminal_id)?;
         Ok(entry
             .state
@@ -266,6 +345,24 @@ impl TerminalRegistry {
             .expect("terminal entry poisoned")
             .snapshot
             .clone())
+    }
+
+    /// Cell-free metadata view for terminals whose grid is not projected.
+    pub fn summary(&self, terminal_id: TerminalId) -> Option<TerminalSummary> {
+        let entry = self
+            .entries
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(&terminal_id)
+            .cloned()?;
+        Some(
+            entry
+                .state
+                .lock()
+                .expect("terminal entry poisoned")
+                .snapshot
+                .summary(),
+        )
     }
 
     pub fn contains_text(
@@ -279,7 +376,7 @@ impl TerminalRegistry {
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         loop {
             if state.recent_output.contains(needle) || state.snapshot.contains_text(needle) {
-                return Ok(state.snapshot.clone());
+                return Ok(state.snapshot.as_ref().clone());
             }
             if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
                 return Err(TerminalError::ProcessExited(terminal_id));
@@ -310,7 +407,7 @@ impl TerminalRegistry {
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         loop {
             if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
-                return Ok(state.snapshot.clone());
+                return Ok(state.snapshot.as_ref().clone());
             }
             let now = Instant::now();
             if now >= deadline {
@@ -375,12 +472,12 @@ impl TerminalRegistry {
             return false;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
-        state.snapshot = snapshot;
+        state.snapshot = Arc::new(snapshot);
         if !output.is_empty() {
             state
                 .recent_output
                 .push_str(&String::from_utf8_lossy(output));
-            trim_recent_output(&mut state.recent_output);
+            trim_recent_output(&mut state.recent_output, MAX_RECENT_OUTPUT_BYTES);
         }
         let should_notify = !state.output_event_pending;
         state.output_event_pending = true;
@@ -394,7 +491,7 @@ impl TerminalRegistry {
     pub(crate) fn take_output_snapshot(
         &self,
         terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, TerminalError> {
+    ) -> Result<Arc<TerminalSnapshot>, TerminalError> {
         let entry = self.entry(terminal_id)?;
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         let snapshot = state.snapshot.clone();
@@ -413,7 +510,27 @@ impl TerminalRegistry {
             return;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
-        state.snapshot.process = TerminalProcessState::Exited { code };
+        let exited = Arc::make_mut(&mut state.snapshot);
+        exited.process = TerminalProcessState::Exited { code };
+        entry.changed.notify_all();
+    }
+
+    /// Replaces a retired terminal's retained state with a bounded tail so
+    /// closed tabs cannot pin full grids in memory until the retirement
+    /// limit evicts them.
+    pub(crate) fn compact_for_retirement(&self, terminal_id: TerminalId) {
+        let Some(entry) = self
+            .entries
+            .lock()
+            .expect("terminal registry poisoned")
+            .get(&terminal_id)
+            .cloned()
+        else {
+            return;
+        };
+        let mut state = entry.state.lock().expect("terminal entry poisoned");
+        state.snapshot = Arc::new(state.snapshot.compacted_tail(RETIRED_SNAPSHOT_TAIL_LINES));
+        trim_recent_output(&mut state.recent_output, RETIRED_RECENT_OUTPUT_BYTES);
         entry.changed.notify_all();
     }
 
@@ -422,6 +539,37 @@ impl TerminalRegistry {
             .lock()
             .expect("terminal registry poisoned")
             .len()
+    }
+
+    /// Estimated heap bytes pinned by the snapshots and recent-output
+    /// buffers the registry retains. Exposed through `waterctl debug
+    /// memory` so operators can watch closed tabs release memory.
+    pub fn retained_snapshot_bytes(&self) -> usize {
+        let entries: Vec<_> = self
+            .entries
+            .lock()
+            .expect("terminal registry poisoned")
+            .values()
+            .cloned()
+            .collect();
+        entries
+            .iter()
+            .map(|entry| {
+                let state = entry.state.lock().expect("terminal entry poisoned");
+                let snapshot = &state.snapshot;
+                let overscan_cells: usize = snapshot
+                    .rows_before
+                    .iter()
+                    .chain(snapshot.rows_after.iter())
+                    .map(|row| row.len())
+                    .sum();
+                (snapshot.cells.len() + overscan_cells)
+                    * std::mem::size_of::<crate::terminal::TerminalCell>()
+                    + state.recent_output.len()
+                    + snapshot.process_name.len()
+                    + snapshot.cwd.len()
+            })
+            .sum()
     }
 
     fn entry(&self, terminal_id: TerminalId) -> Result<Arc<TerminalEntry>, TerminalError> {
@@ -434,11 +582,11 @@ impl TerminalRegistry {
     }
 }
 
-fn trim_recent_output(output: &mut String) {
-    if output.len() <= MAX_RECENT_OUTPUT_BYTES {
+fn trim_recent_output(output: &mut String, max_bytes: usize) {
+    if output.len() <= max_bytes {
         return;
     }
-    let mut remove = output.len() - MAX_RECENT_OUTPUT_BYTES;
+    let mut remove = output.len() - max_bytes;
     while remove < output.len() && !output.is_char_boundary(remove) {
         remove += 1;
     }
@@ -455,12 +603,89 @@ fn process_name_from_program(program: &str) -> String {
         .to_owned()
 }
 
+/// Makes the repo-bundled `alacritty` terminfo discoverable for child shells
+/// when the system has none. The bundled entry's `clear` capability appends
+/// CSI 3 J (erase scrollback), matching kitty semantics; without it, macOS
+/// `xterm-256color`'s `clear` leaves the command line ghosted at the top of
+/// the scrollback because alacritty's ESC[2J pushes the screen into history.
+fn ensure_bundled_terminfo_env() {
+    static READY: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    READY.get_or_init(|| {
+        let Some(dir) = bundled_terminfo_dir() else {
+            return;
+        };
+        let existing = std::env::var("TERMINFO_DIRS").unwrap_or_default();
+        if existing.split(':').any(|entry| {
+            PathBuf::from(entry).join("61").join("alacritty").exists()
+                || PathBuf::from(entry).join("a").join("alacritty").exists()
+        }) {
+            return;
+        }
+        // A trailing empty entry keeps the compiled-in system directories
+        // searchable for every other TERM entry.
+        let merged = if existing.is_empty() {
+            format!("{}:", dir.display())
+        } else {
+            format!("{}:{}", dir.display(), existing)
+        };
+        // SAFETY: called once from the model thread before any terminal
+        // child is spawned; the process reads this variable only through
+        // alacritty_terminal's setup_env immediately afterward.
+        unsafe {
+            std::env::set_var("TERMINFO_DIRS", merged);
+        }
+    });
+}
+
+fn bundled_terminfo_dir() -> Option<PathBuf> {
+    let from_env = std::env::var_os("WATER_TERMINFO_DIR").map(PathBuf::from);
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| {
+        exe.parent().map(|parent| {
+            [
+                parent.join("terminfo"),
+                parent.join("../Resources/terminfo"),
+                parent.join("../share/terminfo"),
+                parent.join("../../assets/terminfo"),
+                parent.join("../../../assets/terminfo"),
+            ]
+        })
+    });
+    let candidates = from_env
+        .into_iter()
+        .chain(exe_dir.into_iter().flatten())
+        .chain([PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terminfo")]);
+    candidates.into_iter().find(|dir| {
+        dir.join("61").join("alacritty").exists() || dir.join("a").join("alacritty").exists()
+    })
+}
+
+/// Best-effort hint for the macOS zone allocator to consolidate freed
+/// regions after large terminal grids were dropped. This is a nudge, not a
+/// guarantee: libmalloc commonly keeps `MADV_FREE` pages counted in `ps`
+/// RSS for reuse (the classic tmux "cleared history, RSS stayed 1GB"
+/// report). The authoritative accounting is `waterctl debug memory`
+/// (`retained_scrollback_bytes` + `registry_snapshot_bytes`), which does
+/// drop as soon as workers and registry entries are released.
+fn release_allocator_pressure() {
+    #[cfg(target_os = "macos")]
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(
+            zone: *mut std::ffi::c_void,
+            tosize: usize,
+        ) -> std::ffi::c_int;
+    }
+    #[cfg(target_os = "macos")]
+    unsafe {
+        malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+    }
+}
+
 pub struct TerminalManager {
     registry: TerminalRegistry,
     theme: TerminalTheme,
-    scrollback_lines: usize,
-    max_total_scrollback_lines: usize,
+    limits: TerminalLimits,
     scrollback_budget: ScrollbackBudget,
+    focused_terminal: Option<TerminalId>,
     event_tx: Sender<TerminalManagerEvent>,
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
@@ -486,53 +711,33 @@ impl std::fmt::Debug for TerminalManager {
 
 impl TerminalManager {
     pub fn new() -> Self {
-        Self::new_with_scrollback(MAX_SCROLLBACK_LINES)
+        Self::new_with_wakeup_and_limits(None, TerminalLimits::default(), TerminalTheme::default())
     }
 
     pub fn new_with_scrollback(scrollback_lines: usize) -> Self {
-        Self::new_with_wakeup_and_scrollback(None, scrollback_lines)
-    }
-
-    pub(crate) fn new_with_wakeup_and_scrollback(
-        event_wakeup: Option<WakeupCallback>,
-        scrollback_lines: usize,
-    ) -> Self {
-        Self::new_with_wakeup_and_scrollback_and_total(
-            event_wakeup,
-            scrollback_lines,
-            MAX_TOTAL_SCROLLBACK_LINES,
-        )
-    }
-
-    pub(crate) fn new_with_wakeup_and_scrollback_and_total(
-        event_wakeup: Option<WakeupCallback>,
-        scrollback_lines: usize,
-        max_total_scrollback_lines: usize,
-    ) -> Self {
-        Self::new_with_wakeup_and_scrollback_and_total_and_theme(
-            event_wakeup,
-            scrollback_lines,
-            max_total_scrollback_lines,
+        Self::new_with_wakeup_and_limits(
+            None,
+            TerminalLimits {
+                scrollback_lines,
+                ..TerminalLimits::default()
+            },
             TerminalTheme::default(),
         )
     }
 
-    pub(crate) fn new_with_wakeup_and_scrollback_and_total_and_theme(
+    pub(crate) fn new_with_wakeup_and_limits(
         event_wakeup: Option<WakeupCallback>,
-        scrollback_lines: usize,
-        max_total_scrollback_lines: usize,
+        limits: TerminalLimits,
         theme: TerminalTheme,
     ) -> Self {
+        let limits = limits.normalized();
         let (event_tx, event_rx) = mpsc::channel();
-        let scrollback_lines = scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
-        let max_total_scrollback_lines =
-            max_total_scrollback_lines.clamp(1, MAX_TOTAL_SCROLLBACK_LINES);
         Self {
             registry: TerminalRegistry::new(),
             theme,
-            scrollback_lines,
-            max_total_scrollback_lines,
-            scrollback_budget: ScrollbackBudget::new(max_total_scrollback_lines),
+            limits,
+            scrollback_budget: ScrollbackBudget::new(limits.max_total_scrollback_bytes),
+            focused_terminal: None,
             event_tx,
             event_rx,
             event_wakeup,
@@ -581,6 +786,7 @@ impl TerminalManager {
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
         let fallback_process_name = process_name_from_program(&program);
+        ensure_bundled_terminfo_env();
         alacritty_terminal::tty::setup_env();
         let options = alacritty_terminal::tty::Options {
             shell: Some(alacritty_terminal::tty::Shell::new(program, args)),
@@ -608,13 +814,14 @@ impl TerminalManager {
             wakeup.clone(),
         )?;
         self.scrollback_budget
-            .register(terminal_id, self.scrollback_lines);
+            .register(terminal_id, self.limits.scrollback_lines, size.columns);
 
         let event_tx = self.event_tx.clone();
         let event_wakeup = self.event_wakeup.clone();
         let registry = self.registry.clone();
         let worker_wakeup = wakeup.clone();
-        let scrollback_lines = self.scrollback_lines;
+        let scrollback_lines = self.limits.scrollback_lines;
+        let inactive_scrollback_lines = self.limits.inactive_scrollback_lines;
         let scrollback_budget = self.scrollback_budget.clone();
         let metadata_executor = self.metadata_executor.clone();
         let theme = self.theme;
@@ -626,6 +833,7 @@ impl TerminalManager {
                         terminal_id,
                         size,
                         scrollback_lines,
+                        inactive_scrollback_lines,
                         scrollback_budget,
                         command_rx,
                         super::worker::WorkerChannels::new(
@@ -684,24 +892,50 @@ impl TerminalManager {
             .send(terminal_id, TerminalWorkerCommand::Scroll(lines))
     }
 
-    pub fn remove(&mut self, terminal_id: TerminalId) {
-        self.stop_worker(terminal_id);
-        self.retired.retain(|retired| *retired != terminal_id);
-        self.registry.remove(terminal_id);
+    /// Updates which terminal currently owns the user's attention. The
+    /// focused terminal keeps its full scrollback reservation and may borrow
+    /// unused budget; a demoted terminal is trimmed to its inactive tail by
+    /// its own worker as soon as the command is applied.
+    pub(crate) fn set_focused_terminal(&mut self, focused: Option<TerminalId>) {
+        if self.focused_terminal == focused {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.focused_terminal, focused);
+        for terminal_id in previous.into_iter().chain(focused) {
+            let value = Some(terminal_id) == focused;
+            let _ = self
+                .registry
+                .send(terminal_id, TerminalWorkerCommand::SetFocused(value));
+        }
     }
 
-    /// Stops a terminal worker after its pane has been closed, but retains the
-    /// final registry snapshot for waiters that race with the auto-close event.
-    /// Retired snapshots are bounded and are removed when the limit is reached.
+    pub fn remove(&mut self, terminal_id: TerminalId) {
+        self.stop_worker(terminal_id);
+        if self.focused_terminal == Some(terminal_id) {
+            self.focused_terminal = None;
+        }
+        self.retired.retain(|retired| *retired != terminal_id);
+        self.registry.remove(terminal_id);
+        release_allocator_pressure();
+    }
+
+    /// Stops a terminal worker after its pane has been closed, but retains a
+    /// compact final snapshot for waiters that race with the auto-close
+    /// event. Retired snapshots are bounded and removed at the limit.
     pub(crate) fn retire(&mut self, terminal_id: TerminalId) {
         self.stop_worker(terminal_id);
+        if self.focused_terminal == Some(terminal_id) {
+            self.focused_terminal = None;
+        }
         self.retired.retain(|retired| *retired != terminal_id);
         self.retired.push_back(terminal_id);
+        self.registry.compact_for_retirement(terminal_id);
         while self.retired.len() > MAX_RETIRED_TERMINALS {
             if let Some(retired) = self.retired.pop_front() {
                 self.registry.remove(retired);
             }
         }
+        release_allocator_pressure();
     }
 
     fn stop_worker(&mut self, terminal_id: TerminalId) {
@@ -731,22 +965,27 @@ impl TerminalManager {
     }
 
     pub fn scrollback_lines(&self) -> usize {
-        self.scrollback_lines
+        self.limits.scrollback_lines
     }
 
-    pub fn scrollback_capacity_lines(&self) -> usize {
-        self.workers
-            .len()
-            .saturating_mul(self.scrollback_lines)
-            .min(self.max_total_scrollback_lines)
+    pub fn inactive_scrollback_lines(&self) -> usize {
+        self.limits.inactive_scrollback_lines
+    }
+
+    pub fn max_total_scrollback_bytes(&self) -> usize {
+        self.limits.max_total_scrollback_bytes
     }
 
     pub fn retained_scrollback_lines(&self) -> usize {
-        self.scrollback_budget.retained_lines()
+        self.scrollback_budget.retained_rows()
     }
 
-    pub fn max_total_scrollback_lines(&self) -> usize {
-        self.max_total_scrollback_lines
+    pub fn retained_scrollback_bytes(&self) -> usize {
+        self.scrollback_budget.retained_bytes()
+    }
+
+    pub fn retained_snapshot_bytes(&self) -> usize {
+        self.registry.retained_snapshot_bytes()
     }
 
     pub fn shutdown_all(&mut self) {
@@ -775,22 +1014,62 @@ mod tests {
 
     #[test]
     fn active_terminal_borrows_and_releases_global_scrollback_budget() {
-        let budget = ScrollbackBudget::new(100);
+        let columns = 16;
+        let row = scrollback_row_bytes(columns);
+        let budget = ScrollbackBudget::new(row * 1_000);
         let first = TerminalId::new(1);
         let second = TerminalId::new(2);
-        budget.register(first, 10);
-        budget.register(second, 10);
+        budget.register(first, 100, columns);
+        budget.register(second, 100, columns);
 
-        assert_eq!(budget.limit_for(first, 0, 10, true), 90);
-        assert_eq!(budget.limit_for(second, 0, 10, false), 10);
+        assert_eq!(budget.limit_for(first, 0, columns, 100, true), 900);
+        assert_eq!(budget.limit_for(second, 0, columns, 100, false), 100);
 
-        assert_eq!(budget.limit_for(first, 0, 10, false), 10);
-        assert_eq!(budget.limit_for(second, 0, 10, true), 90);
+        assert_eq!(budget.limit_for(first, 0, columns, 100, false), 100);
+        assert_eq!(budget.limit_for(second, 0, columns, 100, true), 900);
 
-        budget.sync(second, 12, true);
-        assert_eq!(budget.retained_lines(), 12);
+        budget.sync(second, 12, columns);
+        assert_eq!(budget.retained_rows(), 12);
+        assert_eq!(budget.retained_bytes(), 12 * row);
         budget.unregister(second);
-        assert_eq!(budget.retained_lines(), 0);
+        assert_eq!(budget.retained_rows(), 0);
+    }
+
+    #[test]
+    fn budget_accounts_wide_rows_in_bytes_not_rows() {
+        let row80 = scrollback_row_bytes(80);
+        let row160 = scrollback_row_bytes(160);
+        let budget = ScrollbackBudget::new(row80 * 40);
+        let terminal_id = TerminalId::new(7);
+        // A 40-row 80-column history fills the budget exactly when borrowing.
+        assert_eq!(budget.limit_for(terminal_id, 0, 80, 4, true), 40);
+        // 160-column rows cost roughly twice as many bytes, so the same
+        // budget yields far fewer of them and never exceeds the byte cap.
+        let wide_rows = budget.limit_for(terminal_id, 0, 160, 4, true);
+        assert!(wide_rows < 40);
+        assert!(wide_rows.saturating_mul(row160) <= row80 * 40);
+    }
+
+    #[test]
+    fn retired_snapshot_compaction_keeps_the_visible_tail() {
+        use crate::terminal::TerminalCell;
+        let terminal_id = TerminalId::new(3);
+        let size = TerminalSize::new(4, 60);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, size);
+        for row in 0..size.lines {
+            snapshot.cells[row * size.columns] = TerminalCell {
+                character: char::from(b'0' + (row % 10) as u8),
+                ..TerminalCell::default()
+            };
+        }
+        snapshot.revision = 41;
+        let compacted = snapshot.compacted_tail(24);
+        assert_eq!(compacted.size.lines, 24);
+        assert_eq!(compacted.cells.len(), 24 * size.columns);
+        assert_eq!(compacted.cells[0].character, '6');
+        assert_eq!(compacted.cells[23 * size.columns].character, '9');
+        assert!(compacted.rows_before.is_empty());
+        assert_eq!(compacted.revision, 41);
     }
 
     #[test]

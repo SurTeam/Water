@@ -16,9 +16,30 @@ pub const MAX_COLUMNS: usize = 512;
 pub const MAX_LINES: usize = 256;
 /// Maximum normal scrollback configured for an individual terminal.
 pub const MAX_SCROLLBACK_LINES: usize = 10_000;
-/// Hard safety cap for the combined temporary scrollback of all terminals.
-pub const MAX_TOTAL_SCROLLBACK_LINES: usize = 100_000;
+/// Default per-terminal scrollback retained while a terminal is focused.
+/// Matches the conservative tmux `history-limit` default.
+pub const DEFAULT_SCROLLBACK_LINES: usize = 2_000;
+/// Default per-terminal scrollback retained once a terminal loses focus.
+/// Background tabs keep only their tail so many long tabs cannot exhaust
+/// process memory.
+pub const DEFAULT_INACTIVE_SCROLLBACK_LINES: usize = 500;
+/// Default aggregate byte budget for all terminals' scrollback grids.
+pub const DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES: usize = 64 * 1024 * 1024;
+pub const MIN_MAX_TOTAL_SCROLLBACK_BYTES: usize = 64 * 1024;
+pub const MAX_TOTAL_SCROLLBACK_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
+/// Approximate on-heap cost of one cell in the worker's alacritty grid.
+pub const ANSI_SCROLLBACK_CELL_BYTES: usize = std::mem::size_of::<Cell>();
+const SCROLLBACK_ROW_OVERHEAD_BYTES: usize = 64;
+
+/// Estimated heap cost of one scrollback row at the given width.
+///
+/// Scrollback budgets must account in bytes, not rows: a 10,000-row history
+/// at 512 columns costs an order of magnitude more than at 80 columns.
+pub const fn scrollback_row_bytes(columns: usize) -> usize {
+    let columns = if columns < 1 { 1 } else { columns };
+    columns.saturating_mul(ANSI_SCROLLBACK_CELL_BYTES) + SCROLLBACK_ROW_OVERHEAD_BYTES
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSize {
@@ -132,6 +153,22 @@ pub struct TerminalCursor {
     pub visible: bool,
 }
 
+/// Cell-free projection of a terminal, safe to embed in state dumps for
+/// tabs that are not currently displayed. Presentations fetch full grids
+/// for visible panes only (tmux/herdr keep history behind one surface).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalSummary {
+    pub terminal_id: TerminalId,
+    pub size: TerminalSize,
+    pub revision: u64,
+    pub process: TerminalProcessState,
+    pub display_offset: usize,
+    pub viewport_position: i64,
+    pub cursor: TerminalCursor,
+    pub process_name: String,
+    pub cwd: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub terminal_id: TerminalId,
@@ -212,6 +249,67 @@ impl TerminalSnapshot {
 
     pub fn contains_text(&self, needle: &str) -> bool {
         self.visible_text().contains(needle)
+    }
+
+    /// Cheap, cell-free projection of this snapshot's identity and metadata.
+    pub fn summary(&self) -> TerminalSummary {
+        TerminalSummary {
+            terminal_id: self.terminal_id,
+            size: self.size,
+            revision: self.revision,
+            process: self.process,
+            display_offset: self.display_offset,
+            viewport_position: self.viewport_position,
+            cursor: self.cursor,
+            process_name: self.process_name.clone(),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    /// Rebuilds this snapshot keeping only its last `max_rows` viewport rows,
+    /// dropping overscan context. Used when retiring a closed terminal so
+    /// race-window waiters still see the visible tail without pinning the
+    /// full grid in memory.
+    pub fn compacted_tail(&self, max_rows: usize) -> Self {
+        let columns = self.size.columns;
+        let rows = self.size.lines;
+        let keep = rows.min(max_rows.max(1)).max(1);
+        let removed = rows.saturating_sub(keep);
+        let start = removed.saturating_mul(columns).min(self.cells.len());
+        let mut cells = self.cells[start..].to_vec();
+        let want = keep.saturating_mul(columns);
+        if cells.len() < want {
+            cells.resize(want, TerminalCell::default());
+        } else {
+            cells.truncate(want);
+        }
+        Self {
+            terminal_id: self.terminal_id,
+            size: TerminalSize {
+                columns,
+                lines: keep,
+            },
+            process_name: self.process_name.clone(),
+            cwd: self.cwd.clone(),
+            // The retired history is gone, so any pinned viewport is moot.
+            display_offset: 0,
+            viewport_position: self.viewport_position,
+            cursor: TerminalCursor {
+                row: self
+                    .cursor
+                    .row
+                    .saturating_sub(removed)
+                    .min(keep.saturating_sub(1)),
+                column: self.cursor.column,
+                visible: self.cursor.visible,
+            },
+            modes: self.modes,
+            process: self.process,
+            revision: self.revision,
+            cells,
+            rows_before: Vec::new(),
+            rows_after: Vec::new(),
+        }
     }
 
     pub fn from_term<T: EventListener>(

@@ -37,7 +37,8 @@ enum SettingField {
     DefaultColumns,
     DefaultLines,
     ScrollbackLines,
-    MaxTotalScrollbackLines,
+    InactiveScrollbackLines,
+    MaxTotalScrollbackBytes,
     FontFamily,
     FontSize,
     LineHeight,
@@ -109,7 +110,8 @@ impl SettingField {
             Self::DefaultColumns => "default-columns",
             Self::DefaultLines => "default-lines",
             Self::ScrollbackLines => "scrollback-lines",
-            Self::MaxTotalScrollbackLines => "max-total-scrollback-lines",
+            Self::InactiveScrollbackLines => "inactive-scrollback-lines",
+            Self::MaxTotalScrollbackBytes => "max-total-scrollback-bytes",
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
             Self::LineHeight => "line-height",
@@ -514,8 +516,11 @@ impl SettingsView {
             SettingField::DefaultColumns => self.config.terminal.default_columns.to_string(),
             SettingField::DefaultLines => self.config.terminal.default_lines.to_string(),
             SettingField::ScrollbackLines => self.config.terminal.scrollback_lines.to_string(),
-            SettingField::MaxTotalScrollbackLines => {
-                self.config.terminal.max_total_scrollback_lines.to_string()
+            SettingField::InactiveScrollbackLines => {
+                self.config.terminal.inactive_scrollback_lines.to_string()
+            }
+            SettingField::MaxTotalScrollbackBytes => {
+                self.config.terminal.max_total_scrollback_bytes.to_string()
             }
             SettingField::FontFamily => self.config.terminal.font_family.clone(),
             SettingField::FontSize => format_float(self.config.terminal.font_size),
@@ -619,8 +624,13 @@ impl SettingsView {
             SettingField::ScrollbackLines => {
                 self.config.terminal.scrollback_lines = parse_usize(&value, "终端滚动历史")?
             }
-            SettingField::MaxTotalScrollbackLines => {
-                self.config.terminal.max_total_scrollback_lines = parse_usize(&value, "总滚动历史")?
+            SettingField::InactiveScrollbackLines => {
+                self.config.terminal.inactive_scrollback_lines =
+                    parse_usize(&value, "非活跃终端滚动历史")?
+            }
+            SettingField::MaxTotalScrollbackBytes => {
+                self.config.terminal.max_total_scrollback_bytes =
+                    parse_usize(&value, "滚动历史总字节预算")?
             }
             SettingField::FontFamily => {
                 if value.is_empty() {
@@ -1112,15 +1122,23 @@ impl Render for SettingsView {
             self.render_setting(
                 SettingField::ScrollbackLines,
                 "每个终端滚动历史",
-                "每个 PTY 的常规历史行数，最大 10000",
+                "焦点终端保留的滚动行数，最大 10000",
                 ApplyKind::Restart,
                 theme,
                 cx,
             ),
             self.render_setting(
-                SettingField::MaxTotalScrollbackLines,
-                "总滚动历史上限",
-                "所有 PTY 临时借用滚动历史的总预算，最大 100000",
+                SettingField::InactiveScrollbackLines,
+                "非活跃终端滚动历史",
+                "失去焦点后每个后台标签仅保留的行尾滚动行数",
+                ApplyKind::Restart,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::MaxTotalScrollbackBytes,
+                "滚动历史总字节预算",
+                "所有 PTY 滚动网格共享的堆字节预算（按宽度计价，而非行数）",
                 ApplyKind::Restart,
                 theme,
                 cx,

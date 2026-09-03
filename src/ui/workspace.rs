@@ -173,7 +173,8 @@ struct TerminalPrepaintState {
 }
 
 struct TerminalRenderElement {
-    snapshot: TerminalSnapshot,
+    /// Shared with the terminal registry; painting never copies the grid.
+    snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
     options: TerminalRenderOptions,
     font_family: String,
@@ -1371,7 +1372,7 @@ impl WorkspaceView {
             focused_pane_for_workspace(&snapshot, self.selected_workspace, self.focused_pane);
         self.snapshot = snapshot;
         self.scroll_accumulators.retain(|terminal_id, _| {
-            terminal_snapshot_in_snapshot(&self.snapshot, *terminal_id).is_some()
+            terminal_projection_in_snapshot(&self.snapshot, *terminal_id).is_some()
         });
         if self
             .context_menu
@@ -2192,7 +2193,7 @@ impl WorkspaceView {
                 pane_id,
                 surface_kind,
                 surface_state,
-                terminal_snapshot,
+                terminal,
                 ..
             } => {
                 let pane_id = *pane_id;
@@ -2215,7 +2216,8 @@ impl WorkspaceView {
                     SurfaceState::Terminal(terminal) => Some(terminal.terminal_id),
                     SurfaceState::Empty(_) => None,
                 };
-                let mouse_modes = terminal_snapshot
+                let terminal_grid = terminal.as_ref().and_then(|p| p.snapshot.clone());
+                let mouse_modes = terminal_grid
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
@@ -2223,9 +2225,14 @@ impl WorkspaceView {
                     && self.config.features.mouse_reporting)
                     && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll);
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
-                    terminal_snapshot
-                        .as_ref()
+                    terminal_grid
                         .map(|snapshot| {
+                            let ime_text = self.ime_marked_text_for(snapshot.terminal_id);
+                            let scroll_remainder = if smooth_scroll {
+                                self.terminal_scroll_remainder_for_snapshot(&snapshot)
+                            } else {
+                                0.0
+                            };
                             render_terminal_snapshot(
                                 snapshot,
                                 self.selection,
@@ -2233,15 +2240,11 @@ impl WorkspaceView {
                                     metrics,
                                     theme,
                                     cursor_focused: active && window_active,
-                                    scroll_remainder: if smooth_scroll {
-                                        self.terminal_scroll_remainder_for_snapshot(snapshot)
-                                    } else {
-                                        0.0
-                                    },
+                                    scroll_remainder,
                                 },
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
-                                self.ime_marked_text_for(snapshot.terminal_id),
+                                ime_text,
                                 self.terminal_bounds.clone(),
                                 active.then(|| (view.clone(), self.focus_handle.clone())),
                             )
@@ -2552,19 +2555,52 @@ fn terminal_snapshot_in_snapshot(
     snapshot: &ModelSnapshot,
     terminal_id: TerminalId,
 ) -> Option<&TerminalSnapshot> {
-    if snapshot.workspaces.is_empty() {
+    terminal_projection_in_snapshot(snapshot, terminal_id)
+        .and_then(|projection| projection.snapshot.as_deref())
+}
+
+/// Whether the terminal is projected anywhere in the state (grid or summary
+/// only). Hidden tabs project summaries, so this is the right liveness test
+/// for per-terminal UI bookkeeping.
+fn terminal_projection_in_snapshot(
+    snapshot: &ModelSnapshot,
+    terminal_id: TerminalId,
+) -> Option<&crate::app::model::TerminalProjection> {
+    let tabs = if snapshot.workspaces.is_empty() {
         snapshot
             .workspace
             .as_ref()
             .into_iter()
             .flat_map(|workspace| workspace.tabs.iter())
-            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+            .collect::<Vec<_>>()
     } else {
         snapshot
             .workspaces
             .iter()
             .flat_map(|workspace| workspace.tabs.iter())
-            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+            .collect::<Vec<_>>()
+    };
+    tabs.into_iter()
+        .find_map(|tab| terminal_projection_for_id(&tab.tree, terminal_id))
+}
+
+fn terminal_projection_for_id(
+    tree: &PaneTreeDump,
+    terminal_id: TerminalId,
+) -> Option<&crate::app::model::TerminalProjection> {
+    match tree {
+        PaneTreeDump::Leaf {
+            surface_state,
+            terminal,
+            ..
+        } => match surface_state {
+            SurfaceState::Terminal(terminal_state) if terminal_state.terminal_id == terminal_id => {
+                terminal.as_deref()
+            }
+            SurfaceState::Terminal(_) | SurfaceState::Empty(_) => None,
+        },
+        PaneTreeDump::Split { first, second, .. } => terminal_projection_for_id(first, terminal_id)
+            .or_else(|| terminal_projection_for_id(second, terminal_id)),
     }
 }
 
@@ -2906,13 +2942,19 @@ fn update_terminal_selection_for_snapshot(
     let Some(terminal_id) = selection.as_ref().map(|selection| selection.terminal_id) else {
         return;
     };
-    let Some(previous_snapshot) = terminal_snapshot_in_snapshot(previous, terminal_id) else {
-        return;
-    };
-    let Some(next_snapshot) = terminal_snapshot_in_snapshot(next, terminal_id) else {
+    if terminal_projection_in_snapshot(next, terminal_id).is_none() {
         // The terminal was removed from every workspace. Do not leave a
         // selection referring to a dead projection.
         *selection = None;
+        return;
+    }
+    // Viewport drift tracking needs both grids; hidden tabs only project
+    // summaries, in which case the selection stays as-is until the tab is
+    // displayed again.
+    let (Some(previous_snapshot), Some(next_snapshot)) = (
+        terminal_snapshot_in_snapshot(previous, terminal_id),
+        terminal_snapshot_in_snapshot(next, terminal_id),
+    ) else {
         return;
     };
     let Some(selection_state) = selection.as_mut() else {
@@ -2942,29 +2984,20 @@ fn terminal_snapshot_for_id(
     tree: &PaneTreeDump,
     terminal_id: TerminalId,
 ) -> Option<&TerminalSnapshot> {
-    match tree {
-        PaneTreeDump::Leaf {
-            surface_state,
-            terminal_snapshot,
-            ..
-        } => match surface_state {
-            SurfaceState::Terminal(terminal) if terminal.terminal_id == terminal_id => {
-                terminal_snapshot.as_deref()
-            }
-            SurfaceState::Terminal(_) | SurfaceState::Empty(_) => None,
-        },
-        PaneTreeDump::Split { first, second, .. } => terminal_snapshot_for_id(first, terminal_id)
-            .or_else(|| terminal_snapshot_for_id(second, terminal_id)),
-    }
+    terminal_projection_for_id(tree, terminal_id)?
+        .snapshot
+        .as_deref()
 }
 
 fn terminal_snapshot_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<&TerminalSnapshot> {
     match tree {
         PaneTreeDump::Leaf {
             pane_id: leaf_id,
-            terminal_snapshot,
+            terminal,
             ..
-        } if *leaf_id == pane_id => terminal_snapshot.as_deref(),
+        } if *leaf_id == pane_id => terminal
+            .as_ref()
+            .and_then(|projection| projection.snapshot.as_deref()),
         PaneTreeDump::Leaf { .. } => None,
         PaneTreeDump::Split { first, second, .. } => terminal_snapshot_for_pane(first, pane_id)
             .or_else(|| terminal_snapshot_for_pane(second, pane_id)),
@@ -3612,7 +3645,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
 
 #[allow(clippy::too_many_arguments)]
 fn render_terminal_snapshot(
-    snapshot: &TerminalSnapshot,
+    snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
     options: TerminalRenderOptions,
     font_family: &str,
@@ -3622,7 +3655,7 @@ fn render_terminal_snapshot(
     input_handler: Option<(Entity<WorkspaceView>, FocusHandle)>,
 ) -> AnyElement {
     TerminalRenderElement {
-        snapshot: snapshot.clone(),
+        snapshot,
         selection,
         options,
         font_family: font_family.to_owned(),

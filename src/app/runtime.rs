@@ -12,7 +12,7 @@ use crate::command::{
 use crate::config::AppConfig;
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
-use crate::terminal::{TerminalSnapshot, TerminalTheme, WakeupCallback};
+use crate::terminal::{TerminalSnapshot, WakeupCallback};
 
 #[derive(Debug)]
 enum ModelRequest {
@@ -281,9 +281,6 @@ impl CommandClient {
 
 #[derive(Debug, Clone)]
 struct ModelThreadConfig {
-    terminal_scrollback_lines: usize,
-    terminal_max_total_scrollback_lines: usize,
-    terminal_theme: TerminalTheme,
     app_config: AppConfig,
 }
 
@@ -301,15 +298,7 @@ impl ModelHost {
 
     pub fn start_with_config(config: AppConfig) -> Self {
         let config = config.normalized();
-        let theme_colors = config.theme.colors();
         let terminal_config = ModelThreadConfig {
-            terminal_scrollback_lines: config.terminal.scrollback_lines,
-            terminal_max_total_scrollback_lines: config.terminal.max_total_scrollback_lines,
-            terminal_theme: TerminalTheme::new(
-                theme_colors.terminal_foreground,
-                theme_colors.terminal_background,
-                theme_colors.cursor_background,
-            ),
             app_config: config.clone(),
         };
         let (request_tx, request_rx) = mpsc::channel();
@@ -382,20 +371,9 @@ fn run_model_thread(
     terminal_wakeup_pending: Arc<AtomicBool>,
     terminal_config: ModelThreadConfig,
 ) {
-    let ModelThreadConfig {
-        terminal_scrollback_lines,
-        terminal_max_total_scrollback_lines,
-        terminal_theme,
-        app_config,
-    } = terminal_config;
-    let mut dispatcher = CommandDispatcher::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
-        operations,
-        terminal_wakeup,
-        terminal_scrollback_lines,
-        terminal_max_total_scrollback_lines,
-        terminal_theme,
-        app_config,
-    );
+    let ModelThreadConfig { app_config } = terminal_config;
+    let mut dispatcher =
+        CommandDispatcher::with_operations_and_config(operations, terminal_wakeup, app_config);
     let _ = snapshot_tx.send(dispatcher.state_dump());
 
     while let Ok(request) = request_rx.recv() {

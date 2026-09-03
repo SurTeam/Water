@@ -29,7 +29,9 @@ pub use config::{
 };
 pub use ids::{OperationId, PaneId, SessionId, SurfaceId, TabId, TerminalId, WorkspaceId};
 pub use terminal::{
-    MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_LINES, TerminalCell,
-    TerminalCellFlags, TerminalColor, TerminalCursor, TerminalModes, TerminalProcessState,
-    TerminalSize, TerminalSnapshot,
+    DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
+    DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES, MAX_SCROLLBACK_LINES,
+    MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES, TerminalCell, TerminalCellFlags,
+    TerminalColor, TerminalCursor, TerminalLimits, TerminalModes, TerminalProcessState,
+    TerminalSize, TerminalSnapshot, TerminalSummary, scrollback_row_bytes,
 };

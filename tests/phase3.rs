@@ -35,12 +35,25 @@ fn first_terminal(tree: &PaneTreeDump) -> Option<(water::ids::PaneId, water::ids
 fn first_terminal_snapshot(tree: &PaneTreeDump) -> Option<&water::terminal::TerminalSnapshot> {
     match tree {
         PaneTreeDump::Leaf {
-            terminal_snapshot: Some(snapshot),
+            terminal: Some(projection),
             ..
-        } => Some(snapshot),
+        } => projection.snapshot.as_deref(),
         PaneTreeDump::Leaf { .. } => None,
         PaneTreeDump::Split { first, second, .. } => {
             first_terminal_snapshot(first).or_else(|| first_terminal_snapshot(second))
+        }
+    }
+}
+
+fn first_terminal_summary(tree: &PaneTreeDump) -> Option<&water::terminal::TerminalSummary> {
+    match tree {
+        PaneTreeDump::Leaf {
+            terminal: Some(projection),
+            ..
+        } => Some(&projection.summary),
+        PaneTreeDump::Leaf { .. } => None,
+        PaneTreeDump::Split { first, second, .. } => {
+            first_terminal_summary(first).or_else(|| first_terminal_summary(second))
         }
     }
 }
@@ -349,11 +362,20 @@ fn all_workspace_projections_include_terminal_snapshots() {
     for workspace in &state.workspaces {
         for tab in &workspace.tabs {
             assert!(
-                first_terminal_snapshot(&tab.tree).is_some(),
-                "workspace {} tab {} lacks a terminal snapshot",
+                first_terminal_summary(&tab.tree).is_some(),
+                "workspace {} tab {} lacks a terminal summary",
                 workspace.id,
                 tab.id
             );
+            // Grid cells are projected for the displayed tab of every
+            // workspace; hidden tabs stay metadata-only.
+            if workspace.active_tab == Some(tab.id) {
+                assert!(
+                    first_terminal_snapshot(&tab.tree).is_some(),
+                    "displayed tab {} lacks a terminal grid",
+                    tab.id
+                );
+            }
         }
     }
     let second_workspace = state
@@ -367,6 +389,54 @@ fn all_workspace_projections_include_terminal_snapshots() {
             .visible_text()
             .contains("WATER_INACTIVE_SNAPSHOT")
     );
+}
+
+#[test]
+fn hidden_tabs_project_summaries_only_and_fetch_grids_per_terminal() {
+    let mut dispatcher = CommandDispatcher::new();
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    let first_tab = match dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    ) {
+        OperationResult::TabCreated { tab_id } => tab_id,
+        result => panic!("unexpected result: {result:?}"),
+    };
+    let first_terminal = dispatcher
+        .state_dump()
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.tabs.iter().find(|tab| tab.id == first_tab))
+        .and_then(|tab| first_terminal_summary(&tab.tree))
+        .map(|summary| summary.terminal_id)
+        .expect("first tab projects a terminal summary");
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+
+    let state = dispatcher.state_dump();
+    let workspace = state.workspace.as_ref().unwrap();
+    let hidden = workspace
+        .tabs
+        .iter()
+        .find(|tab| tab.id == first_tab)
+        .expect("hidden tab present");
+    assert_eq!(workspace.active_tab, Some(workspace.tabs[1].id));
+    let summary = first_terminal_summary(&hidden.tree).expect("hidden tab keeps a summary");
+    assert_eq!(summary.terminal_id, first_terminal);
+    assert!(
+        first_terminal_snapshot(&hidden.tree).is_none(),
+        "hidden tabs must not duplicate grid cells into the projection"
+    );
+
+    // The registry remains the single source of truth for hidden grids.
+    let fetched = dispatcher.terminal_snapshot(first_terminal).unwrap();
+    assert_eq!(fetched.terminal_id, first_terminal);
+    assert_eq!(fetched.size.columns, 80);
 }
 
 #[test]
@@ -580,5 +650,193 @@ fn closing_a_pane_terminates_the_terminal_process_group() {
             .terminal_registry()
             .snapshot(terminal_id)
             .is_err()
+    );
+}
+
+#[test]
+fn background_tab_scrollback_is_trimmed_to_the_inactive_tail() {
+    let mut config = AppConfig::default();
+    config.terminal.scrollback_lines = 100;
+    config.terminal.inactive_scrollback_lines = 10;
+    let mut dispatcher = CommandDispatcher::with_config(config);
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let first_terminal = {
+        let state = dispatcher.state_dump();
+        let tab = &state.workspace.as_ref().unwrap().tabs[0];
+        first_terminal_summary(&tab.tree)
+            .expect("first tab projects a summary")
+            .terminal_id
+    };
+    // Opening and focusing a second tab demotes the first one.
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+
+    let flood = dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Terminal(TerminalCommand::SendText {
+            terminal_id: Some(first_terminal),
+            pane_id: None,
+            text: "for i in $(seq 1 200); do echo BACKGROUND_$i; done\n".to_owned(),
+        }),
+    );
+    let _ = flood;
+    dispatcher
+        .wait_terminal_contains(first_terminal, "BACKGROUND_200", Duration::from_secs(10))
+        .expect("background tab output reaches the registry");
+
+    let stats = dispatcher.memory_stats();
+    // Without focus-aware trimming this background tab alone would retain
+    // its full 100-row limit; the cap below only holds if the worker honored
+    // the 10-row inactive tail (plus room for the focused tab's startup).
+    assert!(
+        stats.retained_scrollback_lines <= 40,
+        "background tab must stay at the inactive tail: {stats:?}"
+    );
+    assert_eq!(stats.scrollback_lines, 100);
+    assert_eq!(stats.inactive_scrollback_lines, 10);
+}
+
+fn focused_terminal_id(dispatcher: &CommandDispatcher) -> water::ids::TerminalId {
+    let state = dispatcher.state_dump();
+    let workspace = state.workspace.as_ref().expect("active workspace");
+    let tab = &workspace.tabs[workspace.tabs.len() - 1];
+    first_terminal_summary(&tab.tree)
+        .expect("active tab projects a summary")
+        .terminal_id
+}
+
+fn send_text(dispatcher: &mut CommandDispatcher, terminal_id: water::ids::TerminalId, text: &str) {
+    dispatch_ok(
+        dispatcher,
+        AppCommand::Terminal(TerminalCommand::SendText {
+            terminal_id: Some(terminal_id),
+            pane_id: None,
+            text: text.to_owned(),
+        }),
+    );
+}
+
+#[test]
+fn clear_command_erases_scrollback_via_bundled_terminfo() {
+    let mut dispatcher = CommandDispatcher::new();
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let terminal_id = focused_terminal_id(&dispatcher);
+    let registry = dispatcher.terminal_registry();
+
+    send_text(
+        &mut dispatcher,
+        terminal_id,
+        "for i in $(seq 1 30); do echo SCROLLBACK_LINE$i; done\n",
+    );
+    registry
+        .contains_text(terminal_id, "SCROLLBACK_LINE30", Duration::from_secs(10))
+        .expect("flood reaches the terminal");
+
+    // The marker must be distinguishable from the shell's raw input echo:
+    // the typed command shows `RESULT_$((6*7))` while only the executed
+    // output contains `RESULT_42`.
+    send_text(
+        &mut dispatcher,
+        terminal_id,
+        "clear; echo RESULT_$((6*7))\n",
+    );
+    registry
+        .contains_text(terminal_id, "RESULT_42", Duration::from_secs(10))
+        .expect("clear and marker executed");
+
+    let snapshot = registry.snapshot(terminal_id).unwrap();
+    let visible = snapshot.visible_text();
+    assert!(visible.contains("RESULT_42"));
+    assert!(
+        !visible.contains("SCROLLBACK_LINE15"),
+        "cleared output must not remain in the viewport: {visible}"
+    );
+    assert!(
+        snapshot.rows_before.is_empty(),
+        "clear must erase scrollback; CSI 3J support is provided by the bundled terminfo entry"
+    );
+}
+
+#[test]
+fn closing_tabs_releases_retained_scrollback_memory() {
+    let mut config = AppConfig::default();
+    config.terminal.scrollback_lines = 2000;
+    config.terminal.inactive_scrollback_lines = 500;
+    let mut dispatcher = CommandDispatcher::with_config(config);
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    let mut terminals = Vec::new();
+    for prefix in ["T1", "T2"] {
+        dispatch_ok(
+            &mut dispatcher,
+            AppCommand::Tab(TabCommand::New { title: None }),
+        );
+        let terminal_id = focused_terminal_id(&dispatcher);
+        send_text(
+            &mut dispatcher,
+            terminal_id,
+            &format!("for i in $(seq 1 3000); do echo {prefix}FLOOD$i; done\n"),
+        );
+        dispatcher
+            .terminal_registry()
+            .contains_text(
+                terminal_id,
+                &format!("{prefix}FLOOD3000"),
+                Duration::from_secs(15),
+            )
+            .expect("flood reaches the terminal");
+        terminals.push(terminal_id);
+    }
+
+    let before = dispatcher.memory_stats();
+    assert!(before.retained_scrollback_bytes > 4_000_000, "{before:?}");
+
+    let first_tab = {
+        let state = dispatcher.state_dump();
+        state.workspace.as_ref().unwrap().tabs[0].id
+    };
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::Close {
+            tab_id: Some(first_tab),
+        }),
+    );
+
+    let after = dispatcher.memory_stats();
+    assert!(
+        after.retained_scrollback_bytes < before.retained_scrollback_bytes,
+        "closed tabs must release their scrollback budget: {before:?} -> {after:?}"
+    );
+    assert!(
+        after.registry_snapshot_bytes < before.registry_snapshot_bytes,
+        "closed tabs must release their registry snapshots: {before:?} -> {after:?}"
+    );
+    // The surviving tab keeps its own (focused) scrollback — that is the
+    // remaining budget, not a leak.
+    assert!(
+        dispatcher.terminal_registry().terminal_count() == 1,
+        "only the surviving tab keeps a registry entry"
+    );
+    assert!(
+        after.retained_scrollback_bytes >= 3_000_000,
+        "the focused surviving tab keeps its history: {after:?}"
     );
 }

@@ -1,0 +1,28 @@
+# Water-bundled terminal database entry.
+#
+# Named "alacritty" because Water embeds alacritty_terminal and its
+# `tty::setup_env` selects TERM=alacritty when this entry is discoverable
+# through TERMINFO_DIRS. Derived from the official alacritty terminfo
+# (https://github.com/alacritty/alacritty, Apache-2.0) with one intentional
+# deviation: `clear` appends CSI 3 J so scrollback is erased together with
+# the viewport. Without 3 J, alacritty's ESC[2J semantics push the screen
+# into history, so `clear` leaves the command line and prompt ghosted one
+# row above the fresh viewport (kitty ships the same 2J+3J combination).
+#
+# Compile with: tic -x -o assets/terminfo assets/terminfo/alacritty.src.terminfo
+
+alacritty|alacritty terminal emulator,
+    use=xterm-256color,
+    AX,
+    XT,
+    E3=\E[3J,
+    clear=\E[H\E[2J\E[3J,
+    Smulx=\E[4\:%p1%dm,
+    Sync=\E[?2026%?%p1%{1}%-%tl%eh%;,
+    Cs=\E]12;%p1%s\007,
+    Cr=\E]112\007,
+    Ms=\E]52;%p1%s;%p2%s\007,
+    Se=\E[2 q,
+    Ss=\E[%p1%d q,
+    kxIN=\E[I,
+    kxOUT=\E[O,

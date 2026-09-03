@@ -1,15 +1,17 @@
 use std::path::PathBuf;
 
 use crate::{
-    app::model::{ApplicationModel, MemoryStats, PaneTreeDump, SplitRequest, StateDump},
+    app::model::{
+        ApplicationModel, MemoryStats, PaneTreeDump, SplitRequest, StateDump, TerminalProjection,
+    },
     config::AppConfig,
     event::{AppEvent, AppEventKind, EventBus},
     ids::{IdAllocator, OperationId, PaneId, SessionId, TerminalId, WorkspaceId},
     pane::SplitAxis,
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::{
-        TerminalError, TerminalManager, TerminalRegistry, TerminalSize, TerminalSnapshot,
-        TerminalTheme,
+        TerminalError, TerminalLimits, TerminalManager, TerminalRegistry, TerminalSize,
+        TerminalSnapshot, TerminalTheme,
     },
 };
 
@@ -53,13 +55,24 @@ impl CommandDispatcher {
     /// User settings are captured by the model thread and are used for every
     /// subsequently created default terminal.
     pub fn with_config(config: AppConfig) -> Self {
+        Self::with_operations_and_config(OperationRegistry::new(), None, config)
+    }
+
+    pub(crate) fn with_operations_and_config(
+        operations: OperationRegistry,
+        wakeup: Option<crate::terminal::WakeupCallback>,
+        config: AppConfig,
+    ) -> Self {
         let config = config.normalized();
         let theme = config.theme.colors();
-        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
-            OperationRegistry::new(),
-            None,
-            config.terminal.scrollback_lines,
-            config.terminal.max_total_scrollback_lines,
+        Self::with_operations_and_terminal_wakeup_and_limits_and_config(
+            operations,
+            wakeup,
+            TerminalLimits {
+                scrollback_lines: config.terminal.scrollback_lines,
+                inactive_scrollback_lines: config.terminal.inactive_scrollback_lines,
+                max_total_scrollback_bytes: config.terminal.max_total_scrollback_bytes,
+            },
             TerminalTheme::new(
                 theme.terminal_foreground,
                 theme.terminal_background,
@@ -70,11 +83,13 @@ impl CommandDispatcher {
     }
 
     pub fn with_scrollback_lines(scrollback_lines: usize) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total(
+        Self::with_operations_and_limits(
             OperationRegistry::new(),
             None,
-            scrollback_lines,
-            crate::terminal::MAX_TOTAL_SCROLLBACK_LINES,
+            TerminalLimits {
+                scrollback_lines,
+                ..TerminalLimits::default()
+            },
         )
     }
 
@@ -86,63 +101,27 @@ impl CommandDispatcher {
         operations: OperationRegistry,
         wakeup: Option<crate::terminal::WakeupCallback>,
     ) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback(
-            operations,
-            wakeup,
-            crate::terminal::MAX_SCROLLBACK_LINES,
-        )
+        Self::with_operations_and_limits(operations, wakeup, TerminalLimits::default())
     }
 
-    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback(
+    pub(crate) fn with_operations_and_limits(
         operations: OperationRegistry,
         wakeup: Option<crate::terminal::WakeupCallback>,
-        scrollback_lines: usize,
+        limits: TerminalLimits,
     ) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total(
+        Self::with_operations_and_terminal_wakeup_and_limits_and_config(
             operations,
             wakeup,
-            scrollback_lines,
-            crate::terminal::MAX_TOTAL_SCROLLBACK_LINES,
-        )
-    }
-
-    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total(
-        operations: OperationRegistry,
-        wakeup: Option<crate::terminal::WakeupCallback>,
-        scrollback_lines: usize,
-        max_total_scrollback_lines: usize,
-    ) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
-            operations,
-            wakeup,
-            scrollback_lines,
-            max_total_scrollback_lines,
+            limits,
             TerminalTheme::default(),
-        )
-    }
-
-    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme(
-        operations: OperationRegistry,
-        wakeup: Option<crate::terminal::WakeupCallback>,
-        scrollback_lines: usize,
-        max_total_scrollback_lines: usize,
-        theme: TerminalTheme,
-    ) -> Self {
-        Self::with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
-            operations,
-            wakeup,
-            scrollback_lines,
-            max_total_scrollback_lines,
-            theme,
             AppConfig::default(),
         )
     }
 
-    pub(crate) fn with_operations_and_terminal_wakeup_and_scrollback_and_total_and_theme_and_config(
+    pub(crate) fn with_operations_and_terminal_wakeup_and_limits_and_config(
         operations: OperationRegistry,
         wakeup: Option<crate::terminal::WakeupCallback>,
-        scrollback_lines: usize,
-        max_total_scrollback_lines: usize,
+        limits: TerminalLimits,
         theme: TerminalTheme,
         config: AppConfig,
     ) -> Self {
@@ -160,12 +139,7 @@ impl CommandDispatcher {
             next_workspace_number: 1,
             events: EventBus::default(),
             operations,
-            terminals: TerminalManager::new_with_wakeup_and_scrollback_and_total_and_theme(
-                wakeup,
-                scrollback_lines,
-                max_total_scrollback_lines,
-                theme,
-            ),
+            terminals: TerminalManager::new_with_wakeup_and_limits(wakeup, limits, theme),
             shell_program,
             shell_args,
             default_cwd,
@@ -198,7 +172,16 @@ impl CommandDispatcher {
             "command completed"
         );
         self.operations.finish(operation_id, result);
+        self.sync_focused_terminal();
         operation_id
+    }
+
+    /// Propagates the model's focused pane to the terminal workers. Called
+    /// after every dispatched command and background event drain so a
+    /// backgrounded tab's worker can trim its scrollback tail promptly.
+    fn sync_focused_terminal(&mut self) {
+        let focused = self.model.focused_terminal_id();
+        self.terminals.set_focused_terminal(focused);
     }
 
     pub fn get_operation(&self, operation_id: OperationId) -> Option<OperationSnapshot> {
@@ -220,25 +203,37 @@ impl CommandDispatcher {
     pub fn state_dump(&self) -> StateDump {
         let mut state = self.model.snapshot();
         let registry = self.terminals.registry();
-        // Every workspace projection is rich so a window can select an
-        // inactive workspace without racing a separate terminal query. Keep
-        // the compatibility active-workspace alias rich as well.
+        // Every workspace projects its displayed tab with grid cells so a
+        // window can select an inactive workspace without racing a separate
+        // terminal query. Hidden tabs project summary metadata only; their
+        // grids remain in the registry (the single source of truth) and are
+        // fetched per terminal by waterctl waiters.
         for workspace in &mut state.workspaces {
+            let active_tab = workspace.active_tab;
             for tab in &mut workspace.tabs {
-                attach_terminal_snapshots(&mut tab.tree, &registry);
+                attach_terminal_projections(&mut tab.tree, &registry, active_tab == Some(tab.id));
             }
         }
-        if let Some(workspace) = state.workspace.as_mut() {
-            for tab in &mut workspace.tabs {
-                attach_terminal_snapshots(&mut tab.tree, &registry);
-            }
-        }
+        state.workspace = state
+            .active_workspace
+            .and_then(|workspace_id| {
+                state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)
+            })
+            .cloned();
         state
     }
 
     pub fn memory_stats(&self) -> MemoryStats {
         let mut stats = self.model.memory_stats();
-        stats.scrollback_lines = self.terminals.scrollback_capacity_lines();
+        stats.scrollback_lines = self.terminals.scrollback_lines();
+        stats.inactive_scrollback_lines = self.terminals.inactive_scrollback_lines();
+        stats.max_total_scrollback_bytes = self.terminals.max_total_scrollback_bytes();
+        stats.retained_scrollback_lines = self.terminals.retained_scrollback_lines();
+        stats.retained_scrollback_bytes = self.terminals.retained_scrollback_bytes();
+        stats.registry_snapshot_bytes = self.terminals.retained_snapshot_bytes();
         stats
     }
 
@@ -349,6 +344,10 @@ impl CommandDispatcher {
                 }
             }
         }
+        // Auto-close and exit handling can move focus away from a pane, so
+        // the workers must observe the new focused terminal before the next
+        // state dump is projected.
+        self.sync_focused_terminal();
         changed
     }
 
@@ -1282,23 +1281,33 @@ fn terminal_command_error(error: TerminalError) -> CommandError {
     CommandError::new(code, message)
 }
 
-fn attach_terminal_snapshots(tree: &mut PaneTreeDump, registry: &TerminalRegistry) {
+fn attach_terminal_projections(
+    tree: &mut PaneTreeDump,
+    registry: &TerminalRegistry,
+    include_grid: bool,
+) {
     match tree {
         PaneTreeDump::Leaf {
             surface_state,
-            terminal_snapshot,
+            terminal,
             ..
         } => {
-            *terminal_snapshot = match surface_state {
-                SurfaceState::Terminal(terminal) => {
-                    registry.snapshot(terminal.terminal_id).ok().map(Box::new)
-                }
+            *terminal = match surface_state {
+                SurfaceState::Terminal(terminal) => registry
+                    .snapshot_arc(terminal.terminal_id)
+                    .ok()
+                    .map(|snapshot| {
+                        Box::new(TerminalProjection {
+                            summary: snapshot.summary(),
+                            snapshot: include_grid.then_some(snapshot),
+                        })
+                    }),
                 SurfaceState::Empty(_) => None,
             };
         }
         PaneTreeDump::Split { first, second, .. } => {
-            attach_terminal_snapshots(first, registry);
-            attach_terminal_snapshots(second, registry);
+            attach_terminal_projections(first, registry, include_grid);
+            attach_terminal_projections(second, registry, include_grid);
         }
     }
 }

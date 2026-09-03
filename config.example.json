@@ -37,8 +37,9 @@
   "terminal": {
     "default_columns": 80,
     "default_lines": 24,
-    "scrollback_lines": 10000,
-    "max_total_scrollback_lines": 100000,
+    "scrollback_lines": 2000,
+    "inactive_scrollback_lines": 500,
+    "max_total_scrollback_bytes": 67108864,
     "font_family": "Sarasa Term SC Nerd Font",
     "font_size": 16.0,
     "line_height": 18.0

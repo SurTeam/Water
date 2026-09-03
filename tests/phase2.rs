@@ -376,9 +376,12 @@ fn model_host_projects_terminal_snapshots_without_mutable_ui_access() {
     let tree = &state.workspace.unwrap().tabs[0].tree;
     let snapshot = match tree {
         water::app::model::PaneTreeDump::Leaf {
-            terminal_snapshot: Some(snapshot),
+            terminal: Some(projection),
             ..
-        } => snapshot,
+        } => projection
+            .snapshot
+            .as_ref()
+            .unwrap_or_else(|| panic!("displayed tab must project its grid: {tree:?}")),
         tree => panic!("expected terminal leaf, got {tree:?}"),
     };
     assert_eq!(snapshot.size.columns, 40);
