@@ -6,7 +6,7 @@ use std::sync::Arc;
 use gpui::{
     App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode, Size,
     SystemMenuType, Task, TitlebarOptions, WeakEntity, WindowBounds, WindowDecorations,
-    WindowHandle, WindowOptions, actions, point, px, size,
+    WindowHandle, WindowOptions, actions, px, size,
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
@@ -193,7 +193,10 @@ impl WaterApplication {
             window.focus(&focus_handle, cx);
             root
         }) {
-            Ok(_) => self.state.views.borrow_mut().push(weak_root),
+            Ok(_) => {
+                hide_native_window_buttons();
+                self.state.views.borrow_mut().push(weak_root);
+            }
             Err(error) => tracing::error!(
                 target: "water::ui",
                 ?error,
@@ -230,6 +233,7 @@ impl WaterApplication {
             },
         ) {
             Ok(window) => {
+                hide_native_window_buttons();
                 self.state.settings_window.replace(Some(window));
             }
             Err(error) => tracing::error!(
@@ -377,6 +381,84 @@ fn save_screenshot(image: image::RgbaImage, path: PathBuf) -> Result<UiScreensho
     })
 }
 
+/// Hide the native window buttons on every window owned by this process.
+///
+/// Water draws its own integrated window controls, but the transparent
+/// titlebar required for the AppKit resize style mask also creates native
+/// traffic-light buttons. gpui's only knob for those buttons is a position
+/// (it has no hide API), and negative positions are not a supported way to
+/// make them vanish, so they are hidden directly through the ObjC runtime.
+/// The hidden state persists across later layout passes because the button
+/// views themselves stay hidden; only the system fullscreen chrome can
+/// still draw its own close control.
+#[cfg(target_os = "macos")]
+fn hide_native_window_buttons() {
+    use std::ffi::{c_char, c_void};
+
+    // NSWindowButton raw values: CloseButton, MiniaturizeButton, ZoomButton.
+    const STANDARD_BUTTONS: [usize; 3] = [1, 2, 3];
+
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    type Get = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
+    type GetIndexed = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
+    type Count = unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize;
+    type SetHidden = unsafe extern "C" fn(*mut c_void, *mut c_void, i8);
+
+    fn sel(name: &str) -> *mut c_void {
+        // `sel_registerName` copies the name, so the temporary CString may
+        // drop immediately after registration.
+        let name = std::ffi::CString::new(name).expect("selectors never contain NUL");
+        unsafe { sel_registerName(name.as_ptr()) }
+    }
+
+    // SAFETY: all messages below are scalar-argumented ObjC sends on the
+    // main thread (window creation happens on the GPUI application
+    // thread). `objc_msgSend` is cast to the concrete signatures AppKit
+    // declares; a missing NSApplication class or a nil receiver is handled
+    // by the null checks, and sending messages to nil is an ObjC no-op.
+    unsafe {
+        let app_class = objc_getClass(c"NSApplication".as_ptr());
+        if app_class.is_null() {
+            return;
+        }
+        let shared: Get = std::mem::transmute(objc_msgSend as *const c_void);
+        let app = shared(app_class, sel("sharedApplication"));
+        if app.is_null() {
+            return;
+        }
+        let windows = shared(app, sel("windows"));
+        if windows.is_null() {
+            return;
+        }
+        let count: Count = std::mem::transmute(objc_msgSend as *const c_void);
+        let count = count(windows, sel("count"));
+        let object_at: GetIndexed = std::mem::transmute(objc_msgSend as *const c_void);
+        let button_at: GetIndexed = std::mem::transmute(objc_msgSend as *const c_void);
+        let set_hidden: SetHidden = std::mem::transmute(objc_msgSend as *const c_void);
+        let button_sel = sel("standardWindowButton:");
+        let hidden_sel = sel("setHidden:");
+        for index in 0..count {
+            let window = object_at(windows, sel("objectAtIndex:"), index);
+            if window.is_null() {
+                continue;
+            }
+            for button in STANDARD_BUTTONS {
+                let view = button_at(window, button_sel, button);
+                if !view.is_null() {
+                    set_hidden(view, hidden_sel, 1);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hide_native_window_buttons() {}
+
 fn water_window_options(
     bounds: Bounds<gpui::Pixels>,
     min_size: Size<gpui::Pixels>,
@@ -387,15 +469,17 @@ fn water_window_options(
         // inside its views, so the native titlebar must stay invisible.
         // gpui only grants the resizable/closable/miniaturizable AppKit
         // style masks through an explicit (transparent) titlebar; a bare
-        // `titlebar: None` window cannot be resized at all. A transparent
-        // titlebar with the traffic lights parked off-screen keeps the
-        // free-resize behavior while Water's integrated titlebar owns the
-        // visible window controls. (Native buttons reappear while in the
-        // system fullscreen mode, which AppKit restores by design.)
+        // `titlebar: None` window cannot be resized at all. The native
+        // traffic lights are hidden through AppKit right after the window
+        // is created (`hide_native_window_buttons`); gpui itself only
+        // supports *repositioning* them, and negative off-screen
+        // positions are an undefined-geometry hack, so nothing is parked
+        // here. (System fullscreen chrome may still surface a close
+        // control on top of the window.)
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
-            traffic_light_position: Some(point(px(-64.), px(-64.))),
+            traffic_light_position: None,
         }),
         window_min_size: Some(min_size),
         is_resizable: true,
@@ -540,10 +624,9 @@ mod tests {
         assert!(titlebar.appears_transparent);
         assert!(titlebar.title.is_none());
         assert!(
-            titlebar
-                .traffic_light_position
-                .is_some_and(|position| position.x < px(0.) && position.y < px(0.)),
-            "native traffic lights must stay off-screen behind Water's own controls"
+            titlebar.traffic_light_position.is_none(),
+            "native buttons are hidden through AppKit after creation; gpui \
+             positioning must not be abused as an off-screen hack"
         );
     }
 
