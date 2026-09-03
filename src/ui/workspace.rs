@@ -32,6 +32,8 @@ use super::application::{
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
+/// Pixel step for a single click on the tab-strip overflow indicators.
+const TAB_SCROLL_NUDGE_PX: f32 = 160.0;
 /// Width of the sidebar disclosure column. Agent rows indent by the same
 /// amount so nested rows line up with their workspace title.
 const SIDEBAR_DISCLOSURE_WIDTH: f32 = 18.0;
@@ -564,12 +566,21 @@ impl WorkspaceView {
         if f32::from(delta).abs() <= f32::EPSILON {
             return;
         }
+        self.nudge_tab_bar_scroll(-f32::from(delta), cx);
+        cx.stop_propagation();
+    }
+
+    /// Move the tab-strip scroll position by `delta_x` pixels, clamped to the
+    /// overflow range that the last layout pass measured.
+    fn nudge_tab_bar_scroll(&mut self, delta_x: f32, cx: &mut Context<Self>) {
         let offset = self.tab_scroll.offset();
         let max_offset = self.tab_scroll.max_offset();
-        let next_x = (f32::from(offset.x) + f32::from(delta)).clamp(-f32::from(max_offset.x), 0.0);
+        let next_x = (f32::from(offset.x) - delta_x).clamp(-f32::from(max_offset.x), 0.0);
+        if (next_x - f32::from(offset.x)).abs() <= f32::EPSILON {
+            return;
+        }
         self.tab_scroll.set_offset(point(px(next_x), offset.y));
         cx.notify();
-        cx.stop_propagation();
     }
 
     fn activate_tab_index(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -2428,14 +2439,9 @@ impl WorkspaceView {
             tab_content =
                 tab_content.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
         }
-        let tab_viewport = div()
-            .id("tab-bar-scroll")
-            .h_full()
-            .flex_1()
-            .min_w(px(0.))
-            .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll)
-            .child(tab_content);
+        // The new-tab button rides at the end of the scrollable strip so it
+        // always sits next to the last tab; the edge indicators below signal
+        // when the strip overflows.
         let new_tab = div()
             .id("new-tab")
             .h(px(self.config.ui.tab_height))
@@ -2461,17 +2467,77 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
-        div()
+        let tab_content = tab_content.child(new_tab);
+        let tab_viewport = div()
+            .id("tab-bar-scroll")
+            .h_full()
+            .w_full()
+            .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
+            .child(tab_content);
+        // The indicator state reflects the previous layout pass; scroll and
+        // snapshot updates re-render and keep it current.
+        let (show_left, show_right) = tab_bar_edge_indicators(
+            f32::from(self.tab_scroll.max_offset().x),
+            f32::from(self.tab_scroll.offset().x),
+        );
+        let indicator = |side: isize| {
+            let glyph = if side < 0 { "\u{25c2}" } else { "\u{25b8}" };
+            let step = side as f32 * TAB_SCROLL_NUDGE_PX;
+            div()
+                .id(if side < 0 {
+                    "tab-scroll-left"
+                } else {
+                    "tab-scroll-right"
+                })
+                .absolute()
+                .top_0()
+                .h_full()
+                .w(px(20.))
+                .items_center()
+                .justify_center()
+                .flex()
+                .cursor_pointer()
+                .bg(rgb(theme.chrome_background))
+                .text_color(rgb(theme.ui_foreground))
+                .hover(|style| style.bg(rgb(theme.tab_add_background)))
+                .child(glyph)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                        this.nudge_tab_bar_scroll(step, cx);
+                        cx.stop_propagation();
+                    }),
+                )
+                .on_scroll_wheel(cx.listener(move |this, event, _window, cx| {
+                    this.scroll_tab_bar(event, cx);
+                }))
+        };
+        let left_indicator = if show_left {
+            Some(indicator(-1).left_0())
+        } else {
+            None
+        };
+        let right_indicator = if show_right {
+            Some(indicator(1).right_0())
+        } else {
+            None
+        };
+        let mut root = div()
             .id("tab-bar")
             .h_full()
             .flex_1()
             .min_w(px(0.))
-            .gap(px(2.))
-            .items_center()
+            .relative()
             .flex()
-            .child(tab_viewport)
-            .child(new_tab)
-            .into_any_element()
+            .child(tab_viewport);
+        if let Some(left_indicator) = left_indicator {
+            root = root.child(left_indicator);
+        }
+        if let Some(right_indicator) = right_indicator {
+            root = root.child(right_indicator);
+        }
+        root.into_any_element()
     }
 
     fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -5112,6 +5178,17 @@ fn _pane_id_is_explicitly_typed(_pane_id: PaneId) {}
 #[allow(dead_code)]
 fn _tab_dump_is_a_projection(_tab: &TabDump) {}
 
+/// Which tab-strip edges have hidden content beyond the viewport. `max_x`
+/// is the scrollable overflow magnitude (>= 0) and `offset_x` the current
+/// scroll position (in `[-max_x, 0]`) recorded by the last layout pass.
+fn tab_bar_edge_indicators(max_x: f32, offset_x: f32) -> (bool, bool) {
+    let overflow = max_x > 1.0;
+    (
+        overflow && offset_x < -1.0,
+        overflow && offset_x > -max_x + 1.0,
+    )
+}
+
 /// Blend two packed RGB colors; `factor` weights `from` (1.0 keeps `from`).
 fn mix_rgb(from: u32, to: u32, factor: f32) -> u32 {
     let channel = |value: u32, shift: u32| ((value >> shift) & 0xff) as f32;
@@ -5716,6 +5793,19 @@ mod tests {
             ),
             Some(b"\x1b[<64;1;1M".to_vec())
         );
+    }
+
+    #[test]
+    fn tab_bar_edge_indicators_follow_scroll_position() {
+        // No overflow: never show either edge.
+        assert_eq!(tab_bar_edge_indicators(0.0, 0.0), (false, false));
+        assert_eq!(tab_bar_edge_indicators(0.8, -0.5), (false, false));
+        // Overflow at the leading edge: only the right side has content.
+        assert_eq!(tab_bar_edge_indicators(200.0, 0.0), (false, true));
+        // Mid-scroll: both sides hidden content.
+        assert_eq!(tab_bar_edge_indicators(200.0, -100.0), (true, true));
+        // Fully scrolled to the end: only the left side has hidden content.
+        assert_eq!(tab_bar_edge_indicators(200.0, -200.0), (true, false));
     }
 
     #[test]
