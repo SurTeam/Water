@@ -226,9 +226,19 @@ pub(crate) struct SplitRequest {
     pub new_first: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaneMove {
+    pub source_workspace_id: WorkspaceId,
+    pub source_tab_id: TabId,
+    pub target_tab_id: TabId,
+    pub source_tab_removed: bool,
+    pub source_active_tab_changed: bool,
+}
+
 #[derive(Debug)]
 pub struct ApplicationModel {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
+    workspace_order: Vec<WorkspaceId>,
     active_workspace: Option<WorkspaceId>,
     tabs: BTreeMap<TabId, Tab>,
     panes: BTreeMap<PaneId, Pane>,
@@ -246,6 +256,7 @@ impl ApplicationModel {
     pub fn new() -> Self {
         Self {
             workspaces: BTreeMap::new(),
+            workspace_order: Vec::new(),
             active_workspace: None,
             tabs: BTreeMap::new(),
             panes: BTreeMap::new(),
@@ -270,7 +281,9 @@ impl ApplicationModel {
     }
 
     pub fn workspaces(&self) -> impl Iterator<Item = &Workspace> {
-        self.workspaces.values()
+        self.workspace_order
+            .iter()
+            .filter_map(|workspace_id| self.workspaces.get(workspace_id))
     }
 
     pub fn active_workspace_id(&self) -> Option<WorkspaceId> {
@@ -315,6 +328,7 @@ impl ApplicationModel {
         }
         self.workspaces
             .insert(workspace_id, Workspace::new_with_title(workspace_id, title));
+        self.workspace_order.push(workspace_id);
         self.active_workspace = Some(workspace_id);
         true
     }
@@ -360,6 +374,7 @@ impl ApplicationModel {
             .workspaces
             .remove(&workspace_id)
             .ok_or("workspace not found")?;
+        self.workspace_order.retain(|id| *id != workspace_id);
         for tab_id in &removed.tabs {
             let Some(tab) = self.tabs.remove(tab_id) else {
                 continue;
@@ -373,9 +388,31 @@ impl ApplicationModel {
             }
         }
         if self.active_workspace == Some(workspace_id) {
-            self.active_workspace = self.workspaces.keys().next_back().copied();
+            self.active_workspace = self.workspace_order.last().copied();
         }
         Ok(removed)
+    }
+
+    pub(crate) fn reorder_workspace(
+        &mut self,
+        workspace_id: WorkspaceId,
+        index: usize,
+    ) -> Result<(usize, bool), &'static str> {
+        if !self.workspaces.contains_key(&workspace_id) {
+            return Err("workspace not found");
+        }
+        let current_index = self
+            .workspace_order
+            .iter()
+            .position(|id| *id == workspace_id)
+            .ok_or("workspace order is missing workspace")?;
+        let final_index = index.min(self.workspace_order.len().saturating_sub(1));
+        let changed = current_index != final_index;
+        if changed {
+            let workspace_id = self.workspace_order.remove(current_index);
+            self.workspace_order.insert(final_index, workspace_id);
+        }
+        Ok((final_index, changed))
     }
 
     pub(crate) fn create_tab_with_title_mode(
@@ -469,6 +506,87 @@ impl ApplicationModel {
         self.active_workspace = Some(workspace_id);
         workspace.active_tab = Some(tab_id);
         Ok(changed)
+    }
+
+    pub(crate) fn move_pane_to_workspace(
+        &mut self,
+        pane_id: PaneId,
+        target_workspace_id: WorkspaceId,
+        target_tab_id: TabId,
+    ) -> Result<Option<PaneMove>, &'static str> {
+        if !self.workspaces.contains_key(&target_workspace_id) {
+            return Err("workspace not found");
+        }
+        if self.tabs.contains_key(&target_tab_id) {
+            return Err("tab ID already exists");
+        }
+        let source_tab_id = self.tab_id_for_pane(pane_id).ok_or("pane not found")?;
+        let source_workspace_id = self
+            .workspace_id_for_tab(source_tab_id)
+            .ok_or("workspace not found")?;
+        if source_workspace_id == target_workspace_id {
+            return Ok(None);
+        }
+
+        let title = self
+            .terminal_id_for_pane(pane_id)
+            .and_then(|terminal_id| self.terminal_surface(terminal_id))
+            .map(|terminal| terminal.process_name.clone())
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| "shell".to_owned());
+        let source_active_tab = self.active_tab_id_for_workspace(source_workspace_id);
+        let source_tab_removed = self
+            .tabs
+            .get(&source_tab_id)
+            .ok_or("tab not found")?
+            .root
+            .pane_count()
+            == 1;
+        let source_active_tab_changed = source_active_tab == Some(source_tab_id);
+
+        if source_tab_removed {
+            self.tabs.remove(&source_tab_id).ok_or("tab not found")?;
+            let source_workspace = self
+                .workspaces
+                .get_mut(&source_workspace_id)
+                .ok_or("workspace not found")?;
+            source_workspace
+                .tabs
+                .retain(|tab_id| *tab_id != source_tab_id);
+            if source_workspace.active_tab == Some(source_tab_id) {
+                source_workspace.active_tab = source_workspace.tabs.last().copied();
+            }
+        } else {
+            let tab = self.tabs.get_mut(&source_tab_id).ok_or("tab not found")?;
+            if !tab.root.close_leaf(pane_id) {
+                return Err("pane not found");
+            }
+            if tab.active_pane == pane_id {
+                let mut remaining = Vec::new();
+                tab.root.leaf_ids(&mut remaining);
+                tab.active_pane = remaining
+                    .first()
+                    .copied()
+                    .expect("moving a pane from a split leaves a pane");
+            }
+        }
+
+        self.tabs
+            .insert(target_tab_id, Tab::new_auto(target_tab_id, title, pane_id));
+        let target_workspace = self
+            .workspaces
+            .get_mut(&target_workspace_id)
+            .ok_or("workspace not found")?;
+        target_workspace.tabs.push(target_tab_id);
+        target_workspace.active_tab = Some(target_tab_id);
+
+        Ok(Some(PaneMove {
+            source_workspace_id,
+            source_tab_id,
+            target_tab_id,
+            source_tab_removed,
+            source_active_tab_changed,
+        }))
     }
 
     pub(crate) fn active_tab_id_for_workspace(&self, workspace_id: WorkspaceId) -> Option<TabId> {
@@ -884,8 +1002,7 @@ impl ApplicationModel {
 
     pub fn snapshot(&self) -> StateDump {
         let workspaces: Vec<_> = self
-            .workspaces
-            .values()
+            .workspaces()
             .map(|workspace| self.workspace_dump(workspace))
             .collect();
         let workspace = self
@@ -907,7 +1024,7 @@ impl ApplicationModel {
     /// across tabs and workspaces through the regular command path.
     fn collect_agents(&self) -> Vec<AgentDump> {
         let mut agents = Vec::new();
-        for workspace in self.workspaces.values() {
+        for workspace in self.workspaces() {
             for tab_id in &workspace.tabs {
                 let Some(tab) = self.tabs.get(tab_id) else {
                     continue;

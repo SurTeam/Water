@@ -98,6 +98,34 @@ fn tab_new_in_workspace_uses_a_stable_wire_type() {
 }
 
 #[test]
+fn workspace_reorder_uses_a_stable_wire_type() {
+    let command = AppCommand::Workspace(WorkspaceCommand::Reorder {
+        workspace_id: Some(42.into()),
+        index: 3,
+    });
+    let value = serde_json::to_value(&command).expect("workspace reorder serializes");
+    assert_eq!(value["type"], "workspace.reorder");
+    assert_eq!(value["workspace_id"], 42);
+    assert_eq!(value["index"], 3);
+    let decoded: AppCommand = serde_json::from_value(value).expect("workspace reorder decodes");
+    assert_eq!(decoded, command);
+}
+
+#[test]
+fn pane_move_to_workspace_uses_a_stable_wire_type() {
+    let command = AppCommand::Pane(PaneCommand::MoveToWorkspace {
+        pane_id: Some(7.into()),
+        workspace_id: 42.into(),
+    });
+    let value = serde_json::to_value(&command).expect("pane move serializes");
+    assert_eq!(value["type"], "pane.move_to_workspace");
+    assert_eq!(value["pane_id"], 7);
+    assert_eq!(value["workspace_id"], 42);
+    let decoded: AppCommand = serde_json::from_value(value).expect("pane move decodes");
+    assert_eq!(decoded, command);
+}
+
+#[test]
 fn terminal_commands_use_stable_wire_types() {
     let command = AppCommand::Terminal(TerminalCommand::Spawn {
         pane_id: None,

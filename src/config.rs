@@ -587,6 +587,8 @@ pub struct ThemeConfig {
     pub sidebar_workspace_active_background: String,
     /// Background of the focused agent row in the sidebar.
     pub sidebar_agent_active_background: String,
+    /// Color of the insertion line shown while dragging sidebar items.
+    pub sidebar_drag_indicator_color: String,
     /// Per-agent accent colors keyed by [`AgentKind::config_key`].
     pub agent_colors: BTreeMap<String, String>,
 }
@@ -617,6 +619,7 @@ impl Default for ThemeConfig {
             sidebar_agent_background: "#000000".to_owned(),
             sidebar_workspace_active_background: "#339966".to_owned(),
             sidebar_agent_active_background: "#339966".to_owned(),
+            sidebar_drag_indicator_color: "#339966".to_owned(),
             agent_colors: default_agent_colors(),
         }
     }
@@ -657,6 +660,7 @@ pub struct ThemeColors {
     pub sidebar_agent_background: u32,
     pub sidebar_workspace_active_background: u32,
     pub sidebar_agent_active_background: u32,
+    pub sidebar_drag_indicator: u32,
     pub agent_colors: [u32; 13],
 }
 
@@ -698,6 +702,7 @@ impl ThemeConfig {
                 &self.sidebar_agent_active_background,
                 0x339966,
             ),
+            sidebar_drag_indicator: parse_color(&self.sidebar_drag_indicator_color, 0x339966),
             agent_colors,
         }
     }
@@ -957,6 +962,7 @@ pub struct ThemeConfigOverrides {
     pub sidebar_agent_background: Option<String>,
     pub sidebar_workspace_active_background: Option<String>,
     pub sidebar_agent_active_background: Option<String>,
+    pub sidebar_drag_indicator_color: Option<String>,
     pub agent_colors: Option<BTreeMap<String, String>>,
 }
 
@@ -990,6 +996,7 @@ impl ThemeConfigOverrides {
         apply!(sidebar_agent_background);
         apply!(sidebar_workspace_active_background);
         apply!(sidebar_agent_active_background);
+        apply!(sidebar_drag_indicator_color);
         if let Some(agent_colors) = &self.agent_colors {
             for (key, value) in agent_colors {
                 if AgentKind::from_config_key(key).is_some() {
@@ -1133,6 +1140,7 @@ mod tests {
             config.theme.colors().sidebar_agent_active_background,
             0x339966
         );
+        assert_eq!(config.theme.colors().sidebar_drag_indicator, 0x339966);
         assert_eq!(
             config.theme.colors().agent_color(AgentKind::ClaudeCode),
             0xd97757
@@ -1203,6 +1211,28 @@ mod tests {
             config.theme.colors().agent_color(AgentKind::ClaudeCode),
             AgentKind::ClaudeCode.default_color()
         );
+    }
+
+    #[test]
+    fn sidebar_drag_indicator_theme_override_round_trips() {
+        let path = write_temp_config(
+            r##"{
+                "theme": {
+                    "sidebar_drag_indicator_color": "#abcdef"
+                }
+            }"##,
+        );
+        let config = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let round_trip_path = std::env::temp_dir().join(format!(
+            "water-config-drag-indicator-round-trip-{}.json",
+            std::process::id()
+        ));
+        config.save_to_path(&round_trip_path).unwrap();
+        let loaded = AppConfig::load_from_path(&round_trip_path).unwrap();
+        std::fs::remove_file(round_trip_path).unwrap();
+        assert_eq!(loaded.theme.sidebar_drag_indicator_color, "#abcdef");
+        assert_eq!(loaded.theme.colors().sidebar_drag_indicator, 0xabcdef);
     }
 
     #[test]

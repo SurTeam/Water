@@ -20,6 +20,10 @@ pub enum AppEventKind {
     WorkspaceRenamed {
         workspace_id: WorkspaceId,
     },
+    WorkspaceReordered {
+        workspace_id: WorkspaceId,
+        index: usize,
+    },
     TabCreated {
         tab_id: TabId,
     },
@@ -48,6 +52,11 @@ pub enum AppEventKind {
     PaneResized {
         pane_id: PaneId,
         ratio: f32,
+    },
+    PaneMovedToWorkspace {
+        pane_id: PaneId,
+        tab_id: TabId,
+        workspace_id: WorkspaceId,
     },
     SurfaceChanged {
         pane_id: PaneId,
@@ -101,6 +110,7 @@ impl AppEventKind {
             Self::WorkspaceClosed { .. } => "workspace.closed",
             Self::WorkspaceActivated { .. } => "workspace.activated",
             Self::WorkspaceRenamed { .. } => "workspace.renamed",
+            Self::WorkspaceReordered { .. } => "workspace.reordered",
             Self::TabCreated { .. } => "tab.created",
             Self::TabRenamed { .. } => "tab.renamed",
             Self::TabActivated { .. } => "tab.activated",
@@ -110,6 +120,7 @@ impl AppEventKind {
             Self::PaneFocused { .. } => "pane.focused",
             Self::PaneClosed { .. } => "pane.closed",
             Self::PaneResized { .. } => "pane.resized",
+            Self::PaneMovedToWorkspace { .. } => "pane.moved_to_workspace",
             Self::SurfaceChanged { .. } => "surface.changed",
             Self::TerminalSpawned { .. } => "terminal.spawned",
             Self::TerminalExited { .. } => "terminal.exited",

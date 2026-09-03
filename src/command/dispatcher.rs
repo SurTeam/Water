@@ -586,6 +586,23 @@ impl CommandDispatcher {
                 }
                 Ok(OperationResult::WorkspaceRenamed { workspace_id })
             }
+            WorkspaceCommand::Reorder {
+                workspace_id,
+                index,
+            } => {
+                let workspace_id = self.resolve_workspace(workspace_id)?;
+                let (index, changed) = self
+                    .model
+                    .reorder_workspace(workspace_id, index)
+                    .map_err(|message| CommandError::new("WORKSPACE_NOT_FOUND", message))?;
+                if changed {
+                    self.emit(AppEventKind::WorkspaceReordered {
+                        workspace_id,
+                        index,
+                    });
+                }
+                Ok(OperationResult::None)
+            }
         }
     }
 
@@ -948,6 +965,74 @@ impl CommandDispatcher {
                     pane_id: target_pane,
                     ratio,
                 })
+            }
+            PaneCommand::MoveToWorkspace {
+                pane_id,
+                workspace_id,
+            } => {
+                let target_workspace_id = self.resolve_workspace(Some(workspace_id))?;
+                let (source_tab_id, pane_id) = self.resolve_pane(pane_id)?;
+                let source_workspace_id = self
+                    .model
+                    .workspace_id_for_tab(source_tab_id)
+                    .ok_or_else(|| {
+                        CommandError::new(
+                            "WORKSPACE_NOT_FOUND",
+                            format!("pane {pane_id} does not belong to a workspace"),
+                        )
+                    })?;
+                if source_workspace_id == target_workspace_id {
+                    return Ok(OperationResult::None);
+                }
+
+                let was_active_tab = self.model.active_tab_id() == Some(source_tab_id);
+                let was_focused_pane = self.model.active_pane() == Some(pane_id);
+                let target_was_active_workspace =
+                    self.model.active_workspace_id() == Some(target_workspace_id);
+                let target_tab_id = self.ids.alloc();
+                let move_result = self
+                    .model
+                    .move_pane_to_workspace(pane_id, target_workspace_id, target_tab_id)
+                    .map_err(|message| self.pane_error(message))?
+                    .expect("different workspaces must produce a pane move");
+
+                if move_result.source_tab_removed {
+                    self.emit(AppEventKind::TabClosed {
+                        tab_id: move_result.source_tab_id,
+                    });
+                } else if self
+                    .model
+                    .refresh_tab_title_from_active_pane(move_result.source_tab_id)
+                {
+                    self.emit(AppEventKind::TabRenamed {
+                        tab_id: move_result.source_tab_id,
+                    });
+                }
+                if was_active_tab
+                    && move_result.source_active_tab_changed
+                    && let Some(tab_id) = self
+                        .model
+                        .active_tab_id_for_workspace(move_result.source_workspace_id)
+                {
+                    self.emit(AppEventKind::TabActivated { tab_id });
+                }
+                if was_focused_pane && let Some(pane_id) = self.model.active_pane() {
+                    self.emit(AppEventKind::PaneFocused { pane_id });
+                }
+                self.emit(AppEventKind::TabCreated {
+                    tab_id: move_result.target_tab_id,
+                });
+                if target_was_active_workspace {
+                    self.emit(AppEventKind::TabActivated {
+                        tab_id: move_result.target_tab_id,
+                    });
+                }
+                self.emit(AppEventKind::PaneMovedToWorkspace {
+                    pane_id,
+                    tab_id: move_result.target_tab_id,
+                    workspace_id: target_workspace_id,
+                });
+                Ok(OperationResult::None)
             }
             PaneCommand::RenameAgent { pane_id, label } => {
                 let (_, target_pane) = self.resolve_pane(pane_id)?;
@@ -1408,7 +1493,7 @@ mod tests {
     use super::*;
     use crate::agent::{AgentKind, DetectedAgent};
     use crate::command::{PaneCommand, TabCommand};
-    use crate::ids::{SessionId, SurfaceId};
+    use crate::ids::{SessionId, SurfaceId, TabId};
 
     fn create_dispatcher() -> CommandDispatcher {
         let mut dispatcher = CommandDispatcher::new();
@@ -1718,6 +1803,394 @@ mod tests {
         let error = result.error.unwrap();
         assert_eq!(error.code, "AGENT_NOT_FOUND");
         assert!(error.message.contains("detected agent"));
+    }
+
+    #[test]
+    fn workspace_reorder_persists_creation_order_independently_of_ids() {
+        let mut dispatcher = CommandDispatcher::new();
+        let operation = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        let first = match dispatcher
+            .wait_operation(operation)
+            .unwrap()
+            .result
+            .unwrap()
+        {
+            OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        let operation = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        let second = match dispatcher
+            .wait_operation(operation)
+            .unwrap()
+            .result
+            .unwrap()
+        {
+            OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+        let operation = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        let third = match dispatcher
+            .wait_operation(operation)
+            .unwrap()
+            .result
+            .unwrap()
+        {
+            OperationResult::WorkspaceCreated { workspace_id } => workspace_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+
+        let reorder = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Reorder {
+            workspace_id: Some(second),
+            index: 0,
+        }));
+        let result = dispatcher.wait_operation(reorder).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(result.result, Some(OperationResult::None));
+        assert_eq!(
+            dispatcher
+                .state_dump()
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id)
+                .collect::<Vec<_>>(),
+            vec![second, first, third]
+        );
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            event.kind,
+            AppEventKind::WorkspaceReordered {
+                workspace_id,
+                index: 0
+            } if workspace_id == second
+        )));
+
+        let reorder_to_end =
+            dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Reorder {
+                workspace_id: Some(second),
+                index: usize::MAX,
+            }));
+        assert_eq!(
+            dispatcher.wait_operation(reorder_to_end).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        assert_eq!(
+            dispatcher
+                .state_dump()
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id)
+                .collect::<Vec<_>>(),
+            vec![first, third, second]
+        );
+
+        let events_before = dispatcher.all_events().len();
+        let revision_before = dispatcher.model().state_revision();
+        let no_op = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Reorder {
+            workspace_id: Some(second),
+            index: 2,
+        }));
+        let result = dispatcher.wait_operation(no_op).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(result.result, Some(OperationResult::None));
+        assert_eq!(dispatcher.all_events().len(), events_before);
+        assert_eq!(dispatcher.model().state_revision(), revision_before);
+    }
+
+    #[test]
+    fn moving_a_lone_pane_preserves_terminal_and_agent_metadata() {
+        let (mut dispatcher, pane_id, terminal_id) = dispatcher_with_agent();
+        let source_workspace_id = WorkspaceId::new(1);
+        let target_workspace_id = WorkspaceId::new(8);
+        assert!(
+            dispatcher
+                .model
+                .create_workspace_with_title(target_workspace_id, "Target".to_owned())
+        );
+
+        let rename = dispatcher.dispatch(AppCommand::Pane(PaneCommand::RenameAgent {
+            pane_id: Some(pane_id),
+            label: "Build Bot".to_owned(),
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(rename).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let move_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::MoveToWorkspace {
+            pane_id: Some(pane_id),
+            workspace_id: target_workspace_id,
+        }));
+        let result = dispatcher.wait_operation(move_operation).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(result.result, Some(OperationResult::None));
+
+        let state = dispatcher.state_dump();
+        let source = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == source_workspace_id)
+            .unwrap();
+        assert!(source.tabs.is_empty());
+        assert_eq!(source.active_tab, None);
+        let target = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == target_workspace_id)
+            .unwrap();
+        assert_eq!(target.tabs.len(), 1);
+        let target_tab = &target.tabs[0];
+        assert_eq!(target.active_tab, Some(target_tab.id));
+        assert_eq!(target_tab.title, "claude");
+        let PaneTreeDump::Leaf {
+            pane_id: moved_pane,
+            surface_state: SurfaceState::Terminal(terminal),
+            ..
+        } = &target_tab.tree
+        else {
+            panic!("moved pane did not remain a terminal leaf");
+        };
+        assert_eq!(*moved_pane, pane_id);
+        assert_eq!(terminal.terminal_id, terminal_id);
+        assert!(matches!(terminal.status, TerminalStatus::Running));
+        assert_eq!(state.agents.len(), 1);
+        assert_eq!(state.agents[0].workspace_id, target_workspace_id);
+        assert_eq!(state.agents[0].custom_label.as_deref(), Some("Build Bot"));
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            event.kind,
+            AppEventKind::PaneMovedToWorkspace {
+                pane_id: event_pane,
+                tab_id,
+                workspace_id,
+            } if event_pane == pane_id
+                && tab_id == target_tab.id
+                && workspace_id == target_workspace_id
+        )));
+        assert!(
+            dispatcher
+                .model
+                .terminal_surface(terminal_id)
+                .is_some_and(|terminal| matches!(terminal.status, TerminalStatus::Running))
+        );
+    }
+
+    #[test]
+    fn moving_a_real_agent_preserves_terminal_identity_and_label() {
+        if !std::path::Path::new("/bin/zsh").is_file() {
+            return;
+        }
+
+        let mut dispatcher = CommandDispatcher::new();
+        let workspace = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::New));
+        let source_workspace_id = match dispatcher.wait_operation(workspace).unwrap().result {
+            Some(OperationResult::WorkspaceCreated { workspace_id }) => workspace_id,
+            result => panic!("unexpected workspace result: {result:?}"),
+        };
+        let source_pane = dispatcher
+            .state_dump()
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.tabs.first())
+            .map(|tab| tab.active_pane)
+            .expect("new workspace has a pane");
+        let spawn = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+            pane_id: Some(source_pane),
+            program: "/bin/zsh".to_owned(),
+            args: vec![
+                "-f".to_owned(),
+                "-c".to_owned(),
+                "exec -a claude sleep 20".to_owned(),
+            ],
+            columns: 80,
+            lines: 24,
+        }));
+        let terminal_id = match dispatcher.wait_operation(spawn).unwrap().result {
+            Some(OperationResult::TerminalSpawned { terminal_id }) => terminal_id,
+            result => panic!("unexpected terminal result: {result:?}"),
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            dispatcher.pump_background_events();
+            if dispatcher
+                .state_dump()
+                .agents
+                .iter()
+                .any(|agent| agent.pane_id == source_pane)
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            dispatcher
+                .state_dump()
+                .agents
+                .iter()
+                .any(|agent| agent.pane_id == source_pane),
+            "the fake claude process was not detected"
+        );
+        let rename = dispatcher.dispatch(AppCommand::Pane(PaneCommand::RenameAgent {
+            pane_id: Some(source_pane),
+            label: "Build Bot".to_owned(),
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(rename).unwrap().status,
+            OperationStatus::Succeeded
+        );
+        let target = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        let target_workspace_id = match dispatcher.wait_operation(target).unwrap().result {
+            Some(OperationResult::WorkspaceCreated { workspace_id }) => workspace_id,
+            result => panic!("unexpected workspace result: {result:?}"),
+        };
+        let move_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::MoveToWorkspace {
+            pane_id: Some(source_pane),
+            workspace_id: target_workspace_id,
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(move_operation).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let state = dispatcher.state_dump();
+        let source = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == source_workspace_id)
+            .unwrap();
+        assert!(source.tabs.is_empty());
+        let target = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == target_workspace_id)
+            .unwrap();
+        let PaneTreeDump::Leaf {
+            pane_id,
+            surface_state: SurfaceState::Terminal(terminal),
+            ..
+        } = &target.tabs[0].tree
+        else {
+            panic!("moved fake agent did not remain a terminal leaf");
+        };
+        assert_eq!(*pane_id, source_pane);
+        assert_eq!(terminal.terminal_id, terminal_id);
+        assert!(matches!(terminal.status, TerminalStatus::Running));
+        assert_eq!(
+            state
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == source_pane)
+                .and_then(|agent| agent.custom_label.as_deref()),
+            Some("Build Bot")
+        );
+
+        let close = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Close {
+            pane_id: Some(source_pane),
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(close).unwrap().status,
+            OperationStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn moving_one_leaf_of_a_split_collapses_the_source_tab() {
+        let (mut dispatcher, first_pane, _) = dispatcher_with_agent();
+        let source_tab_id = TabId::new(2);
+        let moved_pane = PaneId::new(8);
+        let empty_surface = SurfaceId::new(9);
+        let moved_terminal = TerminalId::new(10);
+        let moved_surface = SurfaceId::new(11);
+        dispatcher
+            .model
+            .split_pane(SplitRequest {
+                tab_id: source_tab_id,
+                target_pane: first_pane,
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                new_pane: moved_pane,
+                new_surface: empty_surface,
+                new_first: false,
+            })
+            .unwrap();
+        dispatcher
+            .model
+            .replace_surface(
+                moved_pane,
+                moved_surface,
+                SurfaceState::Terminal(TerminalSurfaceState {
+                    terminal_id: moved_terminal,
+                    session_id: SessionId::new(12),
+                    program: "/bin/zsh".to_owned(),
+                    title: None,
+                    process_name: "zsh".to_owned(),
+                    cwd: "/tmp".to_owned(),
+                    args: vec!["-l".to_owned()],
+                    status: TerminalStatus::Running,
+                    columns: 80,
+                    lines: 24,
+                    last_output_revision: 0,
+                    agent: None,
+                    agent_label: None,
+                }),
+            )
+            .unwrap();
+        let target_workspace_id = WorkspaceId::new(13);
+        assert!(
+            dispatcher
+                .model
+                .create_workspace_with_title(target_workspace_id, "Target".to_owned())
+        );
+
+        let move_operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::MoveToWorkspace {
+            pane_id: Some(moved_pane),
+            workspace_id: target_workspace_id,
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(move_operation).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let state = dispatcher.state_dump();
+        let source = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == WorkspaceId::new(1))
+            .unwrap();
+        assert_eq!(source.tabs.len(), 1);
+        assert_eq!(source.tabs[0].id, source_tab_id);
+        assert_eq!(source.tabs[0].active_pane, first_pane);
+        assert!(matches!(
+            &source.tabs[0].tree,
+            PaneTreeDump::Leaf { pane_id, .. } if *pane_id == first_pane
+        ));
+        let target = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == target_workspace_id)
+            .unwrap();
+        assert_eq!(target.tabs.len(), 1);
+        assert!(matches!(
+            &target.tabs[0].tree,
+            PaneTreeDump::Leaf {
+                pane_id,
+                surface_state: SurfaceState::Terminal(terminal),
+                ..
+            } if *pane_id == moved_pane && terminal.terminal_id == moved_terminal
+        ));
+    }
+
+    #[test]
+    fn moving_a_pane_to_its_workspace_is_a_no_op() {
+        let (mut dispatcher, pane_id, _) = dispatcher_with_agent();
+        let before = dispatcher.state_dump();
+        let events_before = dispatcher.all_events().len();
+        let operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::MoveToWorkspace {
+            pane_id: Some(pane_id),
+            workspace_id: WorkspaceId::new(1),
+        }));
+        let result = dispatcher.wait_operation(operation).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(result.result, Some(OperationResult::None));
+        assert_eq!(dispatcher.state_dump(), before);
+        assert_eq!(dispatcher.all_events().len(), events_before);
     }
 
     #[test]

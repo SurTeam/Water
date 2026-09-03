@@ -82,6 +82,7 @@ enum SettingField {
     ThemeSidebarAgentBackground,
     ThemeSidebarWorkspaceActiveBackground,
     ThemeSidebarAgentActiveBackground,
+    ThemeSidebarDragIndicator,
     AgentColor(AgentKind),
     ShortcutOpenSettings,
     ShortcutNewWindow,
@@ -172,6 +173,7 @@ impl SettingField {
                 "theme-sidebar-workspace-active-background"
             }
             Self::ThemeSidebarAgentActiveBackground => "theme-sidebar-agent-active-background",
+            Self::ThemeSidebarDragIndicator => "theme-sidebar-drag-indicator",
             Self::AgentColor(kind) => return format!("agent-color-{}", kind.config_key()),
             Self::ShortcutOpenSettings => "shortcut-open-settings",
             Self::ShortcutNewWindow => "shortcut-new-window",
@@ -242,6 +244,7 @@ impl SettingField {
                 | Self::ThemeSidebarAgentBackground
                 | Self::ThemeSidebarWorkspaceActiveBackground
                 | Self::ThemeSidebarAgentActiveBackground
+                | Self::ThemeSidebarDragIndicator
                 | Self::AgentColor(_)
         )
     }
@@ -634,6 +637,9 @@ impl SettingsView {
                 .clone(),
             SettingField::ThemeSidebarAgentActiveBackground => {
                 self.config.theme.sidebar_agent_active_background.clone()
+            }
+            SettingField::ThemeSidebarDragIndicator => {
+                self.config.theme.sidebar_drag_indicator_color.clone()
             }
             SettingField::AgentColor(kind) => self
                 .config
@@ -1457,6 +1463,10 @@ impl Render for SettingsView {
                 SettingField::ThemeSidebarAgentActiveBackground,
                 "选中 Agent 背景色",
             ),
+            (
+                SettingField::ThemeSidebarDragIndicator,
+                "侧边栏拖拽指示线颜色",
+            ),
         ];
         let theme_rows = theme_fields
             .into_iter()
@@ -1754,6 +1764,7 @@ fn set_theme_field(
         SettingField::ThemeSidebarAgentActiveBackground => {
             theme.sidebar_agent_active_background = value
         }
+        SettingField::ThemeSidebarDragIndicator => theme.sidebar_drag_indicator_color = value,
         SettingField::AgentColor(kind) => {
             theme
                 .agent_colors
@@ -1831,6 +1842,7 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
             colors.sidebar_workspace_active_background
         }
         SettingField::ThemeSidebarAgentActiveBackground => colors.sidebar_agent_active_background,
+        SettingField::ThemeSidebarDragIndicator => colors.sidebar_drag_indicator,
         SettingField::AgentColor(kind) => colors.agent_color(kind),
         _ => return None,
     })

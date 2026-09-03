@@ -44,6 +44,13 @@ pub enum WorkspaceCommand {
         workspace_id: Option<WorkspaceId>,
         title: String,
     },
+    /// Moves a workspace to its final position in the order after removal.
+    /// `None` targets the active workspace and out-of-range indices clamp to
+    /// the available positions.
+    Reorder {
+        workspace_id: Option<WorkspaceId>,
+        index: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -104,6 +111,12 @@ pub enum PaneCommand {
     Resize {
         pane_id: Option<PaneId>,
         ratio: f32,
+    },
+    /// Moves a pane into a new tab in another workspace without replacing its
+    /// pane or terminal surface. `None` targets the active pane.
+    MoveToWorkspace {
+        pane_id: Option<PaneId>,
+        workspace_id: WorkspaceId,
     },
     /// Sets the display label for the detected agent running in a pane.
     /// An empty label clears the override; `None` targets the active pane.
@@ -255,6 +268,11 @@ enum AppCommandWire {
         workspace_id: Option<WorkspaceId>,
         title: String,
     },
+    #[serde(rename = "workspace.reorder")]
+    WorkspaceReorder {
+        workspace_id: Option<WorkspaceId>,
+        index: usize,
+    },
     #[serde(rename = "tab.new")]
     TabNew { title: Option<String> },
     #[serde(rename = "tab.new_in_workspace")]
@@ -288,6 +306,11 @@ enum AppCommandWire {
     },
     #[serde(rename = "pane.resize")]
     PaneResize { pane_id: Option<PaneId>, ratio: f32 },
+    #[serde(rename = "pane.move_to_workspace")]
+    PaneMoveToWorkspace {
+        pane_id: Option<PaneId>,
+        workspace_id: WorkspaceId,
+    },
     #[serde(rename = "pane.agent_rename")]
     PaneAgentRename {
         pane_id: Option<PaneId>,
@@ -377,6 +400,13 @@ impl From<&AppCommand> for AppCommandWire {
                 workspace_id: *workspace_id,
                 title: title.clone(),
             },
+            AppCommand::Workspace(WorkspaceCommand::Reorder {
+                workspace_id,
+                index,
+            }) => Self::WorkspaceReorder {
+                workspace_id: *workspace_id,
+                index: *index,
+            },
             AppCommand::Tab(TabCommand::New { title }) => Self::TabNew {
                 title: title.clone(),
             },
@@ -410,6 +440,13 @@ impl From<&AppCommand> for AppCommandWire {
             AppCommand::Pane(PaneCommand::Resize { pane_id, ratio }) => Self::PaneResize {
                 pane_id: *pane_id,
                 ratio: *ratio,
+            },
+            AppCommand::Pane(PaneCommand::MoveToWorkspace {
+                pane_id,
+                workspace_id,
+            }) => Self::PaneMoveToWorkspace {
+                pane_id: *pane_id,
+                workspace_id: *workspace_id,
             },
             AppCommand::Pane(PaneCommand::RenameAgent { pane_id, label }) => {
                 Self::PaneAgentRename {
@@ -500,6 +537,13 @@ impl From<AppCommandWire> for AppCommand {
                 workspace_id,
                 title,
             }),
+            AppCommandWire::WorkspaceReorder {
+                workspace_id,
+                index,
+            } => Self::Workspace(WorkspaceCommand::Reorder {
+                workspace_id,
+                index,
+            }),
             AppCommandWire::TabNew { title } => Self::Tab(TabCommand::New { title }),
             AppCommandWire::TabNewInWorkspace {
                 workspace_id,
@@ -525,6 +569,13 @@ impl From<AppCommandWire> for AppCommand {
             AppCommandWire::PaneResize { pane_id, ratio } => {
                 Self::Pane(PaneCommand::Resize { pane_id, ratio })
             }
+            AppCommandWire::PaneMoveToWorkspace {
+                pane_id,
+                workspace_id,
+            } => Self::Pane(PaneCommand::MoveToWorkspace {
+                pane_id,
+                workspace_id,
+            }),
             AppCommandWire::PaneAgentRename { pane_id, label } => {
                 Self::Pane(PaneCommand::RenameAgent { pane_id, label })
             }
@@ -622,6 +673,7 @@ impl AppCommand {
             Self::Workspace(WorkspaceCommand::Delete { .. }) => "workspace.delete",
             Self::Workspace(WorkspaceCommand::Activate { .. }) => "workspace.activate",
             Self::Workspace(WorkspaceCommand::Rename { .. }) => "workspace.rename",
+            Self::Workspace(WorkspaceCommand::Reorder { .. }) => "workspace.reorder",
             Self::Tab(TabCommand::New { .. }) => "tab.new",
             Self::Tab(TabCommand::NewInWorkspace { .. }) => "tab.new_in_workspace",
             Self::Tab(TabCommand::Rename { .. }) => "tab.rename",
@@ -631,6 +683,7 @@ impl AppCommand {
             Self::Pane(PaneCommand::Close { .. }) => "pane.close",
             Self::Pane(PaneCommand::Focus { .. }) => "pane.focus",
             Self::Pane(PaneCommand::Resize { .. }) => "pane.resize",
+            Self::Pane(PaneCommand::MoveToWorkspace { .. }) => "pane.move_to_workspace",
             Self::Pane(PaneCommand::RenameAgent { .. }) => "pane.agent_rename",
             Self::Surface(SurfaceCommand::Replace { .. }) => "surface.replace",
             Self::Terminal(TerminalCommand::Spawn { .. }) => "terminal.spawn",

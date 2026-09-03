@@ -144,6 +144,19 @@ fn run_workspace(client: &ControlClient, arguments: &[String]) -> Result<()> {
                 }),
             )?;
         }
+        Some("reorder") => {
+            let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
+                .or_else(|| bare_id::<WorkspaceId>(&arguments[1..]).ok())
+                .context("workspace reorder requires an ID")?;
+            let index = required_usize(arguments, "--index")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Workspace(WorkspaceCommand::Reorder {
+                    workspace_id: Some(workspace_id),
+                    index,
+                }),
+            )?;
+        }
         Some("close") | Some("delete") => {
             let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
                 .or_else(|| bare_id::<WorkspaceId>(&arguments[1..]).ok());
@@ -256,6 +269,20 @@ fn run_pane(client: &ControlClient, arguments: &[String]) -> Result<()> {
             dispatch_and_print(
                 client,
                 AppCommand::Pane(PaneCommand::RenameAgent { pane_id, label }),
+            )?;
+        }
+        "move-to-workspace" => {
+            let pane_id = optional_id::<PaneId>(arguments, "--pane")?
+                .or_else(|| bare_id::<PaneId>(&arguments[1..]).ok())
+                .context("pane move-to-workspace requires a pane ID")?;
+            let workspace_id = optional_id::<WorkspaceId>(arguments, "--workspace")?
+                .context("pane move-to-workspace requires --workspace")?;
+            dispatch_and_print(
+                client,
+                AppCommand::Pane(PaneCommand::MoveToWorkspace {
+                    pane_id: Some(pane_id),
+                    workspace_id,
+                }),
             )?;
         }
         "input" | "send" => {
@@ -775,11 +802,13 @@ fn print_usage() {
            waterctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
            waterctl workspace new\n\
            waterctl workspace rename --workspace 1 --title Dev\n\
+           waterctl workspace reorder --workspace 1 --index 0\n\
            waterctl tab new --title Main\n\
            waterctl tab rename --tab 2 --title Shell\n\
            waterctl pane split --right\n\
            waterctl pane focus 3\n\
            waterctl pane rename-agent --pane 3 --label BuildBot\n\
+           waterctl pane move-to-workspace --pane 3 --workspace 2\n\
            waterctl pane input --pane 3 --text 'printf hello\\n'\n\
            waterctl pane content --pane 3 --row 0 --rows 4 --column 0 --columns 80\n\
            waterctl operation wait 7\n\

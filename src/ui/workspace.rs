@@ -5661,6 +5661,7 @@ mod tests {
                 sidebar_background: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
+                sidebar_drag_indicator: 19,
                 sidebar_workspace_active_background: 19,
                 sidebar_agent_active_background: 20,
                 agent_colors: [21; 13],
