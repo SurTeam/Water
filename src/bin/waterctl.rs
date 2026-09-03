@@ -75,8 +75,23 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
                 .unwrap_or_else(|| "target/water-screenshot.png".to_owned());
             print_json(&client.ui_screenshot(path).context("UI screenshot failed")?)?;
         }
+        Some("wheel") => {
+            let coordinate = |flag: &str, default: f32| -> Result<f32> {
+                match optional_value(arguments, flag)? {
+                    Some(value) => value
+                        .parse::<f32>()
+                        .with_context(|| format!("invalid number for {flag}")),
+                    None => Ok(default),
+                }
+            };
+            let x = coordinate("--x", 120.0)?;
+            let y = coordinate("--y", 20.0)?;
+            let dx = coordinate("--dx", 0.0)?;
+            let dy = coordinate("--dy", 0.0)?;
+            print_json(&client.ui_wheel(x, y, dx, dy).context("UI wheel failed")?)?;
+        }
         Some(command) => bail!("unknown ui command: {command}"),
-        None => bail!("ui requires key, state, or screenshot"),
+        None => bail!("ui requires key, state, screenshot, or wheel"),
     }
     Ok(())
 }
@@ -756,7 +771,8 @@ fn print_usage() {
            waterctl state\n\
            waterctl ui key cmd-t\n\
            waterctl ui state\n\
-           waterctl ui screenshot --output target/water.png\n\
+           waterctl ui screenshot --output target/water.png\
+           waterctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
            waterctl workspace new\n\
            waterctl workspace rename --workspace 1 --title Dev\n\
            waterctl tab new --title Main\n\

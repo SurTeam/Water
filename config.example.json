@@ -70,6 +70,7 @@
     "font_size": 14.0,
     "sidebar_visible": true,
     "sidebar_show_agent_count": true,
+    "tab_bar_vertical_wheel_scroll": false,
     "sidebar_width": 170.0,
     "sidebar_min_width": 170.0,
     "sidebar_max_width": 420.0,

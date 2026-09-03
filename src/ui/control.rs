@@ -20,6 +20,11 @@ pub(crate) enum UiControlRequest {
         path: PathBuf,
         reply: Sender<Result<UiScreenshot, String>>,
     },
+    Wheel {
+        position: (f32, f32),
+        delta: (f32, f32),
+        reply: Sender<Result<UiWheelResult, String>>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +59,14 @@ pub struct UiScreenshot {
     pub height: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiWheelResult {
+    pub position: (f32, f32),
+    pub delta: (f32, f32),
+    pub propagate: bool,
+    pub default_prevented: bool,
+}
+
 pub fn ui_control_channel() -> (UiControlClient, UiControlReceiver) {
     let (sender, receiver) = mpsc::channel();
     (
@@ -73,6 +86,20 @@ impl UiControlClient {
         self.sender
             .send(UiControlRequest::Keystroke {
                 keystroke: keystroke.into(),
+                reply,
+            })
+            .map_err(|_| "UI control channel is unavailable".to_owned())?;
+        response
+            .recv_timeout(UI_CONTROL_TIMEOUT)
+            .map_err(|_| "timed out waiting for the GPUI thread".to_owned())?
+    }
+
+    pub fn wheel(&self, position: (f32, f32), delta: (f32, f32)) -> Result<UiWheelResult, String> {
+        let (reply, response) = mpsc::channel();
+        self.sender
+            .send(UiControlRequest::Wheel {
+                position,
+                delta,
                 reply,
             })
             .map_err(|_| "UI control channel is unavailable".to_owned())?;

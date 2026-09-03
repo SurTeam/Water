@@ -5,7 +5,7 @@ pub mod workspace;
 
 pub use application::WaterApplication;
 pub use control::{
-    UiControlClient, UiControlReceiver, UiKeystrokeResult, UiScreenshot, UiSnapshot,
+    UiControlClient, UiControlReceiver, UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult,
     ui_control_channel,
 };
 pub use settings::SettingsView;

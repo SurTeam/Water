@@ -286,6 +286,22 @@ fn handle_request(
                 ),
             ),
         },
+        RpcMethod::UiWheel { x, y, dx, dy } => match ui_client {
+            Some(ui_client) => match ui_client.wheel((x, y), (dx, dy)) {
+                Ok(result) => RpcResponse::success(request.request_id, &result),
+                Err(error) => RpcResponse::failure(
+                    request.request_id,
+                    RpcError::new("UI_AUTOMATION_FAILED", error),
+                ),
+            },
+            None => RpcResponse::failure(
+                request.request_id,
+                RpcError::new(
+                    "UI_AUTOMATION_UNAVAILABLE",
+                    "UI automation is not installed",
+                ),
+            ),
+        },
         RpcMethod::Ping => RpcResponse::success(
             request.request_id,
             &PingResponse {

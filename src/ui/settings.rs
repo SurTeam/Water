@@ -51,6 +51,7 @@ enum SettingField {
     UiFontSize,
     SidebarVisible,
     SidebarShowAgentCount,
+    TabBarVerticalWheelScroll,
     SidebarWidth,
     SidebarMinWidth,
     SidebarMaxWidth,
@@ -138,6 +139,7 @@ impl SettingField {
             Self::UiFontSize => "ui-font-size",
             Self::SidebarVisible => "sidebar-visible",
             Self::SidebarShowAgentCount => "sidebar-show-agent-count",
+            Self::TabBarVerticalWheelScroll => "tab-bar-vertical-wheel-scroll",
             Self::SidebarWidth => "sidebar-width",
             Self::SidebarMinWidth => "sidebar-min-width",
             Self::SidebarMaxWidth => "sidebar-max-width",
@@ -212,6 +214,7 @@ impl SettingField {
                 | Self::Selection
                 | Self::SidebarVisible
                 | Self::SidebarShowAgentCount
+                | Self::TabBarVerticalWheelScroll
         )
     }
 
@@ -349,6 +352,10 @@ impl SettingsView {
             }
             SettingField::SidebarShowAgentCount => {
                 self.config.ui.sidebar_show_agent_count = !self.config.ui.sidebar_show_agent_count
+            }
+            SettingField::TabBarVerticalWheelScroll => {
+                self.config.ui.tab_bar_vertical_wheel_scroll =
+                    !self.config.ui.tab_bar_vertical_wheel_scroll
             }
             _ => return,
         }
@@ -577,6 +584,9 @@ impl SettingsView {
             SettingField::SidebarShowAgentCount => {
                 self.config.ui.sidebar_show_agent_count.to_string()
             }
+            SettingField::TabBarVerticalWheelScroll => {
+                self.config.ui.tab_bar_vertical_wheel_scroll.to_string()
+            }
             SettingField::SidebarWidth => format_float(self.config.ui.sidebar_width),
             SettingField::SidebarMinWidth => format_float(self.config.ui.sidebar_min_width),
             SettingField::SidebarMaxWidth => format_float(self.config.ui.sidebar_max_width),
@@ -778,7 +788,8 @@ impl SettingsView {
             | SettingField::BracketedPaste
             | SettingField::Selection
             | SettingField::SidebarVisible
-            | SettingField::SidebarShowAgentCount => {
+            | SettingField::SidebarShowAgentCount
+            | SettingField::TabBarVerticalWheelScroll => {
                 return Err("布尔项请直接点击开关".to_owned());
             }
             _ => return Err("暂不支持编辑此设置".to_owned()),
@@ -798,6 +809,9 @@ impl SettingsView {
             SettingField::Selection => on_off(self.config.features.selection),
             SettingField::SidebarVisible => on_off(self.config.ui.sidebar_visible),
             SettingField::SidebarShowAgentCount => on_off(self.config.ui.sidebar_show_agent_count),
+            SettingField::TabBarVerticalWheelScroll => {
+                on_off(self.config.ui.tab_bar_vertical_wheel_scroll)
+            }
             SettingField::DefaultCwd => self
                 .config
                 .startup
@@ -1322,6 +1336,14 @@ impl Render for SettingsView {
                 SettingField::SidebarShowAgentCount,
                 "显示运行中 Agent 数量",
                 "在每个工作区右侧显示当前运行中的 Agent 数量",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::TabBarVerticalWheelScroll,
+                "纵向滚轮滚动标签栏",
+                "默认关闭；开启后在标签栏上滚动鼠标滚轮可横向滚动标签（触控板横向滑动始终可用）",
                 ApplyKind::Immediate,
                 theme,
                 cx,

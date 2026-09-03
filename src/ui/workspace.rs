@@ -437,6 +437,11 @@ pub struct WorkspaceView {
     collapsed_workspaces: BTreeSet<WorkspaceId>,
     sidebar_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
+    /// Tab-strip shape seen at the last snapshot install; changes trigger a
+    /// follow-up render so the overflow indicators pick up the fresh layout.
+    last_tab_strip_signature: (Option<WorkspaceId>, usize),
+    /// Tab whose selection the strip last revealed (auto-scroll on switch).
+    last_revealed_tab: Option<TabId>,
     /// Optimistic tab target for relative tab navigation (Cmd-[ / Cmd-])
     /// while an activation command is still in flight.
     pending_tab: Option<TabId>,
@@ -489,6 +494,8 @@ impl WorkspaceView {
             collapsed_workspaces: BTreeSet::new(),
             sidebar_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
+            last_tab_strip_signature: (None, 0),
+            last_revealed_tab: None,
             pending_tab: None,
             sidebar_width,
             dragging_sidebar: false,
@@ -557,17 +564,21 @@ impl WorkspaceView {
     }
 
     fn scroll_tab_bar(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
-        let delta = event.delta.pixel_delta(px(24.));
-        let delta = if f32::from(delta.x).abs() > f32::EPSILON {
-            delta.x
-        } else {
-            delta.y
-        };
-        if f32::from(delta).abs() <= f32::EPSILON {
+        // Horizontal wheel/trackpad deltas are scrolled by the container's
+        // built-in handler (single application; see render_tab_bar). This
+        // path only exists for the opt-in vertical gesture.
+        if !self.config.ui.tab_bar_vertical_wheel_scroll {
             return;
         }
-        self.nudge_tab_bar_scroll(-f32::from(delta), cx);
-        cx.stop_propagation();
+        let delta = event.delta.pixel_delta(px(24.));
+        if f32::from(delta.x).abs() > f32::EPSILON {
+            return;
+        }
+        let vertical = f32::from(delta.y);
+        if vertical.abs() <= f32::EPSILON {
+            return;
+        }
+        self.nudge_tab_bar_scroll(-vertical, cx);
     }
 
     /// Move the tab-strip scroll position by `delta_x` pixels, clamped to the
@@ -1558,6 +1569,49 @@ impl WorkspaceView {
         self.collapsed_workspaces
             .retain(|workspace_id| workspace_exists_in_snapshot(&snapshot, *workspace_id));
         self.snapshot = snapshot;
+        let tab_strip_signature = (
+            self.selected_workspace,
+            self.selected_workspace_dump()
+                .map_or(0, |workspace| workspace.tabs.len()),
+        );
+        if tab_strip_signature != self.last_tab_strip_signature {
+            // The overflow state of the tab strip is only known after the
+            // layout that follows this render; one follow-up render keeps
+            // the edge indicators honest when tabs are added or removed.
+            self.last_tab_strip_signature = tab_strip_signature;
+            cx.notify();
+        }
+        // Reveal the selected tab whenever selection moves (new tab, tab
+        // activation, Cmd+digit, workspace switch): gpui aligns the item
+        // during the next prepaint using this frame's measured child
+        // bounds and then clears the request, so manual scrolling is never
+        // pinned afterwards.
+        let active_tab = self
+            .selected_workspace_dump()
+            .and_then(|workspace| workspace.active_tab);
+        if active_tab != self.last_revealed_tab {
+            self.last_revealed_tab = active_tab;
+            if let Some(index) = active_tab.and_then(|tab_id| {
+                self.selected_workspace_dump().and_then(|workspace| {
+                    workspace
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == tab_id)
+                        // Reveal the trailing new-tab button as well when
+                        // the last tab is selected, so "+" stays visible.
+                        .map(|index| {
+                            if index + 1 == workspace.tabs.len() {
+                                index + 1
+                            } else {
+                                index
+                            }
+                        })
+                })
+            }) {
+                self.tab_scroll.scroll_to_item(index);
+                cx.notify();
+            }
+        }
         if let Some(pending) = self.pending_tab {
             let confirmed = self
                 .selected_workspace_dump()
@@ -2422,22 +2476,28 @@ impl WorkspaceView {
                     .collect()
             })
             .unwrap_or_default();
-        let mut tab_content = div()
-            .id("tab-bar-content")
+        let mut tab_strip = div()
+            .id("tab-bar-scroll")
             .h_full()
+            .w_full()
             .gap(px(2.))
             .items_center()
             .flex()
-            .flex_none()
-            // The scroll container's built-in handler is registered after
-            // child listeners. Handling the gesture here lets us keep the
-            // wheel movement pixel-precise without applying it twice.
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&self.tab_scroll)
+            // Tabs are DIRECT children of the tracked element so gpui's
+            // `scroll_to_item` indices line up with tab indices. The
+            // container's built-in handler scrolls on horizontal wheel
+            // deltas; `restrict_scroll_to_axis` disables its vertical-to-
+            // horizontal mapping so the vertical gesture stays entirely
+            // with the opt-in gate below (no double application).
             .on_scroll_wheel(cx.listener(|this, event, _window, cx| {
                 this.scroll_tab_bar(event, cx);
             }));
         for (tab_id, title, active, active_pane) in tab_data {
-            tab_content =
-                tab_content.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
+            tab_strip =
+                tab_strip.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
         }
         // The new-tab button rides at the end of the scrollable strip so it
         // always sits next to the last tab; the edge indicators below signal
@@ -2467,14 +2527,8 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
-        let tab_content = tab_content.child(new_tab);
-        let tab_viewport = div()
-            .id("tab-bar-scroll")
-            .h_full()
-            .w_full()
-            .overflow_x_scroll()
-            .track_scroll(&self.tab_scroll)
-            .child(tab_content);
+        let tab_strip = tab_strip.child(new_tab);
+        let tab_viewport = tab_strip;
         // The indicator state reflects the previous layout pass; scroll and
         // snapshot updates re-render and keep it current.
         let (show_left, show_right) = tab_bar_edge_indicators(

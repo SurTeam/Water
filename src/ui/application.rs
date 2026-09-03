@@ -4,9 +4,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode, Size,
-    SystemMenuType, Task, TitlebarOptions, WeakEntity, WindowBounds, WindowDecorations,
-    WindowHandle, WindowOptions, actions, px, size,
+    App, AppContext, Bounds, DispatchEventResult, Focusable, KeyBinding, Keystroke, Menu, MenuItem,
+    Modifiers, PlatformInput, QuitMode, ScrollDelta, ScrollWheelEvent, Size, SystemMenuType, Task,
+    TitlebarOptions, TouchPhase, WeakEntity, WindowBounds, WindowDecorations, WindowHandle,
+    WindowOptions, actions, point, px, size,
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
@@ -15,7 +16,9 @@ use crate::config::{AppConfig, switch_tab_binding};
 use super::WorkspaceView;
 #[cfg(feature = "runtime-screenshot")]
 use super::control::UiScreenshot;
-use super::control::{UiControlReceiver, UiControlRequest, UiKeystrokeResult, UiSnapshot};
+use super::control::{
+    UiControlReceiver, UiControlRequest, UiKeystrokeResult, UiSnapshot, UiWheelResult,
+};
 use super::settings::SettingsView;
 
 actions!(
@@ -325,6 +328,14 @@ impl WaterApplication {
                         });
                         let _ = reply.send(result);
                     }
+                    UiControlRequest::Wheel {
+                        position,
+                        delta,
+                        reply,
+                    } => {
+                        let result = cx.update(|cx| dispatch_controlled_wheel(position, delta, cx));
+                        let _ = reply.send(result);
+                    }
                     #[cfg(feature = "runtime-screenshot")]
                     UiControlRequest::Screenshot { path, reply } => {
                         let result = cx.update(capture_active_window);
@@ -523,6 +534,41 @@ fn dispatch_controlled_keystroke(source: &str, cx: &mut App) -> Result<bool, Str
     window
         .update(cx, |_, window, cx| window.dispatch_keystroke(keystroke, cx))
         .map_err(|error| error.to_string())
+}
+
+fn dispatch_controlled_wheel(
+    position: (f32, f32),
+    delta: (f32, f32),
+    cx: &mut App,
+) -> Result<UiWheelResult, String> {
+    let window = cx
+        .active_window()
+        .or_else(|| {
+            cx.window_stack()
+                .and_then(|windows| windows.into_iter().next())
+        })
+        .or_else(|| cx.windows().into_iter().last())
+        .ok_or_else(|| "Water has no open window".to_owned())?;
+    let event = ScrollWheelEvent {
+        position: point(px(position.0), px(position.1)),
+        delta: ScrollDelta::Lines(point(delta.0, delta.1)),
+        modifiers: Modifiers::default(),
+        touch_phase: TouchPhase::default(),
+    };
+    let DispatchEventResult {
+        propagate,
+        default_prevented,
+    } = window
+        .update(cx, |_, window, cx| {
+            window.dispatch_event(PlatformInput::ScrollWheel(event), cx)
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(UiWheelResult {
+        position,
+        delta,
+        propagate,
+        default_prevented,
+    })
 }
 
 #[cfg(test)]

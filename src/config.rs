@@ -404,6 +404,9 @@ pub struct UiConfig {
     pub sidebar_visible: bool,
     /// Whether workspace rows show a count of currently running agents.
     pub sidebar_show_agent_count: bool,
+    /// Whether a vertical mouse wheel over the tab strip scrolls it
+    /// horizontally. Trackpad horizontal deltas always scroll the strip.
+    pub tab_bar_vertical_wheel_scroll: bool,
     pub sidebar_width: f32,
     pub sidebar_min_width: f32,
     pub sidebar_max_width: f32,
@@ -423,6 +426,7 @@ impl Default for UiConfig {
             font_size: DEFAULT_UI_FONT_SIZE,
             sidebar_visible: true,
             sidebar_show_agent_count: true,
+            tab_bar_vertical_wheel_scroll: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_min_width: DEFAULT_SIDEBAR_MIN_WIDTH,
             sidebar_max_width: DEFAULT_SIDEBAR_MAX_WIDTH,
@@ -864,6 +868,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.sidebar_show_agent_count {
                 config.ui.sidebar_show_agent_count = value;
             }
+            if let Some(value) = ui.tab_bar_vertical_wheel_scroll {
+                config.ui.tab_bar_vertical_wheel_scroll = value;
+            }
             if let Some(value) = ui.sidebar_width {
                 config.ui.sidebar_width = value;
             }
@@ -1012,6 +1019,7 @@ pub struct UiConfigOverrides {
     pub font_size: Option<f32>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_show_agent_count: Option<bool>,
+    pub tab_bar_vertical_wheel_scroll: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_min_width: Option<f32>,
     pub sidebar_max_width: Option<f32>,

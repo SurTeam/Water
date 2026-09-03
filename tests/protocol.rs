@@ -188,6 +188,28 @@ fn ui_screenshot_uses_a_stable_wire_name() {
 }
 
 #[test]
+fn ui_wheel_uses_a_stable_wire_name() {
+    let request = RpcRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 10,
+        method: RpcMethod::UiWheel {
+            x: 120.0,
+            y: 20.0,
+            dx: 0.0,
+            dy: 3.0,
+        },
+    };
+    let value = serde_json::to_value(&request).expect("wheel request serializes");
+    assert_eq!(value["method"], "ui.wheel");
+    assert_eq!(value["params"]["dy"], 3.0);
+    let decoded: RpcRequest = serde_json::from_value(value).expect("wheel request decodes");
+    assert!(matches!(
+        decoded.method,
+        RpcMethod::UiWheel { dy, .. } if (dy - 3.0).abs() < f32::EPSILON
+    ));
+}
+
+#[test]
 fn length_prefixed_protocol_round_trips() {
     let request = RpcRequest {
         protocol_version: PROTOCOL_VERSION,
