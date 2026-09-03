@@ -1320,6 +1320,9 @@ impl WorkspaceView {
             // printable character is never sent to the PTY twice.
             return;
         }
+        let special_name =
+            terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
+                .is_some();
         self.selection = None;
         self.clear_ime();
         self.enqueue_terminal_command(
@@ -1330,6 +1333,13 @@ impl WorkspaceView {
                 text,
             },
         );
+        if special_name {
+            // Synthesized keystrokes (waterctl / scenario control) carry the
+            // key name itself in `key_char`. The mapping above already sent
+            // the real byte sequence; without stopping propagation GPUI's
+            // dispatch fallback would also insert the literal word.
+            cx.stop_propagation();
+        }
     }
 
     fn paste_into_terminal(
@@ -3357,6 +3367,19 @@ fn terminal_mouse_position(
 }
 
 fn terminal_key_uses_text_input_handler(keystroke: &Keystroke) -> bool {
+    // Special key names are always rendered through the key-down mapping.
+    // Synthesized keystrokes (ui control / scenarios) carry a `key_char`
+    // that repeats the key name; letting them take the text-input path
+    // would type the literal word "return" into the shell instead of `\r`.
+    if terminal_special_key_input_with_modes(
+        &keystroke.key,
+        keystroke.modifiers,
+        crate::terminal::TerminalModes::default(),
+    )
+    .is_some()
+    {
+        return false;
+    }
     (keystroke.key_char.as_deref().is_some_and(|character| {
         !character.is_empty() && character.chars().all(|character| !character.is_control())
     }) || keystroke.key.chars().count() == 1

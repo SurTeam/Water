@@ -33,6 +33,20 @@ const MAX_PENDING_METADATA_PROBES: usize = 64;
 const MAX_PTY_BYTES_PER_TICK: usize = 256 * 1024;
 const MAX_PTY_DRAIN_TIME: Duration = Duration::from_millis(4);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+/// A held key repeats every ~20ms on macOS fast repeat settings, while a
+/// themed shell prompt (starship + git/async segments) needs a comparable
+/// amount of time to accept a line and finish redrawing it. Delivering each
+/// keystroke the instant it arrives lets repeats land inside the shell's own
+/// redraw window, which makes ZLE abort the redisplay and fall back to raw
+/// line feeds (visible as irregular blank rows between prompts). Terminals
+/// with a run-loop-paced input path do not show this; water's direct write
+/// path needs an explicit merge. While input commands keep arriving inside
+/// this gap, consecutive bytes are coalesced into one PTY write, bounded by
+/// the max wait and size below. Isolated keystrokes stay on the zero-extra-
+/// latency immediate path.
+const INPUT_COALESCE_GAP: Duration = Duration::from_millis(60);
+const INPUT_COALESCE_MAX_WAIT: Duration = Duration::from_millis(24);
+const INPUT_COALESCE_MAX_BYTES: usize = 4096;
 
 /// Shared background executor for process-name/cwd lookups. PTY workers only
 /// enqueue a probe and consume its result; no metadata query runs on the I/O
@@ -275,6 +289,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut viewport_position = 0_i64;
     let mut last_process_metadata_request = Instant::now();
     let mut stop_requested = false;
+    // Held-key repeats are merged into single PTY writes (see
+    // INPUT_COALESCE_GAP). `pending_input` only ever holds input bytes.
+    let mut pending_input: Vec<u8> = Vec::new();
+    let mut pending_started = Instant::now();
+    let mut last_input_at: Option<Instant> = None;
     let publisher = SnapshotPublisher {
         terminal_id,
         registry: &registry,
@@ -318,7 +337,54 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
             };
             command_batch_full = command_index + 1 == MAX_COMMANDS_PER_TICK;
-            match apply_command(command, &mut pty, &mut term, &mut scrollback) {
+            let effect = match command {
+                TerminalWorkerCommand::SendText(bytes) | TerminalWorkerCommand::SendBytes(bytes) => {
+                    let now = Instant::now();
+                    let coalescing = !pending_input.is_empty()
+                        || last_input_at
+                            .is_some_and(|at| now.saturating_duration_since(at) <= INPUT_COALESCE_GAP);
+                    last_input_at = Some(now);
+                    input_activity = true;
+                    if coalescing {
+                        if pending_input.is_empty() {
+                            pending_started = now;
+                        }
+                        pending_input.extend_from_slice(&bytes);
+                        if pending_input.len() < INPUT_COALESCE_MAX_BYTES {
+                            continue;
+                        }
+                        write_pending_input(&mut pending_input, &mut pty, &mut term, &mut scrollback)
+                    } else {
+                        apply_command(
+                            TerminalWorkerCommand::SendBytes(bytes),
+                            &mut pty,
+                            &mut term,
+                            &mut scrollback,
+                        )
+                    }
+                }
+                command => {
+                    if !pending_input.is_empty() {
+                        handle_input_effect(
+                            write_pending_input(
+                                &mut pending_input,
+                                &mut pty,
+                                &mut term,
+                                &mut scrollback,
+                            ),
+                            terminal_id,
+                            &term,
+                            &publisher,
+                            &mut snapshot_revision,
+                            &mut viewport_position,
+                            &mut input_activity,
+                            &process_metadata,
+                        );
+                    }
+                    apply_command(command, &mut pty, &mut term, &mut scrollback)
+                }
+            };
+            match effect {
                 Ok(CommandEffect::Continue {
                     dirty,
                     viewport_delta,
@@ -360,11 +426,15 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         events.clear();
         let metadata_timeout = PROCESS_METADATA_REFRESH_INTERVAL
             .saturating_sub(last_process_metadata_request.elapsed());
-        let poll_timeout = if command_batch_full {
+        let mut poll_timeout = if command_batch_full {
             Duration::ZERO
         } else {
             metadata_timeout
         };
+        if !pending_input.is_empty() && !command_batch_full {
+            poll_timeout = poll_timeout
+                .min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
+        }
         if let Err(error) = poller.wait(&mut events, Some(poll_timeout)) {
             tracing::warn!(
                 target: "water::pty",
@@ -483,6 +553,23 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 &event_tx,
                 event_wakeup.as_ref(),
                 terminal_id,
+                &process_metadata,
+            );
+        }
+
+        // A coalesced burst must not stall waiting for more keys: once the
+        // batch has waited long enough it goes out, even if the shell stayed
+        // quiet and the poll returned only on the coalescing deadline.
+        if !pending_input.is_empty() && pending_started.elapsed() >= INPUT_COALESCE_MAX_WAIT {
+            let mut deadline_flush_activity = false;
+            handle_input_effect(
+                write_pending_input(&mut pending_input, &mut pty, &mut term, &mut scrollback),
+                terminal_id,
+                &term,
+                &publisher,
+                &mut snapshot_revision,
+                &mut viewport_position,
+                &mut deadline_flush_activity,
                 &process_metadata,
             );
         }
@@ -734,6 +821,68 @@ fn apply_command(
         TerminalWorkerCommand::Shutdown => {
             kill_process_group(&mut *pty);
             Ok(CommandEffect::Stop)
+        }
+    }
+}
+
+/// Writes merged held-key input to the PTY in one pass.
+fn write_pending_input(
+    pending: &mut Vec<u8>,
+    pty: &mut Pty,
+    term: &mut Term<WorkerEventProxy>,
+    scrollback: &mut ScrollbackState,
+) -> io::Result<CommandEffect> {
+    let bytes = std::mem::take(pending);
+    let old_offset = term.grid().display_offset();
+    pty.writer().write_all(&bytes)?;
+    let dirty = scrollback.focus_latest(term);
+    Ok(CommandEffect::Continue {
+        dirty,
+        viewport_delta: viewport_delta(old_offset, term.grid().display_offset()),
+        refresh_process: true,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_input_effect(
+    effect: io::Result<CommandEffect>,
+    terminal_id: TerminalId,
+    term: &Term<WorkerEventProxy>,
+    publisher: &SnapshotPublisher<'_>,
+    snapshot_revision: &mut u64,
+    viewport_position: &mut i64,
+    input_activity: &mut bool,
+    process_metadata: &ProcessMetadata,
+) {
+    match effect {
+        Ok(CommandEffect::Continue {
+            dirty,
+            viewport_delta,
+            refresh_process,
+        }) => {
+            *input_activity |= refresh_process;
+            *viewport_position = viewport_position.saturating_add(viewport_delta);
+            if dirty {
+                *snapshot_revision = snapshot_revision.saturating_add(1);
+                publish_snapshot(
+                    term,
+                    TerminalProcessState::Running,
+                    *snapshot_revision,
+                    publisher,
+                    &[],
+                    *viewport_position,
+                    process_metadata,
+                );
+            }
+        }
+        Ok(CommandEffect::Stop) => {}
+        Err(error) => {
+            tracing::warn!(
+                target: "water::pty",
+                %terminal_id,
+                ?error,
+                "terminal worker coalesced input write failed"
+            );
         }
     }
 }
