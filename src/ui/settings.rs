@@ -32,6 +32,8 @@ enum SettingField {
     InitialTerminal,
     WindowWidth,
     WindowHeight,
+    WindowMinWidth,
+    WindowMinHeight,
     ShellProgram,
     ShellArgs,
     DefaultColumns,
@@ -105,6 +107,8 @@ impl SettingField {
             Self::InitialTerminal => "initial-terminal",
             Self::WindowWidth => "window-width",
             Self::WindowHeight => "window-height",
+            Self::WindowMinWidth => "window-min-width",
+            Self::WindowMinHeight => "window-min-height",
             Self::ShellProgram => "shell-program",
             Self::ShellArgs => "shell-args",
             Self::DefaultColumns => "default-columns",
@@ -509,6 +513,8 @@ impl SettingsView {
             SettingField::InitialTerminal => self.config.startup.initial_terminal.to_string(),
             SettingField::WindowWidth => format_float(self.config.startup.window_width),
             SettingField::WindowHeight => format_float(self.config.startup.window_height),
+            SettingField::WindowMinWidth => format_float(self.config.startup.window_min_width),
+            SettingField::WindowMinHeight => format_float(self.config.startup.window_min_height),
             SettingField::ShellProgram => self.config.shell.program.clone(),
             SettingField::ShellArgs => {
                 serde_json::to_string(&self.config.shell.args).unwrap_or_else(|_| "[]".to_owned())
@@ -604,6 +610,12 @@ impl SettingsView {
             }
             SettingField::WindowHeight => {
                 self.config.startup.window_height = parse_float(&value, "窗口高度")?
+            }
+            SettingField::WindowMinWidth => {
+                self.config.startup.window_min_width = parse_float(&value, "窗口最小宽度")?
+            }
+            SettingField::WindowMinHeight => {
+                self.config.startup.window_min_height = parse_float(&value, "窗口最小高度")?
             }
             SettingField::ShellProgram => {
                 if value.is_empty() {
@@ -1075,6 +1087,22 @@ impl Render for SettingsView {
                 SettingField::WindowHeight,
                 "默认窗口高度",
                 "新建 Water 窗口的初始逻辑像素高度",
+                ApplyKind::NewWindow,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::WindowMinWidth,
+                "窗口最小宽度",
+                "窗口可自由缩小到的最小逻辑像素宽度",
+                ApplyKind::NewWindow,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::WindowMinHeight,
+                "窗口最小高度",
+                "窗口可自由缩小到的最小逻辑像素高度",
                 ApplyKind::NewWindow,
                 theme,
                 cx,

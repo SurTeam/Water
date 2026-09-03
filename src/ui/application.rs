@@ -4,9 +4,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode,
-    SystemMenuType, Task, WeakEntity, WindowBounds, WindowDecorations, WindowHandle, WindowOptions,
-    actions, px, size,
+    App, AppContext, Bounds, Focusable, KeyBinding, Keystroke, Menu, MenuItem, QuitMode, Size,
+    SystemMenuType, Task, TitlebarOptions, WeakEntity, WindowBounds, WindowDecorations,
+    WindowHandle, WindowOptions, actions, point, px, size,
 };
 
 use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
@@ -32,7 +32,8 @@ actions!(
         RenameTab,
         SplitRight,
         SplitDown,
-        OpenSettings
+        OpenSettings,
+        QuitApplication
     ]
 );
 
@@ -49,9 +50,12 @@ struct WaterApplicationState {
     views: RefCell<Vec<WeakEntity<WorkspaceView>>>,
     settings_window: RefCell<Option<WindowHandle<SettingsView>>>,
     // Startup window dimensions are fixed for this process. Settings keeps
-    // the newly saved values visible, but they take effect after restart.
+    // the newly saved values visible, but they take effect after restarting
+    // Water (or for brand-new windows opened in time).
     window_width: f32,
     window_height: f32,
+    window_min_width: f32,
+    window_min_height: f32,
 }
 
 impl WaterApplication {
@@ -70,6 +74,8 @@ impl WaterApplication {
             state: Rc::new(WaterApplicationState {
                 window_width: config.startup.window_width,
                 window_height: config.startup.window_height,
+                window_min_width: config.startup.window_min_width,
+                window_min_height: config.startup.window_min_height,
                 client,
                 config: RefCell::new(config),
                 config_path,
@@ -82,6 +88,15 @@ impl WaterApplication {
 
     pub(crate) fn config(&self) -> AppConfig {
         self.state.config.borrow().clone()
+    }
+
+    /// The configured minimum window size, fixed for this process like the
+    /// startup window dimensions.
+    fn window_min_size(&self) -> Size<gpui::Pixels> {
+        size(
+            px(self.state.window_min_width),
+            px(self.state.window_min_height),
+        )
     }
 
     pub(crate) fn config_path(&self) -> PathBuf {
@@ -125,6 +140,7 @@ impl WaterApplication {
 
         let application = self.clone();
         cx.on_action(move |_: &NewWindow, cx| application.open_window(cx));
+        cx.on_action(|_: &QuitApplication, cx| cx.quit());
         let application = self.clone();
         cx.on_action(move |_: &OpenSettings, cx| application.open_settings(cx));
         let state = self.state.clone();
@@ -171,7 +187,8 @@ impl WaterApplication {
             size(px(self.state.window_width), px(self.state.window_height)),
             cx,
         );
-        match cx.open_window(water_window_options(bounds), move |window, cx| {
+        let min_size = self.window_min_size();
+        match cx.open_window(water_window_options(bounds, min_size), move |window, cx| {
             window.activate_window();
             window.focus(&focus_handle, cx);
             root
@@ -203,11 +220,15 @@ impl WaterApplication {
         let root = cx.new(|cx| SettingsView::new(self.clone(), cx.focus_handle()));
         let focus_handle = root.read(cx).focus_handle(cx);
         let bounds = Bounds::centered(None, size(px(980.), px(760.)), cx);
-        match cx.open_window(settings_window_options(bounds), move |window, cx| {
-            window.activate_window();
-            window.focus(&focus_handle, cx);
-            root
-        }) {
+        let min_size = self.window_min_size();
+        match cx.open_window(
+            settings_window_options(bounds, min_size),
+            move |window, cx| {
+                window.activate_window();
+                window.focus(&focus_handle, cx);
+                root
+            },
+        ) {
             Ok(window) => {
                 self.state.settings_window.replace(Some(window));
             }
@@ -356,21 +377,39 @@ fn save_screenshot(image: image::RgbaImage, path: PathBuf) -> Result<UiScreensho
     })
 }
 
-fn water_window_options(bounds: Bounds<gpui::Pixels>) -> WindowOptions {
+fn water_window_options(
+    bounds: Bounds<gpui::Pixels>,
+    min_size: Size<gpui::Pixels>,
+) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         // Water renders the complete titlebar, including window controls,
-        // inside its views. Do not leave the platform titlebar visible;
-        // client decorations are requested for platforms that support them.
-        titlebar: None,
+        // inside its views, so the native titlebar must stay invisible.
+        // gpui only grants the resizable/closable/miniaturizable AppKit
+        // style masks through an explicit (transparent) titlebar; a bare
+        // `titlebar: None` window cannot be resized at all. A transparent
+        // titlebar with the traffic lights parked off-screen keeps the
+        // free-resize behavior while Water's integrated titlebar owns the
+        // visible window controls. (Native buttons reappear while in the
+        // system fullscreen mode, which AppKit restores by design.)
+        titlebar: Some(TitlebarOptions {
+            title: None,
+            appears_transparent: true,
+            traffic_light_position: Some(point(px(-64.), px(-64.))),
+        }),
+        window_min_size: Some(min_size),
+        is_resizable: true,
         app_owns_titlebar_drag: true,
         window_decorations: Some(WindowDecorations::Client),
         ..Default::default()
     }
 }
 
-fn settings_window_options(bounds: Bounds<gpui::Pixels>) -> WindowOptions {
-    water_window_options(bounds)
+fn settings_window_options(
+    bounds: Bounds<gpui::Pixels>,
+    min_size: Size<gpui::Pixels>,
+) -> WindowOptions {
+    water_window_options(bounds, min_size)
 }
 
 fn dispatch_controlled_keystroke(source: &str, cx: &mut App) -> Result<bool, String> {
@@ -456,6 +495,11 @@ fn application_menus() -> Vec<Menu> {
             MenuItem::action("Settings…", OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
+            MenuItem::separator(),
+            // No key equivalent is registered for QuitApplication on
+            // purpose: cmd-q stays swallowed by the ignore-quit shortcut,
+            // so quitting is a deliberate menu click.
+            MenuItem::action("Quit Water", QuitApplication),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Window", NewWindow),
@@ -483,18 +527,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_titlebar_window_options_hide_the_native_titlebar() {
-        let options = water_window_options(Bounds::default());
+    fn custom_titlebar_window_options_keep_the_window_freely_resizable() {
+        let min_size = size(px(400.), px(260.));
+        let options = water_window_options(Bounds::default(), min_size);
+        assert!(options.is_resizable, "the window must be freely resizable");
         assert!(options.app_owns_titlebar_drag);
         assert_eq!(options.window_decorations, Some(WindowDecorations::Client));
+        assert_eq!(options.window_min_size, Some(min_size));
+        let titlebar = options
+            .titlebar
+            .expect("a transparent titlebar keeps the AppKit resize style mask");
+        assert!(titlebar.appears_transparent);
+        assert!(titlebar.title.is_none());
         assert!(
-            options.titlebar.is_none(),
-            "Water owns the complete titlebar"
+            titlebar
+                .traffic_light_position
+                .is_some_and(|position| position.x < px(0.) && position.y < px(0.)),
+            "native traffic lights must stay off-screen behind Water's own controls"
         );
     }
 
     #[test]
-    fn menu_bar_has_window_controls_without_a_quit_item() {
+    fn menu_bar_exposes_quit_without_a_key_binding() {
         let menus = application_menus();
         assert_eq!(
             menus
@@ -503,9 +557,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Water", "File", "View", "Window"]
         );
-        assert!(menus.iter().all(|menu| menu.items.iter().all(|item| {
-            !matches!(item, MenuItem::Action { name, .. } if name.contains("Quit"))
-        })));
+        assert!(menus[0].items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, .. } if name == "Quit Water"
+        )));
+        // gpui renders menu key equivalents from keymap bindings for the
+        // action; QuitApplication is deliberately never bound, so the item
+        // shows no shortcut and cmd-q remains swallowed by IgnoreQuit.
+        assert!(
+            configured_window_key_bindings(&AppConfig::default())
+                .iter()
+                .all(|binding| {
+                    binding.action().name()
+                        != <QuitApplication as gpui::Action>::name(&QuitApplication)
+                })
+        );
     }
 
     #[test]

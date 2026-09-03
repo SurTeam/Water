@@ -18,6 +18,8 @@ const DEFAULT_LINE_HEIGHT: f32 = 18.0;
 
 pub const DEFAULT_WINDOW_WIDTH: f32 = 1100.0;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
+pub const DEFAULT_WINDOW_MIN_WIDTH: f32 = 400.0;
+pub const DEFAULT_WINDOW_MIN_HEIGHT: f32 = 260.0;
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 170.0;
 pub const DEFAULT_SIDEBAR_MIN_WIDTH: f32 = 170.0;
 pub const DEFAULT_SIDEBAR_MAX_WIDTH: f32 = 420.0;
@@ -235,6 +237,10 @@ pub struct StartupConfig {
     pub initial_terminal: bool,
     pub window_width: f32,
     pub window_height: f32,
+    /// Smallest logical-pixel width a Water window can be dragged down to.
+    pub window_min_width: f32,
+    /// Smallest logical-pixel height a Water window can be dragged down to.
+    pub window_min_height: f32,
 }
 
 impl Default for StartupConfig {
@@ -246,6 +252,8 @@ impl Default for StartupConfig {
             initial_terminal: true,
             window_width: DEFAULT_WINDOW_WIDTH,
             window_height: DEFAULT_WINDOW_HEIGHT,
+            window_min_width: DEFAULT_WINDOW_MIN_WIDTH,
+            window_min_height: DEFAULT_WINDOW_MIN_HEIGHT,
         }
     }
 }
@@ -262,8 +270,16 @@ impl StartupConfig {
             .take()
             .map(|path| path.trim().to_owned())
             .filter(|path| !path.is_empty());
-        self.window_width = self.window_width.clamp(480.0, 4096.0);
-        self.window_height = self.window_height.clamp(320.0, 4096.0);
+        self.window_min_width = self.window_min_width.clamp(200.0, 4096.0);
+        self.window_min_height = self.window_min_height.clamp(120.0, 4096.0);
+        self.window_width = self
+            .window_width
+            .clamp(480.0, 4096.0)
+            .max(self.window_min_width);
+        self.window_height = self
+            .window_height
+            .clamp(320.0, 4096.0)
+            .max(self.window_min_height);
         self
     }
 }
@@ -664,6 +680,12 @@ impl AppConfigOverrides {
             if let Some(value) = startup.window_height {
                 config.startup.window_height = value;
             }
+            if let Some(value) = startup.window_min_width {
+                config.startup.window_min_width = value;
+            }
+            if let Some(value) = startup.window_min_height {
+                config.startup.window_min_height = value;
+            }
         }
         if let Some(shell) = &self.shell {
             let program_changed = shell.program.is_some();
@@ -766,6 +788,8 @@ pub struct StartupConfigOverrides {
     pub initial_terminal: Option<bool>,
     pub window_width: Option<f32>,
     pub window_height: Option<f32>,
+    pub window_min_width: Option<f32>,
+    pub window_min_height: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1001,6 +1025,8 @@ mod tests {
         assert_eq!(config.startup.default_cwd.as_deref(), Some("~"));
         assert_eq!(config.startup.window_width, DEFAULT_WINDOW_WIDTH);
         assert_eq!(config.startup.window_height, DEFAULT_WINDOW_HEIGHT);
+        assert_eq!(config.startup.window_min_width, DEFAULT_WINDOW_MIN_WIDTH);
+        assert_eq!(config.startup.window_min_height, DEFAULT_WINDOW_MIN_HEIGHT);
         assert_eq!(config.ui.sidebar_width, DEFAULT_SIDEBAR_WIDTH);
         assert_eq!(config.ui.font_size, DEFAULT_UI_FONT_SIZE);
         assert_eq!(config.shortcuts.open_settings, "cmd-,");

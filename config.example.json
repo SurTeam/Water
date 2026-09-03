@@ -5,7 +5,9 @@
     "initial_workspace": true,
     "initial_terminal": true,
     "window_width": 1100.0,
-    "window_height": 760.0
+    "window_height": 760.0,
+    "window_min_width": 400.0,
+    "window_min_height": 260.0
   },
   "shell": {
     "program": "/opt/homebrew/bin/zsh",
