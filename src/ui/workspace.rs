@@ -2556,13 +2556,25 @@ impl WorkspaceView {
             }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, _window, _cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, _cx| {
+                    if event.click_count >= 2 {
+                        // Double-click on the titlebar toggles zoom (the same
+                        // native action as the maximize control); cancel the
+                        // pending drag gesture so the second press cannot
+                        // start a window move mid-zoom.
+                        this.titlebar_dragging = false;
+                        window.zoom_window();
+                        return;
+                    }
                     this.titlebar_dragging = true;
                 }),
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _event: &MouseUpEvent, _window, _cx| {
+                cx.listener(|this, event: &MouseUpEvent, _window, _cx| {
+                    if event.click_count >= 2 {
+                        return;
+                    }
                     this.titlebar_dragging = false;
                 }),
             )
