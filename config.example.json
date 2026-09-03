@@ -38,6 +38,8 @@
     "sidebar_background": "#000000",
     "sidebar_workspace_background": "#000000",
     "sidebar_agent_background": "#000000",
+    "sidebar_workspace_active_background": "#339966",
+    "sidebar_agent_active_background": "#339966",
     "agent_colors": {
       "claude_code": "#d97757",
       "codex": "#2f9e63",

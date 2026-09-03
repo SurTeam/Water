@@ -1862,12 +1862,12 @@ impl WorkspaceView {
             workspace.title.clone()
         };
         let workspace_background = if active {
-            rgb(theme.tab_active_background)
+            rgb(theme.sidebar_workspace_active_background)
         } else {
             rgb(theme.sidebar_workspace_background)
         };
         let workspace_hover_background = if active {
-            theme.tab_active_background
+            theme.sidebar_workspace_active_background
         } else {
             theme.tab_add_background
         };
@@ -2029,21 +2029,21 @@ impl WorkspaceView {
         let focused_here =
             self.selected_workspace == Some(workspace_id) && self.focused_pane == Some(pane_id);
         let row_background = if focused_here {
-            rgb(theme.tab_active_background)
+            rgb(theme.sidebar_agent_active_background)
         } else {
             rgb(theme.sidebar_agent_background)
         };
         let hover_background = if focused_here {
-            theme.tab_active_background
+            theme.sidebar_agent_active_background
         } else {
             theme.tab_add_background
         };
         // The configured per-kind color is the row's identity: full strength
         // while the agent is producing output, dimmed toward the row
         // background when idle, and neutral once the process exited. A
-        // focused row paints on the accent background, so a kind color too
-        // close to the accent is blended toward the terminal background to
-        // stay readable.
+        // focused row paints on its configured active background, so a kind
+        // color too close to that background is blended toward the terminal
+        // background to stay readable.
         let kind_color = theme.agent_color(agent.kind);
         let running = matches!(agent.status, crate::surface::TerminalStatus::Running);
         let mut dot_color = if !running {
@@ -2052,7 +2052,7 @@ impl WorkspaceView {
             kind_color
         } else {
             let background = if focused_here {
-                theme.tab_active_background
+                theme.sidebar_agent_active_background
             } else {
                 theme.sidebar_agent_background
             };
@@ -2060,7 +2060,7 @@ impl WorkspaceView {
         };
         if running
             && focused_here
-            && channel_distance(dot_color, theme.tab_active_background) < 0x30
+            && channel_distance(dot_color, theme.sidebar_agent_active_background) < 0x30
         {
             dot_color = mix_rgb(dot_color, theme.terminal_background, 0.5);
         }
@@ -5518,7 +5518,9 @@ mod tests {
                 sidebar_background: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
-                agent_colors: [19; 13],
+                sidebar_workspace_active_background: 19,
+                sidebar_agent_active_background: 20,
+                agent_colors: [21; 13],
             },
             cursor_focused: false,
             scroll_remainder: 0.0,

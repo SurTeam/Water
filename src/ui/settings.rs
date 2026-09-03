@@ -79,6 +79,8 @@ enum SettingField {
     ThemeSidebarBackground,
     ThemeSidebarWorkspaceBackground,
     ThemeSidebarAgentBackground,
+    ThemeSidebarWorkspaceActiveBackground,
+    ThemeSidebarAgentActiveBackground,
     AgentColor(AgentKind),
     ShortcutOpenSettings,
     ShortcutNewWindow,
@@ -164,6 +166,10 @@ impl SettingField {
             Self::ThemeSidebarBackground => "theme-sidebar-background",
             Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
             Self::ThemeSidebarAgentBackground => "theme-sidebar-agent-background",
+            Self::ThemeSidebarWorkspaceActiveBackground => {
+                "theme-sidebar-workspace-active-background"
+            }
+            Self::ThemeSidebarAgentActiveBackground => "theme-sidebar-agent-active-background",
             Self::AgentColor(kind) => return format!("agent-color-{}", kind.config_key()),
             Self::ShortcutOpenSettings => "shortcut-open-settings",
             Self::ShortcutNewWindow => "shortcut-new-window",
@@ -231,6 +237,8 @@ impl SettingField {
                 | Self::ThemeSidebarBackground
                 | Self::ThemeSidebarWorkspaceBackground
                 | Self::ThemeSidebarAgentBackground
+                | Self::ThemeSidebarWorkspaceActiveBackground
+                | Self::ThemeSidebarAgentActiveBackground
                 | Self::AgentColor(_)
         )
     }
@@ -608,6 +616,14 @@ impl SettingsView {
             }
             SettingField::ThemeSidebarAgentBackground => {
                 self.config.theme.sidebar_agent_background.clone()
+            }
+            SettingField::ThemeSidebarWorkspaceActiveBackground => self
+                .config
+                .theme
+                .sidebar_workspace_active_background
+                .clone(),
+            SettingField::ThemeSidebarAgentActiveBackground => {
+                self.config.theme.sidebar_agent_active_background.clone()
             }
             SettingField::AgentColor(kind) => self
                 .config
@@ -1411,6 +1427,14 @@ impl Render for SettingsView {
                 SettingField::ThemeSidebarAgentBackground,
                 "未选中 Agent 背景色",
             ),
+            (
+                SettingField::ThemeSidebarWorkspaceActiveBackground,
+                "选中工作区背景色",
+            ),
+            (
+                SettingField::ThemeSidebarAgentActiveBackground,
+                "选中 Agent 背景色",
+            ),
         ];
         let theme_rows = theme_fields
             .into_iter()
@@ -1702,6 +1726,12 @@ fn set_theme_field(
         SettingField::ThemeSidebarBackground => theme.sidebar_background = value,
         SettingField::ThemeSidebarWorkspaceBackground => theme.sidebar_workspace_background = value,
         SettingField::ThemeSidebarAgentBackground => theme.sidebar_agent_background = value,
+        SettingField::ThemeSidebarWorkspaceActiveBackground => {
+            theme.sidebar_workspace_active_background = value
+        }
+        SettingField::ThemeSidebarAgentActiveBackground => {
+            theme.sidebar_agent_active_background = value
+        }
         SettingField::AgentColor(kind) => {
             theme
                 .agent_colors
@@ -1775,6 +1805,10 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         SettingField::ThemeSidebarBackground => colors.sidebar_background,
         SettingField::ThemeSidebarWorkspaceBackground => colors.sidebar_workspace_background,
         SettingField::ThemeSidebarAgentBackground => colors.sidebar_agent_background,
+        SettingField::ThemeSidebarWorkspaceActiveBackground => {
+            colors.sidebar_workspace_active_background
+        }
+        SettingField::ThemeSidebarAgentActiveBackground => colors.sidebar_agent_active_background,
         SettingField::AgentColor(kind) => colors.agent_color(kind),
         _ => return None,
     })

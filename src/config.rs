@@ -579,6 +579,10 @@ pub struct ThemeConfig {
     pub sidebar_workspace_background: String,
     /// Background of an unselected agent row in the sidebar.
     pub sidebar_agent_background: String,
+    /// Background of the active workspace row in the sidebar.
+    pub sidebar_workspace_active_background: String,
+    /// Background of the focused agent row in the sidebar.
+    pub sidebar_agent_active_background: String,
     /// Per-agent accent colors keyed by [`AgentKind::config_key`].
     pub agent_colors: BTreeMap<String, String>,
 }
@@ -607,6 +611,8 @@ impl Default for ThemeConfig {
             sidebar_background: "#000000".to_owned(),
             sidebar_workspace_background: "#000000".to_owned(),
             sidebar_agent_background: "#000000".to_owned(),
+            sidebar_workspace_active_background: "#339966".to_owned(),
+            sidebar_agent_active_background: "#339966".to_owned(),
             agent_colors: default_agent_colors(),
         }
     }
@@ -645,6 +651,8 @@ pub struct ThemeColors {
     pub sidebar_background: u32,
     pub sidebar_workspace_background: u32,
     pub sidebar_agent_background: u32,
+    pub sidebar_workspace_active_background: u32,
+    pub sidebar_agent_active_background: u32,
     pub agent_colors: [u32; 13],
 }
 
@@ -678,6 +686,14 @@ impl ThemeConfig {
             sidebar_background: parse_color(&self.sidebar_background, 0x000000),
             sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x000000),
             sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x000000),
+            sidebar_workspace_active_background: parse_color(
+                &self.sidebar_workspace_active_background,
+                0x339966,
+            ),
+            sidebar_agent_active_background: parse_color(
+                &self.sidebar_agent_active_background,
+                0x339966,
+            ),
             agent_colors,
         }
     }
@@ -932,6 +948,8 @@ pub struct ThemeConfigOverrides {
     pub sidebar_background: Option<String>,
     pub sidebar_workspace_background: Option<String>,
     pub sidebar_agent_background: Option<String>,
+    pub sidebar_workspace_active_background: Option<String>,
+    pub sidebar_agent_active_background: Option<String>,
     pub agent_colors: Option<BTreeMap<String, String>>,
 }
 
@@ -963,6 +981,8 @@ impl ThemeConfigOverrides {
         apply!(sidebar_background);
         apply!(sidebar_workspace_background);
         apply!(sidebar_agent_background);
+        apply!(sidebar_workspace_active_background);
+        apply!(sidebar_agent_active_background);
         if let Some(agent_colors) = &self.agent_colors {
             for (key, value) in agent_colors {
                 if AgentKind::from_config_key(key).is_some() {
@@ -1097,6 +1117,14 @@ mod tests {
         assert_eq!(config.theme.colors().sidebar_background, 0x000000);
         assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
         assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
+        assert_eq!(
+            config.theme.colors().sidebar_workspace_active_background,
+            0x339966
+        );
+        assert_eq!(
+            config.theme.colors().sidebar_agent_active_background,
+            0x339966
+        );
         assert_eq!(
             config.theme.colors().agent_color(AgentKind::ClaudeCode),
             0xd97757
