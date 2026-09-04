@@ -66,6 +66,21 @@ fn pane_agent_rename_uses_a_stable_wire_type() {
 }
 
 #[test]
+fn pane_resize_split_uses_a_stable_wire_type() {
+    let command = AppCommand::Pane(PaneCommand::ResizeSplit {
+        tab_id: 7.into(),
+        path: vec![false, true],
+        ratio: 0.42,
+    });
+    let value = serde_json::to_value(&command).expect("resize split serializes");
+    assert_eq!(value["type"], "pane.resize_split");
+    assert_eq!(value["tab_id"], 7);
+    assert_eq!(value["path"], serde_json::json!([false, true]));
+    let decoded: AppCommand = serde_json::from_value(value).expect("resize split decodes");
+    assert_eq!(decoded, command);
+}
+
+#[test]
 fn workspace_create_and_new_keep_stable_wire_types() {
     let create = AppCommand::Workspace(WorkspaceCommand::Create);
     let create_value = serde_json::to_value(&create).expect("workspace create serializes");

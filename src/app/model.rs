@@ -765,6 +765,22 @@ impl ApplicationModel {
         Ok(())
     }
 
+    /// Resizes the split at an exact path inside a tab's pane tree, so a
+    /// divider drag can commit ANCESTOR splits that `resize_pane`'s
+    /// nearest-split search would mis-target.
+    pub(crate) fn resize_split(
+        &mut self,
+        tab_id: TabId,
+        path: &[bool],
+        ratio: f32,
+    ) -> Result<(), &'static str> {
+        let tab = self.tabs.get_mut(&tab_id).ok_or("tab not found")?;
+        if !tab.root.resize_at_path(path, ratio) {
+            return Err("split not found for path");
+        }
+        Ok(())
+    }
+
     pub(crate) fn replace_surface(
         &mut self,
         pane_id: PaneId,

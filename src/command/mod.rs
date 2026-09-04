@@ -112,6 +112,15 @@ pub enum PaneCommand {
         pane_id: Option<PaneId>,
         ratio: f32,
     },
+    /// Resizes the split at an exact path from the tab's pane-tree root
+    /// (`false` = first child, `true` = second; empty path = root split).
+    /// Unlike `Resize` (nearest split of a pane), this commits the precise
+    /// divider dragged in the UI, including ancestor splits.
+    ResizeSplit {
+        tab_id: TabId,
+        path: Vec<bool>,
+        ratio: f32,
+    },
     /// Moves a pane into a new tab in another workspace without replacing its
     /// pane or terminal surface. `None` targets the active pane.
     MoveToWorkspace {
@@ -306,6 +315,12 @@ enum AppCommandWire {
     },
     #[serde(rename = "pane.resize")]
     PaneResize { pane_id: Option<PaneId>, ratio: f32 },
+    #[serde(rename = "pane.resize_split")]
+    PaneResizeSplit {
+        tab_id: TabId,
+        path: Vec<bool>,
+        ratio: f32,
+    },
     #[serde(rename = "pane.move_to_workspace")]
     PaneMoveToWorkspace {
         pane_id: Option<PaneId>,
@@ -441,6 +456,15 @@ impl From<&AppCommand> for AppCommandWire {
                 pane_id: *pane_id,
                 ratio: *ratio,
             },
+            AppCommand::Pane(PaneCommand::ResizeSplit {
+                tab_id,
+                path,
+                ratio,
+            }) => Self::PaneResizeSplit {
+                tab_id: *tab_id,
+                path: path.clone(),
+                ratio: *ratio,
+            },
             AppCommand::Pane(PaneCommand::MoveToWorkspace {
                 pane_id,
                 workspace_id,
@@ -569,6 +593,15 @@ impl From<AppCommandWire> for AppCommand {
             AppCommandWire::PaneResize { pane_id, ratio } => {
                 Self::Pane(PaneCommand::Resize { pane_id, ratio })
             }
+            AppCommandWire::PaneResizeSplit {
+                tab_id,
+                path,
+                ratio,
+            } => Self::Pane(PaneCommand::ResizeSplit {
+                tab_id,
+                path,
+                ratio,
+            }),
             AppCommandWire::PaneMoveToWorkspace {
                 pane_id,
                 workspace_id,
@@ -683,6 +716,7 @@ impl AppCommand {
             Self::Pane(PaneCommand::Close { .. }) => "pane.close",
             Self::Pane(PaneCommand::Focus { .. }) => "pane.focus",
             Self::Pane(PaneCommand::Resize { .. }) => "pane.resize",
+            Self::Pane(PaneCommand::ResizeSplit { .. }) => "pane.resize_split",
             Self::Pane(PaneCommand::MoveToWorkspace { .. }) => "pane.move_to_workspace",
             Self::Pane(PaneCommand::RenameAgent { .. }) => "pane.agent_rename",
             Self::Surface(SurfaceCommand::Replace { .. }) => "surface.replace",

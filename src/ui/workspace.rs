@@ -37,6 +37,15 @@ const TAB_SCROLL_NUDGE_PX: f32 = 160.0;
 /// Width of the sidebar disclosure column. Agent rows indent by the same
 /// amount so nested rows line up with their workspace title.
 const SIDEBAR_DISCLOSURE_WIDTH: f32 = 18.0;
+/// Movement needed before a row click becomes a drag gesture.
+const SIDEBAR_DRAG_THRESHOLD_PX: f32 = 4.0;
+/// A drop boundary is active only near a group edge, not throughout a row.
+const SIDEBAR_DROP_TOLERANCE_PX: f32 = 14.0;
+/// Distance from the sidebar viewport edge that starts event-driven scrolling.
+const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
+/// Pixels to move the sidebar per captured pointer move near an edge.
+const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
+const SPLIT_DIVIDER_WIDTH_PX: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy)]
 struct TerminalMetrics {
@@ -88,6 +97,53 @@ enum ContextMenuTarget {
     Tab(TabId),
     Agent(PaneId),
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarDragSource {
+    Workspace(WorkspaceId),
+    Agent {
+        pane_id: PaneId,
+        workspace_id: WorkspaceId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SidebarDrag {
+    source: SidebarDragSource,
+    start: Point<gpui::Pixels>,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SidebarDropPreview {
+    Workspace {
+        y: f32,
+        index: usize,
+    },
+    Agent {
+        y: f32,
+        target_workspace_id: WorkspaceId,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SplitRect {
+    origin: f32,
+    extent: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SplitDrag {
+    tab_id: TabId,
+    path: Vec<bool>,
+    axis: SplitAxis,
+    rect: SplitRect,
+    start: f32,
+    start_ratio: f32,
+    preview_ratio: Option<f32>,
+}
+
+type SplitBounds = Arc<Mutex<BTreeMap<(TabId, Vec<bool>), SplitRect>>>;
 
 /// In-window dialogs are kept as view state so their presentation and
 /// dismissal share one path without introducing model-owned UI state.
@@ -447,6 +503,11 @@ pub struct WorkspaceView {
     pending_tab: Option<TabId>,
     sidebar_width: f32,
     dragging_sidebar: bool,
+    window_drag_start: Option<Point<gpui::Pixels>>,
+    sidebar_drag: Option<SidebarDrag>,
+    sidebar_drop_preview: Option<SidebarDropPreview>,
+    split_bounds: SplitBounds,
+    split_drag: Option<SplitDrag>,
     titlebar_dragging: bool,
     rename_target: Option<RenameTarget>,
     rename_value: String,
@@ -499,6 +560,11 @@ impl WorkspaceView {
             pending_tab: None,
             sidebar_width,
             dragging_sidebar: false,
+            window_drag_start: None,
+            sidebar_drag: None,
+            sidebar_drop_preview: None,
+            split_bounds: Arc::new(Mutex::new(BTreeMap::new())),
+            split_drag: None,
             titlebar_dragging: false,
             rename_target: None,
             rename_value: String::new(),
@@ -532,6 +598,7 @@ impl WorkspaceView {
         self.selected_workspace = Some(workspace_id);
         self.focused_pane = focused_pane;
         self.pending_tab = None;
+        self.split_drag = None;
         self.selection = None;
         self.clear_ime();
         if changed {
@@ -603,6 +670,7 @@ impl WorkspaceView {
         };
         let (tab_id, tab_active_pane) = (tab.id, tab.active_pane);
         self.pending_tab = Some(tab_id);
+        self.split_drag = None;
         self.focused_pane = Some(tab_active_pane);
         self.selection = None;
         self.clear_ime();
@@ -713,6 +781,293 @@ impl WorkspaceView {
         }
     }
 
+    fn begin_window_drag(&mut self, position: Point<gpui::Pixels>) {
+        if self.has_transient_ui() {
+            return;
+        }
+        self.window_drag_start = Some(position);
+        self.sidebar_drag = None;
+        self.sidebar_drop_preview = None;
+        self.split_drag = None;
+    }
+
+    fn update_window_drag(&mut self, position: Point<gpui::Pixels>) -> bool {
+        let Some(start) = self.window_drag_start else {
+            return false;
+        };
+        let dx = (f32::from(position.x) - f32::from(start.x)).abs();
+        let dy = (f32::from(position.y) - f32::from(start.y)).abs();
+        if dx.max(dy) < SIDEBAR_DRAG_THRESHOLD_PX {
+            return false;
+        }
+        self.window_drag_start = None;
+        true
+    }
+
+    fn begin_sidebar_drag(&mut self, source: SidebarDragSource, start: Point<gpui::Pixels>) {
+        self.sidebar_drag = Some(SidebarDrag {
+            source,
+            start,
+            active: false,
+        });
+        self.sidebar_drop_preview = None;
+        self.window_drag_start = None;
+        self.split_drag = None;
+    }
+
+    fn sidebar_group_bounds(&self) -> Vec<(WorkspaceId, SidebarGroupGeometry)> {
+        let offset = self.sidebar_scroll.offset();
+        self.workspace_dumps()
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, workspace)| {
+                let bounds = self.sidebar_scroll.bounds_for_item(index)?;
+                Some((
+                    workspace.id,
+                    SidebarGroupGeometry {
+                        top: f32::from(bounds.top()) + f32::from(offset.y),
+                        bottom: f32::from(bounds.bottom()) + f32::from(offset.y),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    fn update_sidebar_autoscroll(&self, position: Point<gpui::Pixels>) {
+        let viewport = self.sidebar_scroll.bounds();
+        if viewport.size.height <= px(0.) || !viewport.contains(&position) {
+            return;
+        }
+        let y = f32::from(position.y);
+        let top = f32::from(viewport.top());
+        let bottom = f32::from(viewport.bottom());
+        let offset = self.sidebar_scroll.offset();
+        let max_offset = f32::from(self.sidebar_scroll.max_offset().y).max(0.0);
+        let next_y = if y <= top + SIDEBAR_AUTOSCROLL_EDGE_PX {
+            (f32::from(offset.y) + SIDEBAR_AUTOSCROLL_STEP_PX).min(0.0)
+        } else if y >= bottom - SIDEBAR_AUTOSCROLL_EDGE_PX {
+            (f32::from(offset.y) - SIDEBAR_AUTOSCROLL_STEP_PX).max(-max_offset)
+        } else {
+            return;
+        };
+        if (next_y - f32::from(offset.y)).abs() > f32::EPSILON {
+            self.sidebar_scroll.set_offset(point(offset.x, px(next_y)));
+        }
+    }
+
+    fn update_sidebar_drag(
+        &mut self,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(mut drag) = self.sidebar_drag else {
+            return false;
+        };
+        if !drag.active {
+            let dx = (f32::from(position.x) - f32::from(drag.start.x)).abs();
+            let dy = (f32::from(position.y) - f32::from(drag.start.y)).abs();
+            if dx.max(dy) < SIDEBAR_DRAG_THRESHOLD_PX {
+                return true;
+            }
+            drag.active = true;
+            self.sidebar_drag = Some(drag);
+        }
+
+        self.update_sidebar_autoscroll(position);
+        let viewport = self.sidebar_scroll.bounds();
+        let groups = self.sidebar_group_bounds();
+        let y = f32::from(position.y);
+        self.sidebar_drop_preview = if viewport.contains(&position) {
+            match drag.source {
+                SidebarDragSource::Workspace(source_id) => {
+                    let group_bounds = groups.iter().map(|(_, bounds)| *bounds).collect::<Vec<_>>();
+                    sidebar_drop_boundary(
+                        y,
+                        &group_bounds,
+                        f32::from(viewport.top()),
+                        f32::from(viewport.bottom()),
+                        SIDEBAR_DROP_TOLERANCE_PX,
+                    )
+                    .and_then(|(boundary, line_y)| {
+                        let source_index = groups
+                            .iter()
+                            .position(|(workspace_id, _)| *workspace_id == source_id)?;
+                        let index =
+                            sidebar_reorder_final_index(source_index, boundary, groups.len());
+                        // Requirement: positions that would not change the
+                        // order (endpoints next to the dragged group, the
+                        // sole workspace) show no line and move nothing.
+                        (index != source_index)
+                            .then_some(SidebarDropPreview::Workspace { y: line_y, index })
+                    })
+                }
+                SidebarDragSource::Agent {
+                    workspace_id: source_workspace_id,
+                    ..
+                } => groups
+                    .iter()
+                    .find(|(workspace_id, bounds)| {
+                        *workspace_id != source_workspace_id && y >= bounds.top && y < bounds.bottom
+                    })
+                    .map(|(target_workspace_id, bounds)| SidebarDropPreview::Agent {
+                        y: bounds.bottom,
+                        target_workspace_id: *target_workspace_id,
+                    }),
+            }
+        } else {
+            None
+        };
+        cx.notify();
+        true
+    }
+
+    fn finish_sidebar_drag(&mut self, cx: &mut Context<Self>) {
+        let drag = self.sidebar_drag.take();
+        let preview = self.sidebar_drop_preview.take();
+        let Some(drag) = drag else {
+            return;
+        };
+        if !drag.active {
+            return;
+        }
+        match (drag.source, preview) {
+            (
+                SidebarDragSource::Workspace(workspace_id),
+                Some(SidebarDropPreview::Workspace { index, .. }),
+            ) if self.workspace_exists(workspace_id) => {
+                self.dispatch(
+                    AppCommand::Workspace(WorkspaceCommand::Reorder {
+                        workspace_id: Some(workspace_id),
+                        index,
+                    }),
+                    cx,
+                );
+            }
+            (
+                SidebarDragSource::Agent {
+                    pane_id,
+                    workspace_id: source_workspace_id,
+                },
+                Some(SidebarDropPreview::Agent {
+                    target_workspace_id,
+                    ..
+                }),
+            ) if source_workspace_id != target_workspace_id
+                && self.workspace_exists(target_workspace_id)
+                && self
+                    .agent_by_pane_id(pane_id)
+                    .is_some_and(|agent| agent.workspace_id == source_workspace_id) =>
+            {
+                self.dispatch(
+                    AppCommand::Pane(PaneCommand::MoveToWorkspace {
+                        pane_id: Some(pane_id),
+                        workspace_id: target_workspace_id,
+                    }),
+                    cx,
+                );
+            }
+            _ => {}
+        }
+        cx.notify();
+    }
+
+    fn split_rect_for(&self, tab_id: TabId, path: &[bool]) -> Option<SplitRect> {
+        self.split_bounds
+            .lock()
+            .expect("split bounds poisoned")
+            .get(&(tab_id, path.to_vec()))
+            .copied()
+    }
+
+    fn begin_split_drag(
+        &mut self,
+        tab_id: TabId,
+        path: Vec<bool>,
+        axis: SplitAxis,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.active_tab_by_id(tab_id) else {
+            return;
+        };
+        let Some((current_axis, ratio, _, _)) = pane_split_at_path(&tab.tree, &path) else {
+            return;
+        };
+        if current_axis != axis {
+            return;
+        }
+        let Some(rect) = self.split_rect_for(tab_id, &path) else {
+            return;
+        };
+        let start = split_pointer_coordinate(position, axis);
+        self.split_drag = Some(SplitDrag {
+            tab_id,
+            path,
+            axis,
+            rect,
+            start,
+            start_ratio: ratio,
+            preview_ratio: None,
+        });
+        self.sidebar_drag = None;
+        self.sidebar_drop_preview = None;
+        self.window_drag_start = None;
+        cx.notify();
+    }
+
+    fn update_split_drag(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) -> bool {
+        let Some(mut drag) = self.split_drag.take() else {
+            return false;
+        };
+        let valid = self
+            .active_tab_by_id(drag.tab_id)
+            .and_then(|tab| pane_split_at_path(&tab.tree, &drag.path))
+            .is_some_and(|(axis, _, _, _)| axis == drag.axis);
+        if valid {
+            drag.preview_ratio = Some(split_ratio_for_pointer(
+                split_pointer_coordinate(position, drag.axis),
+                drag.rect.origin,
+                drag.rect.extent,
+                SPLIT_DIVIDER_WIDTH_PX,
+            ));
+        }
+        self.split_drag = Some(drag);
+        cx.notify();
+        true
+    }
+
+    fn finish_split_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.split_drag.take() else {
+            return;
+        };
+        // Commit only while the dragged split still lives in the VISIBLE
+        // active tab of the selected workspace; a tab switch mid-drag
+        // cancels instead of mutating a tab the user stopped looking at.
+        let target = drag.preview_ratio.and_then(|ratio| {
+            let visible = self
+                .selected_workspace_dump()
+                .and_then(|workspace| workspace.active_tab)
+                == Some(drag.tab_id);
+            if !visible {
+                return None;
+            }
+            let tab = self.active_tab_by_id(drag.tab_id)?;
+            let (axis, _, _, _) = pane_split_at_path(&tab.tree, &drag.path)?;
+            (axis == drag.axis).then(|| (drag.tab_id, drag.path.clone(), ratio))
+        });
+        if let Some((tab_id, path, ratio)) = target {
+            self.dispatch(
+                AppCommand::Pane(PaneCommand::ResizeSplit {
+                    tab_id,
+                    path,
+                    ratio,
+                }),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     fn workspace_by_id(&self, workspace_id: WorkspaceId) -> Option<&WorkspaceDump> {
         workspace_dump_for_snapshot(&self.snapshot, workspace_id)
     }
@@ -742,6 +1097,13 @@ impl WorkspaceView {
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
+    }
+
+    fn active_tab_by_id(&self, tab_id: TabId) -> Option<&TabDump> {
+        let workspace = self.selected_workspace_dump()?;
+        (workspace.active_tab == Some(tab_id))
+            .then(|| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+            .flatten()
     }
 
     fn context_menu_target_exists(&self, target: ContextMenuTarget) -> bool {
@@ -1569,6 +1931,15 @@ impl WorkspaceView {
         self.collapsed_workspaces
             .retain(|workspace_id| workspace_exists_in_snapshot(&snapshot, *workspace_id));
         self.snapshot = snapshot;
+        // A snapshot that moved the visible tab away from a split under
+        // drag (tab closed/activated elsewhere mid-drag) cancels the drag.
+        if self.split_drag.as_ref().is_some_and(|drag| {
+            self.selected_workspace_dump()
+                .and_then(|workspace| workspace.active_tab)
+                != Some(drag.tab_id)
+        }) {
+            self.split_drag = None;
+        }
         let tab_strip_signature = (
             self.selected_workspace,
             self.selected_workspace_dump()
@@ -1861,6 +2232,7 @@ impl WorkspaceView {
                     this.context_menu = None;
                     this.focus_handle.focus(window, cx);
                     this.focused_pane = Some(active_pane);
+                    this.split_drag = None;
                     this.selection = None;
                     this.clear_ime();
                     this.dispatch(
@@ -1940,17 +2312,19 @@ impl WorkspaceView {
             .active_tab
             .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
             .map(|tab| tab.active_pane);
-        let workspace_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+        let workspace_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
             this.select_workspace_locally(workspace_id, cx);
             this.focused_pane = workspace_active_pane;
+            this.begin_sidebar_drag(SidebarDragSource::Workspace(workspace_id), event.position);
             this.dispatch(
                 AppCommand::Workspace(WorkspaceCommand::Activate {
                     workspace_id: Some(workspace_id),
                 }),
                 cx,
             );
+            cx.stop_propagation();
         });
         let disclosure = div()
             .id(format!("workspace-disclosure-{workspace_id}"))
@@ -2060,6 +2434,41 @@ impl WorkspaceView {
                     .child("No agents detected"),
             );
         }
+        let list_bounds = self.sidebar_scroll.bounds();
+        let indicator = self.sidebar_drop_preview.and_then(|preview| {
+            let y = match preview {
+                SidebarDropPreview::Workspace { y, .. } | SidebarDropPreview::Agent { y, .. } => y,
+            };
+            if list_bounds.size.height <= px(0.) {
+                return None;
+            }
+            let top = (y - f32::from(list_bounds.origin.y))
+                .clamp(0.0, (f32::from(list_bounds.size.height) - 2.0).max(0.0));
+            Some(
+                canvas(
+                    |_bounds, _, _| (),
+                    move |bounds, _, window, _| {
+                        window.paint_quad(fill(bounds, rgb(theme.sidebar_drag_indicator)));
+                    },
+                )
+                .absolute()
+                .left_0()
+                .right_0()
+                .top(px(top))
+                .h(px(2.0)),
+            )
+        });
+        let mut sidebar_content = div()
+            .flex_1()
+            .min_w(px(0.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .relative()
+            .child(list);
+        if let Some(indicator) = indicator {
+            sidebar_content = sidebar_content.child(indicator);
+        }
         div()
             .w(px(self.sidebar_width))
             .h_full()
@@ -2067,15 +2476,7 @@ impl WorkspaceView {
             .flex_row()
             .bg(rgb(theme.sidebar_background))
             .text_color(rgb(theme.ui_foreground))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .h_full()
-                    .flex()
-                    .flex_col()
-                    .child(list),
-            )
+            .child(sidebar_content)
             .child(self.sidebar_resize_handle(theme, cx))
             .into_any_element()
     }
@@ -2140,11 +2541,18 @@ impl WorkspaceView {
         } else {
             agent.display_label().to_owned()
         };
-        let agent_activate = cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+        let agent_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
             this.select_workspace_locally(workspace_id, cx);
             this.focused_pane = Some(pane_id);
+            this.begin_sidebar_drag(
+                SidebarDragSource::Agent {
+                    pane_id,
+                    workspace_id,
+                },
+                event.position,
+            );
             this.dispatch(
                 AppCommand::Pane(PaneCommand::Focus {
                     pane_id: Some(pane_id),
@@ -2152,6 +2560,7 @@ impl WorkspaceView {
                 }),
                 cx,
             );
+            cx.stop_propagation();
         });
         let mut row = div()
             .id(format!("agent-pane-{pane_id}"))
@@ -2713,6 +3122,7 @@ impl WorkspaceView {
 
     fn render_pane_tree(
         &self,
+        tab_id: TabId,
         tree: &PaneTreeDump,
         window_active: bool,
         metrics: TerminalMetrics,
@@ -2720,13 +3130,25 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let view = cx.entity();
-        self.render_pane_tree_with_grow(tree, 1.0, window_active, metrics, theme, view, cx)
+        self.render_pane_tree_with_grow(
+            tab_id,
+            tree,
+            &[],
+            1.0,
+            window_active,
+            metrics,
+            theme,
+            view,
+            cx,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
     fn render_pane_tree_with_grow(
         &self,
+        tab_id: TabId,
         tree: &PaneTreeDump,
+        path: &[bool],
         grow: f32,
         window_active: bool,
         metrics: TerminalMetrics,
@@ -2858,6 +3280,9 @@ impl WorkspaceView {
                                 }),
                                 cx,
                             );
+                            // A terminal/pane click is an interaction, never
+                            // a request to drag the native window.
+                            cx.stop_propagation();
                         }),
                     )
                     .on_scroll_wheel(cx.listener(
@@ -2944,7 +3369,81 @@ impl WorkspaceView {
                 first,
                 second,
             } => {
-                let ratio = ratio.clamp(0.05, 0.95);
+                let split_axis = *axis;
+                let preview_ratio = self
+                    .split_drag
+                    .as_ref()
+                    .filter(|drag| {
+                        drag.tab_id == tab_id && drag.path == path && drag.axis == split_axis
+                    })
+                    .and_then(|drag| drag.preview_ratio)
+                    .unwrap_or(*ratio)
+                    .clamp(0.05, 0.95);
+                let mut first_path = path.to_vec();
+                first_path.push(false);
+                let mut second_path = path.to_vec();
+                second_path.push(true);
+                let divider_path = path.to_vec();
+                let divider_cursor = if split_axis == SplitAxis::Horizontal {
+                    CursorStyle::ResizeLeftRight
+                } else {
+                    CursorStyle::ResizeUpDown
+                };
+                let divider = {
+                    let divider_width = SPLIT_DIVIDER_WIDTH_PX;
+                    let divider_id = path
+                        .iter()
+                        .map(|bit| if *bit { '1' } else { '0' })
+                        .collect::<String>();
+                    let divider = div()
+                        .id(format!("pane-divider-{tab_id}-{divider_id}"))
+                        .flex_none()
+                        .cursor(divider_cursor)
+                        .bg(rgba(0x00000000))
+                        .hover(|style| style.bg(rgb(theme.inactive_pane_border)))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                this.focus_handle.focus(window, cx);
+                                this.begin_split_drag(
+                                    tab_id,
+                                    divider_path.clone(),
+                                    split_axis,
+                                    event.position,
+                                    cx,
+                                );
+                                cx.stop_propagation();
+                            }),
+                        );
+                    if split_axis == SplitAxis::Horizontal {
+                        divider.w(px(divider_width)).h_full()
+                    } else {
+                        divider.h(px(divider_width)).w_full()
+                    }
+                };
+                let split_bounds = self.split_bounds.clone();
+                let split_path = path.to_vec();
+                let bounds_observer = canvas(
+                    move |bounds, _, _| {
+                        let extent = if split_axis == SplitAxis::Horizontal {
+                            f32::from(bounds.size.width)
+                        } else {
+                            f32::from(bounds.size.height)
+                        };
+                        let origin = if split_axis == SplitAxis::Horizontal {
+                            f32::from(bounds.origin.x)
+                        } else {
+                            f32::from(bounds.origin.y)
+                        };
+                        split_bounds
+                            .lock()
+                            .expect("split bounds poisoned")
+                            .insert((tab_id, split_path), SplitRect { origin, extent });
+                    },
+                    |_bounds, _, _, _| {},
+                )
+                .absolute()
+                .inset_0();
                 let mut container = div()
                     .flex_1()
                     .flex_grow(grow)
@@ -2952,30 +3451,36 @@ impl WorkspaceView {
                     .min_w(px(0.))
                     .min_h(px(0.))
                     .overflow_hidden();
-                if *axis == SplitAxis::Horizontal {
+                if split_axis == SplitAxis::Horizontal {
                     container = container.flex_row();
                 } else {
                     container = container.flex_col();
                 }
                 container
                     .child(self.render_pane_tree_with_grow(
+                        tab_id,
                         first,
-                        ratio,
+                        &first_path,
+                        preview_ratio,
                         window_active,
                         metrics,
                         theme,
                         view.clone(),
                         cx,
                     ))
+                    .child(divider)
                     .child(self.render_pane_tree_with_grow(
+                        tab_id,
                         second,
-                        1.0 - ratio,
+                        &second_path,
+                        1.0 - preview_ratio,
                         window_active,
                         metrics,
                         theme,
                         view,
                         cx,
                     ))
+                    .child(bounds_observer)
                     .into_any_element()
             }
         }
@@ -2997,7 +3502,112 @@ impl WorkspaceView {
         let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab_id) else {
             return render_empty_tab_state(theme, &self.config.shortcuts.new_terminal_tab);
         };
-        self.render_pane_tree(&tab.tree, window_active, metrics, theme, cx)
+        self.render_pane_tree(tab.id, &tab.tree, window_active, metrics, theme, cx)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SidebarGroupGeometry {
+    top: f32,
+    bottom: f32,
+}
+
+/// Finds the nearest visible boundary between workspace groups. The returned
+/// index is an insertion slot in the original displayed order; callers map it
+/// to the command's after-removal index before dispatching.
+fn sidebar_drop_boundary(
+    pointer_y: f32,
+    groups: &[SidebarGroupGeometry],
+    viewport_top: f32,
+    viewport_bottom: f32,
+    tolerance: f32,
+) -> Option<(usize, f32)> {
+    if groups.is_empty()
+        || !pointer_y.is_finite()
+        || !viewport_top.is_finite()
+        || !viewport_bottom.is_finite()
+        || pointer_y < viewport_top
+        || pointer_y > viewport_bottom
+    {
+        return None;
+    }
+    let tolerance = tolerance.max(0.0);
+    let mut nearest: Option<(usize, f32)> = None;
+    for (index, y) in std::iter::once((0, groups[0].top)).chain(
+        groups
+            .iter()
+            .enumerate()
+            .map(|(index, group)| (index + 1, group.bottom)),
+    ) {
+        if !y.is_finite() || y < viewport_top - tolerance || y > viewport_bottom + tolerance {
+            continue;
+        }
+        let distance = (pointer_y - y).abs();
+        if nearest.is_none_or(|(_, nearest_y)| distance < (pointer_y - nearest_y).abs()) {
+            nearest = Some((index, y));
+        }
+    }
+    nearest.filter(|(_, y)| (pointer_y - *y).abs() <= tolerance)
+}
+
+/// Maps an original-order insertion slot to the final index after removing
+/// the dragged workspace. The command dispatcher uses this convention.
+fn sidebar_reorder_final_index(source_index: usize, boundary_index: usize, count: usize) -> usize {
+    if count == 0 || source_index >= count {
+        return 0;
+    }
+    let boundary_index = boundary_index.min(count);
+    let index = if boundary_index <= source_index {
+        boundary_index
+    } else {
+        boundary_index.saturating_sub(1)
+    };
+    index.min(count.saturating_sub(1))
+}
+
+fn split_pointer_coordinate(position: Point<gpui::Pixels>, axis: SplitAxis) -> f32 {
+    match axis {
+        SplitAxis::Horizontal => f32::from(position.x),
+        SplitAxis::Vertical => f32::from(position.y),
+    }
+}
+
+fn split_ratio_for_pointer(pointer: f32, origin: f32, extent: f32, divider: f32) -> f32 {
+    if !pointer.is_finite() || !origin.is_finite() || !extent.is_finite() {
+        return 0.5;
+    }
+    // The divider is a fixed-size flex item: children share (extent -
+    // divider). The divider CENTER sits at origin + ratio * usable +
+    // divider / 2, which inverts to the formula below so the committed
+    // ratio matches what the pointer points at.
+    let usable = extent - divider.max(0.0);
+    if usable <= 0.0 {
+        return 0.5;
+    }
+    (((pointer - origin) - divider / 2.0) / usable).clamp(0.05, 0.95)
+}
+
+fn pane_split_at_path<'a>(
+    tree: &'a PaneTreeDump,
+    path: &[bool],
+) -> Option<(SplitAxis, f32, &'a PaneTreeDump, &'a PaneTreeDump)> {
+    if let Some((head, tail)) = path.split_first() {
+        match tree {
+            PaneTreeDump::Split { first, second, .. } => {
+                pane_split_at_path(if *head { second } else { first }, tail)
+            }
+            PaneTreeDump::Leaf { .. } => None,
+        }
+    } else {
+        match tree {
+            PaneTreeDump::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => Some((*axis, *ratio, first, second)),
+            PaneTreeDump::Leaf { .. } => None,
+        }
     }
 }
 
@@ -3567,24 +4177,44 @@ fn terminal_id_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<Terminal
     }
 }
 
-/// Registers window-level listeners during paint so a terminal drag keeps receiving
-/// moves and release events after it crosses another pane or the root hitbox.
+/// Registers window-level listeners during paint so terminal selection and
+/// view-local drag gestures keep receiving moves and release events after the
+/// pointer crosses another pane or the root hitbox.
 fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
     canvas(
         |_bounds, _, _| {},
         move |_bounds, _, window, _| {
             let move_entity = entity.clone();
-            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _window, cx| {
+            window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
                 if phase != DispatchPhase::Capture {
                     return;
                 }
-                move_entity.update(cx, |view, cx| {
+                let (handled, start_window_move) = move_entity.update(cx, |view, cx| {
                     if view.dragging_sidebar {
                         view.update_sidebar_width(event.position.x, cx);
+                        (true, false)
+                    } else if view.sidebar_drag.is_some() {
+                        (view.update_sidebar_drag(event.position, cx), false)
+                    } else if view.split_drag.is_some() {
+                        (view.update_split_drag(event.position, cx), false)
+                    } else if view.window_drag_start.is_some() {
+                        let start_window_move = event.pressed_button == Some(MouseButton::Left)
+                            && view.update_window_drag(event.position);
+                        // Keep a pending background gesture from being
+                        // interpreted as a terminal click if the pointer
+                        // crosses into a pane before the threshold.
+                        (true, start_window_move)
                     } else {
                         view.update_terminal_selection(event, cx);
+                        (false, false)
                     }
                 });
+                if start_window_move {
+                    window.start_window_move();
+                }
+                if handled {
+                    cx.stop_propagation();
+                }
             });
 
             let up_entity = entity;
@@ -3592,14 +4222,26 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                 if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
                     return;
                 }
-                up_entity.update(cx, |view, cx| {
+                let handled = up_entity.update(cx, |view, cx| {
+                    view.window_drag_start = None;
                     if view.dragging_sidebar {
                         view.dragging_sidebar = false;
                         cx.notify();
+                        true
+                    } else if view.sidebar_drag.is_some() {
+                        view.finish_sidebar_drag(cx);
+                        true
+                    } else if view.split_drag.is_some() {
+                        view.finish_split_drag(cx);
+                        true
                     } else {
                         view.finish_terminal_selection(event, cx);
+                        false
                     }
                 });
+                if handled {
+                    cx.stop_propagation();
+                }
             });
         },
     )
@@ -4981,6 +5623,10 @@ impl Render for WorkspaceView {
             .active_terminal_snapshot()
             .map(|snapshot| snapshot.terminal_id);
         let theme = self.config.theme.colors();
+        self.split_bounds
+            .lock()
+            .expect("split bounds poisoned")
+            .clear();
 
         let window_active = window.is_window_active() && self.focus_handle.is_focused(window);
         let content = div()
@@ -4994,7 +5640,23 @@ impl Render for WorkspaceView {
             .child(self.render_active_tab(window_active, metrics, theme, cx));
 
         let action_view = cx.entity();
-        let mut main_content = div().flex_1().min_w(px(0.)).min_h(px(0.)).flex();
+        let mut main_content = div()
+            .flex_1()
+            .min_w(px(0.))
+            .min_h(px(0.))
+            .flex()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if this.has_transient_ui() {
+                        cx.stop_propagation();
+                        return;
+                    }
+                    this.focus_handle.focus(window, cx);
+                    this.begin_window_drag(event.position);
+                    cx.stop_propagation();
+                }),
+            );
         if !self.sidebar_collapsed {
             main_content = main_content.child(self.render_sidebar(theme, cx));
         }
@@ -5861,6 +6523,79 @@ mod tests {
         assert_eq!(tab_bar_edge_indicators(200.0, -100.0), (true, true));
         // Fully scrolled to the end: only the left side has hidden content.
         assert_eq!(tab_bar_edge_indicators(200.0, -200.0), (true, false));
+    }
+
+    #[test]
+    fn sidebar_drop_boundaries_reject_group_interiors_and_out_of_range_points() {
+        let groups = [
+            SidebarGroupGeometry {
+                top: 10.0,
+                bottom: 38.0,
+            },
+            SidebarGroupGeometry {
+                top: 38.0,
+                bottom: 84.0,
+            },
+            SidebarGroupGeometry {
+                top: 84.0,
+                bottom: 112.0,
+            },
+        ];
+        assert_eq!(
+            sidebar_drop_boundary(11.0, &groups, 10.0, 112.0, 14.0),
+            Some((0, 10.0))
+        );
+        assert_eq!(
+            sidebar_drop_boundary(39.0, &groups, 10.0, 112.0, 14.0),
+            Some((1, 38.0))
+        );
+        assert_eq!(
+            sidebar_drop_boundary(111.0, &groups, 10.0, 112.0, 14.0),
+            Some((3, 112.0))
+        );
+        assert_eq!(
+            sidebar_drop_boundary(60.0, &groups, 10.0, 112.0, 14.0),
+            None
+        );
+        assert_eq!(sidebar_drop_boundary(0.0, &groups, 10.0, 112.0, 14.0), None);
+        assert_eq!(
+            sidebar_drop_boundary(125.0, &groups, 10.0, 112.0, 14.0),
+            None
+        );
+    }
+
+    #[test]
+    fn sidebar_reorder_index_uses_after_removal_semantics() {
+        assert_eq!(sidebar_reorder_final_index(0, 0, 3), 0);
+        assert_eq!(sidebar_reorder_final_index(0, 3, 3), 2);
+        assert_eq!(sidebar_reorder_final_index(1, 0, 3), 0);
+        assert_eq!(sidebar_reorder_final_index(1, 1, 3), 1);
+        assert_eq!(sidebar_reorder_final_index(1, 2, 3), 1);
+        assert_eq!(sidebar_reorder_final_index(2, 0, 3), 0);
+        assert_eq!(sidebar_reorder_final_index(2, 3, 3), 2);
+        assert_eq!(sidebar_reorder_final_index(99, 99, 3), 0);
+    }
+
+    #[test]
+    fn split_ratio_geometry_clamps_pointer_to_dispatcher_range() {
+        assert_eq!(split_ratio_for_pointer(100.0, 0.0, 200.0, 0.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(-20.0, 0.0, 200.0, 0.0), 0.05);
+        assert_eq!(split_ratio_for_pointer(240.0, 0.0, 200.0, 0.0), 0.95);
+        assert_eq!(split_ratio_for_pointer(20.0, 10.0, 0.0, 0.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(f32::NAN, 0.0, 200.0, 0.0), 0.5);
+    }
+
+    #[test]
+    fn split_ratio_accounts_for_the_fixed_divider() {
+        // The flex renderer gives children (extent - divider) to share and
+        // centers the fixed divider on the boundary; the pointer maps back
+        // with the same geometry so the committed ratio is what the user
+        // dragged to, without midpoint bias.
+        assert_eq!(split_ratio_for_pointer(33.0, 0.0, 106.0, 6.0), 0.3);
+        assert_eq!(split_ratio_for_pointer(53.0, 0.0, 106.0, 6.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(93.0, 0.0, 106.0, 6.0), 0.9);
+        // No usable space without the divider band itself.
+        assert_eq!(split_ratio_for_pointer(50.0, 0.0, 6.0, 6.0), 0.5);
     }
 
     #[test]

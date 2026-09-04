@@ -136,6 +136,33 @@ impl PaneNode {
         }
     }
 
+    /// Resizes the split identified by an exact path from this node
+    /// (`false` = descend into first, `true` = into second; an empty path
+    /// addresses this node, which must itself be a split). Unlike
+    /// [`resize_nearest`], this can commit an ANCESTOR split whose first
+    /// branch is itself split: `resize_nearest` from any leaf always finds
+    /// the innermost split first, which mis-targets outer dividers.
+    pub fn resize_at_path(&mut self, path: &[bool], ratio: f32) -> bool {
+        match self {
+            Self::Leaf(_) => false,
+            Self::Split {
+                first,
+                second,
+                ratio: current_ratio,
+                ..
+            } => match path.split_first() {
+                None => {
+                    *current_ratio = ratio;
+                    true
+                }
+                Some((descend_second, tail)) => {
+                    let child = if *descend_second { second } else { first };
+                    child.resize_at_path(tail, ratio)
+                }
+            },
+        }
+    }
+
     pub fn ratios(&self, output: &mut Vec<f32>) {
         match self {
             Self::Leaf(_) => {}
@@ -373,4 +400,63 @@ fn remove_leaf(node: PaneNode, target: PaneId) -> (Option<PaneNode>, bool) {
 pub struct Pane {
     pub id: PaneId,
     pub surface: SurfaceId,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ids::PaneId;
+
+    fn leaf(id: u64) -> Box<PaneNode> {
+        Box::new(PaneNode::Leaf(PaneId::from(id)))
+    }
+
+    /// root: Split [ [Split(A,B), C ], D ]
+    fn nested_tree() -> PaneNode {
+        PaneNode::Split {
+            axis: SplitAxis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(PaneNode::Split {
+                axis: SplitAxis::Vertical,
+                ratio: 0.7,
+                first: leaf(1),
+                second: leaf(2),
+            }),
+            second: leaf(3),
+        }
+    }
+
+    fn ratios_of(tree: &PaneNode) -> Vec<f32> {
+        let mut out = Vec::new();
+        tree.ratios(&mut out);
+        out
+    }
+
+    #[test]
+    fn resize_at_path_targets_the_exact_split() {
+        let mut tree = nested_tree();
+        // Empty path = root (outer) split, NOT the nearest inner one.
+        assert!(tree.resize_at_path(&[], 0.2));
+        assert_eq!(ratios_of(&tree), vec![0.2, 0.7]);
+        assert!(tree.resize_at_path(&[false], 0.4));
+        assert_eq!(ratios_of(&tree), vec![0.2, 0.4]);
+    }
+
+    #[test]
+    fn resize_at_path_rejects_missing_or_leaf_paths() {
+        let mut tree = nested_tree();
+        assert!(!tree.resize_at_path(&[true], 0.3)); // second branch is a leaf
+        assert!(!tree.resize_at_path(&[false, false, false], 0.3)); // below the leaves
+        assert_eq!(ratios_of(&tree), vec![0.5, 0.7]);
+    }
+
+    #[test]
+    fn resize_nearest_still_prefers_the_innermost_split() {
+        // Documents WHY the drag commit uses resize_at_path: from leaf A the
+        // nearest split is the INNER one, never the outer split the dragged
+        // outer divider belongs to.
+        let mut tree = nested_tree();
+        assert!(tree.resize_nearest(PaneId::from(1), 0.9));
+        assert_eq!(ratios_of(&tree), vec![0.5, 0.9]);
+    }
 }

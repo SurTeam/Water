@@ -53,6 +53,10 @@ pub enum AppEventKind {
         pane_id: PaneId,
         ratio: f32,
     },
+    SplitResized {
+        tab_id: TabId,
+        ratio: f32,
+    },
     PaneMovedToWorkspace {
         pane_id: PaneId,
         tab_id: TabId,
@@ -120,6 +124,7 @@ impl AppEventKind {
             Self::PaneFocused { .. } => "pane.focused",
             Self::PaneClosed { .. } => "pane.closed",
             Self::PaneResized { .. } => "pane.resized",
+            Self::SplitResized { .. } => "split.resized",
             Self::PaneMovedToWorkspace { .. } => "pane.moved_to_workspace",
             Self::SurfaceChanged { .. } => "surface.changed",
             Self::TerminalSpawned { .. } => "terminal.spawned",

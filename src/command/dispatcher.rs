@@ -1034,6 +1034,23 @@ impl CommandDispatcher {
                 });
                 Ok(OperationResult::None)
             }
+            PaneCommand::ResizeSplit {
+                tab_id,
+                path,
+                ratio,
+            } => {
+                if !ratio.is_finite() || !(0.05..=0.95).contains(&ratio) {
+                    return Err(CommandError::new(
+                        "INVALID_SPLIT",
+                        "split ratio must be finite and between 0.05 and 0.95",
+                    ));
+                }
+                self.model
+                    .resize_split(tab_id, path.as_slice(), ratio)
+                    .map_err(|message| self.pane_error(message))?;
+                self.emit(AppEventKind::SplitResized { tab_id, ratio });
+                Ok(OperationResult::None)
+            }
             PaneCommand::RenameAgent { pane_id, label } => {
                 let (_, target_pane) = self.resolve_pane(pane_id)?;
                 let label = label.trim().to_owned();

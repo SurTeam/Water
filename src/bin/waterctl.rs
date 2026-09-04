@@ -256,6 +256,33 @@ fn run_pane(client: &ControlClient, arguments: &[String]) -> Result<()> {
                 AppCommand::Pane(PaneCommand::Resize { pane_id, ratio }),
             )?;
         }
+        "resize-split" => {
+            let ratio = required_f32(arguments, "--ratio")?;
+            let tab_id = optional_id::<TabId>(arguments, "--tab")?
+                .context("pane resize-split requires --tab")?;
+            let path = optional_value(arguments, "--path")?
+                .map(|raw| {
+                    raw.split(',')
+                        .map(str::trim)
+                        .filter(|bit| !bit.is_empty())
+                        .map(|bit| match bit {
+                            "0" | "false" => Ok(false),
+                            "1" | "true" => Ok(true),
+                            _ => bail!("invalid path segment: {bit}"),
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            dispatch_and_print(
+                client,
+                AppCommand::Pane(PaneCommand::ResizeSplit {
+                    tab_id,
+                    path,
+                    ratio,
+                }),
+            )?;
+        }
         "rename-agent" | "agent-rename" => {
             let pane_id = optional_id::<PaneId>(arguments, "--pane")?;
             let label = optional_value(arguments, "--label")?
