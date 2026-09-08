@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::sync::Arc;
 
-pub const VIEWPORT_OVERSCAN_ROWS: usize = 8;
+/// Raw row reserve on each side of the viewport. This is deliberately wider
+/// than the renderer's prepared-row lookahead: fast gestures can keep moving
+/// from immutable local data while shaping remains bounded to a small band.
+pub const VIEWPORT_OVERSCAN_ROWS: usize = 32;
 
 use crate::ids::TerminalId;
 

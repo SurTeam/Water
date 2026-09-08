@@ -7,6 +7,7 @@ pub mod control;
 pub mod event;
 pub mod ids;
 pub mod pane;
+pub mod remote;
 pub mod surface;
 pub mod terminal;
 pub mod ui;

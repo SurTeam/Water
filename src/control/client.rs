@@ -398,7 +398,7 @@ pub fn connect_water_session(
     };
     let _info: SessionOpenResponse = serde_json::from_value(result)?;
 
-    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let (snapshot_tx, snapshot_rx) = crate::app::runtime::snapshot_stream_channel();
     let (write_tx, write_rx) = std::sync::mpsc::channel::<WireMessage>();
     let mut writer_stream = stream.try_clone()?;
     std::thread::Builder::new()
@@ -415,7 +415,7 @@ pub fn connect_water_session(
         .name("water-session-reader".to_owned())
         .spawn(move || session_reader_loop(stream, snapshot_tx, write_tx, ui_client))
         .ok();
-    Ok(crate::app::SnapshotStream::new(snapshot_rx))
+    Ok(snapshot_rx)
 }
 
 /// Fallback for servers that predate `session.open` (the monolithic build):
@@ -423,7 +423,7 @@ pub fn connect_water_session(
 pub fn spawn_state_polling_fallback(
     client: std::sync::Arc<dyn crate::app::CommandTransport>,
 ) -> crate::app::SnapshotStream {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = crate::app::runtime::snapshot_stream_channel();
     std::thread::Builder::new()
         .name("water-state-poll".to_owned())
         .spawn(move || {
@@ -439,13 +439,13 @@ pub fn spawn_state_polling_fallback(
             }
         })
         .ok();
-    crate::app::SnapshotStream::new(rx)
+    rx
 }
 
 #[cfg(unix)]
 fn session_reader_loop(
     mut stream: std::os::unix::net::UnixStream,
-    snapshot_tx: std::sync::mpsc::Sender<ModelSnapshot>,
+    snapshot_tx: crate::app::runtime::SnapshotStreamSender,
     write_tx: std::sync::mpsc::Sender<WireMessage>,
     ui_client: UiControlClient,
 ) {

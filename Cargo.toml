@@ -26,6 +26,10 @@ path = "src/main.rs"
 name = "waterctl"
 path = "src/bin/waterctl.rs"
 
+[[bin]]
+name = "water-server"
+path = "src/bin/water-server.rs"
+
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0"

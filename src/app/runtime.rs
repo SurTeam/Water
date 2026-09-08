@@ -14,14 +14,10 @@ use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::{TerminalSnapshot, WakeupCallback};
 
-/// A cloneable, thread-safe model snapshot stream.
-///
-/// The GUI consumes one of these on a background executor; `mpsc::Receiver`
-/// is `Send` but not `Sync`, so the mutex keeps the stream shareable with the
-/// GPUI task without changing the blocking `recv` contract.
-pub struct SnapshotStream(
-    std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ModelSnapshot>>>,
-);
+/// A single-consumer, latest-only model snapshot stream. Socket and SSH
+/// readers can continue receiving at transport speed while a slower renderer
+/// skips obsolete revisions instead of replaying an unbounded frame backlog.
+pub struct SnapshotStream(ModelSnapshotReceiver);
 
 impl std::fmt::Debug for SnapshotStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -30,15 +26,31 @@ impl std::fmt::Debug for SnapshotStream {
 }
 
 impl SnapshotStream {
-    pub fn new(receiver: std::sync::mpsc::Receiver<ModelSnapshot>) -> Self {
-        Self(std::sync::Arc::new(std::sync::Mutex::new(receiver)))
-    }
-
     /// Blocks until the next model snapshot; returns `None` when the source
     /// (model host or server session) has ended.
     pub fn recv(&self) -> Option<ModelSnapshot> {
-        self.0.lock().expect("snapshot stream poisoned").recv().ok()
+        self.0.recv().ok()
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct SnapshotStreamSender(SnapshotSender);
+
+impl SnapshotStreamSender {
+    pub(crate) fn send(&self, snapshot: ModelSnapshot) -> Result<(), SnapshotChannelClosed> {
+        self.0.send(snapshot)
+    }
+}
+
+impl Drop for SnapshotStreamSender {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
+pub(crate) fn snapshot_stream_channel() -> (SnapshotStreamSender, SnapshotStream) {
+    let (sender, receiver) = snapshot_channel();
+    (SnapshotStreamSender(sender), SnapshotStream(receiver))
 }
 
 #[derive(Debug)]

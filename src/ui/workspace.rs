@@ -155,6 +155,7 @@ type SplitBounds = Arc<Mutex<BTreeMap<(TabId, Vec<bool>), SplitRect>>>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialogState {
     ConfirmCloseWorkspace { workspace_id: WorkspaceId },
+    ConnectRemote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +219,7 @@ struct TerminalScrollState {
 
 const MOUSE_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(72);
 const MOUSE_SCROLL_IMMEDIATE_FRACTION: f32 = 0.2;
+const PREPARED_ROW_LOOKAHEAD: i32 = 8;
 
 #[derive(Debug, Clone)]
 struct TerminalMouseScrollAnimation {
@@ -434,6 +436,7 @@ struct TerminalPrepaintState {
 struct TerminalRenderCacheKey {
     terminal_id: TerminalId,
     snapshot_revision: u64,
+    viewport_position: i64,
     font_family: String,
     font_size_bits: u32,
     metrics: TerminalMetrics,
@@ -751,6 +754,9 @@ pub struct WorkspaceView {
     titlebar_dragging: bool,
     rename_target: Option<RenameTarget>,
     rename_value: String,
+    remote_host_value: String,
+    remote_connection_error: Option<String>,
+    remote_connection_pending: bool,
     context_menu: Option<ContextMenuState>,
     dialog: Option<DialogState>,
 }
@@ -824,6 +830,9 @@ impl WorkspaceView {
             titlebar_dragging: false,
             rename_target: None,
             rename_value: String::new(),
+            remote_host_value: String::new(),
+            remote_connection_error: None,
+            remote_connection_pending: false,
             context_menu: None,
             dialog: None,
         }
@@ -1391,6 +1400,7 @@ impl WorkspaceView {
             DialogState::ConfirmCloseWorkspace { workspace_id } => {
                 self.workspace_by_id(workspace_id).is_some()
             }
+            DialogState::ConnectRemote => true,
         }
     }
 
@@ -1432,23 +1442,137 @@ impl WorkspaceView {
             DialogState::ConfirmCloseWorkspace { workspace_id } => {
                 self.dispatch_close_workspace(workspace_id, cx);
             }
+            DialogState::ConnectRemote => {
+                let destination =
+                    match crate::remote::validate_ssh_destination(&self.remote_host_value) {
+                        Ok(destination) => destination,
+                        Err(error) => {
+                            self.dialog = Some(DialogState::ConnectRemote);
+                            self.remote_connection_error = Some(error.to_string());
+                            cx.notify();
+                            return;
+                        }
+                    };
+                let executable = match std::env::current_exe() {
+                    Ok(executable) => executable,
+                    Err(error) => {
+                        self.dialog = Some(DialogState::ConnectRemote);
+                        self.remote_connection_error =
+                            Some(format!("Could not locate the Water executable: {error}"));
+                        cx.notify();
+                        return;
+                    }
+                };
+                if self.remote_connection_pending {
+                    self.dialog = Some(DialogState::ConnectRemote);
+                    return;
+                }
+                self.dialog = Some(DialogState::ConnectRemote);
+                self.remote_connection_pending = true;
+                self.remote_connection_error = None;
+                cx.notify();
+                cx.spawn(async move |entity, cx| {
+                    let connection_destination = destination.clone();
+                    let connection = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::remote::SshTunnel::connect(&connection_destination).map(drop)
+                        })
+                        .await;
+                    let _ = entity.update(cx, |view, cx| {
+                        if !view.remote_connection_pending
+                            || view.dialog != Some(DialogState::ConnectRemote)
+                        {
+                            return;
+                        }
+                        view.remote_connection_pending = false;
+                        match connection {
+                            Ok(()) => {
+                                match std::process::Command::new(executable)
+                                    .arg("--ssh")
+                                    .arg(&destination)
+                                    .stdin(std::process::Stdio::null())
+                                    .stdout(std::process::Stdio::null())
+                                    .spawn()
+                                {
+                                    Ok(_) => {
+                                        view.dialog = None;
+                                        view.remote_host_value.clear();
+                                        view.remote_connection_error = None;
+                                    }
+                                    Err(error) => {
+                                        view.remote_connection_error = Some(format!(
+                                            "Could not open remote Water window: {error}"
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                view.remote_connection_error = Some(error.to_string());
+                            }
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+                return;
+            }
         }
         cx.notify();
     }
 
     fn cancel_dialog(&mut self, cx: &mut Context<Self>) {
         if self.dialog.take().is_some() {
+            self.remote_host_value.clear();
+            self.remote_connection_error = None;
+            self.remote_connection_pending = false;
             cx.notify();
         }
+    }
+
+    fn begin_connect_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_transient_ui() {
+            return;
+        }
+        self.context_menu = None;
+        self.remote_host_value.clear();
+        self.remote_connection_error = None;
+        self.remote_connection_pending = false;
+        self.dialog = Some(DialogState::ConnectRemote);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
     }
 
     fn handle_dialog_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         if self.dialog.is_none() {
             return false;
         }
-        match event.keystroke.key.as_str() {
-            "enter" | "return" => self.confirm_dialog(cx),
-            "escape" => self.cancel_dialog(cx),
+        if self.remote_connection_pending && self.dialog == Some(DialogState::ConnectRemote) {
+            if event.keystroke.key == "escape" {
+                self.cancel_dialog(cx);
+            }
+            return true;
+        }
+        match (self.dialog, event.keystroke.key.as_str()) {
+            (_, "enter" | "return") => self.confirm_dialog(cx),
+            (_, "escape") => self.cancel_dialog(cx),
+            (Some(DialogState::ConnectRemote), "backspace") => {
+                self.remote_host_value.pop();
+                self.remote_connection_error = None;
+                cx.notify();
+            }
+            (Some(DialogState::ConnectRemote), _)
+                if !event.keystroke.modifiers.platform
+                    && !event.keystroke.modifiers.control
+                    && !event.keystroke.modifiers.alt
+                    && event.keystroke.key_char.is_some() =>
+            {
+                if let Some(character) = event.keystroke.key_char.as_deref() {
+                    self.remote_host_value.push_str(character);
+                    self.remote_connection_error = None;
+                    cx.notify();
+                }
+            }
             _ => {}
         }
         true
@@ -2927,6 +3051,28 @@ impl WorkspaceView {
                 .h(px(2.0)),
             )
         });
+        let connect_remote = div()
+            .id("connect-remote")
+            .h(px(32.))
+            .w_full()
+            .px(px(10.))
+            .items_center()
+            .gap(px(6.))
+            .flex()
+            .flex_none()
+            .cursor_pointer()
+            .border_t_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
+            .child("＋")
+            .child("Connect Remote…")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, window, cx| {
+                    this.begin_connect_remote(window, cx);
+                    cx.stop_propagation();
+                }),
+            );
         let mut sidebar_content = div()
             .flex_1()
             .min_w(px(0.))
@@ -2934,7 +3080,8 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .relative()
-            .child(list);
+            .child(list)
+            .child(connect_remote);
         if let Some(indicator) = indicator {
             sidebar_content = sidebar_content.child(indicator);
         }
@@ -3218,7 +3365,12 @@ impl WorkspaceView {
 
     fn render_dialog(&self, theme: ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.dialog?;
-        let DialogState::ConfirmCloseWorkspace { workspace_id } = dialog;
+        if dialog == DialogState::ConnectRemote {
+            return Some(self.render_connect_remote_dialog(theme, cx));
+        }
+        let DialogState::ConfirmCloseWorkspace { workspace_id } = dialog else {
+            unreachable!("remote dialog returned above")
+        };
         let workspace = self.workspace_by_id(workspace_id)?;
         let tab_count = workspace.tabs.len();
         let tab_label = if tab_count == 1 { "tab" } else { "tabs" };
@@ -3309,6 +3461,129 @@ impl WorkspaceView {
             .with_priority(20)
             .into_any_element(),
         )
+    }
+
+    fn render_connect_remote_dialog(
+        &self,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let input_text = if self.remote_host_value.is_empty() {
+            SharedString::from("SSH host or config alias…")
+        } else {
+            SharedString::from(format!("{}▌", self.remote_host_value))
+        };
+        let cancel = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .cursor_pointer()
+            .text_color(rgb(theme.ui_foreground))
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.cancel_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Cancel");
+        let connect = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .cursor_pointer()
+            .bg(rgb(theme.tab_add_background))
+            .text_color(rgb(theme.ui_foreground))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.confirm_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child(if self.remote_connection_pending {
+                "Connecting…"
+            } else {
+                "Connect"
+            });
+        let mut dialog = div()
+            .id("connect-remote-dialog")
+            .w(px(420.))
+            .p(px(20.))
+            .gap(px(12.))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.chrome_background))
+            .border_1()
+            .border_color(rgb(theme.active_pane_border))
+            .text_color(rgb(theme.ui_foreground))
+            .child(
+                div()
+                    .text_size(px(self.config.ui.font_size * 1.125))
+                    .child("Connect to remote Water"),
+            )
+            .child("Uses your OpenSSH config and agent. The authenticated connection is reused.")
+            .child(
+                div()
+                    .id("remote-host-input")
+                    .h(px(34.))
+                    .w_full()
+                    .px(px(10.))
+                    .items_center()
+                    .flex()
+                    .border_1()
+                    .border_color(rgb(theme.inactive_pane_border))
+                    .text_color(rgb(if self.remote_host_value.is_empty() {
+                        theme.inactive_pane_border
+                    } else {
+                        theme.ui_foreground
+                    }))
+                    .child(input_text),
+            );
+        if let Some(error) = &self.remote_connection_error {
+            dialog = dialog.child(
+                div()
+                    .text_color(rgb(theme.terminal_foreground))
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+        dialog = dialog.child(
+            div()
+                .w_full()
+                .gap(px(8.))
+                .justify_end()
+                .items_center()
+                .flex()
+                .child(cancel)
+                .child(connect),
+        );
+        deferred(
+            div()
+                .size_full()
+                .absolute()
+                .inset_0()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x00000099))
+                .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    |_event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                    },
+                )
+                .child(dialog),
+        )
+        .with_priority(20)
+        .into_any_element()
     }
 
     fn render_titlebar_control(
@@ -5538,6 +5813,7 @@ impl gpui::Element for TerminalRenderElement {
         let cache_key = TerminalRenderCacheKey {
             terminal_id: self.snapshot.terminal_id,
             snapshot_revision: self.snapshot.revision,
+            viewport_position: self.snapshot.viewport_position,
             font_family: self.font_family.clone(),
             font_size_bits: self.font_size.to_bits(),
             metrics: self.options.metrics,
@@ -5547,9 +5823,21 @@ impl gpui::Element for TerminalRenderElement {
             bounds_origin_x_bits: f32::from(bounds.origin.x).to_bits(),
             bounds_width_bits: f32::from(bounds.size.width).to_bits(),
         };
+        let scroll_offset_rows = self.options.scroll_offset_rows;
+        if scroll_offset_rows != 0.0 {
+            scroll_stat_inc(&SCROLL_FRAMES);
+        }
+        let whole = scroll_offset_rows.trunc() as i32;
+        let source_rows =
+            terminal_visible_source_rows(self.snapshot.size.lines, scroll_offset_rows);
         let mut caches = self.render_caches.lock().expect("terminal cache poisoned");
         let cache = caches.entry(self.snapshot.terminal_id).or_default();
         if cache.key.as_ref() != Some(&cache_key) {
+            let previous_viewport_position = cache
+                .key
+                .as_ref()
+                .map(|key| key.viewport_position)
+                .unwrap_or(self.snapshot.viewport_position);
             let rows_compatible = cache
                 .key
                 .as_ref()
@@ -5560,38 +5848,73 @@ impl gpui::Element for TerminalRenderElement {
                 cache.rows.clear();
                 BTreeMap::new()
             };
-            let mut previous_by_identity = previous_rows
-                .into_values()
-                .map(|row| (row.cells.as_ptr() as usize, row))
-                .collect::<BTreeMap<_, _>>();
+            let mut previous_rows = previous_rows;
             let first = -(self.snapshot.rows_before.len() as i32);
             let end = self.snapshot.size.lines as i32 + self.snapshot.rows_after.len() as i32;
             for source_row in first..end {
                 let Some(cells) = self.snapshot.relative_row_snapshot(source_row) else {
                     continue;
                 };
-                let identity = cells.as_ptr() as usize;
-                let paint = previous_by_identity
-                    .remove(&identity)
-                    .filter(|previous| Arc::ptr_eq(&previous.cells, cells))
-                    .map(|previous| {
-                        let mut paint = previous.paint;
-                        paint.row = source_row;
-                        paint
-                    })
-                    .unwrap_or_else(|| {
-                        terminal_row_paint(
-                            &self.snapshot,
-                            source_row,
-                            cells,
-                            selected_bounds,
-                            self.options,
-                            &self.font_family,
-                            self.font_size,
-                            bounds,
-                            window,
-                        )
-                    });
+                // A viewport ACK rebases row coordinates. Map the new row
+                // back to the same physical grid row in the prior snapshot.
+                // Socket/SSH deserialization necessarily creates new Arcs,
+                // so equality is the cross-process structural-sharing key;
+                // pointer equality keeps the in-process path essentially free.
+                let Some(previous_source_row) = previous_cached_source_row(
+                    source_row,
+                    self.snapshot.viewport_position,
+                    previous_viewport_position,
+                ) else {
+                    continue;
+                };
+                let Some(mut previous) =
+                    previous_rows
+                        .remove(&previous_source_row)
+                        .filter(|previous| {
+                            Arc::ptr_eq(&previous.cells, cells)
+                                || previous.cells.as_ref() == cells.as_ref()
+                        })
+                else {
+                    continue;
+                };
+                previous.paint.row = source_row;
+                cache.rows.insert(
+                    source_row,
+                    TerminalCachedRowPaint {
+                        cells: cells.clone(),
+                        paint: previous.paint,
+                    },
+                );
+            }
+            cache.key = Some(cache_key);
+        }
+
+        // Keep the immutable raw snapshot reserve wide, but shape only the
+        // visible rows plus a small neighboring band. Subsequent scroll frames
+        // reuse these prepared rows and shape only newly approached content.
+        let snapshot_first = -(self.snapshot.rows_before.len() as i32);
+        let snapshot_end = self.snapshot.size.lines as i32 + self.snapshot.rows_after.len() as i32;
+        let prepared_rows =
+            terminal_prepared_source_rows(source_rows.clone(), snapshot_first, snapshot_end);
+        if !prepared_rows.is_empty() {
+            for source_row in prepared_rows {
+                if cache.rows.contains_key(&source_row) {
+                    continue;
+                }
+                let Some(cells) = self.snapshot.relative_row_snapshot(source_row) else {
+                    continue;
+                };
+                let paint = terminal_row_paint(
+                    &self.snapshot,
+                    source_row,
+                    cells,
+                    selected_bounds,
+                    self.options,
+                    &self.font_family,
+                    self.font_size,
+                    bounds,
+                    window,
+                );
                 cache.rows.insert(
                     source_row,
                     TerminalCachedRowPaint {
@@ -5600,16 +5923,8 @@ impl gpui::Element for TerminalRenderElement {
                     },
                 );
             }
-            cache.key = Some(cache_key);
         }
 
-        let scroll_offset_rows = self.options.scroll_offset_rows;
-        if scroll_offset_rows != 0.0 {
-            scroll_stat_inc(&SCROLL_FRAMES);
-        }
-        let whole = scroll_offset_rows.trunc() as i32;
-        let source_rows =
-            terminal_visible_source_rows(self.snapshot.size.lines, scroll_offset_rows);
         let mut rows = Vec::with_capacity(source_rows.len());
         for source_row in source_rows {
             let Some(cached_row) = cache.rows.get(&source_row) else {
@@ -6088,6 +6403,39 @@ fn terminal_visible_source_rows(
     let first = -whole - i32::from(fraction > 0.0);
     let end = screen_lines as i32 - whole + i32::from(fraction < 0.0);
     first..end
+}
+
+fn terminal_prepared_source_rows(
+    visible_rows: std::ops::Range<i32>,
+    snapshot_first: i32,
+    snapshot_end: i32,
+) -> std::ops::Range<i32> {
+    if visible_rows.is_empty() {
+        return 0..0;
+    }
+    visible_rows
+        .start
+        .saturating_sub(PREPARED_ROW_LOOKAHEAD)
+        .max(snapshot_first)
+        ..visible_rows
+            .end
+            .saturating_add(PREPARED_ROW_LOOKAHEAD)
+            .min(snapshot_end)
+}
+
+/// Maps a row in a replacement snapshot to the same physical grid row in
+/// the previous snapshot. A positive viewport ACK shifts visible content
+/// toward the prior snapshot's negative overscan rows.
+fn previous_cached_source_row(
+    source_row: i32,
+    viewport_position: i64,
+    previous_viewport_position: i64,
+) -> Option<i32> {
+    i64::from(source_row)
+        .saturating_sub(viewport_position)
+        .saturating_add(previous_viewport_position)
+        .try_into()
+        .ok()
 }
 
 /// Positions a visible or overscan row while preserving the device-snapped
@@ -6829,6 +7177,27 @@ mod tests {
             terminal_visible_source_rows(4, 2.0).collect::<Vec<_>>(),
             vec![-2, -1, 0, 1]
         );
+    }
+
+    #[test]
+    fn prepared_row_band_stays_bounded_inside_the_raw_reserve() {
+        let visible = terminal_visible_source_rows(24, 12.4);
+        let prepared = terminal_prepared_source_rows(visible.clone(), -32, 24 + 32);
+
+        assert_eq!(prepared.start, visible.start - PREPARED_ROW_LOOKAHEAD);
+        assert_eq!(prepared.end, visible.end + PREPARED_ROW_LOOKAHEAD);
+        assert_eq!(
+            prepared.len(),
+            visible.len() + 2 * PREPARED_ROW_LOOKAHEAD as usize
+        );
+        assert!(prepared.len() < 24 + 2 * 32);
+    }
+
+    #[test]
+    fn viewport_ack_reuses_the_same_physical_cached_row() {
+        assert_eq!(previous_cached_source_row(0, 11, 10), Some(-1));
+        assert_eq!(previous_cached_source_row(5, 11, 10), Some(4));
+        assert_eq!(previous_cached_source_row(-2, 9, 10), Some(-1));
     }
 
     #[test]

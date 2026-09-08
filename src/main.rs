@@ -14,25 +14,68 @@ use water::control::{
     ControlClient, ControlServer, RemoteCommandClient, connect_water_session, default_socket_path,
     spawn_state_polling_fallback,
 };
+use water::remote::SshTunnel;
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
     init_tracing();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let is_server = arguments
+    let dedicated_server_binary = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.file_stem().map(|name| name == "water-server"))
+        .unwrap_or(false);
+    let explicit_server_mode = arguments
         .first()
         .is_some_and(|argument| argument == "server" || argument == "--server");
-    if is_server {
-        run_server(arguments.iter().skip(1).cloned())
+    if dedicated_server_binary {
+        run_server(arguments.into_iter())
+    } else if explicit_server_mode {
+        run_server_via_dedicated_binary(&arguments[1..])
     } else {
         run_gui(arguments.into_iter())
+    }
+}
+
+/// Preserve the compatibility `water server` spelling while replacing the
+/// process image with `water-server` whenever the sibling binary is present.
+/// This keeps Activity Monitor/ps labels unambiguous for manual starts too.
+fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
+    let executable = std::env::current_exe().context("could not resolve water executable")?;
+    let dedicated = executable.with_file_name(if cfg!(windows) {
+        "water-server.exe"
+    } else {
+        "water-server"
+    });
+    if !dedicated.is_file() {
+        return run_server(arguments.iter().cloned());
+    }
+
+    let mut command = std::process::Command::new(dedicated);
+    command.args(arguments);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        Err(command.exec()).context("could not replace process with water-server")
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().context("could not start water-server")?;
+        if status.success() {
+            Ok(())
+        } else {
+            bail!("water-server exited with {status}")
+        }
     }
 }
 
 /// Headless server: owns the model and every PTY, no GUI. This is the tmux-
 /// style backend that GUI clients attach to; sessions survive GUI exits.
 fn run_server(arguments: impl Iterator<Item = String>) -> Result<()> {
+    set_server_process_name();
     let startup = parse_startup_options(arguments)?;
+    if startup.ssh_destination.is_some() {
+        bail!("--ssh is only valid for the Water GUI");
+    }
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let socket_path = resolve_socket_path(&startup, &config)?;
@@ -71,6 +114,25 @@ fn run_server(arguments: impl Iterator<Item = String>) -> Result<()> {
     Ok(())
 }
 
+/// Give process and thread inspectors an unambiguous server label even
+/// though the GUI and server currently share one executable image.
+fn set_server_process_name() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        unsafe extern "C" {
+            fn setprogname(name: *const libc::c_char);
+            fn pthread_setname_np(name: *const libc::c_char) -> libc::c_int;
+        }
+        setprogname(c"water-server".as_ptr());
+        let _ = pthread_setname_np(c"water-server".as_ptr());
+    }
+
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let _ = libc::prctl(libc::PR_SET_NAME, c"water-server".as_ptr(), 0, 0, 0);
+    }
+}
+
 #[cfg(unix)]
 fn wait_for_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
     static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -107,7 +169,16 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
     let startup = parse_startup_options(arguments)?;
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let socket_path = resolve_socket_path(&startup, &config)?;
+    let ssh_tunnel = startup
+        .ssh_destination
+        .as_deref()
+        .map(SshTunnel::connect)
+        .transpose()
+        .context("could not connect to remote Water server")?;
+    let socket_path = ssh_tunnel.as_ref().map_or_else(
+        || resolve_socket_path(&startup, &config),
+        |tunnel| Ok(tunnel.local_socket().to_path_buf()),
+    )?;
     tracing::info!(
         target: "water::workspace",
         socket = %socket_path.display(),
@@ -249,9 +320,21 @@ fn spawn_detached_server(
     initial_terminal: bool,
 ) -> Result<std::process::Child> {
     let exe = std::env::current_exe().context("could not resolve water executable")?;
-    let mut command = std::process::Command::new(exe);
+    let dedicated_server = exe.with_file_name(if cfg!(windows) {
+        "water-server.exe"
+    } else {
+        "water-server"
+    });
+    let use_dedicated_server = dedicated_server.is_file();
+    let mut command = std::process::Command::new(if use_dedicated_server {
+        dedicated_server
+    } else {
+        exe
+    });
+    if !use_dedicated_server {
+        command.arg("server");
+    }
     command
-        .arg("server")
         .arg("--control-socket")
         .arg(socket_path)
         .arg("--config")
@@ -357,6 +440,7 @@ fn dispatch_checked(client: &dyn CommandTransport, command: AppCommand) {
 
 struct StartupOptions {
     socket_path: Option<PathBuf>,
+    ssh_destination: Option<String>,
     config_path: PathBuf,
     initial_workspace: Option<bool>,
     initial_terminal: Option<bool>,
@@ -364,6 +448,7 @@ struct StartupOptions {
 
 fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<StartupOptions> {
     let mut socket_path = None;
+    let mut ssh_destination = None;
     let mut config_path = std::env::var_os("WATER_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(AppConfig::default_load_path);
@@ -378,6 +463,10 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
             );
         } else if let Some(path) = argument.strip_prefix("--control-socket=") {
             socket_path = Some(path.into());
+        } else if argument == "--ssh" {
+            ssh_destination = Some(args.next().context("--ssh requires a destination")?);
+        } else if let Some(destination) = argument.strip_prefix("--ssh=") {
+            ssh_destination = Some(destination.to_owned());
         } else if argument == "--config" {
             config_path = args.next().context("--config requires a path")?.into();
         } else if let Some(path) = argument.strip_prefix("--config=") {
@@ -389,7 +478,7 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
             initial_terminal = Some(false);
         } else if argument == "--help" || argument == "-h" {
             println!(
-                "water [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [server ...]"
+                "water [--ssh HOST] [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [server ...]"
             );
             std::process::exit(0);
         } else {
@@ -398,6 +487,7 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     }
     Ok(StartupOptions {
         socket_path,
+        ssh_destination,
         config_path,
         initial_workspace,
         initial_terminal,
