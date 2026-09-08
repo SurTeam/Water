@@ -50,7 +50,8 @@ actions!(
         SplitRight,
         SplitDown,
         OpenSettings,
-        QuitApplication
+        QuitApplication,
+        QuitApplicationAndServer
     ]
 );
 
@@ -66,6 +67,7 @@ struct WaterApplicationState {
     snapshot: RefCell<ModelSnapshot>,
     views: RefCell<Vec<WeakEntity<WorkspaceView>>>,
     settings_window: RefCell<Option<WindowHandle<SettingsView>>>,
+    shutdown_server: RefCell<Option<Arc<dyn Fn() + Send + Sync>>>,
     last_snapshot_apply: RefCell<std::time::Instant>,
     // Startup window dimensions are fixed for this process. Settings keeps
     // the newly saved values visible, but they take effect after restarting
@@ -104,6 +106,7 @@ impl WaterApplication {
                 snapshot: RefCell::new(snapshot),
                 views: RefCell::new(Vec::new()),
                 settings_window: RefCell::new(None),
+                shutdown_server: RefCell::new(None),
                 last_snapshot_apply: RefCell::new(
                     std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
                 ),
@@ -113,6 +116,13 @@ impl WaterApplication {
 
     pub(crate) fn config(&self) -> AppConfig {
         self.state.config.borrow().clone()
+    }
+
+    /// Installs the explicit lifecycle action used by the application menu.
+    /// Ordinary window closes and `Quit Water` retain the configured detach
+    /// behavior; only `Quit GUI and Server` invokes this callback.
+    pub fn set_server_shutdown_handler(&self, handler: impl Fn() + Send + Sync + 'static) {
+        self.state.shutdown_server.replace(Some(Arc::new(handler)));
     }
 
     /// The configured minimum window size, fixed for this process like the
@@ -152,11 +162,10 @@ impl WaterApplication {
         self.state.views.replace(live_views);
     }
 
-    /// Minimum interval between applied model snapshots. The snapshot source
-    /// (in-process mailbox or socket session) already keeps only the latest
-    /// pending revision, so pacing the apply loop bounds the GPUI render
-    /// cost of a sustained output burst to ~30 fps without losing content.
-    const SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+    /// Keep terminal output at display cadence. Upstream mailboxes already
+    /// collapse intermediate revisions, so this is only a guard against
+    /// applying multiple full snapshots within one fast display frame.
+    const SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
 
     pub fn install(
         &self,
@@ -172,6 +181,13 @@ impl WaterApplication {
         let application = self.clone();
         cx.on_action(move |_: &NewWindow, cx| application.open_window(cx));
         cx.on_action(|_: &QuitApplication, cx| cx.quit());
+        let state = self.state.clone();
+        cx.on_action(move |_: &QuitApplicationAndServer, cx| {
+            if let Some(shutdown_server) = state.shutdown_server.borrow().as_ref() {
+                shutdown_server();
+            }
+            cx.quit();
+        });
         let application = self.clone();
         cx.on_action(move |_: &OpenSettings, cx| application.open_settings(cx));
         let state = self.state.clone();
@@ -292,11 +308,9 @@ impl WaterApplication {
                 let Some(snapshot) = snapshot else {
                     break;
                 };
-                // Pace the render loop: intermediate revisions were already
-                // dropped upstream (single-slot mailbox / coalesced session
-                // pushes), so sleeping and taking the next latest frame loses
-                // nothing while keeping a debug-build full-window render
-                // below the 30 fps budget during output bursts.
+                // Pace snapshot application independently from parser work.
+                // Intermediate revisions are already dropped upstream, while
+                // an 8 ms ceiling keeps output continuous on 60/120 Hz panels.
                 let elapsed = state.last_snapshot_apply.borrow().elapsed();
                 if elapsed < Self::SNAPSHOT_MIN_INTERVAL {
                     cx.background_executor()
@@ -736,6 +750,7 @@ fn application_menus() -> Vec<Menu> {
             // purpose: cmd-q stays swallowed by the ignore-quit shortcut,
             // so quitting is a deliberate menu click.
             MenuItem::action("Quit Water", QuitApplication),
+            MenuItem::action("Quit GUI and Server", QuitApplicationAndServer),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Window", NewWindow),
@@ -801,6 +816,10 @@ mod tests {
             item,
             MenuItem::Action { name, .. } if name == "Quit Water"
         )));
+        assert!(menus[0].items.iter().any(|item| matches!(
+            item,
+            MenuItem::Action { name, .. } if name == "Quit GUI and Server"
+        )));
         // gpui renders menu key equivalents from keymap bindings for the
         // action; QuitApplication is deliberately never bound, so the item
         // shows no shortcut and cmd-q remains swallowed by IgnoreQuit.
@@ -810,6 +829,10 @@ mod tests {
                 .all(|binding| {
                     binding.action().name()
                         != <QuitApplication as gpui::Action>::name(&QuitApplication)
+                        && binding.action().name()
+                            != <QuitApplicationAndServer as gpui::Action>::name(
+                                &QuitApplicationAndServer,
+                            )
                 })
         );
     }

@@ -7,6 +7,10 @@ use alacritty_terminal::term::{
 };
 use alacritty_terminal::vte::ansi::{Color, Rgb};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
+use std::sync::Arc;
+
+pub const VIEWPORT_OVERSCAN_ROWS: usize = 8;
 
 use crate::ids::TerminalId;
 
@@ -97,18 +101,146 @@ impl Default for TerminalColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminalCellFlags(u16);
+
+impl TerminalCellFlags {
+    const INVERSE: u16 = 1 << 0;
+    const BOLD: u16 = 1 << 1;
+    const ITALIC: u16 = 1 << 2;
+    const UNDERLINE: u16 = 1 << 3;
+    const STRIKE: u16 = 1 << 4;
+    const WIDE: u16 = 1 << 5;
+    const WIDE_SPACER: u16 = 1 << 6;
+    const LEADING_WIDE_SPACER: u16 = 1 << 7;
+    const WRAPLINE: u16 = 1 << 8;
+
+    fn set(&mut self, flag: u16, value: bool) {
+        if value {
+            self.0 |= flag;
+        } else {
+            self.0 &= !flag;
+        }
+    }
+
+    pub fn inverse(self) -> bool {
+        self.0 & Self::INVERSE != 0
+    }
+
+    pub fn bold(self) -> bool {
+        self.0 & Self::BOLD != 0
+    }
+
+    pub fn italic(self) -> bool {
+        self.0 & Self::ITALIC != 0
+    }
+
+    pub fn underline(self) -> bool {
+        self.0 & Self::UNDERLINE != 0
+    }
+
+    pub fn strike(self) -> bool {
+        self.0 & Self::STRIKE != 0
+    }
+
+    pub fn wide(self) -> bool {
+        self.0 & Self::WIDE != 0
+    }
+
+    pub fn wide_spacer(self) -> bool {
+        self.0 & Self::WIDE_SPACER != 0
+    }
+
+    pub fn leading_wide_spacer(self) -> bool {
+        self.0 & Self::LEADING_WIDE_SPACER != 0
+    }
+
+    pub fn wrapline(self) -> bool {
+        self.0 & Self::WRAPLINE != 0
+    }
+
+    pub fn set_wide(&mut self, value: bool) {
+        self.set(Self::WIDE, value);
+    }
+
+    pub fn set_wide_spacer(&mut self, value: bool) {
+        self.set(Self::WIDE_SPACER, value);
+    }
+
+    pub fn set_leading_wide_spacer(&mut self, value: bool) {
+        self.set(Self::LEADING_WIDE_SPACER, value);
+    }
+
+    fn from_alacritty(flags: Flags) -> Self {
+        let mut compact = Self::default();
+        compact.set(Self::INVERSE, flags.contains(Flags::INVERSE));
+        compact.set(Self::BOLD, flags.contains(Flags::BOLD));
+        compact.set(Self::ITALIC, flags.contains(Flags::ITALIC));
+        compact.set(Self::UNDERLINE, flags.intersects(Flags::ALL_UNDERLINES));
+        compact.set(Self::STRIKE, flags.contains(Flags::STRIKEOUT));
+        compact.set(Self::WIDE, flags.contains(Flags::WIDE_CHAR));
+        compact.set(Self::WIDE_SPACER, flags.contains(Flags::WIDE_CHAR_SPACER));
+        compact.set(
+            Self::LEADING_WIDE_SPACER,
+            flags.contains(Flags::LEADING_WIDE_CHAR_SPACER),
+        );
+        compact.set(Self::WRAPLINE, flags.contains(Flags::WRAPLINE));
+        compact
+    }
+}
+
+#[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
-pub struct TerminalCellFlags {
-    pub inverse: bool,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub strike: bool,
-    pub wide: bool,
-    pub wide_spacer: bool,
-    pub leading_wide_spacer: bool,
-    pub wrapline: bool,
+struct TerminalCellFlagsWire {
+    inverse: bool,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    wide: bool,
+    wide_spacer: bool,
+    leading_wide_spacer: bool,
+    wrapline: bool,
+}
+
+impl Serialize for TerminalCellFlags {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        TerminalCellFlagsWire {
+            inverse: self.inverse(),
+            bold: self.bold(),
+            italic: self.italic(),
+            underline: self.underline(),
+            strike: self.strike(),
+            wide: self.wide(),
+            wide_spacer: self.wide_spacer(),
+            leading_wide_spacer: self.leading_wide_spacer(),
+            wrapline: self.wrapline(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalCellFlags {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TerminalCellFlagsWire::deserialize(deserializer)?;
+        let mut flags = Self::default();
+        flags.set(Self::INVERSE, wire.inverse);
+        flags.set(Self::BOLD, wire.bold);
+        flags.set(Self::ITALIC, wire.italic);
+        flags.set(Self::UNDERLINE, wire.underline);
+        flags.set(Self::STRIKE, wire.strike);
+        flags.set(Self::WIDE, wire.wide);
+        flags.set(Self::WIDE_SPACER, wire.wide_spacer);
+        flags.set(Self::LEADING_WIDE_SPACER, wire.leading_wide_spacer);
+        flags.set(Self::WRAPLINE, wire.wrapline);
+        Ok(flags)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,7 +249,7 @@ pub struct TerminalCell {
     pub fg: TerminalColor,
     pub bg: TerminalColor,
     pub flags: TerminalCellFlags,
-    pub zerowidth: Vec<char>,
+    pub zerowidth: SmallVec<[char; 2]>,
 }
 
 impl Default for TerminalCell {
@@ -127,7 +259,7 @@ impl Default for TerminalCell {
             fg: TerminalColor::Named { value: 256 },
             bg: TerminalColor::Named { value: 257 },
             flags: TerminalCellFlags::default(),
-            zerowidth: Vec::new(),
+            zerowidth: SmallVec::new(),
         }
     }
 }
@@ -169,16 +301,16 @@ pub struct TerminalSummary {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub type TerminalRowSnapshot = Arc<[TerminalCell]>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalSnapshot {
     pub terminal_id: TerminalId,
     pub size: TerminalSize,
     /// Current foreground process name, refreshed by the PTY worker.
-    #[serde(default)]
     pub process_name: String,
     /// Current foreground process working directory, refreshed by the PTY
     /// worker and used as the inheritance source for new shells.
-    #[serde(default)]
     pub cwd: String,
     pub display_offset: usize,
     /// Cumulative viewport movement caused by commands or resize.
@@ -186,20 +318,127 @@ pub struct TerminalSnapshot {
     /// Output can increase `display_offset` while a pinned viewport remains
     /// visually fixed. This independent coordinate lets consumers distinguish
     /// a user viewport move from output-driven history growth.
-    #[serde(default)]
     pub viewport_position: i64,
     pub cursor: TerminalCursor,
-    #[serde(default)]
     pub modes: TerminalModes,
     pub process: TerminalProcessState,
     pub revision: u64,
-    pub cells: Vec<TerminalCell>,
-    /// The nearest available grid row above the visible viewport, if any.
+    /// Visible viewport rows. Rows are reference-counted so a viewport-only
+    /// snapshot can reuse all unchanged rows from its predecessor.
+    pub rows: Vec<TerminalRowSnapshot>,
+    /// Available grid rows above the visible viewport, nearest first.
+    pub rows_before: Vec<TerminalRowSnapshot>,
+    /// Available grid rows below the visible viewport, nearest first.
+    pub rows_after: Vec<TerminalRowSnapshot>,
+}
+
+#[derive(Serialize)]
+struct TerminalSnapshotRef<'a> {
+    terminal_id: TerminalId,
+    size: TerminalSize,
+    process_name: &'a str,
+    cwd: &'a str,
+    display_offset: usize,
+    viewport_position: i64,
+    cursor: TerminalCursor,
+    modes: TerminalModes,
+    process: TerminalProcessState,
+    revision: u64,
+    cells: Vec<&'a TerminalCell>,
+    rows_before: Vec<&'a [TerminalCell]>,
+    rows_after: Vec<&'a [TerminalCell]>,
+}
+
+#[derive(Deserialize)]
+struct TerminalSnapshotOwned {
+    terminal_id: TerminalId,
+    size: TerminalSize,
     #[serde(default)]
-    pub rows_before: Vec<Vec<TerminalCell>>,
-    /// The nearest available grid row below the visible viewport, if any.
+    process_name: String,
     #[serde(default)]
-    pub rows_after: Vec<Vec<TerminalCell>>,
+    cwd: String,
+    display_offset: usize,
+    #[serde(default)]
+    viewport_position: i64,
+    cursor: TerminalCursor,
+    #[serde(default)]
+    modes: TerminalModes,
+    process: TerminalProcessState,
+    revision: u64,
+    cells: Vec<TerminalCell>,
+    #[serde(default)]
+    rows_before: Vec<Vec<TerminalCell>>,
+    #[serde(default)]
+    rows_after: Vec<Vec<TerminalCell>>,
+}
+
+impl Serialize for TerminalSnapshot {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        TerminalSnapshotRef {
+            terminal_id: self.terminal_id,
+            size: self.size,
+            process_name: &self.process_name,
+            cwd: &self.cwd,
+            display_offset: self.display_offset,
+            viewport_position: self.viewport_position,
+            cursor: self.cursor,
+            modes: self.modes,
+            process: self.process,
+            revision: self.revision,
+            cells: self.rows.iter().flat_map(|row| row.iter()).collect(),
+            rows_before: self.rows_before.iter().map(AsRef::as_ref).collect(),
+            rows_after: self.rows_after.iter().map(AsRef::as_ref).collect(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TerminalSnapshot {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = TerminalSnapshotOwned::deserialize(deserializer)?;
+        let rows = rows_from_flat_cells(wire.cells, wire.size);
+        Ok(Self {
+            terminal_id: wire.terminal_id,
+            size: wire.size,
+            process_name: wire.process_name,
+            cwd: wire.cwd,
+            display_offset: wire.display_offset,
+            viewport_position: wire.viewport_position,
+            cursor: wire.cursor,
+            modes: wire.modes,
+            process: wire.process,
+            revision: wire.revision,
+            rows,
+            rows_before: wire
+                .rows_before
+                .into_iter()
+                .map(|row| Arc::from(row.into_boxed_slice()))
+                .collect(),
+            rows_after: wire
+                .rows_after
+                .into_iter()
+                .map(|row| Arc::from(row.into_boxed_slice()))
+                .collect(),
+        })
+    }
+}
+
+fn rows_from_flat_cells(cells: Vec<TerminalCell>, size: TerminalSize) -> Vec<TerminalRowSnapshot> {
+    let mut cells = cells.into_iter();
+    (0..size.lines)
+        .map(|_| {
+            let row: Vec<_> = (0..size.columns)
+                .map(|_| cells.next().unwrap_or_default())
+                .collect();
+            Arc::from(row.into_boxed_slice())
+        })
+        .collect()
 }
 
 impl TerminalSnapshot {
@@ -215,7 +454,9 @@ impl TerminalSnapshot {
             modes: TerminalModes::default(),
             process: TerminalProcessState::Running,
             revision: 0,
-            cells: vec![TerminalCell::default(); size.columns * size.lines],
+            rows: (0..size.lines)
+                .map(|_| Arc::from(vec![TerminalCell::default(); size.columns].into_boxed_slice()))
+                .collect(),
             rows_before: Vec::new(),
             rows_after: Vec::new(),
         }
@@ -225,7 +466,38 @@ impl TerminalSnapshot {
         if row >= self.size.lines || column >= self.size.columns {
             return None;
         }
-        self.cells.get(row * self.size.columns + column)
+        self.rows.get(row)?.get(column)
+    }
+
+    pub fn cell_mut(&mut self, row: usize, column: usize) -> Option<&mut TerminalCell> {
+        if row >= self.size.lines || column >= self.size.columns {
+            return None;
+        }
+        Arc::make_mut(self.rows.get_mut(row)?).get_mut(column)
+    }
+
+    pub fn cell_count(&self) -> usize {
+        self.rows.iter().map(|row| row.len()).sum()
+    }
+
+    /// Returns a row relative to the visible viewport. Negative rows address
+    /// `rows_before`, visible rows address `cells`, and rows at or beyond the
+    /// screen height address `rows_after`.
+    pub fn relative_row(&self, row: i32) -> Option<&[TerminalCell]> {
+        self.relative_row_snapshot(row).map(AsRef::as_ref)
+    }
+
+    pub fn relative_row_snapshot(&self, row: i32) -> Option<&TerminalRowSnapshot> {
+        if row < 0 {
+            let index = usize::try_from(row.saturating_neg().saturating_sub(1)).ok()?;
+            return self.rows_before.get(index);
+        }
+
+        let row = usize::try_from(row).ok()?;
+        if row < self.size.lines {
+            return self.rows.get(row);
+        }
+        self.rows_after.get(row.saturating_sub(self.size.lines))
     }
 
     pub fn visible_text(&self) -> String {
@@ -236,8 +508,8 @@ impl TerminalSnapshot {
             }
             for column in 0..self.size.columns {
                 if let Some(cell) = self.cell(row, column)
-                    && !cell.flags.wide_spacer
-                    && !cell.flags.leading_wide_spacer
+                    && !cell.flags.wide_spacer()
+                    && !cell.flags.leading_wide_spacer()
                 {
                     text.push(cell.character);
                     text.extend(cell.zerowidth.iter().copied());
@@ -271,22 +543,18 @@ impl TerminalSnapshot {
     /// race-window waiters still see the visible tail without pinning the
     /// full grid in memory.
     pub fn compacted_tail(&self, max_rows: usize) -> Self {
-        let columns = self.size.columns;
         let rows = self.size.lines;
         let keep = rows.min(max_rows.max(1)).max(1);
         let removed = rows.saturating_sub(keep);
-        let start = removed.saturating_mul(columns).min(self.cells.len());
-        let mut cells = self.cells[start..].to_vec();
-        let want = keep.saturating_mul(columns);
-        if cells.len() < want {
-            cells.resize(want, TerminalCell::default());
-        } else {
-            cells.truncate(want);
-        }
+        let mut visible_rows = self.rows[removed.min(self.rows.len())..].to_vec();
+        visible_rows.resize_with(keep, || {
+            Arc::from(vec![TerminalCell::default(); self.size.columns].into_boxed_slice())
+        });
+        visible_rows.truncate(keep);
         Self {
             terminal_id: self.terminal_id,
             size: TerminalSize {
-                columns,
+                columns: self.size.columns,
                 lines: keep,
             },
             process_name: self.process_name.clone(),
@@ -306,7 +574,7 @@ impl TerminalSnapshot {
             modes: self.modes,
             process: self.process,
             revision: self.revision,
-            cells,
+            rows: visible_rows,
             rows_before: Vec::new(),
             rows_after: Vec::new(),
         }
@@ -328,37 +596,95 @@ impl TerminalSnapshot {
         revision: u64,
         viewport_position: i64,
     ) -> Self {
+        Self::from_term_with_previous(
+            terminal_id,
+            term,
+            process,
+            revision,
+            viewport_position,
+            None,
+        )
+    }
+
+    pub fn from_term_with_previous<T: EventListener>(
+        terminal_id: TerminalId,
+        term: &Term<T>,
+        process: TerminalProcessState,
+        revision: u64,
+        viewport_position: i64,
+        previous: Option<&TerminalSnapshot>,
+    ) -> Self {
+        Self::from_term_with_previous_counted(
+            terminal_id,
+            term,
+            process,
+            revision,
+            viewport_position,
+            previous,
+        )
+        .0
+    }
+
+    pub(crate) fn from_term_with_previous_counted<T: EventListener>(
+        terminal_id: TerminalId,
+        term: &Term<T>,
+        process: TerminalProcessState,
+        revision: u64,
+        viewport_position: i64,
+        previous: Option<&TerminalSnapshot>,
+    ) -> (Self, usize) {
         let size = TerminalSize::new(term.columns(), term.screen_lines());
         let display_offset = term.grid().display_offset();
-        let mut cells = Vec::with_capacity(size.columns * size.lines);
-        for row in 0..size.lines {
-            let line = Line(row as i32 - display_offset as i32);
-            for column in 0..size.columns {
-                let cell = &term.grid()[line][Column(column)];
-                cells.push(Self::cell_from_alacritty(cell));
-            }
-        }
+        let mut materialized_cells = 0;
+        let rows = (0..size.lines)
+            .map(|row| {
+                Self::row_from_alacritty(
+                    term,
+                    Line(row as i32 - display_offset as i32),
+                    size.columns,
+                    previous,
+                    (row as i64).saturating_sub(viewport_position),
+                    &mut materialized_cells,
+                )
+            })
+            .collect();
 
         let viewport_start = -(display_offset as i32);
         let viewport_end = viewport_start + size.lines as i32 - 1;
-        let rows_before = if viewport_start > term.grid().topmost_line().0 {
-            vec![Self::row_from_alacritty(
-                term,
-                Line(viewport_start - 1),
-                size.columns,
-            )]
-        } else {
-            Vec::new()
-        };
-        let rows_after = if viewport_end < term.grid().bottommost_line().0 {
-            vec![Self::row_from_alacritty(
-                term,
-                Line(viewport_end + 1),
-                size.columns,
-            )]
-        } else {
-            Vec::new()
-        };
+        let topmost = term.grid().topmost_line().0;
+        let bottommost = term.grid().bottommost_line().0;
+        let rows_before = (1..=VIEWPORT_OVERSCAN_ROWS)
+            .map_while(|distance| {
+                let line = viewport_start.saturating_sub(distance as i32);
+                (line >= topmost).then(|| {
+                    Self::row_from_alacritty(
+                        term,
+                        Line(line),
+                        size.columns,
+                        previous,
+                        (-(distance as i64)).saturating_sub(viewport_position),
+                        &mut materialized_cells,
+                    )
+                })
+            })
+            .collect();
+        let rows_after = (1..=VIEWPORT_OVERSCAN_ROWS)
+            .map_while(|distance| {
+                let line = viewport_end.saturating_add(distance as i32);
+                (line <= bottommost).then(|| {
+                    Self::row_from_alacritty(
+                        term,
+                        Line(line),
+                        size.columns,
+                        previous,
+                        (size.lines as i64)
+                            .saturating_add(distance as i64 - 1)
+                            .saturating_sub(viewport_position),
+                        &mut materialized_cells,
+                    )
+                })
+            })
+            .collect();
 
         let point = term.grid().cursor.point;
         let viewport_row = point.line.0 + display_offset as i32;
@@ -383,35 +709,69 @@ impl TerminalSnapshot {
             alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
         };
 
-        Self {
-            terminal_id,
-            size,
-            process_name: String::new(),
-            cwd: String::new(),
-            display_offset,
-            viewport_position,
-            cursor,
-            modes,
-            process,
-            revision,
-            cells,
-            rows_before,
-            rows_after,
-        }
+        (
+            Self {
+                terminal_id,
+                size,
+                process_name: String::new(),
+                cwd: String::new(),
+                display_offset,
+                viewport_position,
+                cursor,
+                modes,
+                process,
+                revision,
+                rows,
+                rows_before,
+                rows_after,
+            },
+            materialized_cells,
+        )
     }
 
     fn row_from_alacritty<T: EventListener>(
         term: &Term<T>,
         line: Line,
         columns: usize,
-    ) -> Vec<TerminalCell> {
+        previous: Option<&TerminalSnapshot>,
+        physical_row: i64,
+        materialized_cells: &mut usize,
+    ) -> TerminalRowSnapshot {
+        if let Some(previous) = previous {
+            let relative = physical_row.saturating_add(previous.viewport_position);
+            if let Ok(relative) = i32::try_from(relative)
+                && let Some(row) = previous.relative_row(relative)
+                && row.len() == columns
+                && row.iter().enumerate().all(|(column, snapshot_cell)| {
+                    Self::cell_matches_alacritty(snapshot_cell, &term.grid()[line][Column(column)])
+                })
+            {
+                return if relative < 0 {
+                    previous.rows_before[relative.unsigned_abs() as usize - 1].clone()
+                } else if relative < previous.size.lines as i32 {
+                    previous.rows[relative as usize].clone()
+                } else {
+                    previous.rows_after[relative as usize - previous.size.lines].clone()
+                };
+            }
+        }
+
+        *materialized_cells = materialized_cells.saturating_add(columns);
         let mut row = Vec::with_capacity(columns);
         for column in 0..columns {
             row.push(Self::cell_from_alacritty(
                 &term.grid()[line][Column(column)],
             ));
         }
-        row
+        Arc::from(row.into_boxed_slice())
+    }
+
+    fn cell_matches_alacritty(snapshot: &TerminalCell, cell: &Cell) -> bool {
+        snapshot.character == cell.c
+            && snapshot.fg == color_from_alacritty(cell.fg)
+            && snapshot.bg == color_from_alacritty(cell.bg)
+            && snapshot.flags == TerminalCellFlags::from_alacritty(cell.flags)
+            && snapshot.zerowidth.as_slice() == cell.zerowidth().unwrap_or_default()
     }
 
     fn cell_from_alacritty(cell: &Cell) -> TerminalCell {
@@ -419,18 +779,8 @@ impl TerminalSnapshot {
             character: cell.c,
             fg: color_from_alacritty(cell.fg),
             bg: color_from_alacritty(cell.bg),
-            flags: TerminalCellFlags {
-                inverse: cell.flags.contains(Flags::INVERSE),
-                bold: cell.flags.contains(Flags::BOLD),
-                italic: cell.flags.contains(Flags::ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
-                strike: cell.flags.contains(Flags::STRIKEOUT),
-                wide: cell.flags.contains(Flags::WIDE_CHAR),
-                wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
-                leading_wide_spacer: cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER),
-                wrapline: cell.flags.contains(Flags::WRAPLINE),
-            },
-            zerowidth: cell.zerowidth().map(ToOwned::to_owned).unwrap_or_default(),
+            flags: TerminalCellFlags::from_alacritty(cell.flags),
+            zerowidth: cell.zerowidth().into_iter().flatten().copied().collect(),
         }
     }
 }
@@ -481,28 +831,51 @@ mod tests {
 
         let at_bottom =
             TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 1);
-        assert_eq!(at_bottom.rows_before.len(), 1);
+        assert!(at_bottom.rows_before.len() > 1);
+        assert!(at_bottom.rows_before.len() <= VIEWPORT_OVERSCAN_ROWS);
         assert!(at_bottom.rows_after.is_empty());
+        assert_eq!(
+            at_bottom.relative_row(-1),
+            Some(at_bottom.rows_before[0].as_ref())
+        );
+        assert_eq!(at_bottom.relative_row(0), Some(at_bottom.rows[0].as_ref()));
 
         term.scroll_display(Scroll::Delta(1));
-        let one_row_up =
-            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
-        assert_eq!(one_row_up.rows_before.len(), 1);
+        let (one_row_up, materialized_cells) = TerminalSnapshot::from_term_with_previous_counted(
+            terminal_id,
+            &term,
+            TerminalProcessState::Running,
+            2,
+            1,
+            Some(&at_bottom),
+        );
+        assert_eq!(materialized_cells, 0);
+        assert_eq!(
+            one_row_up.rows_before.len() + 1,
+            at_bottom.rows_before.len()
+        );
         assert_eq!(one_row_up.rows_after.len(), 1);
         assert_eq!(
-            &one_row_up.cells[..size.columns],
-            at_bottom.rows_before[0].as_slice()
+            one_row_up.rows[0].as_ref(),
+            at_bottom.rows_before[0].as_ref()
         );
+        assert!(Arc::ptr_eq(&one_row_up.rows[0], &at_bottom.rows_before[0]));
         assert_eq!(
-            one_row_up.rows_after[0].as_slice(),
-            &at_bottom.cells[size.columns..size.columns * size.lines]
+            one_row_up.rows_after[0].as_ref(),
+            at_bottom.rows[1].as_ref()
         );
+        assert!(Arc::ptr_eq(&one_row_up.rows_after[0], &at_bottom.rows[1]));
 
         term.scroll_display(Scroll::Top);
         let at_top =
             TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 3);
         assert!(at_top.rows_before.is_empty());
-        assert_eq!(at_top.rows_after.len(), 1);
+        assert!(at_top.rows_after.len() > 1);
+        assert!(at_top.rows_after.len() <= VIEWPORT_OVERSCAN_ROWS);
+        assert_eq!(
+            at_top.relative_row(size.lines as i32),
+            Some(at_top.rows_after[0].as_ref())
+        );
     }
 
     #[test]

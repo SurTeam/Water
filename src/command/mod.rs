@@ -173,6 +173,11 @@ pub enum TerminalCommand {
         pane_id: Option<PaneId>,
         lines: i32,
     },
+    SetViewportPosition {
+        terminal_id: Option<TerminalId>,
+        pane_id: Option<PaneId>,
+        target: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +241,10 @@ pub enum OperationResult {
     TerminalScrolled {
         terminal_id: TerminalId,
         lines: i32,
+    },
+    TerminalViewportPositionSet {
+        terminal_id: TerminalId,
+        target: i64,
     },
 }
 
@@ -372,6 +381,12 @@ enum AppCommandWire {
         terminal_id: Option<TerminalId>,
         pane_id: Option<PaneId>,
         lines: i32,
+    },
+    #[serde(rename = "terminal.set_viewport_position")]
+    TerminalSetViewportPosition {
+        terminal_id: Option<TerminalId>,
+        pane_id: Option<PaneId>,
+        target: i64,
     },
 }
 
@@ -535,6 +550,15 @@ impl From<&AppCommand> for AppCommandWire {
                 pane_id: *pane_id,
                 lines: *lines,
             },
+            AppCommand::Terminal(TerminalCommand::SetViewportPosition {
+                terminal_id,
+                pane_id,
+                target,
+            }) => Self::TerminalSetViewportPosition {
+                terminal_id: *terminal_id,
+                pane_id: *pane_id,
+                target: *target,
+            },
         }
     }
 }
@@ -674,6 +698,15 @@ impl From<AppCommandWire> for AppCommand {
                 pane_id,
                 lines,
             }),
+            AppCommandWire::TerminalSetViewportPosition {
+                terminal_id,
+                pane_id,
+                target,
+            } => Self::Terminal(TerminalCommand::SetViewportPosition {
+                terminal_id,
+                pane_id,
+                target,
+            }),
         }
     }
 }
@@ -725,6 +758,9 @@ impl AppCommand {
             Self::Terminal(TerminalCommand::SendBytes { .. }) => "terminal.send_bytes",
             Self::Terminal(TerminalCommand::Resize { .. }) => "terminal.resize",
             Self::Terminal(TerminalCommand::Scroll { .. }) => "terminal.scroll",
+            Self::Terminal(TerminalCommand::SetViewportPosition { .. }) => {
+                "terminal.set_viewport_position"
+            }
         }
     }
 }

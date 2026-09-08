@@ -1,14 +1,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
     FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine,
-    SharedString, StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, UTF16Selection,
-    UnderlineStyle, Window, WindowControlArea, anchored, canvas, deferred, div, fill, font,
-    outline, point, prelude::*, px, relative, rgb, rgba, size,
+    SharedString, StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, TouchPhase,
+    UTF16Selection, UnderlineStyle, Window, WindowControlArea, anchored, canvas, deferred, div,
+    fill, font, outline, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
@@ -21,7 +24,9 @@ use crate::config::{AppConfig, DEFAULT_TERMINAL_LINE_HEIGHT, ThemeColors};
 use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
-use crate::terminal::{TerminalCell, TerminalColor, TerminalModes, TerminalSize, TerminalSnapshot};
+use crate::terminal::{
+    TerminalCell, TerminalColor, TerminalModes, TerminalRowSnapshot, TerminalSize, TerminalSnapshot,
+};
 
 use super::application::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
@@ -47,7 +52,7 @@ const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
 const SPLIT_DIVIDER_WIDTH_PX: f32 = 6.0;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct TerminalMetrics {
     cell_width: f32,
     line_height: f32,
@@ -191,75 +196,195 @@ struct TerminalRenderOptions {
     metrics: TerminalMetrics,
     theme: ThemeColors,
     cursor_focused: bool,
-    /// Fractional normal-screen viewport movement that has not crossed a
-    /// whole row. Positive values reveal `rows_before`; negative values reveal
+    /// UI-local normal-screen viewport movement relative to the latest
+    /// snapshot. Positive values reveal `rows_before`; negative values reveal
     /// `rows_after`.
-    scroll_remainder: f32,
+    scroll_offset_rows: f32,
 }
 
-/// Keeps fractional wheel movement visually anchored while whole-row scroll
-/// commands cross the asynchronous model/PTY boundary.
-///
-/// `remainder` is the latest gesture target. `rendered_remainder` remains at
-/// the last painted position until `pending_lines` is reflected by a terminal
-/// snapshot, preventing the old grid from briefly jumping backwards.
-#[derive(Debug, Clone, Copy)]
+/// Keeps wheel movement visually anchored while viewport requests cross the
+/// asynchronous model/PTY boundary.
+#[derive(Debug, Clone)]
 struct TerminalScrollState {
-    remainder: f32,
-    rendered_remainder: f32,
+    /// Worker viewport coordinate represented by the latest snapshot.
     observed_viewport_position: i64,
-    pending_lines: i32,
+    /// Continuous UI-local movement not yet incorporated into the snapshot.
+    visual_unacked_rows: f32,
+    /// Latest absolute worker viewport target requested by the UI.
+    requested_viewport_position: i64,
+    /// Start of the latest absolute request, used only by opt-in scroll stats.
+    request_started_at: Option<Instant>,
+}
+
+const MOUSE_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(72);
+const MOUSE_SCROLL_IMMEDIATE_FRACTION: f32 = 0.2;
+
+#[derive(Debug, Clone)]
+struct TerminalMouseScrollAnimation {
+    pane_id: PaneId,
+    start_position: f32,
+    target_position: f32,
+    started_at: Instant,
+}
+
+impl TerminalMouseScrollAnimation {
+    fn position_at(&self, now: Instant) -> (f32, bool) {
+        let elapsed = now.saturating_duration_since(self.started_at);
+        let progress =
+            (elapsed.as_secs_f32() / MOUSE_SCROLL_ANIMATION_DURATION.as_secs_f32()).clamp(0.0, 1.0);
+        // A time-based ease-out reaches the same point after a dropped frame;
+        // it never counts frames or assumes a fixed 16 ms refresh interval.
+        let eased = 1.0 - (1.0 - progress).powi(3);
+        (
+            self.start_position + (self.target_position - self.start_position) * eased,
+            progress >= 1.0,
+        )
+    }
 }
 
 impl TerminalScrollState {
     fn new(viewport_position: i64) -> Self {
         Self {
-            remainder: 0.0,
-            rendered_remainder: 0.0,
             observed_viewport_position: viewport_position,
-            pending_lines: 0,
+            visual_unacked_rows: 0.0,
+            requested_viewport_position: viewport_position,
+            request_started_at: None,
         }
     }
 
-    fn accumulate(&mut self, delta_rows: f32) -> (i32, bool) {
-        let lines = accumulate_terminal_scroll_delta(&mut self.remainder, delta_rows);
-        self.pending_lines = self.pending_lines.saturating_add(lines);
-        let repaint = self.pending_lines == 0;
-        if repaint {
-            self.rendered_remainder = self.remainder;
-        }
-        (lines, repaint)
+    #[cfg(test)]
+    fn accumulate(&mut self, delta_rows: f32) -> (Option<i64>, bool) {
+        self.accumulate_with_boundaries(delta_rows, false, false)
     }
 
-    fn reconcile_snapshot(&mut self, snapshot: &TerminalSnapshot) {
-        let viewport_delta = snapshot
-            .viewport_position
-            .saturating_sub(self.observed_viewport_position);
-        self.observed_viewport_position = snapshot.viewport_position;
-
-        if self.pending_lines != 0 && viewport_delta != 0 {
-            let previous = i64::from(self.pending_lines);
-            let remaining = previous.saturating_sub(viewport_delta);
-            self.pending_lines = if remaining == 0 || remaining.signum() != previous.signum() {
-                0
-            } else {
-                remaining.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-            };
+    fn accumulate_with_boundaries(
+        &mut self,
+        delta_rows: f32,
+        at_history_start: bool,
+        at_live_bottom: bool,
+    ) -> (Option<i64>, bool) {
+        if !delta_rows.is_finite() || delta_rows == 0.0 {
+            return (None, false);
         }
 
-        // A clamped scroll does not publish a changed viewport. Resolve it
-        // from the overscan boundary so the state cannot remain pending.
-        if (self.pending_lines > 0 && snapshot.rows_before.is_empty())
-            || (self.pending_lines < 0 && snapshot.rows_after.is_empty())
+        let had_boundary_debt = (at_history_start && self.visual_unacked_rows > 0.0)
+            || (at_live_bottom && self.visual_unacked_rows < 0.0);
+        if had_boundary_debt {
+            self.visual_unacked_rows = 0.0;
+            self.requested_viewport_position = self.observed_viewport_position;
+            self.request_started_at = None;
+        }
+
+        let delta_rows = delta_rows.clamp(-100.0, 100.0);
+        let previous_visual = self.visual_unacked_rows;
+        self.visual_unacked_rows = (previous_visual + delta_rows).clamp(-101.0, 101.0);
+        // A known terminal boundary is a hard physical limit, not merely a
+        // paint clamp. Discard movement beyond it immediately so reversing
+        // direction never has to repay invisible accumulated wheel deltas.
+        if at_history_start {
+            self.visual_unacked_rows = self.visual_unacked_rows.min(0.0);
+        }
+        if at_live_bottom {
+            self.visual_unacked_rows = self.visual_unacked_rows.max(0.0);
+        }
+        let whole = self.visual_unacked_rows.trunc() as i64;
+        let target = self.observed_viewport_position.saturating_add(whole);
+        let request = (target != self.requested_viewport_position).then_some(target);
+        self.requested_viewport_position = target;
+        if request.is_some() {
+            self.request_started_at = Some(Instant::now());
+            scroll_stat_inc(&SCROLL_VIEWPORT_REQUESTS);
+        }
+        scroll_stat_max_unacked(self.visual_unacked_rows);
+        (request, self.visual_unacked_rows != previous_visual)
+    }
+}
+
+fn reconcile_visual_scroll(state: &mut TerminalScrollState, snapshot: &TerminalSnapshot) {
+    let applied = snapshot
+        .viewport_position
+        .saturating_sub(state.observed_viewport_position);
+    state.observed_viewport_position = snapshot.viewport_position;
+    state.visual_unacked_rows -= applied as f32;
+    if applied != 0 {
+        scroll_stat_inc(&SCROLL_VIEWPORT_ACKS);
+        if scroll_stats_enabled()
+            && let Some(started) = state.request_started_at.take()
         {
-            self.pending_lines = 0;
-            self.remainder = 0.0;
-        }
-
-        if self.pending_lines == 0 {
-            self.rendered_remainder = self.remainder;
+            SCROLL_ACK_LATENCY_MICROS
+                .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
     }
+
+    // Clamp only at a known history boundary. An acknowledgement always
+    // rebases first so replacing the snapshot cannot move the visual viewport.
+    if (state.visual_unacked_rows > 0.0 && snapshot.rows_before.is_empty())
+        || (state.visual_unacked_rows < 0.0 && snapshot.rows_after.is_empty())
+    {
+        state.visual_unacked_rows = 0.0;
+        state.requested_viewport_position = snapshot.viewport_position;
+    }
+}
+
+fn record_latest_viewport_request(
+    pending: &mut BTreeMap<TerminalId, (PaneId, i64)>,
+    terminal_id: TerminalId,
+    pane_id: PaneId,
+    target: i64,
+) {
+    pending.insert(terminal_id, (pane_id, target));
+}
+
+static SCROLL_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
+static SCROLL_STATS_REPORTED: AtomicBool = AtomicBool::new(false);
+static SCROLL_WHEEL_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_TRACKPAD_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_MOUSE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_VIEWPORT_REQUESTS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_VIEWPORT_ACKS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_ACK_LATENCY_MICROS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_MAX_UNACKED_MILLIROWS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_PREPAINT_MICROS: AtomicU64 = AtomicU64::new(0);
+static SCROLL_SHAPE_LINE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SCROLL_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+fn scroll_stats_enabled() -> bool {
+    *SCROLL_STATS_ENABLED.get_or_init(|| std::env::var_os("WATER_SCROLL_STATS").is_some())
+}
+
+fn scroll_stat_inc(counter: &AtomicU64) {
+    if scroll_stats_enabled() {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn scroll_stat_max_unacked(rows: f32) {
+    if scroll_stats_enabled() {
+        SCROLL_MAX_UNACKED_MILLIROWS
+            .fetch_max((rows.abs() * 1_000.0).round() as u64, Ordering::Relaxed);
+    }
+}
+
+fn report_scroll_stats_if_enabled() {
+    if !scroll_stats_enabled() || SCROLL_STATS_REPORTED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let acks = SCROLL_VIEWPORT_ACKS.load(Ordering::Relaxed);
+    let ack_micros = SCROLL_ACK_LATENCY_MICROS.load(Ordering::Relaxed);
+    tracing::info!(
+        target: "water::scroll",
+        wheel_events = SCROLL_WHEEL_EVENTS.load(Ordering::Relaxed),
+        trackpad_events = SCROLL_TRACKPAD_EVENTS.load(Ordering::Relaxed),
+        mouse_events = SCROLL_MOUSE_EVENTS.load(Ordering::Relaxed),
+        viewport_requests = SCROLL_VIEWPORT_REQUESTS.load(Ordering::Relaxed),
+        viewport_acks = acks,
+        max_unacked_rows = SCROLL_MAX_UNACKED_MILLIROWS.load(Ordering::Relaxed) as f64 / 1_000.0,
+        viewport_ack_latency_us = ack_micros.checked_div(acks).unwrap_or(0),
+        terminal_prepaint_us = SCROLL_PREPAINT_MICROS.load(Ordering::Relaxed),
+        shape_line_count = SCROLL_SHAPE_LINE_COUNT.load(Ordering::Relaxed),
+        scroll_frames = SCROLL_FRAMES.load(Ordering::Relaxed),
+        "terminal scroll stats"
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -285,11 +410,13 @@ struct TerminalTextChunk {
     cells: Vec<TerminalTextCell>,
 }
 
+#[derive(Clone)]
 struct TerminalTextPaint {
     start_column: usize,
     line: ShapedLine,
 }
 
+#[derive(Clone)]
 struct TerminalRowPaint {
     /// Signed viewport-relative row. `-1` and `size.lines` are the optional
     /// overscan rows surrounding the visible grid.
@@ -303,6 +430,47 @@ struct TerminalPrepaintState {
     ime_line: Option<(ShapedLine, usize, usize)>,
 }
 
+#[derive(Clone, PartialEq)]
+struct TerminalRenderCacheKey {
+    terminal_id: TerminalId,
+    snapshot_revision: u64,
+    font_family: String,
+    font_size_bits: u32,
+    metrics: TerminalMetrics,
+    theme: ThemeColors,
+    cursor_focused: bool,
+    selection: Option<TerminalSelection>,
+    bounds_origin_x_bits: u32,
+    bounds_width_bits: u32,
+}
+
+impl TerminalRenderCacheKey {
+    fn rows_compatible_with(&self, other: &Self) -> bool {
+        self.terminal_id == other.terminal_id
+            && self.font_family == other.font_family
+            && self.font_size_bits == other.font_size_bits
+            && self.metrics == other.metrics
+            && self.theme == other.theme
+            && self.cursor_focused == other.cursor_focused
+            && self.selection == other.selection
+            && self.bounds_origin_x_bits == other.bounds_origin_x_bits
+            && self.bounds_width_bits == other.bounds_width_bits
+    }
+}
+
+struct TerminalCachedRowPaint {
+    cells: TerminalRowSnapshot,
+    paint: TerminalRowPaint,
+}
+
+#[derive(Default)]
+struct TerminalRenderCache {
+    key: Option<TerminalRenderCacheKey>,
+    rows: BTreeMap<i32, TerminalCachedRowPaint>,
+}
+
+type TerminalRenderCaches = Arc<Mutex<BTreeMap<TerminalId, TerminalRenderCache>>>;
+
 struct TerminalRenderElement {
     /// Shared with the terminal registry; painting never copies the grid.
     snapshot: Arc<TerminalSnapshot>,
@@ -312,6 +480,7 @@ struct TerminalRenderElement {
     font_size: f32,
     ime_text: Option<String>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    render_caches: TerminalRenderCaches,
     input_handler: Option<(Entity<WorkspaceView>, FocusHandle)>,
 }
 
@@ -442,7 +611,7 @@ impl InputHandler for TerminalInputHandler {
                     let cursor = terminal_cursor_position(snapshot);
                     let width_columns = snapshot
                         .cell(cursor.0, cursor.1)
-                        .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                        .map(|cell| if cell.flags.wide() { 2 } else { 1 })
                         .unwrap_or(1);
                     (cursor, width_columns)
                 })
@@ -541,12 +710,18 @@ pub struct WorkspaceView {
     focus_handle: FocusHandle,
     resize_requests: Arc<Mutex<BTreeMap<TerminalId, TerminalSize>>>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    render_caches: TerminalRenderCaches,
     input_handler_terminal: Option<TerminalId>,
     /// Workspace selection and pane focus belong to this projection. The
     /// model's active aliases are compatibility state shared by all windows.
     selected_workspace: Option<WorkspaceId>,
     focused_pane: Option<PaneId>,
     scroll_accumulators: BTreeMap<TerminalId, TerminalScrollState>,
+    active_trackpad_scrolls: BTreeSet<TerminalId>,
+    pending_viewport_requests: BTreeMap<TerminalId, (PaneId, i64)>,
+    viewport_request_frame_pending: bool,
+    mouse_scroll_animations: BTreeMap<TerminalId, TerminalMouseScrollAnimation>,
+    mouse_scroll_frame_pending: bool,
     selection: Option<TerminalSelection>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
@@ -580,6 +755,12 @@ pub struct WorkspaceView {
     dialog: Option<DialogState>,
 }
 
+impl Drop for WorkspaceView {
+    fn drop(&mut self) {
+        report_scroll_stats_if_enabled();
+    }
+}
+
 impl WorkspaceView {
     pub fn new(
         client: std::sync::Arc<dyn CommandTransport>,
@@ -609,10 +790,16 @@ impl WorkspaceView {
             focus_handle,
             resize_requests: Arc::new(Mutex::new(BTreeMap::new())),
             terminal_bounds: Arc::new(Mutex::new(BTreeMap::new())),
+            render_caches: Arc::new(Mutex::new(BTreeMap::new())),
             input_handler_terminal: None,
             selected_workspace,
             focused_pane,
             scroll_accumulators: BTreeMap::new(),
+            active_trackpad_scrolls: BTreeSet::new(),
+            pending_viewport_requests: BTreeMap::new(),
+            viewport_request_frame_pending: false,
+            mouse_scroll_animations: BTreeMap::new(),
+            mouse_scroll_frame_pending: false,
             selection: None,
             ime_terminal: None,
             ime_marked_text: String::new(),
@@ -1422,14 +1609,18 @@ impl WorkspaceView {
         }
     }
 
-    fn enqueue_terminal_command(&self, terminal_id: TerminalId, command: TerminalCommand) {
-        if let Err(error) = self.client.enqueue(AppCommand::Terminal(command)) {
-            tracing::warn!(
-                target: "water::ui",
-                terminal_id = %terminal_id,
-                ?error,
-                "could not enqueue terminal input"
-            );
+    fn enqueue_terminal_command(&self, terminal_id: TerminalId, command: TerminalCommand) -> bool {
+        match self.client.enqueue(AppCommand::Terminal(command)) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    target: "water::ui",
+                    terminal_id = %terminal_id,
+                    ?error,
+                    "could not enqueue terminal command"
+                );
+                false
+            }
         }
     }
 
@@ -1491,33 +1682,195 @@ impl WorkspaceView {
             .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
     }
 
-    fn terminal_scroll_remainder_for_snapshot(&self, snapshot: &TerminalSnapshot) -> f32 {
-        let remainder = self
+    fn terminal_scroll_offset_for_snapshot(&self, snapshot: &TerminalSnapshot) -> f32 {
+        let offset = self
             .scroll_accumulators
             .get(&snapshot.terminal_id)
-            .map(|state| state.rendered_remainder)
+            .map(|state| state.visual_unacked_rows)
             .unwrap_or(0.0);
-        if (remainder > 0.0 && snapshot.rows_before.is_empty())
-            || (remainder < 0.0 && snapshot.rows_after.is_empty())
-        {
-            0.0
-        } else {
-            remainder
-        }
+        offset.clamp(
+            -(snapshot.rows_after.len() as f32),
+            snapshot.rows_before.len() as f32,
+        )
     }
 
     fn accumulate_terminal_scroll(
         &mut self,
         terminal_id: TerminalId,
         delta_rows: f32,
-    ) -> (i32, bool) {
-        let viewport_position = self
+    ) -> (Option<i64>, bool) {
+        let (viewport_position, at_history_start, at_live_bottom) = self
             .terminal_snapshot_for(terminal_id)
-            .map_or(0, |snapshot| snapshot.viewport_position);
+            .map_or((0, false, false), |snapshot| {
+                (
+                    snapshot.viewport_position,
+                    snapshot.rows_before.is_empty(),
+                    snapshot.rows_after.is_empty(),
+                )
+            });
         self.scroll_accumulators
             .entry(terminal_id)
             .or_insert_with(|| TerminalScrollState::new(viewport_position))
-            .accumulate(delta_rows)
+            .accumulate_with_boundaries(delta_rows, at_history_start, at_live_bottom)
+    }
+
+    fn queue_terminal_viewport_request(
+        &mut self,
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+        target: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Input can arrive much faster than a display refresh. Preserve every
+        // UI-local fractional delta, but cross the socket/model boundary only
+        // once per frame with the latest absolute target for each terminal.
+        record_latest_viewport_request(
+            &mut self.pending_viewport_requests,
+            terminal_id,
+            pane_id,
+            target,
+        );
+        if self.viewport_request_frame_pending {
+            return;
+        }
+        self.viewport_request_frame_pending = true;
+        cx.on_next_frame(window, |this, _window, _cx| {
+            this.viewport_request_frame_pending = false;
+            for (terminal_id, (pane_id, target)) in
+                std::mem::take(&mut this.pending_viewport_requests)
+            {
+                if !this.enqueue_terminal_command(
+                    terminal_id,
+                    TerminalCommand::SetViewportPosition {
+                        terminal_id: Some(terminal_id),
+                        pane_id: Some(pane_id),
+                        target,
+                    },
+                ) {
+                    // A disconnected model/server cannot acknowledge further
+                    // viewport targets. Stop the display-paced producer after
+                    // the first failure instead of logging once per frame.
+                    this.mouse_scroll_animations.remove(&terminal_id);
+                }
+            }
+        });
+    }
+
+    fn visual_terminal_position(&self, terminal_id: TerminalId) -> f32 {
+        let position = self.scroll_accumulators.get(&terminal_id).map_or_else(
+            || {
+                self.terminal_snapshot_for(terminal_id)
+                    .map_or(0.0, |snapshot| snapshot.viewport_position as f32)
+            },
+            |state| state.observed_viewport_position as f32 + state.visual_unacked_rows,
+        );
+        self.clamp_terminal_visual_position(terminal_id, position)
+    }
+
+    fn clamp_terminal_visual_position(&self, terminal_id: TerminalId, mut position: f32) -> f32 {
+        let Some(snapshot) = self.terminal_snapshot_for(terminal_id) else {
+            return position;
+        };
+        let base = snapshot.viewport_position as f32;
+        if snapshot.rows_before.is_empty() {
+            position = position.min(base);
+        }
+        if snapshot.rows_after.is_empty() {
+            position = position.max(base);
+        }
+        position
+    }
+
+    fn begin_mouse_scroll_animation(
+        &mut self,
+        terminal_id: TerminalId,
+        pane_id: PaneId,
+        delta_rows: f32,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let current = self.visual_terminal_position(terminal_id);
+        let carried_target = self
+            .mouse_scroll_animations
+            .get(&terminal_id)
+            .map_or(current, |animation| animation.target_position);
+        let carried_target = self.clamp_terminal_visual_position(terminal_id, carried_target);
+        let target_position =
+            self.clamp_terminal_visual_position(terminal_id, carried_target + delta_rows);
+        if (target_position - current).abs() < f32::EPSILON {
+            self.mouse_scroll_animations.remove(&terminal_id);
+            return false;
+        }
+
+        // Move on the input event itself so a fresh notch never waits for the
+        // first animation callback. The remaining distance is display-paced.
+        let immediate_delta = (target_position - current) * MOUSE_SCROLL_IMMEDIATE_FRACTION;
+        let (request, repaint) = self.accumulate_terminal_scroll(terminal_id, immediate_delta);
+        if let Some(target) = request {
+            self.queue_terminal_viewport_request(terminal_id, pane_id, target, window, cx);
+        }
+        let start_position = self.visual_terminal_position(terminal_id);
+        self.mouse_scroll_animations.insert(
+            terminal_id,
+            TerminalMouseScrollAnimation {
+                pane_id,
+                start_position,
+                target_position,
+                started_at: Instant::now(),
+            },
+        );
+        self.request_mouse_scroll_frame(window, cx);
+        repaint
+    }
+
+    fn request_mouse_scroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mouse_scroll_frame_pending {
+            return;
+        }
+        self.mouse_scroll_frame_pending = true;
+        cx.on_next_frame(window, |this, window, cx| {
+            this.mouse_scroll_frame_pending = false;
+            let now = Instant::now();
+            let terminal_ids = this
+                .mouse_scroll_animations
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            let mut finished = Vec::new();
+            let mut repaint = false;
+            for terminal_id in terminal_ids {
+                let Some(animation) = this.mouse_scroll_animations.get(&terminal_id).cloned()
+                else {
+                    continue;
+                };
+                let (position, done) = animation.position_at(now);
+                let delta_rows = position - this.visual_terminal_position(terminal_id);
+                let (request, changed) = this.accumulate_terminal_scroll(terminal_id, delta_rows);
+                repaint |= changed;
+                if let Some(target) = request {
+                    this.queue_terminal_viewport_request(
+                        terminal_id,
+                        animation.pane_id,
+                        target,
+                        window,
+                        cx,
+                    );
+                }
+                if done {
+                    finished.push(terminal_id);
+                }
+            }
+            for terminal_id in finished {
+                this.mouse_scroll_animations.remove(&terminal_id);
+            }
+            if repaint {
+                cx.notify();
+            }
+            if !this.mouse_scroll_animations.is_empty() {
+                this.request_mouse_scroll_frame(window, cx);
+            }
+        });
     }
 
     fn terminal_selection_endpoint_at(
@@ -1926,6 +2279,7 @@ impl WorkspaceView {
             } else {
                 -20
             };
+            self.scroll_accumulators.remove(&terminal_id);
             self.enqueue_terminal_command(
                 terminal_id,
                 TerminalCommand::Scroll {
@@ -2077,10 +2431,37 @@ impl WorkspaceView {
                 return false;
             };
             if let Some(snapshot) = projection.snapshot.as_deref() {
-                state.reconcile_snapshot(snapshot);
+                reconcile_visual_scroll(state, snapshot);
             }
             true
         });
+        self.mouse_scroll_animations
+            .retain(|terminal_id, animation| {
+                let Some(projection) =
+                    terminal_projection_in_snapshot(installed_snapshot, *terminal_id)
+                else {
+                    return false;
+                };
+                let Some(snapshot) = projection.snapshot.as_deref() else {
+                    return false;
+                };
+                let base = snapshot.viewport_position as f32;
+                !((snapshot.rows_before.is_empty() && animation.target_position > base)
+                    || (snapshot.rows_after.is_empty() && animation.target_position < base))
+            });
+        self.pending_viewport_requests
+            .retain(|terminal_id, (_, target)| {
+                let Some(projection) =
+                    terminal_projection_in_snapshot(installed_snapshot, *terminal_id)
+                else {
+                    return false;
+                };
+                let Some(snapshot) = projection.snapshot.as_deref() else {
+                    return false;
+                };
+                !((snapshot.rows_before.is_empty() && *target > snapshot.viewport_position)
+                    || (snapshot.rows_after.is_empty() && *target < snapshot.viewport_position))
+            });
         if self
             .context_menu
             .is_some_and(|menu| !self.context_menu_target_exists(menu.target))
@@ -2227,6 +2608,7 @@ impl WorkspaceView {
             | OperationResult::TerminalBytesSent { .. }
             | OperationResult::TerminalResized { .. }
             | OperationResult::TerminalScrolled { .. }
+            | OperationResult::TerminalViewportPositionSet { .. }
             | OperationResult::None
             | OperationResult::TabRenamed { .. } => {}
         }
@@ -3283,8 +3665,8 @@ impl WorkspaceView {
                     terminal_grid
                         .map(|snapshot| {
                             let ime_text = self.ime_marked_text_for(snapshot.terminal_id);
-                            let scroll_remainder = if smooth_scroll {
-                                self.terminal_scroll_remainder_for_snapshot(&snapshot)
+                            let scroll_offset_rows = if smooth_scroll {
+                                self.terminal_scroll_offset_for_snapshot(&snapshot)
                             } else {
                                 0.0
                             };
@@ -3295,12 +3677,13 @@ impl WorkspaceView {
                                     metrics,
                                     theme,
                                     cursor_focused: active && window_active,
-                                    scroll_remainder,
+                                    scroll_offset_rows,
                                 },
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
                                 ime_text,
                                 self.terminal_bounds.clone(),
+                                self.render_caches.clone(),
                                 active.then(|| (view.clone(), self.focus_handle.clone())),
                             )
                         })
@@ -3378,6 +3761,26 @@ impl WorkspaceView {
                             let Some(terminal_id) = this.terminal_id_for_pane(pane_id) else {
                                 return;
                             };
+                            scroll_stat_inc(&SCROLL_WHEEL_EVENTS);
+                            let input_kind = terminal_scroll_input_kind(
+                                event,
+                                this.active_trackpad_scrolls.contains(&terminal_id),
+                            );
+                            match event.touch_phase {
+                                TouchPhase::Started
+                                    if matches!(event.delta, ScrollDelta::Pixels(_)) =>
+                                {
+                                    this.active_trackpad_scrolls.insert(terminal_id);
+                                }
+                                TouchPhase::Ended | TouchPhase::Cancelled => {
+                                    this.active_trackpad_scrolls.remove(&terminal_id);
+                                }
+                                _ => {}
+                            }
+                            scroll_stat_inc(match input_kind {
+                                TerminalScrollInputKind::TrackpadGesture => &SCROLL_TRACKPAD_EVENTS,
+                                TerminalScrollInputKind::MouseWheel => &SCROLL_MOUSE_EVENTS,
+                            });
                             let delta_rows =
                                 terminal_scroll_delta_rows(event, this.terminal_metrics);
                             if !delta_rows.is_finite() || delta_rows == 0.0 {
@@ -3391,6 +3794,7 @@ impl WorkspaceView {
                                 // viewport movement in this mode.
                                 should_repaint =
                                     this.scroll_accumulators.remove(&terminal_id).is_some();
+                                this.mouse_scroll_animations.remove(&terminal_id);
                                 if let Some(bytes) = terminal_mouse_input(
                                     event,
                                     TerminalMouseContext {
@@ -3413,6 +3817,7 @@ impl WorkspaceView {
                                 // key sequences rather than normal scrollback.
                                 should_repaint =
                                     this.scroll_accumulators.remove(&terminal_id).is_some();
+                                this.mouse_scroll_animations.remove(&terminal_id);
                                 let lines = terminal_scroll_lines(event, this.terminal_metrics);
                                 if lines != 0 {
                                     this.enqueue_terminal_command(
@@ -3428,25 +3833,40 @@ impl WorkspaceView {
                                     );
                                 }
                             } else {
-                                let (lines, repaint) =
-                                    this.accumulate_terminal_scroll(terminal_id, delta_rows);
-                                should_repaint = repaint;
-                                if lines != 0 {
-                                    this.enqueue_terminal_command(
+                                if input_kind == TerminalScrollInputKind::MouseWheel
+                                    && delta_rows.abs() > 1.0
+                                {
+                                    should_repaint = this.begin_mouse_scroll_animation(
                                         terminal_id,
-                                        TerminalCommand::Scroll {
-                                            terminal_id: Some(terminal_id),
-                                            pane_id: Some(pane_id),
-                                            lines,
-                                        },
+                                        pane_id,
+                                        delta_rows,
+                                        window,
+                                        cx,
                                     );
+                                } else {
+                                    // Trackpad motion (including system
+                                    // inertia) stays one-to-one with AppKit's
+                                    // continuous pixel delta. Never layer an
+                                    // extra easing curve over it.
+                                    this.mouse_scroll_animations.remove(&terminal_id);
+                                    let (target, repaint) =
+                                        this.accumulate_terminal_scroll(terminal_id, delta_rows);
+                                    should_repaint = repaint;
+                                    if let Some(target) = target {
+                                        this.queue_terminal_viewport_request(
+                                            terminal_id,
+                                            pane_id,
+                                            target,
+                                            window,
+                                            cx,
+                                        );
+                                    }
                                 }
                             }
-                            // Once a whole-row command is pending, keep the
-                            // old fractional position painted until the new
-                            // terminal snapshot arrives. Repainting the old
-                            // grid with the post-wrap remainder causes a
-                            // visible backwards/forwards jump.
+                            // GPUI collapses invalidations within a frame. Do
+                            // notify for every effective fractional delta so
+                            // visual motion can never wait on another event
+                            // or on the worker acknowledgement.
                             if should_repaint {
                                 cx.notify();
                             }
@@ -4061,7 +4481,7 @@ impl EntityInputHandler for WorkspaceView {
                 let cursor = terminal_cursor_position(snapshot);
                 let width_columns = snapshot
                     .cell(cursor.0, cursor.1)
-                    .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                    .map(|cell| if cell.flags.wide() { 2 } else { 1 })
                     .unwrap_or(1);
                 (cursor, width_columns)
             })
@@ -4353,17 +4773,28 @@ fn terminal_scroll_delta_rows(event: &ScrollWheelEvent, metrics: TerminalMetrics
     }
 }
 
-/// Converts accumulated wheel movement into whole terminal rows while
-/// retaining the fractional remainder for pixel-smooth rendering.
-fn accumulate_terminal_scroll_delta(accumulator: &mut f32, delta_rows: f32) -> i32 {
-    if !delta_rows.is_finite() || delta_rows == 0.0 {
-        return 0;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalScrollInputKind {
+    TrackpadGesture,
+    MouseWheel,
+}
+
+fn terminal_scroll_input_kind(
+    event: &ScrollWheelEvent,
+    trackpad_gesture_active: bool,
+) -> TerminalScrollInputKind {
+    match event.delta {
+        ScrollDelta::Lines(_) => TerminalScrollInputKind::MouseWheel,
+        ScrollDelta::Pixels(_) => match event.touch_phase {
+            TouchPhase::Started | TouchPhase::Ended | TouchPhase::Cancelled => {
+                TerminalScrollInputKind::TrackpadGesture
+            }
+            TouchPhase::Moved if trackpad_gesture_active => {
+                TerminalScrollInputKind::TrackpadGesture
+            }
+            TouchPhase::Moved => TerminalScrollInputKind::MouseWheel,
+        },
     }
-    let delta_rows = delta_rows.clamp(-100.0, 100.0);
-    let total = (*accumulator + delta_rows).clamp(-101.0, 101.0);
-    let lines = total.trunc().clamp(-100.0, 100.0) as i32;
-    *accumulator = total - lines as f32;
-    lines
 }
 
 fn terminal_scroll_lines(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> i32 {
@@ -4831,7 +5262,7 @@ fn selection_bounds(
     selection: TerminalSelection,
 ) -> Option<(TerminalCellPosition, TerminalCellPosition)> {
     let columns = snapshot.size.columns;
-    let total_cells = snapshot.cells.len();
+    let total_cells = snapshot.cell_count();
     let anchor_boundary = selection_boundary_index(selection.anchor, columns);
     let head_boundary = selection_boundary_index(selection.head, columns);
     let (start_endpoint, end_endpoint) = if anchor_boundary <= head_boundary {
@@ -4849,18 +5280,22 @@ fn selection_bounds(
     }
 
     while start < end {
-        let Some(cell) = snapshot.cells.get(start) else {
+        let Some(cell) = snapshot.cell(start / columns, start % columns) else {
             break;
         };
-        if cell.flags.leading_wide_spacer {
+        if cell.flags.leading_wide_spacer() {
             // This is the placeholder written at the end of a wrapped line
             // before a wide character starts on the next line. It is not the
             // second half of a character in this row.
             start = start.saturating_add(1);
-        } else if cell.flags.wide_spacer {
+        } else if cell.flags.wide_spacer() {
             // A trailing spacer belongs to the wide base immediately before
             // it. Normalize an endpoint landing on either half to the base.
-            if start > 0 && snapshot.cells[start - 1].flags.wide {
+            if start > 0
+                && snapshot
+                    .cell((start - 1) / columns, (start - 1) % columns)
+                    .is_some_and(|cell| cell.flags.wide())
+            {
                 start -= 1;
             } else {
                 start = start.saturating_add(1);
@@ -4871,17 +5306,21 @@ fn selection_bounds(
     }
     if end > start
         && snapshot
-            .cells
-            .get(end.saturating_sub(1))
-            .is_some_and(|cell| cell.flags.leading_wide_spacer)
+            .cell(
+                end.saturating_sub(1) / columns,
+                end.saturating_sub(1) % columns,
+            )
+            .is_some_and(|cell| cell.flags.leading_wide_spacer())
     {
         end = end.saturating_sub(1);
     }
     if end > start
         && snapshot
-            .cells
-            .get(end.saturating_sub(1))
-            .is_some_and(|cell| cell.flags.wide)
+            .cell(
+                end.saturating_sub(1) / columns,
+                end.saturating_sub(1) % columns,
+            )
+            .is_some_and(|cell| cell.flags.wide())
     {
         end = end.saturating_add(1).min(total_cells);
     }
@@ -4918,7 +5357,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
             let Some(cell) = snapshot.cell(row_index, column) else {
                 continue;
             };
-            if cell.flags.wide_spacer || cell.flags.leading_wide_spacer {
+            if cell.flags.wide_spacer() || cell.flags.leading_wide_spacer() {
                 continue;
             }
             text.push(cell.character);
@@ -4930,7 +5369,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
         if row != end.row {
             let wrapped = snapshot
                 .cell(row_index, snapshot.size.columns.saturating_sub(1))
-                .is_some_and(|cell| cell.flags.wrapline);
+                .is_some_and(|cell| cell.flags.wrapline());
             if !wrapped {
                 text.push('\n');
             }
@@ -4948,6 +5387,7 @@ fn render_terminal_snapshot(
     font_size: f32,
     ime_text: Option<String>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
+    render_caches: TerminalRenderCaches,
     input_handler: Option<(Entity<WorkspaceView>, FocusHandle)>,
 ) -> AnyElement {
     TerminalRenderElement {
@@ -4958,6 +5398,7 @@ fn render_terminal_snapshot(
         font_size,
         ime_text,
         terminal_bounds,
+        render_caches,
         input_handler,
     }
     .into_any_element()
@@ -5084,6 +5525,7 @@ impl gpui::Element for TerminalRenderElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
+        let prepaint_started = scroll_stats_enabled().then(Instant::now);
         self.terminal_bounds
             .lock()
             .expect("terminal bounds poisoned")
@@ -5093,55 +5535,91 @@ impl gpui::Element for TerminalRenderElement {
             .selection
             .filter(|selection| selection.terminal_id == self.snapshot.terminal_id)
             .and_then(|selection| selection_bounds(&self.snapshot, selection));
-        let remainder = self.options.scroll_remainder;
-        let mut rows = Vec::with_capacity(self.snapshot.size.lines + 1);
-        if remainder > 0.0
-            && let Some(cells) = self.snapshot.rows_before.first()
-        {
-            rows.push(terminal_row_paint(
-                &self.snapshot,
-                -1,
-                cells,
-                selected_bounds,
-                self.options,
-                &self.font_family,
-                self.font_size,
-                bounds,
-                window,
-            ));
+        let cache_key = TerminalRenderCacheKey {
+            terminal_id: self.snapshot.terminal_id,
+            snapshot_revision: self.snapshot.revision,
+            font_family: self.font_family.clone(),
+            font_size_bits: self.font_size.to_bits(),
+            metrics: self.options.metrics,
+            theme: self.options.theme,
+            cursor_focused: self.options.cursor_focused,
+            selection: self.selection,
+            bounds_origin_x_bits: f32::from(bounds.origin.x).to_bits(),
+            bounds_width_bits: f32::from(bounds.size.width).to_bits(),
+        };
+        let mut caches = self.render_caches.lock().expect("terminal cache poisoned");
+        let cache = caches.entry(self.snapshot.terminal_id).or_default();
+        if cache.key.as_ref() != Some(&cache_key) {
+            let rows_compatible = cache
+                .key
+                .as_ref()
+                .is_some_and(|previous| previous.rows_compatible_with(&cache_key));
+            let previous_rows = if rows_compatible {
+                std::mem::take(&mut cache.rows)
+            } else {
+                cache.rows.clear();
+                BTreeMap::new()
+            };
+            let mut previous_by_identity = previous_rows
+                .into_values()
+                .map(|row| (row.cells.as_ptr() as usize, row))
+                .collect::<BTreeMap<_, _>>();
+            let first = -(self.snapshot.rows_before.len() as i32);
+            let end = self.snapshot.size.lines as i32 + self.snapshot.rows_after.len() as i32;
+            for source_row in first..end {
+                let Some(cells) = self.snapshot.relative_row_snapshot(source_row) else {
+                    continue;
+                };
+                let identity = cells.as_ptr() as usize;
+                let paint = previous_by_identity
+                    .remove(&identity)
+                    .filter(|previous| Arc::ptr_eq(&previous.cells, cells))
+                    .map(|previous| {
+                        let mut paint = previous.paint;
+                        paint.row = source_row;
+                        paint
+                    })
+                    .unwrap_or_else(|| {
+                        terminal_row_paint(
+                            &self.snapshot,
+                            source_row,
+                            cells,
+                            selected_bounds,
+                            self.options,
+                            &self.font_family,
+                            self.font_size,
+                            bounds,
+                            window,
+                        )
+                    });
+                cache.rows.insert(
+                    source_row,
+                    TerminalCachedRowPaint {
+                        cells: cells.clone(),
+                        paint,
+                    },
+                );
+            }
+            cache.key = Some(cache_key);
         }
-        for row in 0..self.snapshot.size.lines {
-            let start = row.saturating_mul(self.snapshot.size.columns);
-            let end = start
-                .saturating_add(self.snapshot.size.columns)
-                .min(self.snapshot.cells.len());
-            rows.push(terminal_row_paint(
-                &self.snapshot,
-                row as i32,
-                &self.snapshot.cells[start..end],
-                selected_bounds,
-                self.options,
-                &self.font_family,
-                self.font_size,
-                bounds,
-                window,
-            ));
+
+        let scroll_offset_rows = self.options.scroll_offset_rows;
+        if scroll_offset_rows != 0.0 {
+            scroll_stat_inc(&SCROLL_FRAMES);
         }
-        if remainder < 0.0
-            && let Some(cells) = self.snapshot.rows_after.first()
-        {
-            rows.push(terminal_row_paint(
-                &self.snapshot,
-                self.snapshot.size.lines as i32,
-                cells,
-                selected_bounds,
-                self.options,
-                &self.font_family,
-                self.font_size,
-                bounds,
-                window,
-            ));
+        let whole = scroll_offset_rows.trunc() as i32;
+        let source_rows =
+            terminal_visible_source_rows(self.snapshot.size.lines, scroll_offset_rows);
+        let mut rows = Vec::with_capacity(source_rows.len());
+        for source_row in source_rows {
+            let Some(cached_row) = cache.rows.get(&source_row) else {
+                continue;
+            };
+            let mut row = cached_row.paint.clone();
+            row.row = source_row.saturating_add(whole);
+            rows.push(row);
         }
+        drop(caches);
 
         let ime_line = self.ime_text.as_deref().and_then(|text| {
             if text.is_empty() || !self.snapshot.cursor.visible {
@@ -5161,6 +5639,7 @@ impl gpui::Element for TerminalRenderElement {
                 }),
                 strikethrough: None,
             };
+            scroll_stat_inc(&SCROLL_SHAPE_LINE_COUNT);
             let line = window.text_system().shape_line(
                 SharedString::from(text.to_owned()),
                 px(self.font_size),
@@ -5170,6 +5649,10 @@ impl gpui::Element for TerminalRenderElement {
             Some((line, row, column))
         });
 
+        if let Some(started) = prepaint_started {
+            SCROLL_PREPAINT_MICROS
+                .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        }
         TerminalPrepaintState { rows, ime_line }
     }
 
@@ -5187,8 +5670,10 @@ impl gpui::Element for TerminalRenderElement {
             metrics,
             theme,
             cursor_focused,
-            scroll_remainder,
+            scroll_offset_rows,
         } = self.options;
+        let whole = scroll_offset_rows.trunc() as i32;
+        let fraction = scroll_offset_rows - whole as f32;
         window.paint_quad(fill(bounds, rgb(theme.terminal_background)));
 
         for row_paint in &prepaint.rows {
@@ -5200,7 +5685,7 @@ impl gpui::Element for TerminalRenderElement {
                         row_paint.row,
                         background.start_column,
                         background.width_columns,
-                        scroll_remainder,
+                        fraction,
                     ),
                     rgb(background.color),
                 ));
@@ -5212,7 +5697,7 @@ impl gpui::Element for TerminalRenderElement {
                     row_paint.row,
                     text.start_column,
                     1,
-                    scroll_remainder,
+                    fraction,
                 )
                 .origin;
                 let _ = text.line.paint(
@@ -5230,10 +5715,10 @@ impl gpui::Element for TerminalRenderElement {
             let origin = terminal_cell_bounds_for_row(
                 bounds,
                 metrics,
-                *row as i32,
+                (*row as i32).saturating_add(whole),
                 *column,
                 1,
-                scroll_remainder,
+                fraction,
             )
             .origin;
             let _ = line.paint(
@@ -5251,16 +5736,16 @@ impl gpui::Element for TerminalRenderElement {
             let width_columns = self
                 .snapshot
                 .cell(row, column)
-                .map(|cell| if cell.flags.wide { 2 } else { 1 })
+                .map(|cell| if cell.flags.wide() { 2 } else { 1 })
                 .unwrap_or(1);
             window.paint_quad(outline(
                 terminal_cell_bounds_for_row(
                     bounds,
                     metrics,
-                    row as i32,
+                    (row as i32).saturating_add(whole),
                     column,
                     width_columns,
-                    scroll_remainder,
+                    fraction,
                 ),
                 rgb(theme.inactive_cursor),
                 gpui::BorderStyle::default(),
@@ -5292,6 +5777,7 @@ fn shape_terminal_text_line(
 ) -> ShapedLine {
     let text_system = window.text_system();
     let shape = |font_size: f32| {
+        scroll_stat_inc(&SCROLL_SHAPE_LINE_COUNT);
         text_system.shape_line(
             SharedString::from(text.to_owned()),
             px(font_size),
@@ -5325,14 +5811,11 @@ fn terminal_row_data(
     options: TerminalRenderOptions,
     font_family: &str,
 ) -> (Vec<TerminalTextChunk>, Vec<TerminalBackgroundSpan>) {
-    let start = row.saturating_mul(snapshot.size.columns);
-    let end = start
-        .saturating_add(snapshot.size.columns)
-        .min(snapshot.cells.len());
+    let cells = snapshot.relative_row(row as i32).unwrap_or_default();
     terminal_row_data_for_cells(
         snapshot,
         row as i32,
-        &snapshot.cells[start..end],
+        cells,
         selected_bounds,
         options,
         font_family,
@@ -5389,7 +5872,7 @@ fn terminal_row_data_for_cells(
         let Some(cell) = cells.get(column) else {
             continue;
         };
-        if cell.flags.wide_spacer {
+        if cell.flags.wide_spacer() {
             flush_chunk(
                 &mut chunks,
                 &mut current_text,
@@ -5416,13 +5899,13 @@ fn terminal_row_data_for_cells(
             background = theme_color(options.theme.cursor_background);
         }
 
-        let width_columns =
-            (if cell.flags.wide { 2 } else { 1 }).min(snapshot.size.columns.saturating_sub(column));
+        let width_columns = (if cell.flags.wide() { 2 } else { 1 })
+            .min(snapshot.size.columns.saturating_sub(column));
         let background_color = color_to_rgb(background, false, options.theme);
         if background_color != options.theme.terminal_background {
             push_terminal_background(&mut backgrounds, column, width_columns, background_color);
         }
-        if cell.flags.leading_wide_spacer {
+        if cell.flags.leading_wide_spacer() {
             flush_chunk(
                 &mut chunks,
                 &mut current_text,
@@ -5440,15 +5923,16 @@ fn terminal_row_data_for_cells(
         let color = rgb(color_to_rgb(foreground, true, options.theme)).into();
         let run = TextRun {
             len: character.len(),
-            font: fonts[usize::from(cell.flags.italic) + usize::from(cell.flags.bold) * 2].clone(),
+            font: fonts[usize::from(cell.flags.italic()) + usize::from(cell.flags.bold()) * 2]
+                .clone(),
             color,
             background_color: None,
-            underline: cell.flags.underline.then(|| UnderlineStyle {
+            underline: cell.flags.underline().then(|| UnderlineStyle {
                 thickness: px(1.),
                 color: Some(color),
                 wavy: false,
             }),
-            strikethrough: cell.flags.strike.then(|| StrikethroughStyle {
+            strikethrough: cell.flags.strike().then(|| StrikethroughStyle {
                 thickness: px(1.),
                 color: Some(color),
             }),
@@ -5459,7 +5943,7 @@ fn terminal_row_data_for_cells(
             run: run.clone(),
             width_columns,
         };
-        if cell.flags.wide {
+        if cell.flags.wide() {
             flush_chunk(
                 &mut chunks,
                 &mut current_text,
@@ -5507,7 +5991,7 @@ fn terminal_cell_colors(
     let mut background = cell.bg;
     let default_colors = cell.fg == TerminalColor::Named { value: 256 }
         && cell.bg == TerminalColor::Named { value: 257 };
-    if cell.flags.inverse {
+    if cell.flags.inverse() {
         std::mem::swap(&mut foreground, &mut background);
         if default_colors {
             foreground = theme_color(theme.inverse_foreground);
@@ -5591,8 +6075,19 @@ fn terminal_cell_bounds(
     )
 }
 
-fn terminal_row_position(row: i32, scroll_remainder: f32) -> f32 {
-    row as f32 + scroll_remainder
+fn terminal_row_position(row: i32, fractional_scroll_offset: f32) -> f32 {
+    row as f32 + fractional_scroll_offset
+}
+
+fn terminal_visible_source_rows(
+    screen_lines: usize,
+    scroll_offset_rows: f32,
+) -> std::ops::Range<i32> {
+    let whole = scroll_offset_rows.trunc() as i32;
+    let fraction = scroll_offset_rows - whole as f32;
+    let first = -whole - i32::from(fraction > 0.0);
+    let end = screen_lines as i32 - whole + i32::from(fraction < 0.0);
+    first..end
 }
 
 /// Positions a visible or overscan row while preserving the device-snapped
@@ -5603,7 +6098,7 @@ fn terminal_cell_bounds_for_row(
     row: i32,
     column: usize,
     width_columns: usize,
-    scroll_remainder: f32,
+    fractional_scroll_offset: f32,
 ) -> Bounds<gpui::Pixels> {
     let row_bounds = if row >= 0 {
         terminal_cell_bounds(bounds, metrics, row as usize, column, width_columns)
@@ -5617,7 +6112,7 @@ fn terminal_cell_bounds_for_row(
             first.size,
         )
     };
-    let fractional_offset = terminal_row_position(row, scroll_remainder) - row as f32;
+    let fractional_offset = terminal_row_position(row, fractional_scroll_offset) - row as f32;
     Bounds::new(
         point(
             row_bounds.origin.x,
@@ -5638,7 +6133,7 @@ fn terminal_cursor_position(snapshot: &TerminalSnapshot) -> (usize, usize) {
         .min(snapshot.size.columns.saturating_sub(1));
     if snapshot
         .cell(row, column)
-        .is_some_and(|cell| cell.flags.wide_spacer)
+        .is_some_and(|cell| cell.flags.wide_spacer())
     {
         column = column.saturating_sub(1);
     }
@@ -6097,54 +6592,219 @@ mod tests {
     }
 
     #[test]
-    fn fractional_scroll_accumulates_until_a_whole_row() {
-        let mut accumulator = 0.0;
-        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, 0.4), 0);
-        assert!((accumulator - 0.4).abs() < f32::EPSILON);
-        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, 0.7), 1);
-        assert!((accumulator - 0.1).abs() < f32::EPSILON);
-        assert_eq!(accumulate_terminal_scroll_delta(&mut accumulator, -0.25), 0);
-        assert!((accumulator + 0.15).abs() < f32::EPSILON);
+    fn fractional_scroll_repaints_without_requesting_a_whole_row() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(0.75), (None, true));
+        assert!((state.visual_unacked_rows - 0.75).abs() < f32::EPSILON);
+        assert_eq!(state.requested_viewport_position, 10);
     }
 
     #[test]
-    fn fractional_scroll_does_not_snap_back_before_the_viewport_acknowledges_a_row() {
-        let mut state = TerminalScrollState::new(0);
-        assert_eq!(state.accumulate(0.75), (0, true));
-        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
-
-        assert_eq!(state.accumulate(0.5), (1, false));
-        assert!((state.remainder - 0.25).abs() < f32::EPSILON);
-        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
-
-        // More trackpad input can arrive before the PTY worker publishes the
-        // requested row. It must not repaint the old grid with the new
-        // remainder either.
-        assert_eq!(state.accumulate(0.2), (0, false));
-        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
-
-        let mut snapshot = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(8, 4));
-        snapshot.viewport_position = 1;
-        snapshot.rows_before.push(vec![TerminalCell::default(); 8]);
-        snapshot.rows_after.push(vec![TerminalCell::default(); 8]);
-        state.reconcile_snapshot(&snapshot);
-
-        assert_eq!(state.pending_lines, 0);
-        assert!((state.rendered_remainder - 0.45).abs() < f32::EPSILON);
+    fn fractional_scroll_continues_while_a_worker_request_is_pending() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(0.75), (None, true));
+        assert_eq!(state.accumulate(0.5), (Some(11), true));
+        assert!((state.visual_unacked_rows - 1.25).abs() < f32::EPSILON);
+        assert_eq!(state.requested_viewport_position, 11);
     }
 
     #[test]
-    fn fractional_scroll_clears_a_pending_command_at_the_history_boundary() {
-        let mut state = TerminalScrollState::new(3);
-        assert_eq!(state.accumulate(1.25), (1, false));
+    fn snapshot_ack_rebases_without_moving_the_visual_position() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(1.25), (Some(11), true));
+        let before = state.observed_viewport_position as f32 + state.visual_unacked_rows;
 
         let mut snapshot = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(8, 4));
-        snapshot.viewport_position = 3;
-        state.reconcile_snapshot(&snapshot);
+        snapshot.viewport_position = 11;
+        snapshot.rows_before.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
+        snapshot.rows_after.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
+        reconcile_visual_scroll(&mut state, &snapshot);
 
-        assert_eq!(state.pending_lines, 0);
-        assert_eq!(state.remainder, 0.0);
-        assert_eq!(state.rendered_remainder, 0.0);
+        let after = state.observed_viewport_position as f32 + state.visual_unacked_rows;
+        assert!((state.visual_unacked_rows - 0.25).abs() < f32::EPSILON);
+        assert!((before - after).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn reversing_before_ack_corrects_the_absolute_visual_target() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(1.4), (Some(11), true));
+        assert_eq!(state.accumulate(-0.9), (Some(10), true));
+        assert!((state.visual_unacked_rows - 0.5).abs() < f32::EPSILON);
+        assert_eq!(state.requested_viewport_position, 10);
+    }
+
+    #[test]
+    fn live_bottom_discards_hidden_scroll_debt_before_reversing() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(-20.0), (Some(-10), true));
+
+        // The snapshot says the live bottom is already visible. The first
+        // opposite delta must move immediately instead of paying back -20.
+        assert_eq!(
+            state.accumulate_with_boundaries(0.5, false, true),
+            (None, true)
+        );
+        assert!((state.visual_unacked_rows - 0.5).abs() < f32::EPSILON);
+        assert_eq!(state.requested_viewport_position, 10);
+    }
+
+    #[test]
+    fn history_start_discards_hidden_scroll_debt_before_reversing() {
+        let mut state = TerminalScrollState::new(10);
+        assert_eq!(state.accumulate(20.0), (Some(30), true));
+
+        // The same rule is symmetric at the oldest history row.
+        assert_eq!(
+            state.accumulate_with_boundaries(-0.5, true, false),
+            (None, true)
+        );
+        assert!((state.visual_unacked_rows + 0.5).abs() < f32::EPSILON);
+        assert_eq!(state.requested_viewport_position, 10);
+    }
+
+    #[test]
+    fn deltas_further_into_a_known_boundary_are_not_accumulated() {
+        let mut bottom = TerminalScrollState::new(0);
+        assert_eq!(
+            bottom.accumulate_with_boundaries(-100.0, false, true),
+            (None, false)
+        );
+        assert_eq!(bottom.visual_unacked_rows, 0.0);
+
+        let mut top = TerminalScrollState::new(100);
+        assert_eq!(
+            top.accumulate_with_boundaries(100.0, true, false),
+            (None, false)
+        );
+        assert_eq!(top.visual_unacked_rows, 0.0);
+    }
+
+    #[test]
+    fn touch_phase_distinguishes_trackpad_gestures_from_mouse_pixels() {
+        let started = ScrollWheelEvent {
+            delta: ScrollDelta::Pixels(point(px(0.0), px(1.0))),
+            touch_phase: TouchPhase::Started,
+            ..ScrollWheelEvent::default()
+        };
+        let moved = ScrollWheelEvent {
+            touch_phase: TouchPhase::Moved,
+            ..started.clone()
+        };
+        let lines = ScrollWheelEvent {
+            delta: ScrollDelta::Lines(point(0.0, 1.0)),
+            touch_phase: TouchPhase::Started,
+            ..ScrollWheelEvent::default()
+        };
+
+        assert_eq!(
+            terminal_scroll_input_kind(&started, false),
+            TerminalScrollInputKind::TrackpadGesture
+        );
+        assert_eq!(
+            terminal_scroll_input_kind(&moved, true),
+            TerminalScrollInputKind::TrackpadGesture
+        );
+        assert_eq!(
+            terminal_scroll_input_kind(&moved, false),
+            TerminalScrollInputKind::MouseWheel
+        );
+        assert_eq!(
+            terminal_scroll_input_kind(&lines, true),
+            TerminalScrollInputKind::MouseWheel
+        );
+    }
+
+    #[test]
+    fn mouse_scroll_animation_uses_elapsed_time_and_finishes_exactly() {
+        let started_at = Instant::now();
+        let animation = TerminalMouseScrollAnimation {
+            pane_id: PaneId::new(1),
+            start_position: 10.6,
+            target_position: 13.0,
+            started_at,
+        };
+
+        assert_eq!(animation.position_at(started_at), (10.6, false));
+        let (halfway, halfway_done) =
+            animation.position_at(started_at + MOUSE_SCROLL_ANIMATION_DURATION / 2);
+        assert!(!halfway_done);
+        assert!(halfway > 10.6 && halfway < 13.0);
+
+        // Skipping intermediate callbacks does not slow the animation: its
+        // final position is derived from elapsed time, not a frame counter.
+        let (finished, done) = animation.position_at(started_at + MOUSE_SCROLL_ANIMATION_DURATION);
+        assert!(done);
+        assert!((finished - 13.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn ui_viewport_requests_are_latest_wins_within_a_frame() {
+        let terminal_id = TerminalId::new(1);
+        let pane_id = PaneId::new(2);
+        let mut pending = BTreeMap::new();
+        for target in 1..=20 {
+            record_latest_viewport_request(&mut pending, terminal_id, pane_id, target);
+        }
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[&terminal_id], (pane_id, 20));
+    }
+
+    #[test]
+    fn delayed_worker_ack_never_freezes_or_moves_the_visual_viewport_backwards() {
+        let mut state = TerminalScrollState::new(10);
+        let mut last_visual_position = 10.0;
+
+        // All gesture events arrive before the simulated worker ACK at 40 ms.
+        for (_at_ms, delta) in [
+            (0_u64, 0.21_f32),
+            (5, 0.32),
+            (11, 0.41),
+            (19, 0.37),
+            (28, 0.48),
+        ] {
+            let (_, repaint) = state.accumulate(delta);
+            let visual_position =
+                state.observed_viewport_position as f32 + state.visual_unacked_rows;
+            assert!(repaint);
+            assert!(visual_position > last_visual_position);
+            last_visual_position = visual_position;
+        }
+        assert!((last_visual_position - 11.79).abs() < 1e-5);
+
+        let mut first_ack = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(8, 4));
+        first_ack.viewport_position = 11;
+        first_ack.rows_before = (0..8)
+            .map(|_| Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()))
+            .collect();
+        first_ack.rows_after = (0..8)
+            .map(|_| Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()))
+            .collect();
+        reconcile_visual_scroll(&mut state, &first_ack);
+        let after_first_ack = state.observed_viewport_position as f32 + state.visual_unacked_rows;
+        assert!((after_first_ack - last_visual_position).abs() < f32::EPSILON);
+
+        for delta in [0.33_f32, 0.44] {
+            let (_, repaint) = state.accumulate(delta);
+            let visual_position =
+                state.observed_viewport_position as f32 + state.visual_unacked_rows;
+            assert!(repaint);
+            assert!(visual_position > last_visual_position);
+            last_visual_position = visual_position;
+        }
+
+        let mut final_ack = first_ack;
+        final_ack.viewport_position = 12;
+        reconcile_visual_scroll(&mut state, &final_ack);
+        let final_visual_position =
+            state.observed_viewport_position as f32 + state.visual_unacked_rows;
+        let input_total: f32 = [0.21, 0.32, 0.41, 0.37, 0.48, 0.33, 0.44].into_iter().sum();
+        assert!((final_visual_position - last_visual_position).abs() < f32::EPSILON);
+        assert!((final_visual_position - (10.0 + input_total)).abs() < 1e-5);
     }
 
     #[test]
@@ -6153,6 +6813,22 @@ mod tests {
         assert_eq!(terminal_row_position(0, 0.25), 0.25);
         assert_eq!(terminal_row_position(4, -0.25), 3.75);
         assert_eq!(terminal_row_position(5, -0.25), 4.75);
+    }
+
+    #[test]
+    fn multi_row_visual_offsets_select_only_visible_source_rows() {
+        assert_eq!(
+            terminal_visible_source_rows(4, 1.25).collect::<Vec<_>>(),
+            vec![-2, -1, 0, 1, 2]
+        );
+        assert_eq!(
+            terminal_visible_source_rows(4, -3.4).collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7]
+        );
+        assert_eq!(
+            terminal_visible_source_rows(4, 2.0).collect::<Vec<_>>(),
+            vec![-2, -1, 0, 1]
+        );
     }
 
     #[test]
@@ -6252,14 +6928,14 @@ mod tests {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 2));
         for (column, character) in "hello".chars().enumerate() {
-            snapshot.cells[column].character = character;
+            snapshot.cell_mut(0, column).unwrap().character = character;
         }
         for (column, character) in "world".chars().enumerate() {
-            snapshot.cells[snapshot.size.columns + column].character = character;
+            snapshot.cell_mut(1, column).unwrap().character = character;
         }
-        snapshot.cells[5].flags.wide_spacer = true;
-        snapshot.cells[4].character = '界';
-        snapshot.cells[4].flags.wide = true;
+        snapshot.cell_mut(0, 5).unwrap().flags.set_wide_spacer(true);
+        snapshot.cell_mut(0, 4).unwrap().character = '界';
+        snapshot.cell_mut(0, 4).unwrap().flags.set_wide(true);
         let selection = TerminalSelection {
             terminal_id,
             anchor: endpoint(0, 0, TerminalSelectionSide::Left),
@@ -6276,7 +6952,7 @@ mod tests {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 1));
         for (column, character) in "abcd".chars().enumerate() {
-            snapshot.cells[column].character = character;
+            snapshot.cell_mut(0, column).unwrap().character = character;
         }
 
         let first_cell = TerminalSelection {
@@ -6350,9 +7026,9 @@ mod tests {
     fn wide_character_selection_expands_to_both_grid_cells() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(5, 1));
-        snapshot.cells[1].character = '界';
-        snapshot.cells[1].flags.wide = true;
-        snapshot.cells[2].flags.wide_spacer = true;
+        snapshot.cell_mut(0, 1).unwrap().character = '界';
+        snapshot.cell_mut(0, 1).unwrap().flags.set_wide(true);
+        snapshot.cell_mut(0, 2).unwrap().flags.set_wide_spacer(true);
         let selection = TerminalSelection {
             terminal_id,
             anchor: endpoint(0, 0, TerminalSelectionSide::Left),
@@ -6401,10 +7077,14 @@ mod tests {
     fn leading_wide_placeholders_do_not_become_a_second_character() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 2));
-        snapshot.cells[3].flags.leading_wide_spacer = true;
-        snapshot.cells[4].character = '界';
-        snapshot.cells[4].flags.wide = true;
-        snapshot.cells[5].flags.wide_spacer = true;
+        snapshot
+            .cell_mut(0, 3)
+            .unwrap()
+            .flags
+            .set_leading_wide_spacer(true);
+        snapshot.cell_mut(1, 0).unwrap().character = '界';
+        snapshot.cell_mut(1, 0).unwrap().flags.set_wide(true);
+        snapshot.cell_mut(1, 1).unwrap().flags.set_wide_spacer(true);
 
         let wrapped_wide_character = TerminalSelection {
             terminal_id,
@@ -6431,11 +7111,11 @@ mod tests {
     fn terminal_rows_shape_wide_cells_with_two_cell_advances() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(5, 1));
-        snapshot.cells[0].character = 'a';
-        snapshot.cells[1].character = '界';
-        snapshot.cells[1].flags.wide = true;
-        snapshot.cells[2].flags.wide_spacer = true;
-        snapshot.cells[3].character = 'b';
+        snapshot.cell_mut(0, 0).unwrap().character = 'a';
+        snapshot.cell_mut(0, 1).unwrap().character = '界';
+        snapshot.cell_mut(0, 1).unwrap().flags.set_wide(true);
+        snapshot.cell_mut(0, 2).unwrap().flags.set_wide_spacer(true);
+        snapshot.cell_mut(0, 3).unwrap().character = 'b';
         let options = TerminalRenderOptions {
             metrics: TerminalMetrics::default(),
             theme: ThemeColors {
@@ -6464,7 +7144,7 @@ mod tests {
                 agent_colors: [21; 13],
             },
             cursor_focused: false,
-            scroll_remainder: 0.0,
+            scroll_offset_rows: 0.0,
         };
         let (chunks, _) =
             terminal_row_data(&snapshot, 0, None, options, "Sarasa Term SC Nerd Font");

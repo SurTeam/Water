@@ -726,6 +726,66 @@ fn send_text(dispatcher: &mut CommandDispatcher, terminal_id: water::ids::Termin
 }
 
 #[test]
+fn absolute_viewport_request_scrolls_real_shell_history_and_acks() {
+    let mut config = AppConfig::default();
+    config.terminal.scrollback_lines = 500;
+    let mut dispatcher = CommandDispatcher::with_config(config);
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Workspace(WorkspaceCommand::Create),
+    );
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Tab(TabCommand::New { title: None }),
+    );
+    let terminal_id = focused_terminal_id(&dispatcher);
+    let registry = dispatcher.terminal_registry();
+
+    send_text(
+        &mut dispatcher,
+        terminal_id,
+        "for i in $(seq 1 80); do echo VIEWPORT_LINE_$i; done\n",
+    );
+    let bottom = registry
+        .contains_text(terminal_id, "VIEWPORT_LINE_80", Duration::from_secs(10))
+        .expect("history reaches the terminal");
+    assert!(bottom.rows_before.len() >= 3);
+
+    let target = bottom.viewport_position + 3;
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Terminal(TerminalCommand::SetViewportPosition {
+            terminal_id: Some(terminal_id),
+            pane_id: None,
+            target,
+        }),
+    );
+    let scrolled = registry
+        .wait_viewport_position(terminal_id, target, Duration::from_secs(2))
+        .expect("worker acknowledges absolute viewport target");
+    assert!(std::sync::Arc::ptr_eq(
+        &scrolled.rows[0],
+        &bottom.rows_before[2]
+    ));
+
+    dispatch_ok(
+        &mut dispatcher,
+        AppCommand::Terminal(TerminalCommand::SetViewportPosition {
+            terminal_id: Some(terminal_id),
+            pane_id: None,
+            target: bottom.viewport_position,
+        }),
+    );
+    registry
+        .wait_viewport_position(
+            terminal_id,
+            bottom.viewport_position,
+            Duration::from_secs(2),
+        )
+        .expect("worker returns to the bottom viewport");
+}
+
+#[test]
 fn clear_command_erases_scrollback_via_shell_integration() {
     let mut dispatcher = CommandDispatcher::new();
     dispatch_ok(

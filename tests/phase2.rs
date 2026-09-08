@@ -115,10 +115,10 @@ fn terminal_worker_captures_output_and_ansi_cell_attributes() {
         TerminalColor::Named { value: 1 }
     );
     let styled = &snapshot.cell(0, 4).unwrap().flags;
-    assert!(styled.bold);
-    assert!(styled.italic);
-    assert!(styled.underline);
-    assert!(styled.strike);
+    assert!(styled.bold());
+    assert!(styled.italic());
+    assert!(styled.underline());
+    assert!(styled.strike());
     let exit = dispatcher
         .wait_terminal_exit(terminal_id, Duration::from_secs(5))
         .unwrap();

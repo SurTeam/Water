@@ -210,6 +210,9 @@ pub(crate) enum TerminalWorkerCommand {
     SendBytes(Vec<u8>),
     Resize(TerminalSize),
     Scroll(i32),
+    SetViewportPosition {
+        target: i64,
+    },
     /// Informs the worker whether its terminal is the focused one, so the
     /// scrollback reconciler applies the focused or the inactive limit.
     SetFocused(bool),
@@ -401,6 +404,40 @@ impl TerminalRegistry {
         }
     }
 
+    /// Waits for the PTY worker to publish an acknowledgement of an absolute
+    /// viewport target. This observes revisioned snapshots and never exposes
+    /// the mutable terminal grid to callers.
+    pub fn wait_viewport_position(
+        &self,
+        terminal_id: TerminalId,
+        target: i64,
+        timeout: Duration,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        let entry = self.entry(terminal_id)?;
+        let deadline = Instant::now() + timeout;
+        let mut state = entry.state.lock().expect("terminal entry poisoned");
+        loop {
+            if state.snapshot.viewport_position == target {
+                return Ok(state.snapshot.as_ref().clone());
+            }
+            if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
+                return Err(TerminalError::ProcessExited(terminal_id));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(TerminalError::Timeout(timeout.as_millis() as u64));
+            }
+            let (new_state, result) = entry
+                .changed
+                .wait_timeout(state, deadline.saturating_duration_since(now))
+                .expect("terminal entry poisoned");
+            state = new_state;
+            if result.timed_out() {
+                return Err(TerminalError::Timeout(timeout.as_millis() as u64));
+            }
+        }
+    }
+
     pub fn wait_process_exit(
         &self,
         terminal_id: TerminalId,
@@ -573,7 +610,7 @@ impl TerminalRegistry {
                     .chain(snapshot.rows_after.iter())
                     .map(|row| row.len())
                     .sum();
-                (snapshot.cells.len() + overscan_cells)
+                (snapshot.cell_count() + overscan_cells)
                     * std::mem::size_of::<crate::terminal::TerminalCell>()
                     + state.recent_output.len()
                     + snapshot.process_name.len()
@@ -907,6 +944,17 @@ impl TerminalManager {
             .send(terminal_id, TerminalWorkerCommand::Scroll(lines))
     }
 
+    pub fn set_viewport_position(
+        &self,
+        terminal_id: TerminalId,
+        target: i64,
+    ) -> Result<(), TerminalError> {
+        self.registry.send(
+            terminal_id,
+            TerminalWorkerCommand::SetViewportPosition { target },
+        )
+    }
+
     /// Updates which terminal currently owns the user's attention. The
     /// focused terminal keeps its full scrollback reservation and may borrow
     /// unused budget; a demoted terminal is trimmed to its inactive tail by
@@ -1072,7 +1120,7 @@ mod tests {
         let size = TerminalSize::new(4, 60);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, size);
         for row in 0..size.lines {
-            snapshot.cells[row * size.columns] = TerminalCell {
+            *snapshot.cell_mut(row, 0).unwrap() = TerminalCell {
                 character: char::from(b'0' + (row % 10) as u8),
                 ..TerminalCell::default()
             };
@@ -1080,9 +1128,9 @@ mod tests {
         snapshot.revision = 41;
         let compacted = snapshot.compacted_tail(24);
         assert_eq!(compacted.size.lines, 24);
-        assert_eq!(compacted.cells.len(), 24 * size.columns);
-        assert_eq!(compacted.cells[0].character, '6');
-        assert_eq!(compacted.cells[23 * size.columns].character, '9');
+        assert_eq!(compacted.cell_count(), 24 * size.columns);
+        assert_eq!(compacted.cell(0, 0).unwrap().character, '6');
+        assert_eq!(compacted.cell(23, 0).unwrap().character, '9');
         assert!(compacted.rows_before.is_empty());
         assert_eq!(compacted.revision, 41);
     }

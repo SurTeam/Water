@@ -24,29 +24,26 @@ use super::model::{
     ScrollbackBudget, TerminalManagerEvent, TerminalRegistry, TerminalWorkerCommand,
     WakeupCallback, WakeupSlot,
 };
-use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
+use super::snapshot::{
+    MAX_RECENT_OUTPUT_BYTES, TerminalProcessState, TerminalSize, TerminalSnapshot,
+};
 
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
-const READ_BUFFER_BYTES: usize = 128 * 1024;
+const READER_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
-// The drain budget bounds one poll tick, not total output: a large burst
-// (for example `cat` of a multi-megabyte file) is delivered across many
-// ticks, and each tick publishes at most one snapshot. The byte budget must
-// stay large enough that a fast parser is throughput-bound instead of paying
-// poll/publish overhead per megabyte (256 KB forced ~1500 ticks on the 61 MB
-// benchmark stream); the time budget keeps input coalescing, metadata
-// refresh, and shutdown latency bounded while a burst is in flight.
+// Parsing and snapshot publication deliberately use separate cadences. A
+// large burst yields back to command processing frequently without forcing a
+// full snapshot after every parser slice.
 const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;
-const MAX_PTY_DRAIN_TIME: Duration = Duration::from_millis(100);
-/// The dedicated PTY reader pushes a batch after accumulating this much, or
-/// when the writer goes quiet (burst -> idle transition).
-const READER_PUSH_BYTES: usize = 64 * 1024;
-/// In-flight batch ceiling (1024 x up to 256KB ~= 256MB): a large burst must
-/// not backpressure the writer down to our parse rate, or `cat bigfile`
-/// would be measured at parse speed instead of PTY speed.
-const READER_CHANNEL_CAPACITY: usize = 1024;
+const INTERACTIVE_PARSE_SLICE: Duration = Duration::from_millis(4);
+const NORMAL_PARSE_SLICE: Duration = Duration::from_millis(8);
+const SNAPSHOT_FRAME_INTERVAL: Duration = Duration::from_millis(8);
+/// In-flight block ceiling (512 x 128KiB = 64MiB): a large burst must not
+/// backpressure the writer down to our parse rate, while keeping allocation
+/// bounded and every consumed block reusable by the reader.
+const READER_CHANNEL_CAPACITY: usize = 512;
 /// The reader keeps spin-reading while data has been seen within this
 /// window; afterwards it blocks on kqueue until the next chunk (zero idle
 /// CPU). macOS refills land within tens of microseconds of a drain, so the
@@ -325,32 +322,37 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     // ~1KB ahead of the reader, so a reader that parses while reading makes
     // the writer wait once per 1KB (the 61MB benchmark paid ~34k kqueue
     // wakes for exactly that). The reader drains the master at PTY speed
-    // and pushes batches; the worker parses from the channel and is woken
-    // per batch.
+    // and pushes reusable blocks; the worker parses from the channel and
+    // coalesces wakeups across each queued burst.
     let pty_reader_stopped = Arc::new(AtomicBool::new(false));
-    let (pty_data_rx, mut pty_reader_handle) =
-        match spawn_pty_reader(&pty, worker_wakeup.clone(), pty_reader_stopped.clone()) {
-            Ok((rx, handle)) => (rx, Some(handle)),
-            Err(error) => {
-                tracing::error!(
-                    target: "water::pty",
-                    terminal_id = %terminal_id,
-                    ?error,
-                    "failed to start PTY reader"
-                );
-                emit_manager_event(
-                    &event_tx,
-                    event_wakeup.as_ref(),
-                    TerminalManagerEvent::Exited {
-                        terminal_id,
-                        code: None,
-                    },
-                );
-                registry.mark_exited(terminal_id, None);
-                scrollback.unregister();
-                return;
-            }
-        };
+    let PtyReader {
+        filled_rx: pty_data_rx,
+        free_tx: pty_free_tx,
+        wakeup_pending: parser_wakeup_pending,
+        handle,
+    } = match spawn_pty_reader(&pty, worker_wakeup.clone(), pty_reader_stopped.clone()) {
+        Ok(reader) => reader,
+        Err(error) => {
+            tracing::error!(
+                target: "water::pty",
+                terminal_id = %terminal_id,
+                ?error,
+                "failed to start PTY reader"
+            );
+            emit_manager_event(
+                &event_tx,
+                event_wakeup.as_ref(),
+                TerminalManagerEvent::Exited {
+                    terminal_id,
+                    code: None,
+                },
+            );
+            registry.mark_exited(terminal_id, None);
+            scrollback.unregister();
+            return;
+        }
+    };
+    let mut pty_reader_handle = Some(handle);
     // The reader thread owns master reads; drop the master from the worker's
     // poller so a level-triggered readable event cannot race the reader and
     // spin the worker while the channel is being filled.
@@ -364,7 +366,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut metadata_probe_in_flight = false;
     let mut last_output_at = Instant::now();
     let mut events = Events::new();
-    let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
+    let mut recent_output = RecentOutputTail::new();
+    let mut output_pending = false;
     let mut snapshot_revision = 0_u64;
     let mut viewport_position = 0_i64;
     let mut last_process_metadata_request = Instant::now();
@@ -389,6 +392,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         viewport_position,
         &process_metadata,
     );
+    let mut last_snapshot_at = Instant::now();
     emit_process_metadata(
         &event_tx,
         event_wakeup.as_ref(),
@@ -407,6 +411,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     'worker: loop {
         let mut command_batch_full = false;
         let mut input_activity = false;
+        let mut commands_dirty = false;
+        let mut viewport_delta_total = 0_i64;
+        let mut pending_viewport_target = None;
         // Sticky: once the reader has disconnected (EOF), stop draining.
         let pty_eof = reader_eof.load(std::sync::atomic::Ordering::Relaxed);
         for command_index in 0..MAX_COMMANDS_PER_TICK {
@@ -419,6 +426,47 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
             };
             command_batch_full = command_index + 1 == MAX_COMMANDS_PER_TICK;
+            if let TerminalWorkerCommand::SetViewportPosition { target } = &command {
+                if !pending_input.is_empty()
+                    && merge_command_effect(
+                        write_pending_input(
+                            &mut pending_input,
+                            &mut pty,
+                            &mut term,
+                            &mut scrollback,
+                        ),
+                        terminal_id,
+                        &mut commands_dirty,
+                        &mut viewport_delta_total,
+                        &mut input_activity,
+                    )
+                {
+                    stop_requested = true;
+                    break;
+                }
+                record_latest_viewport_target(&mut pending_viewport_target, *target);
+                continue;
+            }
+
+            if let Some(target) = pending_viewport_target.take()
+                && merge_command_effect(
+                    apply_command(
+                        TerminalWorkerCommand::SetViewportPosition { target },
+                        &mut pty,
+                        &mut term,
+                        &mut scrollback,
+                        viewport_position.saturating_add(viewport_delta_total),
+                    ),
+                    terminal_id,
+                    &mut commands_dirty,
+                    &mut viewport_delta_total,
+                    &mut input_activity,
+                )
+            {
+                stop_requested = true;
+                break;
+            }
+
             let effect = match command {
                 TerminalWorkerCommand::SendText(bytes)
                 | TerminalWorkerCommand::SendBytes(bytes) => {
@@ -449,12 +497,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                             &mut pty,
                             &mut term,
                             &mut scrollback,
+                            viewport_position.saturating_add(viewport_delta_total),
                         )
                     }
                 }
                 command => {
-                    if !pending_input.is_empty() {
-                        handle_input_effect(
+                    if !pending_input.is_empty()
+                        && merge_command_effect(
                             write_pending_input(
                                 &mut pending_input,
                                 &mut pty,
@@ -462,51 +511,70 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                                 &mut scrollback,
                             ),
                             terminal_id,
-                            &term,
-                            &publisher,
-                            &mut snapshot_revision,
-                            &mut viewport_position,
+                            &mut commands_dirty,
+                            &mut viewport_delta_total,
                             &mut input_activity,
-                            &process_metadata,
-                        );
+                        )
+                    {
+                        stop_requested = true;
+                        break;
                     }
-                    apply_command(command, &mut pty, &mut term, &mut scrollback)
+                    apply_command(
+                        command,
+                        &mut pty,
+                        &mut term,
+                        &mut scrollback,
+                        viewport_position.saturating_add(viewport_delta_total),
+                    )
                 }
             };
-            match effect {
-                Ok(CommandEffect::Continue {
-                    dirty,
-                    viewport_delta,
-                    refresh_process,
-                }) => {
-                    input_activity |= refresh_process;
-                    viewport_position = viewport_position.saturating_add(viewport_delta);
-                    if dirty {
-                        snapshot_revision = snapshot_revision.saturating_add(1);
-                        publish_snapshot(
-                            &term,
-                            TerminalProcessState::Running,
-                            snapshot_revision,
-                            &publisher,
-                            &[],
-                            viewport_position,
-                            &process_metadata,
-                        );
-                    }
-                }
-                Ok(CommandEffect::Stop) => {
-                    stop_requested = true;
-                    break;
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        target: "water::pty",
-                        terminal_id = %terminal_id,
-                        ?error,
-                        "terminal worker command failed"
-                    );
-                }
+            if merge_command_effect(
+                effect,
+                terminal_id,
+                &mut commands_dirty,
+                &mut viewport_delta_total,
+                &mut input_activity,
+            ) {
+                stop_requested = true;
+                break;
             }
+        }
+
+        if !stop_requested
+            && let Some(target) = pending_viewport_target
+            && merge_command_effect(
+                apply_command(
+                    TerminalWorkerCommand::SetViewportPosition { target },
+                    &mut pty,
+                    &mut term,
+                    &mut scrollback,
+                    viewport_position.saturating_add(viewport_delta_total),
+                ),
+                terminal_id,
+                &mut commands_dirty,
+                &mut viewport_delta_total,
+                &mut input_activity,
+            )
+        {
+            stop_requested = true;
+        }
+
+        if finish_command_batch(
+            commands_dirty,
+            viewport_delta_total,
+            &mut viewport_position,
+            &mut snapshot_revision,
+        ) {
+            publish_snapshot(
+                &term,
+                TerminalProcessState::Running,
+                snapshot_revision,
+                &publisher,
+                &[],
+                viewport_position,
+                &process_metadata,
+            );
+            last_snapshot_at = Instant::now();
         }
         if stop_requested {
             break 'worker;
@@ -525,6 +593,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         if !pending_input.is_empty() && !command_batch_full {
             poll_timeout =
                 poll_timeout.min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
+        }
+        if output_pending && !command_batch_full {
+            // A temporarily empty reader queue is not proof that an output
+            // burst ended. Keep one frame deadline for the pending terminal
+            // image instead of publishing every tiny reader refill.
+            poll_timeout = poll_timeout
+                .min(SNAPSHOT_FRAME_INTERVAL.saturating_sub(last_snapshot_at.elapsed()));
         }
         let poll_started = Instant::now();
         let poll_result = poller.wait(&mut events, Some(poll_timeout));
@@ -551,7 +626,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             break 'worker;
         }
 
-        output_buffer.clear();
         let mut child_exited = None;
         let mut worker_stop = false;
         // A raw binary stream can contain bytes that happen to look like a
@@ -571,16 +645,31 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         if let Some(ChildEvent::Exited(status)) = child_event {
             child_exited = Some(status.and_then(|status| status.code()));
         }
+        let mut had_output = false;
         if !pty_eof {
             // A pinned viewport must be allowed to borrow the
             // remaining global history before parsing new rows. If
             // the normal limit were reached first, alacritty would
             // discard the very rows the user is looking at.
             let _ = scrollback.prepare_for_output(&mut term);
-            let output_start = output_buffer.len();
-            let drain_result =
-                drain_data(&pty_data_rx, &mut processor, &mut term, &mut output_buffer);
-            binary_output |= output_buffer[output_start..].contains(&0);
+            let parse_slice = if scrollback.focused {
+                INTERACTIVE_PARSE_SLICE
+            } else {
+                NORMAL_PARSE_SLICE
+            };
+            let drain_result = drain_data(
+                &pty_data_rx,
+                &pty_free_tx,
+                &parser_wakeup_pending,
+                &mut processor,
+                &mut term,
+                &mut DrainOutput {
+                    recent: &mut recent_output,
+                    had_output: &mut had_output,
+                    binary_output: &mut binary_output,
+                },
+                parse_slice,
+            );
             match drain_result {
                 Ok(ReadEffect::BudgetExhausted) => pty_data_pending = true,
                 Ok(ReadEffect::Continue) => pty_data_pending = false,
@@ -601,6 +690,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
             }
         }
+        output_pending |= had_output;
 
         if process_proxy_events(
             &proxy_events.1,
@@ -612,7 +702,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         ) {
             worker_stop = true;
         }
-        if !output_buffer.is_empty() {
+        if had_output {
             last_output_at = Instant::now();
         }
         let mut metadata_changed = stats_phase("metadata_apply", || {
@@ -636,7 +726,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         // scheduling new probes while output/input is active to avoid wasting
         // work on short-lived foreground-process transitions.
         if metadata_due {
-            if output_buffer.is_empty() && !input_activity {
+            if !had_output && !input_activity {
                 let _ = request_process_metadata_refresh(
                     &metadata_executor,
                     &pty,
@@ -648,12 +738,13 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             }
             last_process_metadata_request = Instant::now();
         }
-        if !output_buffer.is_empty() {
+        if had_output {
             stats_phase("scrollback_sync", || {
                 let _ = scrollback.sync(&mut term);
             });
         }
-        if !output_buffer.is_empty() || metadata_changed {
+        let output_snapshot_due = snapshot_due(output_pending, last_snapshot_at.elapsed());
+        if output_snapshot_due || metadata_changed {
             snapshot_revision = snapshot_revision.saturating_add(1);
             stats_phase("publish", || {
                 let p_started = Instant::now();
@@ -662,7 +753,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     TerminalProcessState::Running,
                     snapshot_revision,
                     &publisher,
-                    &output_buffer,
+                    recent_output.as_slice(),
                     viewport_position,
                     &process_metadata,
                 );
@@ -675,12 +766,15 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         tracing::info!(
                             target: "water::pty",
                             ms = format_args!("{:.1}", el.as_secs_f64() * 1e3),
-                            output_kb = output_buffer.len() / 1024,
+                            output_kb = recent_output.as_slice().len() / 1024,
                             "publish"
                         );
                     }
                 }
             });
+            recent_output.clear();
+            output_pending = false;
+            last_snapshot_at = Instant::now();
         }
         if metadata_changed {
             emit_process_metadata(
@@ -717,10 +811,24 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             }
             // A final non-blocking drain avoids losing bytes that were already
             // queued in the PTY when SIGCHLD arrived.
-            output_buffer.clear();
             let _ = scrollback.prepare_for_output(&mut term);
-            let _ = drain_data(&pty_data_rx, &mut processor, &mut term, &mut output_buffer);
-            if !output_buffer.is_empty() {
+            let mut final_had_output = false;
+            let mut final_binary_output = false;
+            let _ = drain_data(
+                &pty_data_rx,
+                &pty_free_tx,
+                &parser_wakeup_pending,
+                &mut processor,
+                &mut term,
+                &mut DrainOutput {
+                    recent: &mut recent_output,
+                    had_output: &mut final_had_output,
+                    binary_output: &mut final_binary_output,
+                },
+                NORMAL_PARSE_SLICE,
+            );
+            output_pending |= final_had_output;
+            if output_pending {
                 let _ = scrollback.sync(&mut term);
                 snapshot_revision = snapshot_revision.saturating_add(1);
                 publish_snapshot(
@@ -728,7 +836,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     TerminalProcessState::Running,
                     snapshot_revision,
                     &publisher,
-                    &output_buffer,
+                    recent_output.as_slice(),
                     viewport_position,
                     &process_metadata,
                 );
@@ -899,11 +1007,64 @@ enum CommandEffect {
     Stop,
 }
 
+fn record_latest_viewport_target(pending: &mut Option<i64>, target: i64) {
+    *pending = Some(target);
+}
+
+fn finish_command_batch(
+    dirty: bool,
+    viewport_delta_total: i64,
+    viewport_position: &mut i64,
+    snapshot_revision: &mut u64,
+) -> bool {
+    *viewport_position = viewport_position.saturating_add(viewport_delta_total);
+    if dirty {
+        *snapshot_revision = snapshot_revision.saturating_add(1);
+    }
+    dirty
+}
+
+fn snapshot_due(has_output: bool, since_last_snapshot: Duration) -> bool {
+    has_output && since_last_snapshot >= SNAPSHOT_FRAME_INTERVAL
+}
+
+fn merge_command_effect(
+    effect: io::Result<CommandEffect>,
+    terminal_id: TerminalId,
+    commands_dirty: &mut bool,
+    viewport_delta_total: &mut i64,
+    input_activity: &mut bool,
+) -> bool {
+    match effect {
+        Ok(CommandEffect::Continue {
+            dirty,
+            viewport_delta,
+            refresh_process,
+        }) => {
+            *commands_dirty |= dirty;
+            *viewport_delta_total = viewport_delta_total.saturating_add(viewport_delta);
+            *input_activity |= refresh_process;
+            false
+        }
+        Ok(CommandEffect::Stop) => true,
+        Err(error) => {
+            tracing::warn!(
+                target: "water::pty",
+                %terminal_id,
+                ?error,
+                "terminal worker command failed"
+            );
+            false
+        }
+    }
+}
+
 fn apply_command(
     command: TerminalWorkerCommand,
     pty: &mut Pty,
     term: &mut Term<WorkerEventProxy>,
     scrollback: &mut ScrollbackState,
+    viewport_position: i64,
 ) -> io::Result<CommandEffect> {
     match command {
         TerminalWorkerCommand::SendText(bytes) | TerminalWorkerCommand::SendBytes(bytes) => {
@@ -938,6 +1099,20 @@ fn apply_command(
         TerminalWorkerCommand::Scroll(lines) => {
             let old_offset = term.grid().display_offset();
             term.scroll_display(Scroll::Delta(lines));
+            let dirty = scrollback.reconcile(term);
+            let new_offset = term.grid().display_offset();
+            Ok(CommandEffect::Continue {
+                dirty: dirty || old_offset != new_offset,
+                viewport_delta: viewport_delta(old_offset, new_offset),
+                refresh_process: false,
+            })
+        }
+        TerminalWorkerCommand::SetViewportPosition { target } => {
+            let old_offset = term.grid().display_offset();
+            let delta = target
+                .saturating_sub(viewport_position)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+            term.scroll_display(Scroll::Delta(delta));
             let dirty = scrollback.reconcile(term);
             let new_offset = term.grid().display_offset();
             Ok(CommandEffect::Continue {
@@ -1031,6 +1206,59 @@ enum ReadEffect {
     Continue,
     BudgetExhausted,
     Eof,
+}
+
+struct RecentOutputTail {
+    bytes: Vec<u8>,
+}
+
+struct DrainOutput<'a> {
+    recent: &'a mut RecentOutputTail,
+    had_output: &'a mut bool,
+    binary_output: &'a mut bool,
+}
+
+struct ParseSliceBudget {
+    bytes: usize,
+    started: Instant,
+    duration: Duration,
+    stats: bool,
+}
+
+impl RecentOutputTail {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::with_capacity(MAX_RECENT_OUTPUT_BYTES),
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.len() >= MAX_RECENT_OUTPUT_BYTES {
+            self.bytes.clear();
+            self.bytes
+                .extend_from_slice(&chunk[chunk.len() - MAX_RECENT_OUTPUT_BYTES..]);
+            return;
+        }
+        let overflow = self
+            .bytes
+            .len()
+            .saturating_add(chunk.len())
+            .saturating_sub(MAX_RECENT_OUTPUT_BYTES);
+        if overflow > 0 {
+            let kept = self.bytes.len().saturating_sub(overflow);
+            self.bytes.copy_within(overflow.., 0);
+            self.bytes.truncate(kept);
+        }
+        self.bytes.extend_from_slice(chunk);
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn clear(&mut self) {
+        self.bytes.clear();
+    }
 }
 
 #[derive(Debug)]
@@ -1396,42 +1624,58 @@ fn stats_phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
 
 /// Consume reader-thread batches from the channel until the tick budget is
 /// exhausted or the channel is empty. Non-blocking: the reader thread wakes
-/// this poller on every push, so an empty read just means "no burst in
-/// flight right now".
+/// this poller once per queued burst, so an empty read just means "no burst
+/// in flight right now".
 fn drain_data(
     rx: &Receiver<Vec<u8>>,
+    free_tx: &SyncSender<Vec<u8>>,
+    parser_wakeup_pending: &AtomicBool,
     processor: &mut Processor,
     term: &mut Term<WorkerEventProxy>,
-    output_buffer: &mut Vec<u8>,
+    output: &mut DrainOutput<'_>,
+    parse_slice: Duration,
 ) -> io::Result<ReadEffect> {
     let drain_started = Instant::now();
     let result = {
-        let stats = std::env::var("WATER_PTY_STATS").is_ok();
-        let mut bytes_this_tick = 0_usize;
-        let started = Instant::now();
+        let mut budget = ParseSliceBudget {
+            bytes: 0,
+            started: Instant::now(),
+            duration: parse_slice,
+            stats: std::env::var("WATER_PTY_STATS").is_ok(),
+        };
         let mut effect = ReadEffect::Continue;
 
         loop {
-            match rx.try_recv() {
-                Ok(chunk) => {
-                    if feed_chunk(
-                        output_buffer,
-                        processor,
-                        term,
-                        &chunk,
-                        &mut bytes_this_tick,
-                        &started,
-                        stats,
-                    ) {
-                        effect = ReadEffect::BudgetExhausted;
-                        break;
+            let mut chunk = match rx.try_recv() {
+                Ok(chunk) => chunk,
+                Err(TryRecvError::Empty) => {
+                    // Clear only after observing the queue empty, then recheck
+                    // to close the producer-wakeup race.
+                    parser_wakeup_pending.store(false, std::sync::atomic::Ordering::Release);
+                    match rx.try_recv() {
+                        Ok(chunk) => {
+                            parser_wakeup_pending.store(true, std::sync::atomic::Ordering::Release);
+                            chunk
+                        }
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            effect = ReadEffect::Eof;
+                            break;
+                        }
                     }
                 }
-                Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
+                    parser_wakeup_pending.store(false, std::sync::atomic::Ordering::Release);
                     effect = ReadEffect::Eof;
                     break;
                 }
+            };
+            let exhausted = feed_chunk(output, processor, term, &chunk, &mut budget);
+            chunk.clear();
+            let _ = free_tx.try_send(chunk);
+            if exhausted {
+                effect = ReadEffect::BudgetExhausted;
+                break;
             }
         }
         effect
@@ -1463,36 +1707,64 @@ fn drain_data(
 /// that. This thread owns the master reads: it spin-reads while a burst is
 /// flowing (catches the microsecond-scale refills without a kqueue round
 /// trip), blocks on kqueue once the writer goes quiet (zero idle CPU), and
-/// pushes byte batches into a bounded channel the worker parses. Each push
-/// wakes the worker through its poller, so the PTY keeps draining at writer
-/// speed even while the worker is busy parsing the previous batch.
+/// pushes byte blocks into a bounded channel the worker parses. The first
+/// queued block wakes the worker; subsequent blocks share that wake until
+/// the queue is drained.
+struct PtyReader {
+    filled_rx: Receiver<Vec<u8>>,
+    free_tx: SyncSender<Vec<u8>>,
+    wakeup_pending: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
 fn spawn_pty_reader(
     pty: &Pty,
     wakeup: WakeupCallback,
     stopped: Arc<AtomicBool>,
-) -> io::Result<(Receiver<Vec<u8>>, std::thread::JoinHandle<()>)> {
+) -> io::Result<PtyReader> {
     let mut reader_file = pty.file().try_clone()?;
     let reader_poller = Poller::new()?;
     unsafe {
         reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Level)?;
     }
-    let (tx, rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
+    let (filled_tx, filled_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
+    let (free_tx, free_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
+    let parser_wakeup_pending = Arc::new(AtomicBool::new(false));
+    let reader_wakeup_pending = parser_wakeup_pending.clone();
 
     let handle = std::thread::Builder::new()
         .name("water-terminal-reader".into())
         .spawn(move || {
             boost_drain_thread_qos();
             let stats = std::env::var("WATER_PTY_STATS").is_ok();
-            let mut buf = [0_u8; 128 * 1024];
-            let mut batch = Vec::with_capacity(256 * 1024);
-            let mut out = Vec::new();
+            let mut buf = [0_u8; READER_BLOCK_BYTES];
+            let mut batch = Vec::with_capacity(READER_BLOCK_BYTES);
             let mut events = Events::new();
             let mut batch_started: Option<Instant> = None;
-            // Move a full batch into the channel without reallocating the
-            // reader's buffers; returns whether the worker is still attached.
-            let push = |batch: &mut Vec<u8>, out: &mut Vec<u8>| -> bool {
-                std::mem::swap(batch, out);
-                tx.send(std::mem::take(out)).is_ok()
+            // Filled blocks move to the parser and return over `free_rx` for
+            // reuse. Only the false->true wake transition notifies the worker.
+            let push = |batch: &mut Vec<u8>| -> bool {
+                let replacement = free_rx
+                    .try_recv()
+                    .unwrap_or_else(|_| Vec::with_capacity(READER_BLOCK_BYTES));
+                let mut filled = std::mem::replace(batch, replacement);
+                loop {
+                    match filled_tx.try_send(filled) {
+                        Ok(()) => break,
+                        Err(TrySendError::Full(returned)) => {
+                            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                                return false;
+                            }
+                            filled = returned;
+                            std::thread::yield_now();
+                        }
+                        Err(TrySendError::Disconnected(_)) => return false,
+                    }
+                }
+                if !reader_wakeup_pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                    wakeup();
+                }
+                true
             };
 
             loop {
@@ -1501,24 +1773,26 @@ fn spawn_pty_reader(
                 loop {
                     match reader_file.read(&mut buf) {
                         Ok(0) => {
-                            if !batch.is_empty() && push(&mut batch, &mut out) {
-                                wakeup();
-                            }
+                            let _ = batch.is_empty() || push(&mut batch);
                             return;
                         }
                         Ok(bytes_read) => {
-                            if batch.is_empty() {
-                                batch_started = Some(Instant::now());
-                            }
-                            batch.extend_from_slice(&buf[..bytes_read]);
                             spin_start = None;
-                            if batch.len() >= READER_PUSH_BYTES {
-                                if push(&mut batch, &mut out) {
-                                    wakeup();
-                                } else {
-                                    return;
+                            let mut offset = 0;
+                            while offset < bytes_read {
+                                if batch.is_empty() {
+                                    batch_started = Some(Instant::now());
                                 }
-                                batch_started = None;
+                                let available = READER_BLOCK_BYTES.saturating_sub(batch.len());
+                                let take = available.min(bytes_read - offset);
+                                batch.extend_from_slice(&buf[offset..offset + take]);
+                                offset += take;
+                                if batch.len() == READER_BLOCK_BYTES {
+                                    if !push(&mut batch) {
+                                        return;
+                                    }
+                                    batch_started = None;
+                                }
                             }
                         }
                         Err(error) if error.kind() == ErrorKind::WouldBlock => {
@@ -1535,9 +1809,7 @@ fn spawn_pty_reader(
                         }
                         Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                         Err(_) => {
-                            if !batch.is_empty() && push(&mut batch, &mut out) {
-                                wakeup();
-                            }
+                            let _ = batch.is_empty() || push(&mut batch);
                             return;
                         }
                     }
@@ -1547,11 +1819,10 @@ fn spawn_pty_reader(
                 // also lets the thread notice the worker dropping the
                 // channel on shutdown).
                 if !batch.is_empty() {
-                    if !push(&mut batch, &mut out) {
+                    if !push(&mut batch) {
                         return;
                     }
                     batch_started = None;
-                    wakeup();
                 }
                 let wait_started = Instant::now();
                 let waited = reader_poller.wait(&mut events, Some(READER_IDLE_POLL));
@@ -1566,14 +1837,17 @@ fn spawn_pty_reader(
                     }
                 }
                 if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    if !batch.is_empty() && push(&mut batch, &mut out) {
-                        wakeup();
-                    }
+                    let _ = batch.is_empty() || push(&mut batch);
                     return;
                 }
             }
         })?;
-    Ok((rx, handle))
+    Ok(PtyReader {
+        filled_rx,
+        free_tx,
+        wakeup_pending: parser_wakeup_pending,
+        handle,
+    })
 }
 
 /// Optional throughput diagnostics (`WATER_PTY_STATS=1`): cumulative parse
@@ -1588,20 +1862,27 @@ static GRACE_POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 static GRACE_WAKES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GRACE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static LAST_DRAIN_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SNAPSHOT_BUILD_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SNAPSHOT_CELLS_MATERIALIZED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 /// Feed one read chunk into the parser. Returns true when the tick budget
 /// (bytes or time) is exhausted.
 fn feed_chunk(
-    output_buffer: &mut Vec<u8>,
+    output: &mut DrainOutput<'_>,
     processor: &mut Processor,
     term: &mut Term<WorkerEventProxy>,
     chunk: &[u8],
-    bytes_this_tick: &mut usize,
-    started: &Instant,
-    stats: bool,
+    budget: &mut ParseSliceBudget,
 ) -> bool {
-    output_buffer.extend_from_slice(chunk);
-    let parse_started = if stats { Some(Instant::now()) } else { None };
+    *output.had_output = true;
+    *output.binary_output |= chunk.contains(&0);
+    output.recent.push(chunk);
+    let parse_started = if budget.stats {
+        Some(Instant::now())
+    } else {
+        None
+    };
     processor.advance(term, chunk);
     if let Some(parse_at) = parse_started {
         PARSE_NANOS.fetch_add(
@@ -1610,8 +1891,8 @@ fn feed_chunk(
         );
         PARSE_BYTES.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
     }
-    *bytes_this_tick = bytes_this_tick.saturating_add(chunk.len());
-    *bytes_this_tick >= MAX_PTY_BYTES_PER_TICK || started.elapsed() >= MAX_PTY_DRAIN_TIME
+    budget.bytes = budget.bytes.saturating_add(chunk.len());
+    budget.bytes >= MAX_PTY_BYTES_PER_TICK || budget.started.elapsed() >= budget.duration
 }
 
 fn report_pty_stats_if_enabled() {
@@ -1635,6 +1916,17 @@ fn report_pty_stats_if_enabled() {
                 "pty throughput stats"
             );
         }
+    }
+    if std::env::var_os("WATER_SCROLL_STATS").is_some() {
+        tracing::info!(
+            target: "water::scroll",
+            snapshot_build_us = SNAPSHOT_BUILD_NANOS
+                .load(std::sync::atomic::Ordering::Relaxed)
+                / 1_000,
+            snapshot_cells_materialized = SNAPSHOT_CELLS_MATERIALIZED
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "terminal snapshot stats"
+        );
     }
 }
 
@@ -1695,13 +1987,26 @@ fn publish_snapshot(
     viewport_position: i64,
     metadata: &ProcessMetadata,
 ) {
-    let mut snapshot = TerminalSnapshot::from_term_with_viewport_position(
+    let previous = publisher.registry.snapshot_arc(publisher.terminal_id).ok();
+    let snapshot_started = Instant::now();
+    let (mut snapshot, materialized_cells) = TerminalSnapshot::from_term_with_previous_counted(
         publisher.terminal_id,
         term,
         process,
         revision,
         viewport_position,
+        previous.as_deref(),
     );
+    if std::env::var_os("WATER_SCROLL_STATS").is_some() {
+        SNAPSHOT_BUILD_NANOS.fetch_add(
+            snapshot_started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        SNAPSHOT_CELLS_MATERIALIZED.fetch_add(
+            materialized_cells as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
     snapshot.process_name = metadata.process_name.clone();
     snapshot.cwd = metadata.cwd.clone();
     if publisher
@@ -1895,19 +2200,119 @@ mod tests {
         // byte budget.
         let chunk = vec![b'x'; 4 * 1024];
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (free_tx, _free_rx) = mpsc::sync_channel::<Vec<u8>>(1);
+        let parser_wakeup_pending = AtomicBool::new(true);
         for _ in 0..=MAX_PTY_BYTES_PER_TICK / chunk.len() {
             tx.send(chunk.clone()).unwrap();
         }
         drop(tx);
         let mut term = test_term(TerminalSize::new(80, 24), 100);
         let mut processor = Processor::new();
-        let mut output = Vec::new();
+        let mut output = RecentOutputTail::new();
+        let mut had_output = false;
+        let mut binary_output = false;
 
-        let effect = drain_data(&rx, &mut processor, &mut term, &mut output).unwrap();
+        let effect = drain_data(
+            &rx,
+            &free_tx,
+            &parser_wakeup_pending,
+            &mut processor,
+            &mut term,
+            &mut DrainOutput {
+                recent: &mut output,
+                had_output: &mut had_output,
+                binary_output: &mut binary_output,
+            },
+            Duration::from_secs(60),
+        )
+        .unwrap();
 
         assert_eq!(effect, ReadEffect::BudgetExhausted);
-        assert!(!output.is_empty());
-        assert!(output.len() <= MAX_PTY_BYTES_PER_TICK);
+        assert!(had_output);
+        assert!(!output.as_slice().is_empty());
+        assert!(output.as_slice().len() <= MAX_RECENT_OUTPUT_BYTES);
+    }
+
+    #[test]
+    fn parser_returns_consumed_reader_blocks_to_the_free_pool() {
+        let mut chunk = Vec::with_capacity(READER_BLOCK_BYTES);
+        chunk.extend_from_slice(b"reusable block");
+        let (tx, rx) = mpsc::channel();
+        let (free_tx, free_rx) = mpsc::sync_channel(1);
+        tx.send(chunk).unwrap();
+        drop(tx);
+
+        let parser_wakeup_pending = AtomicBool::new(true);
+        let mut term = test_term(TerminalSize::new(80, 24), 100);
+        let mut processor = Processor::new();
+        let mut output = RecentOutputTail::new();
+        let mut had_output = false;
+        let mut binary_output = false;
+        let effect = drain_data(
+            &rx,
+            &free_tx,
+            &parser_wakeup_pending,
+            &mut processor,
+            &mut term,
+            &mut DrainOutput {
+                recent: &mut output,
+                had_output: &mut had_output,
+                binary_output: &mut binary_output,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(effect, ReadEffect::Eof);
+        let returned = free_rx.try_recv().unwrap();
+        assert!(returned.is_empty());
+        assert!(returned.capacity() >= READER_BLOCK_BYTES);
+        assert!(!parser_wakeup_pending.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn parser_slices_and_snapshot_cadence_are_independent() {
+        assert!(!snapshot_due(
+            true,
+            SNAPSHOT_FRAME_INTERVAL.saturating_sub(Duration::from_millis(1)),
+        ));
+        assert!(snapshot_due(true, SNAPSHOT_FRAME_INTERVAL));
+        assert!(!snapshot_due(true, Duration::ZERO));
+        assert!(!snapshot_due(false, SNAPSHOT_FRAME_INTERVAL));
+    }
+
+    #[test]
+    fn viewport_requests_are_latest_wins_with_one_batch_revision() {
+        let mut pending = None;
+        for target in [12, 13, 17, 15] {
+            record_latest_viewport_target(&mut pending, target);
+        }
+        assert_eq!(pending, Some(15));
+
+        let mut viewport_position = 10;
+        let mut snapshot_revision = 41;
+        assert!(finish_command_batch(
+            true,
+            5,
+            &mut viewport_position,
+            &mut snapshot_revision,
+        ));
+        assert_eq!(viewport_position, 15);
+        assert_eq!(snapshot_revision, 42);
+    }
+
+    #[test]
+    fn clean_command_batch_does_not_publish_a_snapshot() {
+        let mut viewport_position = 10;
+        let mut snapshot_revision = 41;
+        assert!(!finish_command_batch(
+            false,
+            0,
+            &mut viewport_position,
+            &mut snapshot_revision,
+        ));
+        assert_eq!(viewport_position, 10);
+        assert_eq!(snapshot_revision, 41);
     }
 
     #[test]

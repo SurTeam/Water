@@ -203,6 +203,16 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
         config,
         startup.config_path.clone(),
     );
+    let shutdown_socket_path = socket_path.clone();
+    ui_application.set_server_shutdown_handler(move || {
+        if let Err(error) = ControlClient::new(shutdown_socket_path.clone()).server_shutdown() {
+            tracing::warn!(
+                target: "water::workspace",
+                ?error,
+                "failed to stop server while quitting GUI"
+            );
+        }
+    });
     let reopen_application = ui_application.clone();
     let application =
         platform_application().with_restart_arguments(std::env::args_os().skip(1).collect());

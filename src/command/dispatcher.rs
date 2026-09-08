@@ -1262,6 +1262,20 @@ impl CommandDispatcher {
                     .map_err(terminal_command_error)?;
                 Ok(OperationResult::TerminalScrolled { terminal_id, lines })
             }
+            TerminalCommand::SetViewportPosition {
+                terminal_id,
+                pane_id,
+                target,
+            } => {
+                let terminal_id = self.resolve_terminal_target(terminal_id, pane_id)?;
+                self.terminals
+                    .set_viewport_position(terminal_id, target)
+                    .map_err(terminal_command_error)?;
+                Ok(OperationResult::TerminalViewportPositionSet {
+                    terminal_id,
+                    target,
+                })
+            }
         }
     }
 

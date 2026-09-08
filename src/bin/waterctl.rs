@@ -546,8 +546,8 @@ fn print_pane_content(client: &ControlClient, arguments: &[String]) -> Result<()
         let mut line = String::new();
         for current_column in column.min(column_end)..column_end {
             if let Some(cell) = snapshot.cell(current_row, current_column)
-                && !cell.flags.wide_spacer
-                && !cell.flags.leading_wide_spacer
+                && !cell.flags.wide_spacer()
+                && !cell.flags.leading_wide_spacer()
             {
                 line.push(cell.character);
                 line.extend(cell.zerowidth.iter().copied());
