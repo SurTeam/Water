@@ -14,6 +14,33 @@ use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::{TerminalSnapshot, WakeupCallback};
 
+/// A cloneable, thread-safe model snapshot stream.
+///
+/// The GUI consumes one of these on a background executor; `mpsc::Receiver`
+/// is `Send` but not `Sync`, so the mutex keeps the stream shareable with the
+/// GPUI task without changing the blocking `recv` contract.
+pub struct SnapshotStream(
+    std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<ModelSnapshot>>>,
+);
+
+impl std::fmt::Debug for SnapshotStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SnapshotStream").finish()
+    }
+}
+
+impl SnapshotStream {
+    pub fn new(receiver: std::sync::mpsc::Receiver<ModelSnapshot>) -> Self {
+        Self(std::sync::Arc::new(std::sync::Mutex::new(receiver)))
+    }
+
+    /// Blocks until the next model snapshot; returns `None` when the source
+    /// (model host or server session) has ended.
+    pub fn recv(&self) -> Option<ModelSnapshot> {
+        self.0.lock().expect("snapshot stream poisoned").recv().ok()
+    }
+}
+
 #[derive(Debug)]
 enum ModelRequest {
     Dispatch {
@@ -276,6 +303,112 @@ impl CommandClient {
             })
             .map_err(|_| DispatchError::ChannelClosed)?;
         reply_rx.recv().map_err(|_| DispatchError::ChannelClosed)?
+    }
+}
+
+/// A cloneable, thread-safe command/query handle to the application model.
+///
+/// Two transports exist:
+/// - [`CommandClient`]: in-process, used by unit tests and the headless
+///   server internals (mpsc channel into the model thread).
+/// - `RemoteCommandClient` (in `crate::control`): the socket transport used
+///   by the GUI client in the split client/server architecture. Every method
+///   crosses the control socket as a length-prefixed JSON frame.
+///
+/// The mutation path is unchanged: UI handlers, `waterctl`, and scenarios
+/// all funnel into `AppCommand -> CommandDispatcher` on the model thread.
+pub trait CommandTransport: Send + Sync {
+    /// Dispatches a command and returns its operation id (blocks until the
+    /// model thread accepts it).
+    fn dispatch(&self, command: AppCommand) -> Result<OperationId, DispatchError>;
+
+    /// Enqueues a command without waiting for an operation id. Used for
+    /// high-frequency terminal input; implementations must not block the
+    /// caller on the model thread.
+    fn enqueue(&self, command: AppCommand) -> Result<(), DispatchError>;
+
+    fn get_operation(&self, operation_id: OperationId) -> Option<OperationSnapshot>;
+
+    fn wait_operation(&self, operation_id: OperationId)
+    -> Result<OperationSnapshot, DispatchError>;
+
+    fn state_dump(&self) -> Result<crate::app::model::ModelSnapshot, DispatchError>;
+
+    fn memory_stats(&self) -> Result<crate::app::model::MemoryStats, DispatchError>;
+
+    fn events_since(&self, sequence: u64) -> Result<Vec<AppEvent>, DispatchError>;
+
+    fn terminal_contains(
+        &self,
+        terminal_id: TerminalId,
+        text: String,
+        timeout: Duration,
+    ) -> Result<TerminalSnapshot, DispatchError>;
+
+    fn wait_terminal_exit(
+        &self,
+        terminal_id: TerminalId,
+        timeout: Duration,
+    ) -> Result<TerminalSnapshot, DispatchError>;
+
+    fn terminal_snapshot(&self, terminal_id: TerminalId)
+    -> Result<TerminalSnapshot, DispatchError>;
+}
+
+impl CommandTransport for CommandClient {
+    fn dispatch(&self, command: AppCommand) -> Result<OperationId, DispatchError> {
+        CommandClient::dispatch(self, command)
+    }
+
+    fn enqueue(&self, command: AppCommand) -> Result<(), DispatchError> {
+        CommandClient::enqueue(self, command)
+    }
+
+    fn get_operation(&self, operation_id: OperationId) -> Option<OperationSnapshot> {
+        CommandClient::get_operation(self, operation_id)
+    }
+
+    fn wait_operation(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<OperationSnapshot, DispatchError> {
+        CommandClient::wait_operation(self, operation_id)
+    }
+
+    fn state_dump(&self) -> Result<crate::app::model::ModelSnapshot, DispatchError> {
+        CommandClient::state_dump(self)
+    }
+
+    fn memory_stats(&self) -> Result<crate::app::model::MemoryStats, DispatchError> {
+        CommandClient::memory_stats(self)
+    }
+
+    fn events_since(&self, sequence: u64) -> Result<Vec<AppEvent>, DispatchError> {
+        CommandClient::events_since(self, sequence)
+    }
+
+    fn terminal_contains(
+        &self,
+        terminal_id: TerminalId,
+        text: String,
+        timeout: Duration,
+    ) -> Result<TerminalSnapshot, DispatchError> {
+        CommandClient::terminal_contains(self, terminal_id, text, timeout)
+    }
+
+    fn wait_terminal_exit(
+        &self,
+        terminal_id: TerminalId,
+        timeout: Duration,
+    ) -> Result<TerminalSnapshot, DispatchError> {
+        CommandClient::wait_terminal_exit(self, terminal_id, timeout)
+    }
+
+    fn terminal_snapshot(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<TerminalSnapshot, DispatchError> {
+        CommandClient::terminal_snapshot(self, terminal_id)
     }
 }
 

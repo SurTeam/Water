@@ -10,7 +10,7 @@ use gpui::{
     WindowOptions, actions, point, px, size,
 };
 
-use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
+use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
 
 use super::WorkspaceView;
@@ -60,12 +60,13 @@ pub struct WaterApplication {
 }
 
 struct WaterApplicationState {
-    client: CommandClient,
+    client: std::sync::Arc<dyn CommandTransport>,
     config: RefCell<AppConfig>,
     config_path: PathBuf,
     snapshot: RefCell<ModelSnapshot>,
     views: RefCell<Vec<WeakEntity<WorkspaceView>>>,
     settings_window: RefCell<Option<WindowHandle<SettingsView>>>,
+    last_snapshot_apply: RefCell<std::time::Instant>,
     // Startup window dimensions are fixed for this process. Settings keeps
     // the newly saved values visible, but they take effect after restarting
     // Water (or for brand-new windows opened in time).
@@ -76,12 +77,16 @@ struct WaterApplicationState {
 }
 
 impl WaterApplication {
-    pub fn new(client: CommandClient, snapshot: ModelSnapshot, config: AppConfig) -> Self {
+    pub fn new(
+        client: std::sync::Arc<dyn CommandTransport>,
+        snapshot: ModelSnapshot,
+        config: AppConfig,
+    ) -> Self {
         Self::new_with_config_path(client, snapshot, config, AppConfig::default_load_path())
     }
 
     pub fn new_with_config_path(
-        client: CommandClient,
+        client: std::sync::Arc<dyn CommandTransport>,
         snapshot: ModelSnapshot,
         config: AppConfig,
         config_path: PathBuf,
@@ -99,6 +104,9 @@ impl WaterApplication {
                 snapshot: RefCell::new(snapshot),
                 views: RefCell::new(Vec::new()),
                 settings_window: RefCell::new(None),
+                last_snapshot_apply: RefCell::new(
+                    std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
+                ),
             }),
         }
     }
@@ -144,10 +152,16 @@ impl WaterApplication {
         self.state.views.replace(live_views);
     }
 
+    /// Minimum interval between applied model snapshots. The snapshot source
+    /// (in-process mailbox or socket session) already keeps only the latest
+    /// pending revision, so pacing the apply loop bounds the GPUI render
+    /// cost of a sustained output burst to ~30 fps without losing content.
+    const SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(33);
+
     pub fn install(
         &self,
         cx: &mut App,
-        snapshot_receiver: ModelSnapshotReceiver,
+        snapshot_receiver: crate::app::SnapshotStream,
         ui_control_receiver: UiControlReceiver,
     ) {
         cx.set_quit_mode(QuitMode::Explicit);
@@ -261,19 +275,37 @@ impl WaterApplication {
         }
     }
 
-    fn spawn_snapshot_listener(&self, cx: &mut App, receiver: ModelSnapshotReceiver) -> Task<()> {
-        let receiver = Arc::new(receiver);
+    fn spawn_snapshot_listener(
+        &self,
+        cx: &mut App,
+        receiver: crate::app::SnapshotStream,
+    ) -> Task<()> {
+        let receiver = std::sync::Arc::new(receiver);
         let state = self.state.clone();
         cx.spawn(async move |cx| {
             loop {
                 let receiver_for_worker = receiver.clone();
                 let snapshot = cx
                     .background_executor()
-                    .spawn(async move { receiver_for_worker.recv().ok() })
+                    .spawn(async move { receiver_for_worker.recv() })
                     .await;
                 let Some(snapshot) = snapshot else {
                     break;
                 };
+                // Pace the render loop: intermediate revisions were already
+                // dropped upstream (single-slot mailbox / coalesced session
+                // pushes), so sleeping and taking the next latest frame loses
+                // nothing while keeping a debug-build full-window render
+                // below the 30 fps budget during output bursts.
+                let elapsed = state.last_snapshot_apply.borrow().elapsed();
+                if elapsed < Self::SNAPSHOT_MIN_INTERVAL {
+                    cx.background_executor()
+                        .spawn(async move {
+                            std::thread::sleep(Self::SNAPSHOT_MIN_INTERVAL - elapsed);
+                        })
+                        .await;
+                }
+                state.last_snapshot_apply.replace(std::time::Instant::now());
 
                 state.snapshot.replace(snapshot.clone());
                 let views = state.views.borrow().clone();
@@ -803,9 +835,9 @@ mod tests {
     #[gpui::test]
     fn settings_shortcut_opens_one_standalone_settings_window(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let snapshot = client.state_dump().unwrap();
-        let application = WaterApplication::new(client, snapshot, AppConfig::default());
+        let application = WaterApplication::new(client.clone(), snapshot, AppConfig::default());
 
         cx.update(|cx| {
             cx.bind_keys(configured_window_key_bindings(&AppConfig::default()));
@@ -878,9 +910,9 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let snapshot = client.state_dump().unwrap();
-        let application = WaterApplication::new(client, snapshot, AppConfig::default());
+        let application = WaterApplication::new(client.clone(), snapshot, AppConfig::default());
 
         cx.update(|cx| {
             application.open_window(cx);
@@ -926,9 +958,9 @@ mod tests {
     #[gpui::test]
     fn application_shortcuts_route_through_the_focused_window(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let snapshot = client.state_dump().unwrap();
-        let application = WaterApplication::new(client, snapshot, AppConfig::default());
+        let application = WaterApplication::new(client.clone(), snapshot, AppConfig::default());
 
         cx.update(|cx| {
             cx.bind_keys(window_key_bindings());

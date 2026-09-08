@@ -12,7 +12,7 @@ use gpui::{
 };
 
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
-use crate::app::{CommandClient, ModelSnapshot};
+use crate::app::{CommandTransport, ModelSnapshot};
 use crate::command::{
     AppCommand, FocusDirection, OperationResult, PaneCommand, SplitDirection, TabCommand,
     TerminalCommand, WorkspaceCommand,
@@ -195,6 +195,71 @@ struct TerminalRenderOptions {
     /// whole row. Positive values reveal `rows_before`; negative values reveal
     /// `rows_after`.
     scroll_remainder: f32,
+}
+
+/// Keeps fractional wheel movement visually anchored while whole-row scroll
+/// commands cross the asynchronous model/PTY boundary.
+///
+/// `remainder` is the latest gesture target. `rendered_remainder` remains at
+/// the last painted position until `pending_lines` is reflected by a terminal
+/// snapshot, preventing the old grid from briefly jumping backwards.
+#[derive(Debug, Clone, Copy)]
+struct TerminalScrollState {
+    remainder: f32,
+    rendered_remainder: f32,
+    observed_viewport_position: i64,
+    pending_lines: i32,
+}
+
+impl TerminalScrollState {
+    fn new(viewport_position: i64) -> Self {
+        Self {
+            remainder: 0.0,
+            rendered_remainder: 0.0,
+            observed_viewport_position: viewport_position,
+            pending_lines: 0,
+        }
+    }
+
+    fn accumulate(&mut self, delta_rows: f32) -> (i32, bool) {
+        let lines = accumulate_terminal_scroll_delta(&mut self.remainder, delta_rows);
+        self.pending_lines = self.pending_lines.saturating_add(lines);
+        let repaint = self.pending_lines == 0;
+        if repaint {
+            self.rendered_remainder = self.remainder;
+        }
+        (lines, repaint)
+    }
+
+    fn reconcile_snapshot(&mut self, snapshot: &TerminalSnapshot) {
+        let viewport_delta = snapshot
+            .viewport_position
+            .saturating_sub(self.observed_viewport_position);
+        self.observed_viewport_position = snapshot.viewport_position;
+
+        if self.pending_lines != 0 && viewport_delta != 0 {
+            let previous = i64::from(self.pending_lines);
+            let remaining = previous.saturating_sub(viewport_delta);
+            self.pending_lines = if remaining == 0 || remaining.signum() != previous.signum() {
+                0
+            } else {
+                remaining.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
+            };
+        }
+
+        // A clamped scroll does not publish a changed viewport. Resolve it
+        // from the overscan boundary so the state cannot remain pending.
+        if (self.pending_lines > 0 && snapshot.rows_before.is_empty())
+            || (self.pending_lines < 0 && snapshot.rows_after.is_empty())
+        {
+            self.pending_lines = 0;
+            self.remainder = 0.0;
+        }
+
+        if self.pending_lines == 0 {
+            self.rendered_remainder = self.remainder;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -469,7 +534,7 @@ impl InputHandler for TerminalInputHandler {
 }
 
 pub struct WorkspaceView {
-    client: CommandClient,
+    client: std::sync::Arc<dyn CommandTransport>,
     snapshot: ModelSnapshot,
     config: AppConfig,
     terminal_metrics: TerminalMetrics,
@@ -481,7 +546,7 @@ pub struct WorkspaceView {
     /// model's active aliases are compatibility state shared by all windows.
     selected_workspace: Option<WorkspaceId>,
     focused_pane: Option<PaneId>,
-    scroll_accumulators: BTreeMap<TerminalId, f32>,
+    scroll_accumulators: BTreeMap<TerminalId, TerminalScrollState>,
     selection: Option<TerminalSelection>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
@@ -516,12 +581,16 @@ pub struct WorkspaceView {
 }
 
 impl WorkspaceView {
-    pub fn new(client: CommandClient, snapshot: ModelSnapshot, focus_handle: FocusHandle) -> Self {
+    pub fn new(
+        client: std::sync::Arc<dyn CommandTransport>,
+        snapshot: ModelSnapshot,
+        focus_handle: FocusHandle,
+    ) -> Self {
         Self::new_with_config(client, snapshot, focus_handle, AppConfig::default())
     }
 
     pub fn new_with_config(
-        client: CommandClient,
+        client: std::sync::Arc<dyn CommandTransport>,
         snapshot: ModelSnapshot,
         focus_handle: FocusHandle,
         config: AppConfig,
@@ -1426,7 +1495,7 @@ impl WorkspaceView {
         let remainder = self
             .scroll_accumulators
             .get(&snapshot.terminal_id)
-            .copied()
+            .map(|state| state.rendered_remainder)
             .unwrap_or(0.0);
         if (remainder > 0.0 && snapshot.rows_before.is_empty())
             || (remainder < 0.0 && snapshot.rows_after.is_empty())
@@ -1437,9 +1506,18 @@ impl WorkspaceView {
         }
     }
 
-    fn accumulate_terminal_scroll(&mut self, terminal_id: TerminalId, delta_rows: f32) -> i32 {
-        let accumulator = self.scroll_accumulators.entry(terminal_id).or_default();
-        accumulate_terminal_scroll_delta(accumulator, delta_rows)
+    fn accumulate_terminal_scroll(
+        &mut self,
+        terminal_id: TerminalId,
+        delta_rows: f32,
+    ) -> (i32, bool) {
+        let viewport_position = self
+            .terminal_snapshot_for(terminal_id)
+            .map_or(0, |snapshot| snapshot.viewport_position);
+        self.scroll_accumulators
+            .entry(terminal_id)
+            .or_insert_with(|| TerminalScrollState::new(viewport_position))
+            .accumulate(delta_rows)
     }
 
     fn terminal_selection_endpoint_at(
@@ -1991,8 +2069,17 @@ impl WorkspaceView {
                 self.pending_tab = None;
             }
         }
-        self.scroll_accumulators.retain(|terminal_id, _| {
-            terminal_projection_in_snapshot(&self.snapshot, *terminal_id).is_some()
+        let installed_snapshot = &self.snapshot;
+        self.scroll_accumulators.retain(|terminal_id, state| {
+            let Some(projection) =
+                terminal_projection_in_snapshot(installed_snapshot, *terminal_id)
+            else {
+                return false;
+            };
+            if let Some(snapshot) = projection.snapshot.as_deref() {
+                state.reconcile_snapshot(snapshot);
+            }
+            true
         });
         if self
             .context_menu
@@ -3297,11 +3384,13 @@ impl WorkspaceView {
                                 return;
                             }
 
+                            let should_repaint;
                             if mouse_modes.mouse_reporting && this.config.features.mouse_reporting {
                                 // Mouse reporting owns the wheel protocol; do
                                 // not turn a partial trackpad delta into local
                                 // viewport movement in this mode.
-                                this.scroll_accumulators.remove(&terminal_id);
+                                should_repaint =
+                                    this.scroll_accumulators.remove(&terminal_id).is_some();
                                 if let Some(bytes) = terminal_mouse_input(
                                     event,
                                     TerminalMouseContext {
@@ -3322,7 +3411,8 @@ impl WorkspaceView {
                             } else if mouse_modes.alternate_screen && mouse_modes.alternate_scroll {
                                 // Alternate-screen applications expect cursor
                                 // key sequences rather than normal scrollback.
-                                this.scroll_accumulators.remove(&terminal_id);
+                                should_repaint =
+                                    this.scroll_accumulators.remove(&terminal_id).is_some();
                                 let lines = terminal_scroll_lines(event, this.terminal_metrics);
                                 if lines != 0 {
                                     this.enqueue_terminal_command(
@@ -3338,8 +3428,9 @@ impl WorkspaceView {
                                     );
                                 }
                             } else {
-                                let lines =
+                                let (lines, repaint) =
                                     this.accumulate_terminal_scroll(terminal_id, delta_rows);
+                                should_repaint = repaint;
                                 if lines != 0 {
                                     this.enqueue_terminal_command(
                                         terminal_id,
@@ -3351,10 +3442,14 @@ impl WorkspaceView {
                                     );
                                 }
                             }
-                            // The fractional accumulator is view state, so
-                            // schedule a repaint even when no whole-row
-                            // command was emitted yet.
-                            cx.notify();
+                            // Once a whole-row command is pending, keep the
+                            // old fractional position painted until the new
+                            // terminal snapshot arrives. Repainting the old
+                            // grid with the post-wrap remainder causes a
+                            // visible backwards/forwards jump.
+                            if should_repaint {
+                                cx.notify();
+                            }
                             // Consume even a fractional normal-screen wheel
                             // event so the surrounding UI cannot interpret it
                             // as a second scroll gesture.
@@ -6013,6 +6108,46 @@ mod tests {
     }
 
     #[test]
+    fn fractional_scroll_does_not_snap_back_before_the_viewport_acknowledges_a_row() {
+        let mut state = TerminalScrollState::new(0);
+        assert_eq!(state.accumulate(0.75), (0, true));
+        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
+
+        assert_eq!(state.accumulate(0.5), (1, false));
+        assert!((state.remainder - 0.25).abs() < f32::EPSILON);
+        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
+
+        // More trackpad input can arrive before the PTY worker publishes the
+        // requested row. It must not repaint the old grid with the new
+        // remainder either.
+        assert_eq!(state.accumulate(0.2), (0, false));
+        assert!((state.rendered_remainder - 0.75).abs() < f32::EPSILON);
+
+        let mut snapshot = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(8, 4));
+        snapshot.viewport_position = 1;
+        snapshot.rows_before.push(vec![TerminalCell::default(); 8]);
+        snapshot.rows_after.push(vec![TerminalCell::default(); 8]);
+        state.reconcile_snapshot(&snapshot);
+
+        assert_eq!(state.pending_lines, 0);
+        assert!((state.rendered_remainder - 0.45).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fractional_scroll_clears_a_pending_command_at_the_history_boundary() {
+        let mut state = TerminalScrollState::new(3);
+        assert_eq!(state.accumulate(1.25), (1, false));
+
+        let mut snapshot = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(8, 4));
+        snapshot.viewport_position = 3;
+        state.reconcile_snapshot(&snapshot);
+
+        assert_eq!(state.pending_lines, 0);
+        assert_eq!(state.remainder, 0.0);
+        assert_eq!(state.rendered_remainder, 0.0);
+    }
+
+    #[test]
     fn fractional_scroll_positions_nearest_overscan_rows_without_a_gap() {
         assert_eq!(terminal_row_position(-1, 0.25), -0.75);
         assert_eq!(terminal_row_position(0, 0.25), 0.25);
@@ -6407,7 +6542,7 @@ mod tests {
     #[gpui::test]
     fn ime_composition_state_commits_once_to_the_focused_terminal(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let workspace = client
             .dispatch(crate::command::AppCommand::Workspace(
                 crate::command::WorkspaceCommand::Create,
@@ -6664,7 +6799,7 @@ mod tests {
     #[gpui::test]
     fn focused_workspace_routes_keystrokes_to_real_zsh(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let workspace = client
             .dispatch(crate::command::AppCommand::Workspace(
                 crate::command::WorkspaceCommand::Create,
@@ -6745,7 +6880,7 @@ mod tests {
     #[gpui::test]
     fn mouse_selection_begins_and_survives_reinstall(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
-        let client = host.client();
+        let client = std::sync::Arc::new(host.client());
         let workspace = client
             .dispatch(crate::command::AppCommand::Workspace(
                 crate::command::WorkspaceCommand::Create,

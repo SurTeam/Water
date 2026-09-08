@@ -29,8 +29,9 @@ fn control_socket_uses_the_same_command_dispatch_path() {
         std::env::temp_dir().join(format!("water-phase1-{}.sock", std::process::id()));
     let mut host = ModelHost::start();
     let server_client = host.client();
-    let mut server =
-        ControlServer::start(socket_path.clone(), server_client).expect("server starts");
+    let (mut server, _shutdown_rx) =
+        ControlServer::start(socket_path.clone(), server_client, None, None)
+            .expect("server starts");
     let client = ControlClient::new(&socket_path);
     client.ping().expect("ping succeeds");
 

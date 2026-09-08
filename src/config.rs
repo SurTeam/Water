@@ -43,6 +43,7 @@ pub const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = DEFAULT_LINE_HEIGHT;
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct AppConfig {
     pub startup: StartupConfig,
+    pub server: ServerConfig,
     pub shell: ShellConfig,
     pub features: FeatureConfig,
     pub theme: ThemeConfig,
@@ -181,6 +182,7 @@ impl AppConfig {
             || self.startup.control_socket != next.startup.control_socket
             || self.startup.initial_workspace != next.startup.initial_workspace
             || self.startup.initial_terminal != next.startup.initial_terminal
+            || self.server != next.server
             || self.shell != next.shell
             || self.terminal.scrollback_lines != next.terminal.scrollback_lines
             || self.terminal.inactive_scrollback_lines != next.terminal.inactive_scrollback_lines
@@ -191,6 +193,7 @@ impl AppConfig {
 
     pub fn normalized(mut self) -> Self {
         self.startup = self.startup.normalized();
+        self.server = self.server.normalized();
         self.shell = self.shell.normalized();
         self.terminal = self.terminal.normalized();
         self.ui = self.ui.normalized();
@@ -282,6 +285,50 @@ impl StartupConfig {
             .window_height
             .clamp(320.0, 4096.0)
             .max(self.window_min_height);
+        self
+    }
+}
+
+/// Client/server split settings (tmux-style).
+///
+/// The server owns the model and every PTY; GUI processes attach to it over
+/// the control socket. `detached` runs the server as a separate long-lived
+/// process, `auto_start` makes the GUI spawn one when none is listening, and
+/// `detach_on_quit` keeps sessions alive after the GUI exits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfig {
+    /// Run the server as a separate (detached) process instead of embedding
+    /// it in the GUI process. Only applies when the GUI starts the server.
+    pub detached: bool,
+    /// Start a server automatically when the GUI finds no running one.
+    pub auto_start: bool,
+    /// Keep the server (and its PTYs) running when the GUI that started it
+    /// exits.
+    pub detach_on_quit: bool,
+    /// Optional socket path for the server. CLI and WATER_CONTROL_SOCKET take
+    /// precedence, then `startup.control_socket`, then the default.
+    pub socket_path: Option<String>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            detached: true,
+            auto_start: true,
+            detach_on_quit: true,
+            socket_path: None,
+        }
+    }
+}
+
+impl ServerConfig {
+    fn normalized(mut self) -> Self {
+        self.socket_path = self
+            .socket_path
+            .take()
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty());
         self
     }
 }
@@ -768,6 +815,7 @@ impl ConfigDocument {
 #[serde(default)]
 pub struct AppConfigOverrides {
     pub startup: Option<StartupConfigOverrides>,
+    pub server: Option<ServerConfigOverrides>,
     pub shell: Option<ShellConfigOverrides>,
     pub features: Option<FeatureConfigOverrides>,
     pub theme: Option<ThemeConfigOverrides>,
@@ -810,6 +858,20 @@ impl AppConfigOverrides {
             }
             if let Some(value) = startup.window_min_height {
                 config.startup.window_min_height = value;
+            }
+        }
+        if let Some(server) = &self.server {
+            if let Some(value) = server.detached {
+                config.server.detached = value;
+            }
+            if let Some(value) = server.auto_start {
+                config.server.auto_start = value;
+            }
+            if let Some(value) = server.detach_on_quit {
+                config.server.detach_on_quit = value;
+            }
+            if let Some(value) = &server.socket_path {
+                config.server.socket_path = value.clone();
             }
         }
         if let Some(shell) = &self.shell {
@@ -921,6 +983,15 @@ pub struct StartupConfigOverrides {
     pub window_height: Option<f32>,
     pub window_min_width: Option<f32>,
     pub window_min_height: Option<f32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ServerConfigOverrides {
+    pub detached: Option<bool>,
+    pub auto_start: Option<bool>,
+    pub detach_on_quit: Option<bool>,
+    pub socket_path: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

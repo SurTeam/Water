@@ -14,8 +14,8 @@ pub mod workspace;
 
 pub use agent::{AgentKind, DetectedAgent, detect_agent};
 pub use app::{
-    ApplicationModel, CommandClient, MemoryStats, ModelHost, ModelSnapshot, ModelSnapshotReceiver,
-    StateDump,
+    ApplicationModel, CommandClient, CommandTransport, MemoryStats, ModelHost, ModelSnapshot,
+    ModelSnapshotReceiver, StateDump,
 };
 pub use command::{
     AppCommand, CommandDispatcher, CommandError, DispatchError, FocusDirection, OperationResult,
@@ -24,8 +24,8 @@ pub use command::{
 };
 pub use config::{
     AppConfig, AppConfigOverrides, ConfigError, ConfigOverrides, FeatureConfig,
-    FeatureConfigOverrides, ShellConfig, ShellConfigOverrides, ShortcutConfig,
-    ShortcutConfigOverrides, StartupConfig, StartupConfigOverrides, TerminalConfig,
+    FeatureConfigOverrides, ServerConfig, ServerConfigOverrides, ShellConfig, ShellConfigOverrides,
+    ShortcutConfig, ShortcutConfigOverrides, StartupConfig, StartupConfigOverrides, TerminalConfig,
     TerminalConfigOverrides, ThemeColors, ThemeConfig, ThemeConfigOverrides, UiConfig,
     UiConfigOverrides,
 };

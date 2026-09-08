@@ -2,9 +2,13 @@ pub mod client;
 pub mod protocol;
 pub mod server;
 
-pub use client::{ControlClient, ControlClientError};
+pub use client::{
+    ControlClient, ControlClientError, RemoteCommandClient, connect_water_session,
+    spawn_state_polling_fallback,
+};
 pub use protocol::{
-    PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, read_frame, write_frame,
+    PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
+    SessionOpenResponse, WireMessage, read_frame, write_frame,
 };
 pub use server::{ControlServer, ControlServerHandle};
 

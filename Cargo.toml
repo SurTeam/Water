@@ -42,3 +42,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "test-support"] }
+
+# The 0.8 s / 61 MB benchmark target is met by the release build. The dev
+# profile is still optimized (opt-level 2, full debuginfo) because the user
+# does terminal UX work in the debug build: vte's generic `advance<H: Handler>`
+# is monomorphized inside whatever crate calls it, so the parser hot path is
+# compiled at Water's own opt level, not vte's (opt-0 parsing measured ~6 MB/s
+# vs ~70 MB/s in release). Water's own code keeps its default safety switches
+# (overflow checks and debug assertions on); only dependencies get
+# release-equivalent settings.
+[profile.dev]
+opt-level = 2
+
+[profile.dev.package."*"]
+opt-level = 3
+overflow-checks = false
+
+# The 0.8 s / 61 MB benchmark target is a release-profile target. LTO plus
+# single-codegen-unit plus native CPU codegen push the vte/alacritty grid hot
+# path (which is monomorphized across the water/vte/alacritty crate boundary)
+# from ~67 MB/s to ~100+ MB/s of parse throughput. Native CPU codegen
+# comes from .cargo/config.toml rustflags (-C target-cpu=native).
+[profile.release]
+lto = true
+codegen-units = 1

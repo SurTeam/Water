@@ -67,6 +67,12 @@
     "font_size": 16.0,
     "line_height": 18.0
   },
+  "server": {
+    "detached": true,
+    "auto_start": true,
+    "detach_on_quit": true,
+    "socket_path": null
+  },
   "ui": {
     "font_size": 14.0,
     "sidebar_visible": true,

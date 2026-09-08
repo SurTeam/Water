@@ -1,37 +1,41 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::App;
 use gpui_platform::application as platform_application;
 
-use water::app::{CommandClient, ModelHost};
+use water::app::{CommandTransport, ModelHost};
 use water::command::{AppCommand, OperationStatus, TabCommand, WorkspaceCommand};
 use water::config::AppConfig;
-use water::control::{ControlServer, default_socket_path};
-
+use water::control::{
+    ControlClient, ControlServer, RemoteCommandClient, connect_water_session, default_socket_path,
+    spawn_state_polling_fallback,
+};
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
     init_tracing();
-    let startup = parse_startup_options(std::env::args().skip(1))?;
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let is_server = arguments
+        .first()
+        .is_some_and(|argument| argument == "server" || argument == "--server");
+    if is_server {
+        run_server(arguments.iter().skip(1).cloned())
+    } else {
+        run_gui(arguments.into_iter())
+    }
+}
+
+/// Headless server: owns the model and every PTY, no GUI. This is the tmux-
+/// style backend that GUI clients attach to; sessions survive GUI exits.
+fn run_server(arguments: impl Iterator<Item = String>) -> Result<()> {
+    let startup = parse_startup_options(arguments)?;
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let socket_path = startup
-        .socket_path
-        .clone()
-        .or_else(|| std::env::var_os("WATER_CONTROL_SOCKET").map(PathBuf::from))
-        .or_else(|| config.startup.control_socket.clone().map(PathBuf::from))
-        .unwrap_or_else(default_socket_path);
-    tracing::info!(
-        target: "water::workspace",
-        socket = %socket_path.display(),
-        config = %startup.config_path.display(),
-        scrollback_lines = config.terminal.scrollback_lines,
-        initial_workspace = startup.initial_workspace,
-        initial_terminal = startup.initial_terminal,
-        "starting water"
-    );
-
+    let socket_path = resolve_socket_path(&startup, &config)?;
     let mut model_host = ModelHost::start_with_config(config.clone());
     let client = model_host.client();
     let initial_workspace = startup
@@ -41,23 +45,161 @@ fn main() -> Result<()> {
         .initial_terminal
         .unwrap_or(config.startup.initial_terminal)
         && initial_workspace;
-    if initial_workspace {
-        dispatch_checked(&client, AppCommand::Workspace(WorkspaceCommand::Create))?;
-    }
-    if initial_terminal {
-        dispatch_checked(&client, AppCommand::Tab(TabCommand::New { title: None }))?;
-    }
-    let initial_snapshot = client
-        .state_dump()
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let snapshot_receiver = model_host.take_snapshot_receiver();
-    let (ui_control_client, ui_control_receiver) = ui_control_channel();
-    let mut control_server =
-        ControlServer::start_with_ui(socket_path, client.clone(), ui_control_client)
-            .context("failed to start control socket")?;
-    let ui_application = WaterApplication::new_with_config_path(
+    ensure_initial_workspace(&client, initial_workspace, initial_terminal);
+    let (mut control_server, shutdown_rx) = ControlServer::start(
+        socket_path.clone(),
         client,
-        initial_snapshot,
+        None,
+        Some(model_host.take_snapshot_receiver()),
+    )
+    .with_context(|| {
+        format!(
+            "failed to start control socket at {}",
+            socket_path.display()
+        )
+    })?;
+    tracing::info!(
+        target: "water::workspace",
+        pid = std::process::id(),
+        socket = %socket_path.display(),
+        "water server listening"
+    );
+    wait_for_shutdown(shutdown_rx);
+    control_server.shutdown();
+    model_host.shutdown();
+    tracing::info!(target: "water::workspace", "water server stopped");
+    Ok(())
+}
+
+#[cfg(unix)]
+fn wait_for_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
+    static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
+    unsafe extern "C" fn on_signal(_: libc::c_int) {
+        SIGNAL_RECEIVED.store(true, Ordering::Release);
+    }
+    unsafe {
+        let handler = on_signal as *const () as usize;
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
+        // A detached server must survive the controlling terminal closing.
+        libc::signal(libc::SIGHUP, libc::SIG_IGN);
+    }
+    loop {
+        match shutdown_rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(()) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                if SIGNAL_RECEIVED.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn wait_for_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
+    let _ = shutdown_rx.recv();
+}
+
+/// GUI client: resolves (or auto-starts) the server, attaches, and renders.
+fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
+    let startup = parse_startup_options(arguments)?;
+    let config = AppConfig::load_from_path(&startup.config_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let socket_path = resolve_socket_path(&startup, &config)?;
+    tracing::info!(
+        target: "water::workspace",
+        socket = %socket_path.display(),
+        config = %startup.config_path.display(),
+        initial_workspace = startup.initial_workspace.unwrap_or(config.startup.initial_workspace),
+        initial_terminal = startup
+            .initial_terminal
+            .unwrap_or(config.startup.initial_terminal),
+        "starting water client"
+    );
+
+    // Resolve a server: attach when one is already listening, auto-start
+    // (detached or embedded) when none is.
+    let probe = ControlClient::new(socket_path.clone());
+    let initial_workspace = startup
+        .initial_workspace
+        .unwrap_or(config.startup.initial_workspace);
+    let initial_terminal = startup
+        .initial_terminal
+        .unwrap_or(config.startup.initial_terminal)
+        && initial_workspace;
+    let mut embedded: Option<EmbeddedServer> = None;
+    let mut owns_server = false;
+    if probe.ping().is_err() {
+        if !config.server.auto_start {
+            bail!(
+                "no water server is listening at {}; start one with `water server` \
+                 or set server.auto_start",
+                socket_path.display()
+            );
+        }
+        if config.server.detached {
+            spawn_detached_server(
+                &socket_path,
+                &startup.config_path,
+                initial_workspace,
+                initial_terminal,
+            )?;
+            wait_for_server(&socket_path)?;
+            owns_server = true;
+        } else {
+            let mut host = ModelHost::start_with_config(config.clone());
+            let client = host.client();
+            ensure_initial_workspace(&client, initial_workspace, initial_terminal);
+            let (handle, _shutdown_rx) = ControlServer::start(
+                socket_path.clone(),
+                client,
+                None,
+                Some(host.take_snapshot_receiver()),
+            )
+            .with_context(|| {
+                format!(
+                    "failed to start embedded server at {}",
+                    socket_path.display()
+                )
+            })?;
+            embedded = Some(EmbeddedServer {
+                host,
+                handle: Some(handle),
+            });
+        }
+    }
+
+    let transport: std::sync::Arc<dyn CommandTransport> =
+        std::sync::Arc::new(RemoteCommandClient::connect(&socket_path)?);
+    // Create the initial workspace/terminal when attaching to a fresh server
+    // (for example one started manually with --empty-workspace); a server
+    // that already has state is attached as-is, tmux-style.
+    let initial = transport.state_dump()?;
+    if initial.workspaces.is_empty() && (initial_workspace || initial_terminal) {
+        ensure_initial_workspace(transport.as_ref(), initial_workspace, initial_terminal);
+    }
+
+    // Snapshot stream + UI automation: prefer the push session; fall back to
+    // state polling against pre-split servers.
+    let (ui_control_client, ui_control_receiver) = ui_control_channel();
+    let snapshot_receiver = match connect_water_session(&socket_path, ui_control_client) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            tracing::warn!(
+                target: "water::workspace",
+                ?error,
+                "session.open unavailable; falling back to state polling"
+            );
+            spawn_state_polling_fallback(transport.clone())
+        }
+    };
+
+    let detach_on_quit = config.server.detach_on_quit;
+    let ui_application = WaterApplication::new_with_config_path(
+        transport,
+        initial,
         config,
         startup.config_path.clone(),
     );
@@ -69,26 +211,138 @@ fn main() -> Result<()> {
         ui_application.install(cx, snapshot_receiver, ui_control_receiver);
     });
 
-    control_server.shutdown();
-    model_host.shutdown();
+    // The GUI is gone: detach the server (tmux semantics) or stop it when
+    // this process owns it and detach_on_quit is off.
+    if owns_server && !detach_on_quit {
+        let _ = ControlClient::new(socket_path.clone()).server_shutdown();
+    }
+    if let Some(mut embedded) = embedded {
+        if let Some(mut handle) = embedded.handle.take() {
+            handle.shutdown();
+        }
+        embedded.host.shutdown();
+    }
     Ok(())
 }
 
-fn dispatch_checked(client: &CommandClient, command: AppCommand) -> Result<()> {
-    let operation_id = client
-        .dispatch(command)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let operation = client
-        .wait_operation(operation_id)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+/// The embedded server must outlive the GPUI run loop; this wrapper makes the
+/// drop order explicit.
+struct EmbeddedServer {
+    host: ModelHost,
+    handle: Option<water::control::ControlServerHandle>,
+}
+
+fn spawn_detached_server(
+    socket_path: &PathBuf,
+    config_path: &PathBuf,
+    initial_workspace: bool,
+    initial_terminal: bool,
+) -> Result<std::process::Child> {
+    let exe = std::env::current_exe().context("could not resolve water executable")?;
+    let mut command = std::process::Command::new(exe);
+    command
+        .arg("server")
+        .arg("--control-socket")
+        .arg(socket_path)
+        .arg("--config")
+        .arg(config_path);
+    if !initial_workspace {
+        command.arg("--empty-workspace");
+    } else if !initial_terminal {
+        command.arg("--no-initial-terminal");
+    }
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::null());
+    // Detached server logs land next to the socket; the socket path is the
+    // per-instance identity, so these never collide between instances.
+    let log_path = format!("{}.server.log", socket_path.display());
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+    {
+        Ok(file) => {
+            command.stderr(std::process::Stdio::from(file));
+        }
+        Err(_) => {
+            command.stderr(std::process::Stdio::null());
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // SAFETY: the closure only calls setsid, which is async-signal-safe
+        // and uses no Rust state; a race that leaves us a session leader is
+        // harmless because the nulled stdio already detaches the process.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    command.spawn().context("failed to start water server")
+}
+
+fn wait_for_server(socket_path: &Path) -> Result<()> {
+    let client = ControlClient::new(socket_path);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        if client.ping().is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    bail!(
+        "water server did not come up at {} within 15 seconds",
+        socket_path.display()
+    )
+}
+
+/// Creates the initial workspace (and terminal tab) on a fresh model. The
+/// server does this at startup when it owns state creation; the GUI repeats
+/// it only when it attaches to a server with no workspaces at all.
+fn ensure_initial_workspace(
+    client: &dyn CommandTransport,
+    initial_workspace: bool,
+    initial_terminal: bool,
+) {
+    if !initial_workspace {
+        return;
+    }
+    if let Ok(state) = client.state_dump()
+        && !state.workspaces.is_empty()
+    {
+        return;
+    }
+    dispatch_checked(client, AppCommand::Workspace(WorkspaceCommand::Create));
+    if initial_terminal {
+        dispatch_checked(client, AppCommand::Tab(TabCommand::New { title: None }));
+    }
+}
+
+fn dispatch_checked(client: &dyn CommandTransport, command: AppCommand) {
+    let operation_id = match client.dispatch(command) {
+        Ok(operation_id) => operation_id,
+        Err(error) => {
+            tracing::error!(target: "water::workspace", ?error, "initial command failed to dispatch");
+            return;
+        }
+    };
+    let operation = match client.wait_operation(operation_id) {
+        Ok(operation) => operation,
+        Err(error) => {
+            tracing::error!(target: "water::workspace", ?error, "initial command timed out");
+            return;
+        }
+    };
     if operation.status == OperationStatus::Failed {
         let error = operation
             .error
             .map(|error| format!("{}: {}", error.code, error.message))
             .unwrap_or_else(|| "unknown command failure".to_owned());
-        bail!(error);
+        tracing::error!(target: "water::workspace", error, "initial command failed");
     }
-    Ok(())
 }
 
 struct StartupOptions {
@@ -125,7 +379,7 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
             initial_terminal = Some(false);
         } else if argument == "--help" || argument == "-h" {
             println!(
-                "water [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace]"
+                "water [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [server ...]"
             );
             std::process::exit(0);
         } else {
@@ -140,8 +394,31 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
     })
 }
 
+/// Resolves the control/server socket: CLI flag > WATER_CONTROL_SOCKET >
+/// `server.socket_path` > `startup.control_socket` > platform default.
+fn resolve_socket_path(startup: &StartupOptions, config: &AppConfig) -> Result<PathBuf> {
+    if let Some(path) = &startup.socket_path {
+        return Ok(path.clone());
+    }
+    if let Some(path) = std::env::var_os("WATER_CONTROL_SOCKET") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = &config.server.socket_path {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = &config.startup.control_socket {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(default_socket_path())
+}
+
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("water=info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    // Explicitly stderr: the default writer is stdout, which a detached
+    // server points at /dev/null (its .server.log captures stderr).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }

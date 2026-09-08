@@ -3,6 +3,7 @@ use std::path::PathBuf;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -20,18 +21,43 @@ use crate::ids::TerminalId;
 
 use super::TerminalTheme;
 use super::model::{
-    ScrollbackBudget, TERMINAL_WAKE_KEY, TerminalManagerEvent, TerminalRegistry,
-    TerminalWorkerCommand, WakeupCallback, WakeupSlot,
+    ScrollbackBudget, TerminalManagerEvent, TerminalRegistry, TerminalWorkerCommand,
+    WakeupCallback, WakeupSlot,
 };
 use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
-const READ_BUFFER_BYTES: usize = 16 * 1024;
+const READ_BUFFER_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
-const MAX_PTY_BYTES_PER_TICK: usize = 256 * 1024;
-const MAX_PTY_DRAIN_TIME: Duration = Duration::from_millis(4);
+// The drain budget bounds one poll tick, not total output: a large burst
+// (for example `cat` of a multi-megabyte file) is delivered across many
+// ticks, and each tick publishes at most one snapshot. The byte budget must
+// stay large enough that a fast parser is throughput-bound instead of paying
+// poll/publish overhead per megabyte (256 KB forced ~1500 ticks on the 61 MB
+// benchmark stream); the time budget keeps input coalescing, metadata
+// refresh, and shutdown latency bounded while a burst is in flight.
+const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;
+const MAX_PTY_DRAIN_TIME: Duration = Duration::from_millis(100);
+/// The dedicated PTY reader pushes a batch after accumulating this much, or
+/// when the writer goes quiet (burst -> idle transition).
+const READER_PUSH_BYTES: usize = 64 * 1024;
+/// In-flight batch ceiling (1024 x up to 256KB ~= 256MB): a large burst must
+/// not backpressure the writer down to our parse rate, or `cat bigfile`
+/// would be measured at parse speed instead of PTY speed.
+const READER_CHANNEL_CAPACITY: usize = 1024;
+/// The reader keeps spin-reading while data has been seen within this
+/// window; afterwards it blocks on kqueue until the next chunk (zero idle
+/// CPU). macOS refills land within tens of microseconds of a drain, so the
+/// spin catches them without a kqueue round trip.
+const READER_BURST_IDLE: Duration = Duration::from_millis(1);
+/// Idle poll timeout; also bounds the reader thread's shutdown latency.
+const READER_IDLE_POLL: Duration = Duration::from_millis(50);
+/// A partially filled batch older than this is flushed even though the
+/// stream has not paused (protects slow-but-continuous output, which
+/// would otherwise wait for the 64KB push threshold).
+const READER_MAX_BATCH_AGE: Duration = Duration::from_millis(5);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 /// A held key repeats every ~20ms on macOS fast repeat settings, while a
 /// themed shell prompt (starship + git/async segments) needs a comparable
@@ -198,6 +224,7 @@ impl WorkerConfig {
 }
 
 pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
+    boost_drain_thread_qos();
     let WorkerConfig {
         terminal_id,
         size,
@@ -294,11 +321,49 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     });
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = Some(worker_wakeup.clone());
 
+    // Dedicated PTY reader thread: the macOS slave->master queue holds only
+    // ~1KB ahead of the reader, so a reader that parses while reading makes
+    // the writer wait once per 1KB (the 61MB benchmark paid ~34k kqueue
+    // wakes for exactly that). The reader drains the master at PTY speed
+    // and pushes batches; the worker parses from the channel and is woken
+    // per batch.
+    let pty_reader_stopped = Arc::new(AtomicBool::new(false));
+    let (pty_data_rx, mut pty_reader_handle) =
+        match spawn_pty_reader(&pty, worker_wakeup.clone(), pty_reader_stopped.clone()) {
+            Ok((rx, handle)) => (rx, Some(handle)),
+            Err(error) => {
+                tracing::error!(
+                    target: "water::pty",
+                    terminal_id = %terminal_id,
+                    ?error,
+                    "failed to start PTY reader"
+                );
+                emit_manager_event(
+                    &event_tx,
+                    event_wakeup.as_ref(),
+                    TerminalManagerEvent::Exited {
+                        terminal_id,
+                        code: None,
+                    },
+                );
+                registry.mark_exited(terminal_id, None);
+                scrollback.unregister();
+                return;
+            }
+        };
+    // The reader thread owns master reads; drop the master from the worker's
+    // poller so a level-triggered readable event cannot race the reader and
+    // spin the worker while the channel is being filled.
+    let _ = poller.delete(pty.file());
+    let reader_eof = Arc::new(AtomicBool::new(false));
+    // Set when a drain hit the tick byte/time budget mid-burst; the next
+    // poll must not sleep before the channel is drained again.
+    let mut pty_data_pending = false;
+
     let (metadata_result_tx, metadata_result_rx) = mpsc::channel();
     let mut metadata_probe_in_flight = false;
     let mut last_output_at = Instant::now();
     let mut events = Events::new();
-    let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
     let mut output_buffer = Vec::with_capacity(READ_BUFFER_BYTES);
     let mut snapshot_revision = 0_u64;
     let mut viewport_position = 0_i64;
@@ -342,6 +407,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     'worker: loop {
         let mut command_batch_full = false;
         let mut input_activity = false;
+        // Sticky: once the reader has disconnected (EOF), stop draining.
+        let pty_eof = reader_eof.load(std::sync::atomic::Ordering::Relaxed);
         for command_index in 0..MAX_COMMANDS_PER_TICK {
             let command = match command_rx.try_recv() {
                 Ok(command) => command,
@@ -448,7 +515,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         events.clear();
         let metadata_timeout = PROCESS_METADATA_REFRESH_INTERVAL
             .saturating_sub(last_process_metadata_request.elapsed());
-        let mut poll_timeout = if command_batch_full {
+        let mut poll_timeout = if command_batch_full || pty_data_pending {
+            // A burst is still in flight: the reader channel may hold
+            // unparsed data, so do not sleep the poll before the next drain.
             Duration::ZERO
         } else {
             metadata_timeout
@@ -457,7 +526,22 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             poll_timeout =
                 poll_timeout.min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
         }
-        if let Err(error) = poller.wait(&mut events, Some(poll_timeout)) {
+        let poll_started = Instant::now();
+        let poll_result = poller.wait(&mut events, Some(poll_timeout));
+        if std::env::var("WATER_PTY_STATS").is_ok() {
+            let el = poll_started.elapsed();
+            POLL_NANOS.fetch_add(el.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            let ms = el.as_secs_f64() * 1e3;
+            if ms > 5.0 {
+                tracing::info!(
+                    target: "water::pty",
+                    ms = format_args!("{ms:.0}"),
+                    timeout_ms = format_args!("{:?}", poll_timeout.as_millis()),
+                    "poller wait"
+                );
+            }
+        }
+        if let Err(error) = poll_result {
             tracing::warn!(
                 target: "water::pty",
                 terminal_id = %terminal_id,
@@ -474,50 +558,47 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         // terminal query (for example, CSI `c`). Never feed the automatic
         // response for such a query into the shell's input queue.
         let mut binary_output = false;
-        let mut pty_eof = false;
+        // The reader thread signals batches through poller.notify(); its
+        // event carries the polling crate's private key, so it never
+        // matches the child key below - the drain after the loop is the
+        // handler for those wakes.
+        let mut child_event = None;
         for event in events.iter() {
-            match event.key {
-                PTY_READ_WRITE_KEY if event.readable && !pty_eof => {
-                    // A pinned viewport must be allowed to borrow the
-                    // remaining global history before parsing new rows. If
-                    // the normal limit were reached first, alacritty would
-                    // discard the very rows the user is looking at.
-                    let _ = scrollback.prepare_for_output(&mut term);
-                    let output_start = output_buffer.len();
-                    let drain_result = drain_pty(
-                        &mut pty,
-                        &mut processor,
-                        &mut term,
-                        &mut read_buffer,
-                        &mut output_buffer,
+            if event.key == PTY_CHILD_EVENT_KEY {
+                child_event = pty.next_child_event();
+            }
+        }
+        if let Some(ChildEvent::Exited(status)) = child_event {
+            child_exited = Some(status.and_then(|status| status.code()));
+        }
+        if !pty_eof {
+            // A pinned viewport must be allowed to borrow the
+            // remaining global history before parsing new rows. If
+            // the normal limit were reached first, alacritty would
+            // discard the very rows the user is looking at.
+            let _ = scrollback.prepare_for_output(&mut term);
+            let output_start = output_buffer.len();
+            let drain_result =
+                drain_data(&pty_data_rx, &mut processor, &mut term, &mut output_buffer);
+            binary_output |= output_buffer[output_start..].contains(&0);
+            match drain_result {
+                Ok(ReadEffect::BudgetExhausted) => pty_data_pending = true,
+                Ok(ReadEffect::Continue) => pty_data_pending = false,
+                Ok(ReadEffect::Eof) => {
+                    pty_data_pending = false;
+                    reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {}
+                Err(error) => {
+                    pty_data_pending = false;
+                    tracing::debug!(
+                        target: "water::pty",
+                        terminal_id = %terminal_id,
+                        ?error,
+                        "PTY read ended"
                     );
-                    binary_output |= output_buffer[output_start..].contains(&0);
-                    match drain_result {
-                        Ok(ReadEffect::Continue | ReadEffect::BudgetExhausted) => {}
-                        Ok(ReadEffect::Eof) => {
-                            pty_eof = true;
-                            let _ = poller.delete(pty.file());
-                        }
-                        Err(error) if error.kind() == ErrorKind::WouldBlock => {}
-                        Err(error) => {
-                            tracing::debug!(
-                                target: "water::pty",
-                                terminal_id = %terminal_id,
-                                ?error,
-                                "PTY read ended"
-                            );
-                            pty_eof = true;
-                            let _ = poller.delete(pty.file());
-                        }
-                    }
+                    reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
-                PTY_CHILD_EVENT_KEY => {
-                    if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
-                        child_exited = Some(status.and_then(|status| status.code()));
-                    }
-                }
-                TERMINAL_WAKE_KEY => {}
-                _ => {}
             }
         }
 
@@ -531,15 +612,16 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         ) {
             worker_stop = true;
         }
-
         if !output_buffer.is_empty() {
             last_output_at = Instant::now();
         }
-        let mut metadata_changed = apply_process_metadata_result(
-            &metadata_result_rx,
-            &mut metadata_probe_in_flight,
-            &mut process_metadata,
-        );
+        let mut metadata_changed = stats_phase("metadata_apply", || {
+            apply_process_metadata_result(
+                &metadata_result_rx,
+                &mut metadata_probe_in_flight,
+                &mut process_metadata,
+            )
+        });
         // The worker owns the activity signal: probe results carry it through
         // unchanged, and it flips on output-burst edges without waiting for
         // the next probe round trip.
@@ -567,19 +649,38 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             last_process_metadata_request = Instant::now();
         }
         if !output_buffer.is_empty() {
-            let _ = scrollback.sync(&mut term);
+            stats_phase("scrollback_sync", || {
+                let _ = scrollback.sync(&mut term);
+            });
         }
         if !output_buffer.is_empty() || metadata_changed {
             snapshot_revision = snapshot_revision.saturating_add(1);
-            publish_snapshot(
-                &term,
-                TerminalProcessState::Running,
-                snapshot_revision,
-                &publisher,
-                &output_buffer,
-                viewport_position,
-                &process_metadata,
-            );
+            stats_phase("publish", || {
+                let p_started = Instant::now();
+                publish_snapshot(
+                    &term,
+                    TerminalProcessState::Running,
+                    snapshot_revision,
+                    &publisher,
+                    &output_buffer,
+                    viewport_position,
+                    &process_metadata,
+                );
+                if std::env::var("WATER_PTY_STATS").is_ok() {
+                    let el = p_started.elapsed();
+                    PUBLISH_NANOS
+                        .fetch_add(el.as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                    PUBLISH_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if el.as_millis() > 1 {
+                        tracing::info!(
+                            target: "water::pty",
+                            ms = format_args!("{:.1}", el.as_secs_f64() * 1e3),
+                            output_kb = output_buffer.len() / 1024,
+                            "publish"
+                        );
+                    }
+                }
+            });
         }
         if metadata_changed {
             emit_process_metadata(
@@ -608,17 +709,17 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
 
         if let Some(code) = child_exited {
+            // Stop the reader first so its in-flight batch is flushed into
+            // the channel; the final drain below then picks it up.
+            if let Some(reader_handle) = pty_reader_handle.take() {
+                pty_reader_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = reader_handle.join();
+            }
             // A final non-blocking drain avoids losing bytes that were already
             // queued in the PTY when SIGCHLD arrived.
             output_buffer.clear();
             let _ = scrollback.prepare_for_output(&mut term);
-            let _ = drain_pty(
-                &mut pty,
-                &mut processor,
-                &mut term,
-                &mut read_buffer,
-                &mut output_buffer,
-            );
+            let _ = drain_data(&pty_data_rx, &mut processor, &mut term, &mut output_buffer);
             if !output_buffer.is_empty() {
                 let _ = scrollback.sync(&mut term);
                 snapshot_revision = snapshot_revision.saturating_add(1);
@@ -657,7 +758,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
     }
 
+    if let Some(reader_handle) = pty_reader_handle.take() {
+        pty_reader_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = reader_handle.join();
+    }
     let _ = pty.deregister(&poller);
+    report_pty_stats_if_enabled();
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = None;
     scrollback.unregister();
 }
@@ -1269,40 +1375,265 @@ fn kill_process_group(pty: &mut Pty) {
     let _ = pty;
 }
 
-fn drain_pty(
-    pty: &mut Pty,
-    processor: &mut Processor,
-    term: &mut Term<WorkerEventProxy>,
-    read_buffer: &mut [u8],
-    output_buffer: &mut Vec<u8>,
-) -> io::Result<ReadEffect> {
-    drain_reader(pty.reader(), processor, term, read_buffer, output_buffer)
+fn stats_phase<T>(name: &str, f: impl FnOnce() -> T) -> T {
+    if std::env::var("WATER_PTY_STATS").is_ok() {
+        let started = Instant::now();
+        let result = f();
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        if ms > 5.0 {
+            tracing::info!(
+                target: "water::pty",
+                phase = name,
+                ms = format_args!("{ms:.0}"),
+                "slow worker phase"
+            );
+        }
+        result
+    } else {
+        f()
+    }
 }
 
-fn drain_reader<R: Read + ?Sized>(
-    reader: &mut R,
+/// Consume reader-thread batches from the channel until the tick budget is
+/// exhausted or the channel is empty. Non-blocking: the reader thread wakes
+/// this poller on every push, so an empty read just means "no burst in
+/// flight right now".
+fn drain_data(
+    rx: &Receiver<Vec<u8>>,
     processor: &mut Processor,
     term: &mut Term<WorkerEventProxy>,
-    read_buffer: &mut [u8],
     output_buffer: &mut Vec<u8>,
 ) -> io::Result<ReadEffect> {
-    let started = Instant::now();
-    let mut bytes_this_tick = 0_usize;
-    loop {
-        match reader.read(read_buffer) {
-            Ok(0) => return Ok(ReadEffect::Eof),
-            Ok(bytes_read) => {
-                output_buffer.extend_from_slice(&read_buffer[..bytes_read]);
-                processor.advance(term, &read_buffer[..bytes_read]);
-                bytes_this_tick = bytes_this_tick.saturating_add(bytes_read);
-                if bytes_this_tick >= MAX_PTY_BYTES_PER_TICK
-                    || started.elapsed() >= MAX_PTY_DRAIN_TIME
-                {
-                    return Ok(ReadEffect::BudgetExhausted);
+    let drain_started = Instant::now();
+    let result = {
+        let stats = std::env::var("WATER_PTY_STATS").is_ok();
+        let mut bytes_this_tick = 0_usize;
+        let started = Instant::now();
+        let mut effect = ReadEffect::Continue;
+
+        loop {
+            match rx.try_recv() {
+                Ok(chunk) => {
+                    if feed_chunk(
+                        output_buffer,
+                        processor,
+                        term,
+                        &chunk,
+                        &mut bytes_this_tick,
+                        &started,
+                        stats,
+                    ) {
+                        effect = ReadEffect::BudgetExhausted;
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    effect = ReadEffect::Eof;
+                    break;
                 }
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(ReadEffect::Continue),
-            Err(error) => return Err(error),
+        }
+        effect
+    };
+    if std::env::var("WATER_PTY_STATS").is_ok() {
+        DRAIN_NANOS.fetch_add(
+            drain_started.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let now = std::time::UNIX_EPOCH.elapsed().expect("clock").as_nanos() as u64;
+        let last = LAST_DRAIN_END.swap(now, std::sync::atomic::Ordering::Relaxed);
+        let gap_ms = (now.saturating_sub(last)) as f64 / 1e6;
+        if gap_ms > 5.0 {
+            tracing::info!(
+                target: "water::pty",
+                gap_ms = format_args!("{gap_ms:.0}"),
+                "drain gap (time between drain calls)"
+            );
+        }
+    }
+    Ok(result)
+}
+
+/// Dedicated PTY reader thread.
+///
+/// The macOS slave->master PTY queue holds only ~1KB ahead of the reader, so
+/// a reader that parses while reading (the pre-split design) makes the
+/// writer wait once per 1KB - the 61MB benchmark paid ~34k kqueue wakes for
+/// that. This thread owns the master reads: it spin-reads while a burst is
+/// flowing (catches the microsecond-scale refills without a kqueue round
+/// trip), blocks on kqueue once the writer goes quiet (zero idle CPU), and
+/// pushes byte batches into a bounded channel the worker parses. Each push
+/// wakes the worker through its poller, so the PTY keeps draining at writer
+/// speed even while the worker is busy parsing the previous batch.
+fn spawn_pty_reader(
+    pty: &Pty,
+    wakeup: WakeupCallback,
+    stopped: Arc<AtomicBool>,
+) -> io::Result<(Receiver<Vec<u8>>, std::thread::JoinHandle<()>)> {
+    let mut reader_file = pty.file().try_clone()?;
+    let reader_poller = Poller::new()?;
+    unsafe {
+        reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Level)?;
+    }
+    let (tx, rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
+
+    let handle = std::thread::Builder::new()
+        .name("water-terminal-reader".into())
+        .spawn(move || {
+            boost_drain_thread_qos();
+            let stats = std::env::var("WATER_PTY_STATS").is_ok();
+            let mut buf = [0_u8; 128 * 1024];
+            let mut batch = Vec::with_capacity(256 * 1024);
+            let mut out = Vec::new();
+            let mut events = Events::new();
+            let mut batch_started: Option<Instant> = None;
+            // Move a full batch into the channel without reallocating the
+            // reader's buffers; returns whether the worker is still attached.
+            let push = |batch: &mut Vec<u8>, out: &mut Vec<u8>| -> bool {
+                std::mem::swap(batch, out);
+                tx.send(std::mem::take(out)).is_ok()
+            };
+
+            loop {
+                // Burst phase: spin-read everything the writer has produced.
+                let mut spin_start: Option<Instant> = None;
+                loop {
+                    match reader_file.read(&mut buf) {
+                        Ok(0) => {
+                            if !batch.is_empty() && push(&mut batch, &mut out) {
+                                wakeup();
+                            }
+                            return;
+                        }
+                        Ok(bytes_read) => {
+                            if batch.is_empty() {
+                                batch_started = Some(Instant::now());
+                            }
+                            batch.extend_from_slice(&buf[..bytes_read]);
+                            spin_start = None;
+                            if batch.len() >= READER_PUSH_BYTES {
+                                if push(&mut batch, &mut out) {
+                                    wakeup();
+                                } else {
+                                    return;
+                                }
+                                batch_started = None;
+                            }
+                        }
+                        Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            // A stale partial batch must not wait for the
+                            // 64KB threshold (slow-but-continuous streams).
+                            let batch_stale = batch_started
+                                .is_some_and(|at| at.elapsed() >= READER_MAX_BATCH_AGE);
+                            match spin_start {
+                                None => spin_start = Some(Instant::now()),
+                                Some(start)
+                                    if start.elapsed() < READER_BURST_IDLE && !batch_stale => {}
+                                _ => break,
+                            }
+                        }
+                        Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                        Err(_) => {
+                            if !batch.is_empty() && push(&mut batch, &mut out) {
+                                wakeup();
+                            }
+                            return;
+                        }
+                    }
+                }
+                // Idle phase: the writer has been quiet - flush what we have
+                // and block on kqueue until the next chunk (the bounded poll
+                // also lets the thread notice the worker dropping the
+                // channel on shutdown).
+                if !batch.is_empty() {
+                    if !push(&mut batch, &mut out) {
+                        return;
+                    }
+                    batch_started = None;
+                    wakeup();
+                }
+                let wait_started = Instant::now();
+                let waited = reader_poller.wait(&mut events, Some(READER_IDLE_POLL));
+                if stats {
+                    GRACE_POLLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    GRACE_NANOS.fetch_add(
+                        wait_started.elapsed().as_nanos() as u64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    if waited.map(|count| count > 0).unwrap_or(false) {
+                        GRACE_WAKES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
+                    if !batch.is_empty() && push(&mut batch, &mut out) {
+                        wakeup();
+                    }
+                    return;
+                }
+            }
+        })?;
+    Ok((rx, handle))
+}
+
+/// Optional throughput diagnostics (`WATER_PTY_STATS=1`): cumulative parse
+/// time/bytes and total drain time, printed when a worker exits.
+static PARSE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PARSE_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DRAIN_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static POLL_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PUBLISH_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PUBLISH_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRACE_POLLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRACE_WAKES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GRACE_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_DRAIN_END: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Feed one read chunk into the parser. Returns true when the tick budget
+/// (bytes or time) is exhausted.
+fn feed_chunk(
+    output_buffer: &mut Vec<u8>,
+    processor: &mut Processor,
+    term: &mut Term<WorkerEventProxy>,
+    chunk: &[u8],
+    bytes_this_tick: &mut usize,
+    started: &Instant,
+    stats: bool,
+) -> bool {
+    output_buffer.extend_from_slice(chunk);
+    let parse_started = if stats { Some(Instant::now()) } else { None };
+    processor.advance(term, chunk);
+    if let Some(parse_at) = parse_started {
+        PARSE_NANOS.fetch_add(
+            parse_at.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        PARSE_BYTES.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+    *bytes_this_tick = bytes_this_tick.saturating_add(chunk.len());
+    *bytes_this_tick >= MAX_PTY_BYTES_PER_TICK || started.elapsed() >= MAX_PTY_DRAIN_TIME
+}
+
+fn report_pty_stats_if_enabled() {
+    if std::env::var("WATER_PTY_STATS").is_ok() {
+        let nanos = PARSE_NANOS.load(std::sync::atomic::Ordering::Relaxed);
+        let bytes = PARSE_BYTES.load(std::sync::atomic::Ordering::Relaxed);
+        let drain_nanos = DRAIN_NANOS.load(std::sync::atomic::Ordering::Relaxed);
+        if bytes > 0 {
+            tracing::info!(
+                target: "water::pty",
+                parsed_mb = bytes as f64 / 1e6,
+                parse_secs = PARSE_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                parse_mbs = if nanos > 0 { bytes as f64 / (nanos as f64 / 1e9) / 1e6 } else { 0.0 },
+                drain_secs = drain_nanos as f64 / 1e9,
+                poll_secs = POLL_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                publish_secs = PUBLISH_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                publish_count = PUBLISH_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+                grace_polls = GRACE_POLLS.load(std::sync::atomic::Ordering::Relaxed),
+                grace_wakes = GRACE_WAKES.load(std::sync::atomic::Ordering::Relaxed),
+                grace_secs = GRACE_NANOS.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1e9,
+                "pty throughput stats"
+            );
         }
     }
 }
@@ -1449,6 +1780,29 @@ impl EventListener for WorkerEventProxy {
     }
 }
 
+/// Raise this thread's QoS to USER_INTERACTIVE.
+///
+/// The PTY drain + VTE parse loop is the pipeline's throughput-critical
+/// path. On Apple Silicon the scheduler tends to park long-lived threads
+/// that have been idle on E-cores, where the same parse runs at roughly
+/// half speed (measured: the 61MB ingest benchmark takes ~2.5x longer). macOS
+/// has no supported hard-affinity API (THREAD_AFFINITY_POLICY is ignored on
+/// arm64); QoS is the documented lever that biases placement toward
+/// P-cores.
+#[cfg(target_os = "macos")]
+fn boost_drain_thread_qos() {
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: i32, relative_priority: i32) -> i32;
+    }
+    const QOS_CLASS_USER_INTERACTIVE: i32 = 0x21;
+    if unsafe { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0) } != 0 {
+        tracing::debug!(target: "water::pty", "worker QoS boost unavailable");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn boost_drain_thread_qos() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1535,31 +1889,21 @@ mod tests {
         assert!(!metadata.cwd.is_empty());
     }
 
-    struct EndlessReader;
-
-    impl Read for EndlessReader {
-        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-            buffer.fill(b'x');
-            Ok(buffer.len())
-        }
-    }
-
     #[test]
     fn sustained_output_yields_after_the_read_budget() {
-        let mut reader = EndlessReader;
+        // Pre-fill the reader channel with enough chunks to exceed the tick
+        // byte budget.
+        let chunk = vec![b'x'; 4 * 1024];
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        for _ in 0..=MAX_PTY_BYTES_PER_TICK / chunk.len() {
+            tx.send(chunk.clone()).unwrap();
+        }
+        drop(tx);
         let mut term = test_term(TerminalSize::new(80, 24), 100);
         let mut processor = Processor::new();
-        let mut read_buffer = [0_u8; READ_BUFFER_BYTES];
         let mut output = Vec::new();
 
-        let effect = drain_reader(
-            &mut reader,
-            &mut processor,
-            &mut term,
-            &mut read_buffer,
-            &mut output,
-        )
-        .unwrap();
+        let effect = drain_data(&rx, &mut processor, &mut term, &mut output).unwrap();
 
         assert_eq!(effect, ReadEffect::BudgetExhausted);
         assert!(!output.is_empty());
@@ -1629,5 +1973,102 @@ mod tests {
         assert!(dirty);
         assert_eq!(scrollback.current_limit, 5);
         assert!(terminal_history_size(&term) <= 5);
+    }
+
+    /// Always-on smoke check: parse a small chunk through the real VTE path
+    /// and confirm the grid actually received the text. The full 61 MB
+    /// benchmark stream only runs when `WATER_PARSE_BENCH` is set (it is a
+    /// throughput probe for the terminal pipeline, not a correctness check).
+    #[test]
+    fn parse_throughput_smoke() {
+        let path = "/Users/clearain/tmp/computer_use/benchmark.data";
+        let data = match std::fs::read(path) {
+            Ok(d) => d,
+            Err(_) => return,
+        };
+        // WATER_PARSE_BENCH_SIZE=cxrows lets throughput probes compare grid
+        // shapes (scroll cost is proportional to column count).
+        let size = match std::env::var("WATER_PARSE_BENCH_SIZE") {
+            Ok(spec) => {
+                let (cols, rows) = spec
+                    .split_once('x')
+                    .and_then(|(c, r)| c.parse::<usize>().ok().zip(r.parse::<usize>().ok()))
+                    .unwrap_or((113, 34));
+                TerminalSize::new(cols, rows)
+            }
+            Err(_) => TerminalSize::new(113, 34),
+        };
+        let (sender, _receiver) = std::sync::mpsc::channel();
+        let mut term = Term::new(
+            Config {
+                scrolling_history: 2000,
+                ..Config::default()
+            },
+            &size,
+            WorkerEventProxy {
+                sender,
+                theme: TerminalTheme::default(),
+            },
+        );
+        let mut processor: Processor = Processor::new();
+        let sample = &data[..64 * 1024.min(data.len())];
+        let start = Instant::now();
+        processor.advance(&mut term, sample);
+        let elapsed = start.elapsed();
+        let mb = data.len() as f64 / 1_000_000.0;
+        println!(
+            "PARSE-SMOKE: {:.1} KB in {:?} = {:.1} MB/s",
+            sample.len() as f64 / 1024.0,
+            elapsed,
+            sample.len() as f64 / 1_000_000.0 / elapsed.as_secs_f64().max(f64::EPSILON),
+        );
+        // The stream starts with printable text; the grid must not be empty.
+        assert!(term.grid().display_iter().any(|cell| cell.c != ' '));
+
+        if std::env::var("WATER_PARSE_BENCH").is_ok() {
+            // Interleaved A/B measurement: one-shot advance vs advancing in
+            // 1KB slices (the worker's real PTY pattern). Interleaving
+            // cancels out machine-state drift between the two variants.
+            let run = |label: &str, chunk: usize| {
+                let (s2, _r2) = std::sync::mpsc::channel();
+                let mut term2 = Term::new(
+                    Config {
+                        scrolling_history: 2000,
+                        ..Config::default()
+                    },
+                    &size,
+                    WorkerEventProxy {
+                        sender: s2,
+                        theme: TerminalTheme::default(),
+                    },
+                );
+                let mut p2: Processor = Processor::new();
+                let start = Instant::now();
+                if chunk >= data.len() {
+                    p2.advance(&mut term2, &data);
+                } else {
+                    for piece in data.chunks(chunk) {
+                        p2.advance(&mut term2, piece);
+                    }
+                }
+                let secs = start.elapsed().as_secs_f64();
+                println!(
+                    "PARSE-BENCH [{label}]: {mb:.1} MB in {:.3}s = {:.1} MB/s",
+                    secs,
+                    mb / secs,
+                );
+                secs
+            };
+            let a1 = run("oneshot-A", data.len());
+            let b1 = run("1kb-A", 1024);
+            let a2 = run("oneshot-B", data.len());
+            let b2 = run("1kb-B", 1024);
+            println!(
+                "PARSE-RATIO: oneshot={:.1} MB/s vs 1kb={:.1} MB/s (ratio {:.2})",
+                mb / ((a1 + a2) / 2.0),
+                mb / ((b1 + b2) / 2.0),
+                (b1 + b2) / (a1 + a2),
+            );
+        }
     }
 }

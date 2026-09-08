@@ -30,6 +30,7 @@ fn main() -> Result<()> {
         }
         "state" => print_json(&client.state_dump().context("state request failed")?)?,
         "ui" => run_ui(&client, &arguments[1..])?,
+        "server" => run_server(&client, &arguments[1..])?,
         "debug" => run_debug(&client, &arguments[1..])?,
         "workspace" => run_workspace(&client, &arguments[1..])?,
         "tab" => run_tab(&client, &arguments[1..])?,
@@ -101,6 +102,19 @@ fn run_debug(client: &ControlClient, arguments: &[String]) -> Result<()> {
         Some("memory") => print_json(&client.memory_stats().context("memory request failed")?)?,
         Some(command) => bail!("unknown debug command: {command}"),
         None => bail!("debug requires a command"),
+    }
+    Ok(())
+}
+
+fn run_server(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        Some("info") => print_json(&client.server_info().context("server info request failed")?)?,
+        Some("shutdown") => {
+            let _ = client.server_shutdown().context("server shutdown failed")?;
+            println!("server shutdown requested");
+        }
+        Some(command) => bail!("unknown server command: {command}"),
+        None => bail!("server requires info or shutdown"),
     }
     Ok(())
 }

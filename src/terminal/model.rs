@@ -18,7 +18,6 @@ use super::snapshot::{
     TerminalSummary, scrollback_row_bytes,
 };
 
-pub(crate) const TERMINAL_WAKE_KEY: usize = usize::MAX - 1;
 /// Retired terminals keep a compact final snapshot for waiters that race
 /// with pane auto-close. The window stays small so closed tabs cannot pin
 /// memory long after they were closed.
@@ -479,9 +478,15 @@ impl TerminalRegistry {
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         state.snapshot = Arc::new(snapshot);
         if !output.is_empty() {
+            // The waiters only ever match against the trailing
+            // MAX_RECENT_OUTPUT_BYTES of the stream. Pushing just the chunk
+            // tail keeps that invariant (the stream tail always survives the
+            // trim) while a large drain chunk no longer costs a full
+            // lossy-conversion copy per tick.
+            let tail_start = output.len().saturating_sub(MAX_RECENT_OUTPUT_BYTES);
             state
                 .recent_output
-                .push_str(&String::from_utf8_lossy(output));
+                .push_str(&String::from_utf8_lossy(&output[tail_start..]));
             trim_recent_output(&mut state.recent_output, MAX_RECENT_OUTPUT_BYTES);
         }
         let should_notify = !state.output_event_pending;
