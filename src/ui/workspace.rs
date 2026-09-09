@@ -459,6 +459,10 @@ struct TerminalRenderCacheKey {
     terminal_id: TerminalId,
     snapshot_revision: u64,
     viewport_position: i64,
+    /// The focused cursor is baked into its row's colors. Keep its position
+    /// out of whole-cache compatibility, then invalidate only the old/new
+    /// cursor rows when it moves.
+    focused_cursor: Option<(usize, usize)>,
     font_family: String,
     font_size_bits: u32,
     metrics: TerminalMetrics,
@@ -492,6 +496,16 @@ struct TerminalCachedRowPaint {
 struct TerminalRenderCache {
     key: Option<TerminalRenderCacheKey>,
     rows: BTreeMap<i32, TerminalCachedRowPaint>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalResizeRequest {
+    terminal_id: TerminalId,
+    target: TerminalSize,
+    /// Size projected by the snapshot when this request was sent. If this
+    /// changes while the target does not, another window has superseded us
+    /// and the active window must be allowed to request its target again.
+    observed_size: TerminalSize,
 }
 
 type TerminalRenderCaches = Arc<Mutex<BTreeMap<TerminalId, TerminalRenderCache>>>;
@@ -736,7 +750,7 @@ pub struct WorkspaceView {
     config: AppConfig,
     terminal_metrics: TerminalMetrics,
     focus_handle: FocusHandle,
-    resize_requests: Arc<Mutex<BTreeMap<TerminalId, TerminalSize>>>,
+    resize_requests: Arc<Mutex<BTreeMap<(ConnectionId, PaneId), TerminalResizeRequest>>>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
     render_caches: TerminalRenderCaches,
     input_handler_terminal: Option<TerminalId>,
@@ -2419,6 +2433,8 @@ impl WorkspaceView {
 
     fn terminal_resize_observer(
         &self,
+        connection_id: ConnectionId,
+        pane_id: PaneId,
         terminal_id: TerminalId,
         current_size: TerminalSize,
         metrics: TerminalMetrics,
@@ -2431,31 +2447,31 @@ impl WorkspaceView {
                 // A terminal can be projected in several native windows. Only
                 // the focused active window is allowed to negotiate its PTY
                 // size, otherwise each window can fight over the shared size.
-                if !window_active || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+                if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
                     return;
                 }
                 let size = TerminalSize::new(
                     terminal_columns_for_width(bounds, metrics),
                     terminal_lines_for_height(bounds, metrics),
                 );
-                if size == current_size {
-                    return;
-                }
                 let should_enqueue = {
                     let mut requests = resize_requests
                         .lock()
                         .expect("terminal resize requests poisoned");
-                    if requests.get(&terminal_id) == Some(&size) {
-                        false
-                    } else {
-                        requests.insert(terminal_id, size);
-                        true
-                    }
+                    terminal_resize_request_needed(
+                        &mut requests,
+                        connection_id,
+                        pane_id,
+                        terminal_id,
+                        current_size,
+                        size,
+                        window_active,
+                    )
                 };
                 if should_enqueue {
                     let _ = client.enqueue(AppCommand::Terminal(TerminalCommand::Resize {
-                        terminal_id: Some(terminal_id),
-                        pane_id: None,
+                        terminal_id: None,
+                        pane_id: Some(pane_id),
                         columns: size.columns,
                         lines: size.lines,
                     }));
@@ -4343,6 +4359,8 @@ impl WorkspaceView {
                         .relative()
                         .child(content)
                         .child(self.terminal_resize_observer(
+                            self.active_connection,
+                            pane_id,
                             terminal.terminal_id,
                             TerminalSize::new(terminal.columns, terminal.lines),
                             metrics,
@@ -5621,6 +5639,37 @@ fn terminal_columns_for_width(bounds: Bounds<gpui::Pixels>, metrics: TerminalMet
         .count()
 }
 
+fn terminal_resize_request_needed(
+    requests: &mut BTreeMap<(ConnectionId, PaneId), TerminalResizeRequest>,
+    connection_id: ConnectionId,
+    pane_id: PaneId,
+    terminal_id: TerminalId,
+    current_size: TerminalSize,
+    target: TerminalSize,
+    window_active: bool,
+) -> bool {
+    let key = (connection_id, pane_id);
+    if target == current_size {
+        requests.remove(&key);
+        return false;
+    }
+    if !window_active {
+        return false;
+    }
+
+    let request = TerminalResizeRequest {
+        terminal_id,
+        target,
+        observed_size: current_size,
+    };
+    if requests.get(&key) == Some(&request) {
+        false
+    } else {
+        requests.insert(key, request);
+        true
+    }
+}
+
 fn terminal_lines_for_height(bounds: Bounds<gpui::Pixels>, metrics: TerminalMetrics) -> usize {
     let origin = f32::from(bounds.origin.y);
     let bottom = terminal_snap_to_device_pixel(f32::from(bounds.bottom()), metrics.scale_factor);
@@ -6174,6 +6223,8 @@ impl gpui::Element for TerminalRenderElement {
             terminal_id: self.snapshot.terminal_id,
             snapshot_revision: self.snapshot.revision,
             viewport_position: self.snapshot.viewport_position,
+            focused_cursor: (self.options.cursor_focused && self.snapshot.cursor.visible)
+                .then(|| terminal_cursor_position(&self.snapshot)),
             font_family: self.font_family.clone(),
             font_size_bits: self.font_size.to_bits(),
             metrics: self.options.metrics,
@@ -6193,13 +6244,12 @@ impl gpui::Element for TerminalRenderElement {
         let mut caches = self.render_caches.lock().expect("terminal cache poisoned");
         let cache = caches.entry(self.snapshot.terminal_id).or_default();
         if cache.key.as_ref() != Some(&cache_key) {
-            let previous_viewport_position = cache
-                .key
+            let previous_key = cache.key.clone();
+            let previous_viewport_position = previous_key
                 .as_ref()
                 .map(|key| key.viewport_position)
                 .unwrap_or(self.snapshot.viewport_position);
-            let rows_compatible = cache
-                .key
+            let rows_compatible = previous_key
                 .as_ref()
                 .is_some_and(|previous| previous.rows_compatible_with(&cache_key));
             let previous_rows = if rows_compatible {
@@ -6231,8 +6281,13 @@ impl gpui::Element for TerminalRenderElement {
                     previous_rows
                         .remove(&previous_source_row)
                         .filter(|previous| {
-                            Arc::ptr_eq(&previous.cells, cells)
-                                || previous.cells.as_ref() == cells.as_ref()
+                            terminal_cached_row_cursor_compatible(
+                                previous_key.as_ref().and_then(|key| key.focused_cursor),
+                                cache_key.focused_cursor,
+                                previous_source_row,
+                                source_row,
+                            ) && (Arc::ptr_eq(&previous.cells, cells)
+                                || previous.cells.as_ref() == cells.as_ref())
                         })
                 else {
                     continue;
@@ -6798,6 +6853,19 @@ fn previous_cached_source_row(
         .ok()
 }
 
+fn terminal_cached_row_cursor_compatible(
+    previous_cursor: Option<(usize, usize)>,
+    current_cursor: Option<(usize, usize)>,
+    previous_source_row: i32,
+    current_source_row: i32,
+) -> bool {
+    let cursor_is_on_row = |cursor: Option<(usize, usize)>, row: i32| {
+        cursor.and_then(|(cursor_row, _)| i32::try_from(cursor_row).ok()) == Some(row)
+    };
+    !cursor_is_on_row(previous_cursor, previous_source_row)
+        && !cursor_is_on_row(current_cursor, current_source_row)
+}
+
 /// Positions a visible or overscan row while preserving the device-snapped
 /// geometry of the normal grid and adding only the fractional wheel movement.
 fn terminal_cell_bounds_for_row(
@@ -7300,6 +7368,84 @@ mod tests {
     }
 
     #[test]
+    fn pane_resize_requests_are_connection_scoped_and_reassert_after_supersession() {
+        let pane_id = PaneId::new(1);
+        let terminal_id = TerminalId::new(1);
+        let local = ConnectionId::new(1);
+        let remote = ConnectionId::new(2);
+        let initial = TerminalSize::new(80, 24);
+        let first_window = TerminalSize::new(100, 30);
+        let second_window = TerminalSize::new(120, 40);
+        let mut requests = BTreeMap::new();
+
+        assert!(terminal_resize_request_needed(
+            &mut requests,
+            local,
+            pane_id,
+            terminal_id,
+            initial,
+            first_window,
+            true,
+        ));
+        assert!(!terminal_resize_request_needed(
+            &mut requests,
+            local,
+            pane_id,
+            terminal_id,
+            initial,
+            first_window,
+            true,
+        ));
+        assert!(
+            terminal_resize_request_needed(
+                &mut requests,
+                local,
+                pane_id,
+                TerminalId::new(2),
+                initial,
+                first_window,
+                true,
+            ),
+            "replacing the terminal surface in a pane must create a fresh request"
+        );
+        assert!(
+            terminal_resize_request_needed(
+                &mut requests,
+                remote,
+                pane_id,
+                terminal_id,
+                initial,
+                first_window,
+                true,
+            ),
+            "colliding remote pane/terminal IDs must not inherit the local request"
+        );
+
+        assert!(
+            terminal_resize_request_needed(
+                &mut requests,
+                local,
+                pane_id,
+                TerminalId::new(2),
+                second_window,
+                first_window,
+                true,
+            ),
+            "the active window must reassert its size after another window resized the PTY"
+        );
+        assert!(!terminal_resize_request_needed(
+            &mut requests,
+            local,
+            pane_id,
+            terminal_id,
+            first_window,
+            first_window,
+            false,
+        ));
+        assert!(!requests.contains_key(&(local, pane_id)));
+    }
+
+    #[test]
     fn fractional_scroll_repaints_without_requesting_a_whole_row() {
         let mut state = TerminalScrollState::new(10);
         assert_eq!(state.accumulate(0.75), (None, true));
@@ -7558,6 +7704,35 @@ mod tests {
         assert_eq!(previous_cached_source_row(0, 11, 10), Some(-1));
         assert_eq!(previous_cached_source_row(5, 11, 10), Some(4));
         assert_eq!(previous_cached_source_row(-2, 9, 10), Some(-1));
+    }
+
+    #[test]
+    fn cached_rows_rebuild_only_where_the_focused_cursor_was_or_is() {
+        assert!(!terminal_cached_row_cursor_compatible(
+            Some((2, 7)),
+            Some((3, 0)),
+            2,
+            2,
+        ));
+        assert!(!terminal_cached_row_cursor_compatible(
+            Some((2, 7)),
+            Some((3, 0)),
+            3,
+            3,
+        ));
+        assert!(terminal_cached_row_cursor_compatible(
+            Some((2, 7)),
+            Some((3, 0)),
+            1,
+            1,
+        ));
+        assert!(!terminal_cached_row_cursor_compatible(
+            Some((4, 5)),
+            Some((4, 6)),
+            4,
+            4,
+        ));
+        assert!(terminal_cached_row_cursor_compatible(None, None, 4, 4));
     }
 
     #[test]
@@ -7949,7 +8124,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn connection_projection_switches_colliding_workspace_ids_without_cross_talk(
+    fn windows_switch_shared_connection_projections_without_cross_talk(
         cx: &mut gpui::TestAppContext,
     ) {
         let mut local_host = crate::app::ModelHost::start();
@@ -7986,7 +8161,17 @@ mod tests {
                 snapshot: remote_host.client().state_dump().unwrap(),
             },
         ];
-        let (view, cx) = cx.add_window_view(|_, cx| {
+        let first_connections = connections.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                first_connections,
+                local_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        let (other_view, cx) = cx.add_window_view(move |_, cx| {
             WorkspaceView::new_with_connections(
                 None,
                 connections,
@@ -8012,6 +8197,30 @@ mod tests {
             )),
             (remote_id, 2)
         );
+
+        assert_eq!(
+            other_view.update_in(cx, |view, _, _| (
+                view.active_connection,
+                view.workspace_dumps().len()
+            )),
+            (local_id, 1),
+            "switching one window must not change another window's projection"
+        );
+        other_view.update_in(cx, |view, _, cx| {
+            assert!(view.select_connection_locally(remote_id, cx));
+        });
+        view.update_in(cx, |view, _, cx| {
+            assert!(view.select_connection_locally(local_id, cx));
+        });
+        assert_eq!(
+            view.update_in(cx, |view, _, _| view.active_connection),
+            local_id
+        );
+        assert_eq!(
+            other_view.update_in(cx, |view, _, _| view.active_connection),
+            remote_id
+        );
+
         view.update_in(cx, |view, _, cx| view.remove_connection(remote_id, cx));
         assert_eq!(
             view.update_in(cx, |view, _, _| (
