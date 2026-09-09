@@ -84,7 +84,7 @@ pub use snapshot::{
     TerminalProcessState, TerminalRowSnapshot, TerminalSize, TerminalSnapshot, TerminalSummary,
     scrollback_row_bytes,
 };
-pub use stream::{TerminalSeq, TerminalStreamEvent, WireTerminalEvent};
+pub use stream::{TerminalSeq, TerminalStreamEvent, WireTerminalEvent, decode_base64, encode_base64};
 
 #[cfg(test)]
 mod tests {
