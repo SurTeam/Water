@@ -2446,9 +2446,11 @@ impl WorkspaceView {
             .get(&snapshot.terminal_id)
             .map(|state| state.visual_unacked_rows)
             .unwrap_or(0.0);
+        // The offset may extend into the full retained scrollback, not just
+        // the materialized overscan window (rows_before is a paint-only cap).
         offset.clamp(
             -(snapshot.rows_after.len() as f32),
-            snapshot.rows_before.len() as f32,
+            snapshot.history_len as f32,
         )
     }
 
@@ -2518,7 +2520,7 @@ impl WorkspaceView {
             return position;
         };
         let base = snapshot.viewport_position as f32;
-        if snapshot.rows_before.is_empty() {
+        if snapshot.history_len == 0 {
             position = position.min(base);
         }
         if snapshot.rows_after.is_empty() {
@@ -2629,10 +2631,6 @@ impl WorkspaceView {
             self.terminal_bounds_for(terminal_id),
             self.terminal_metrics,
         );
-        let row = mouse
-            .row
-            .saturating_sub(1)
-            .min(snapshot.size.lines.saturating_sub(1));
         let column = mouse
             .column
             .saturating_sub(1)
@@ -2642,9 +2640,18 @@ impl WorkspaceView {
         } else {
             mouse.side
         };
+        // The painted content is shifted by the unacked scroll offset (positive
+        // = scrolled up into history), so a pixel row addresses the source row
+        // that the paint actually shows — not the viewport's first row.
+        let scroll_offset_rows = self.terminal_scroll_offset_for_snapshot(&snapshot);
+        let first_visible =
+            terminal_visible_source_rows(snapshot.size.lines, scroll_offset_rows).start;
+        let row = (first_visible + mouse.row.saturating_sub(1) as i32)
+            .max(-(snapshot.history_len) as i32)
+            .min(snapshot.size.lines as i32 - 1);
         Some(TerminalSelectionEndpoint {
             position: TerminalCellPosition {
-                row: row as i32,
+                row,
                 column,
             },
             side,
@@ -9284,6 +9291,112 @@ mod tests {
             assert!(
                 view.selection.is_some(),
                 "selection must survive the PaneFocus operation result"
+            );
+        });
+        host.shutdown();
+    }
+
+    #[gpui::test]
+    fn mouse_selection_targets_the_scrolled_content(cx: &mut gpui::TestAppContext) {
+        // While the viewport is scrolled up (unacked fractional offset), a
+        // pixel row must address the shifted source row, not the viewport's
+        // first row.
+        let mut host = crate::app::ModelHost::start();
+        let client = std::sync::Arc::new(host.client());
+        let workspace = client
+            .dispatch(crate::command::AppCommand::Workspace(
+                crate::command::WorkspaceCommand::Create,
+            ))
+            .unwrap();
+        client.wait_operation(workspace).unwrap();
+        let tab = client
+            .dispatch(crate::command::AppCommand::Tab(
+                crate::command::TabCommand::New { title: None },
+            ))
+            .unwrap();
+        client.wait_operation(tab).unwrap();
+        let dump = client.state_dump().unwrap();
+        let terminal_id = displayed_terminal_id(&dump);
+        client
+            .dispatch(crate::command::AppCommand::Terminal(
+                crate::command::TerminalCommand::SendText {
+                    terminal_id: Some(terminal_id),
+                    pane_id: None,
+                    text: "for i in $(seq 1 40); do echo SCROLL_SEL_$i; done\n".to_owned(),
+                },
+            ))
+            .unwrap();
+        client
+            .terminal_contains(terminal_id, "SCROLL_SEL_40", std::time::Duration::from_secs(5))
+            .unwrap();
+        let mut snapshot = crate::terminal::snapshot_from_replay(
+            &client.terminal_replay(terminal_id).unwrap(),
+            2_000,
+        );
+        // The wire snapshot carries no grid; give the test snapshot a real
+        // retained-history bound like the GUI local emulator would.
+        snapshot.history_len = 40;
+        snapshot.history_bottom = snapshot.viewport_position - 40;
+        let snapshot = Arc::new(snapshot);
+
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new(client.clone(), dump.clone(), cx.focus_handle())
+        });
+        view.update_in(cx, |view, _window, cx| {
+            view.terminal_snapshots.insert(terminal_id, snapshot);
+            view.terminal_metrics = TerminalMetrics {
+                cell_width: 8.0,
+                line_height: 16.0,
+                scale_factor: 1.0,
+            };
+            view.terminal_bounds
+                .lock()
+                .expect("bounds poisoned")
+                .insert(
+                    terminal_id,
+                    Bounds::new(point(px(0.0), px(0.0)), size(px(640.0), px(384.0))),
+                );
+            // Simulate a 2.5-row unacked scroll up: the painted content is
+            // shifted, so pixel row 1 addresses source row 3.
+            view.scroll_accumulators
+                .entry(terminal_id)
+                .or_insert_with(|| TerminalScrollState::new(0))
+                .visual_unacked_rows = 2.5;
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            let selection = view
+                .selection
+                .expect("mouse selection must begin on the shown tab");
+            assert_eq!(
+                selection.anchor.position.row, -2,
+                "a pixel in the shifted grid must map to the painted source row"
+            );
+            // With the viewport pinned at the bottom (no unacked offset), the
+            // mapping is purely viewport-relative.
+            view.scroll_accumulators
+                .get_mut(&terminal_id)
+                .unwrap()
+                .visual_unacked_rows = 0.0;
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), cx);
+            assert_eq!(
+                view.selection.unwrap().anchor.position.row, 2,
+                "the mapping is viewport-relative without an unacked offset"
+            );
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            assert_eq!(
+                view.selection.unwrap().anchor.position.row, 1,
+                "pixel row 1 maps to the viewport top row"
+            );
+            // Scrolled up again to a whole row: pixel row 1 addresses a
+            // history row above the viewport (the mapping follows the
+            // painted content, not the viewport top).
+            view.scroll_accumulators
+                .get_mut(&terminal_id)
+                .unwrap()
+                .visual_unacked_rows = 2.0;
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            assert!(
+                view.selection.unwrap().anchor.position.row < 0,
+                "a whole-row unacked offset must shift the mapping into history"
             );
         });
         host.shutdown();

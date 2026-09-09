@@ -440,6 +440,14 @@ pub struct TerminalSnapshot {
     pub modes: TerminalModes,
     pub process: TerminalProcessState,
     pub revision: u64,
+    /// Rows of scrollback history retained above the viewport (the grid's
+    /// `total_lines - screen_lines`). The materialized `rows_before` only
+    /// covers a bounded overscan window; this field is the authoritative
+    /// scrollback limit the GUI may scroll to.
+    pub history_len: i64,
+    /// `viewport_position` of the oldest retained history row (the maximum
+    /// reachable scroll target, 0 when there is no history).
+    pub history_bottom: i64,
     /// Visible viewport rows. Rows are reference-counted so a viewport-only
     /// snapshot can reuse all unchanged rows from its predecessor.
     pub rows: Vec<TerminalRowSnapshot>,
@@ -531,6 +539,10 @@ impl<'de> Deserialize<'de> for TerminalSnapshot {
             modes: wire.modes,
             process: wire.process,
             revision: wire.revision,
+            // Deserialized wire snapshots carry no grid; the GUI local
+            // emulator is the scrollback authority, so treat them as flat.
+            history_len: 0,
+            history_bottom: 0,
             rows,
             rows_before: wire
                 .rows_before
@@ -571,6 +583,8 @@ impl TerminalSnapshot {
             modes: TerminalModes::default(),
             process: TerminalProcessState::Running,
             revision: 0,
+            history_len: 0,
+            history_bottom: 0,
             rows: (0..size.lines)
                 .map(|_| Arc::from(vec![TerminalCell::default(); size.columns].into_boxed_slice()))
                 .collect(),
@@ -675,6 +689,8 @@ impl TerminalSnapshot {
             // The retired history is gone, so any pinned viewport is moot.
             display_offset: 0,
             viewport_position: self.viewport_position,
+            history_len: 0,
+            history_bottom: self.viewport_position,
             cursor: TerminalCursor {
                 row: self
                     .cursor
@@ -748,6 +764,13 @@ impl TerminalSnapshot {
     ) -> (Self, usize) {
         let size = TerminalSize::new(term.columns(), term.screen_lines());
         let display_offset = term.grid().display_offset();
+        // Total retained history rows above the viewport: the authoritative
+        // scrollback bound (rows_before is only a bounded overscan window).
+        let history_len = term
+            .grid()
+            .total_lines()
+            .saturating_sub(size.lines) as i64;
+        let history_bottom = viewport_position.saturating_sub(history_len);
         let mut materialized_cells = 0;
         let rows = (0..size.lines)
             .map(|row| {
@@ -834,6 +857,8 @@ impl TerminalSnapshot {
                 modes,
                 process,
                 revision,
+                history_len,
+                history_bottom,
                 rows,
                 rows_before,
                 rows_after,
