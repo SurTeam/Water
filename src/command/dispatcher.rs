@@ -10,8 +10,8 @@ use crate::{
     pane::SplitAxis,
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
     terminal::{
-        TerminalError, TerminalLimits, TerminalManager, TerminalRegistry, TerminalSize,
-        TerminalSnapshot, TerminalTheme,
+        TerminalError, TerminalLimits, TerminalManager, TerminalRegistry, TerminalReplay,
+        TerminalSize,
     },
 };
 
@@ -64,7 +64,6 @@ impl CommandDispatcher {
         config: AppConfig,
     ) -> Self {
         let config = config.normalized();
-        let theme = config.theme.colors();
         Self::with_operations_and_terminal_wakeup_and_limits_and_config(
             operations,
             wakeup,
@@ -72,12 +71,8 @@ impl CommandDispatcher {
                 scrollback_lines: config.terminal.scrollback_lines,
                 inactive_scrollback_lines: config.terminal.inactive_scrollback_lines,
                 max_total_scrollback_bytes: config.terminal.max_total_scrollback_bytes,
+                replay_history_bytes: config.terminal.replay_history_bytes,
             },
-            TerminalTheme::new(
-                theme.terminal_foreground,
-                theme.terminal_background,
-                theme.cursor_background,
-            ),
             config,
         )
     }
@@ -113,7 +108,6 @@ impl CommandDispatcher {
             operations,
             wakeup,
             limits,
-            TerminalTheme::default(),
             AppConfig::default(),
         )
     }
@@ -122,7 +116,6 @@ impl CommandDispatcher {
         operations: OperationRegistry,
         wakeup: Option<crate::terminal::WakeupCallback>,
         limits: TerminalLimits,
-        theme: TerminalTheme,
         config: AppConfig,
     ) -> Self {
         let config = config.normalized();
@@ -139,7 +132,7 @@ impl CommandDispatcher {
             next_workspace_number: 1,
             events: EventBus::default(),
             operations,
-            terminals: TerminalManager::new_with_wakeup_and_limits(wakeup, limits, theme),
+            terminals: TerminalManager::new_with_wakeup_and_limits(wakeup, limits),
             shell_program,
             shell_args,
             default_cwd,
@@ -172,16 +165,7 @@ impl CommandDispatcher {
             "command completed"
         );
         self.operations.finish(operation_id, result);
-        self.sync_focused_terminal();
         operation_id
-    }
-
-    /// Propagates the model's focused pane to the terminal workers. Called
-    /// after every dispatched command and background event drain so a
-    /// backgrounded tab's worker can trim its scrollback tail promptly.
-    fn sync_focused_terminal(&mut self) {
-        let focused = self.model.focused_terminal_id();
-        self.terminals.set_focused_terminal(focused);
     }
 
     pub fn get_operation(&self, operation_id: OperationId) -> Option<OperationSnapshot> {
@@ -201,17 +185,14 @@ impl CommandDispatcher {
     }
 
     pub fn state_dump(&self) -> StateDump {
+        crate::metrics::inc(crate::metrics::state_dumps());
         let mut state = self.model.snapshot();
-        let registry = self.terminals.registry();
-        // Every workspace projects its displayed tab with grid cells so a
-        // window can select an inactive workspace without racing a separate
-        // terminal query. Hidden tabs project summary metadata only; their
-        // grids remain in the registry (the single source of truth) and are
-        // fetched per terminal by waterctl waiters.
+        // Every terminal projects control-plane metadata only (geometry and
+        // process state); the GUI builds the screen locally from the raw
+        // PTY stream, so no grid ever crosses the wire in a state dump.
         for workspace in &mut state.workspaces {
-            let active_tab = workspace.active_tab;
             for tab in &mut workspace.tabs {
-                attach_terminal_projections(&mut tab.tree, &registry, active_tab == Some(tab.id));
+                attach_terminal_projections(&mut tab.tree, &self.model);
             }
         }
         state.workspace = state
@@ -230,10 +211,8 @@ impl CommandDispatcher {
         let mut stats = self.model.memory_stats();
         stats.scrollback_lines = self.terminals.scrollback_lines();
         stats.inactive_scrollback_lines = self.terminals.inactive_scrollback_lines();
-        stats.max_total_scrollback_bytes = self.terminals.max_total_scrollback_bytes();
-        stats.retained_scrollback_lines = self.terminals.retained_scrollback_lines();
-        stats.retained_scrollback_bytes = self.terminals.retained_scrollback_bytes();
-        stats.registry_snapshot_bytes = self.terminals.retained_snapshot_bytes();
+        stats.replay_history_bytes = self.terminals.replay_history_bytes();
+        stats.retained_replay_bytes = self.terminals.retained_replay_bytes();
         stats
     }
 
@@ -241,13 +220,26 @@ impl CommandDispatcher {
         self.terminals.registry()
     }
 
-    pub fn terminal_snapshot(
+    /// Returns the bounded raw replay history; callers build a temporary
+    /// local terminal and replay the events to inspect the screen.
+    pub fn terminal_replay(
         &self,
         terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    ) -> Result<crate::terminal::TerminalReplay, DispatchError> {
         self.terminals
             .registry()
-            .snapshot(terminal_id)
+            .replay(terminal_id)
+            .map_err(terminal_dispatch_error)
+    }
+
+    /// Live raw-stream attachment: ordered historical replay plus a live
+    /// event channel pumped by the caller.
+    pub fn terminal_attach(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<crate::terminal::TerminalAttachment, DispatchError> {
+        self.terminals
+            .attach(terminal_id)
             .map_err(terminal_dispatch_error)
     }
 
@@ -256,7 +248,7 @@ impl CommandDispatcher {
         terminal_id: TerminalId,
         text: &str,
         timeout: std::time::Duration,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    ) -> Result<TerminalReplay, DispatchError> {
         self.terminals
             .registry()
             .contains_text(terminal_id, text, timeout)
@@ -267,7 +259,7 @@ impl CommandDispatcher {
         &self,
         terminal_id: TerminalId,
         timeout: std::time::Duration,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    ) -> Result<TerminalReplay, DispatchError> {
         self.terminals
             .registry()
             .wait_process_exit(terminal_id, timeout)
@@ -281,20 +273,6 @@ impl CommandDispatcher {
         let mut changed = false;
         for event in self.terminals.drain_events() {
             match event {
-                crate::terminal::TerminalManagerEvent::OutputChanged { terminal_id } => {
-                    if let Ok(snapshot) =
-                        self.terminals.registry().take_output_snapshot(terminal_id)
-                        && self
-                            .model
-                            .set_terminal_output_revision(terminal_id, snapshot.revision)
-                    {
-                        let size = snapshot.size;
-                        self.model
-                            .set_terminal_size(terminal_id, size.columns, size.lines);
-                        self.emit(AppEventKind::TerminalOutputChanged { terminal_id });
-                        changed = true;
-                    }
-                }
                 crate::terminal::TerminalManagerEvent::TitleChanged { terminal_id, title } => {
                     if self.model.set_terminal_title(terminal_id, title.clone()) {
                         self.emit(AppEventKind::TerminalTitleChanged { terminal_id, title });
@@ -375,7 +353,6 @@ impl CommandDispatcher {
         // Auto-close and exit handling can move focus away from a pane, so
         // the workers must observe the new focused terminal before the next
         // state dump is projected.
-        self.sync_focused_terminal();
         changed
     }
 
@@ -1146,7 +1123,6 @@ impl CommandDispatcher {
             status: TerminalStatus::Running,
             columns: size.columns,
             lines: size.lines,
-            last_output_revision: 0,
             agent,
             agent_label: None,
         });
@@ -1251,15 +1227,15 @@ impl CommandDispatcher {
                     lines: size.lines,
                 })
             }
+            // Viewport and scrollback are GUI-local in the raw-stream
+            // architecture; these commands are accepted for wire
+            // compatibility and acknowledged without server-side state.
             TerminalCommand::Scroll {
                 terminal_id,
                 pane_id,
                 lines,
             } => {
                 let terminal_id = self.resolve_terminal_target(terminal_id, pane_id)?;
-                self.terminals
-                    .scroll(terminal_id, lines)
-                    .map_err(terminal_command_error)?;
                 Ok(OperationResult::TerminalScrolled { terminal_id, lines })
             }
             TerminalCommand::SetViewportPosition {
@@ -1268,9 +1244,6 @@ impl CommandDispatcher {
                 target,
             } => {
                 let terminal_id = self.resolve_terminal_target(terminal_id, pane_id)?;
-                self.terminals
-                    .set_viewport_position(terminal_id, target)
-                    .map_err(terminal_command_error)?;
                 Ok(OperationResult::TerminalViewportPositionSet {
                     terminal_id,
                     target,
@@ -1488,11 +1461,7 @@ fn terminal_command_error(error: TerminalError) -> CommandError {
     CommandError::new(code, message)
 }
 
-fn attach_terminal_projections(
-    tree: &mut PaneTreeDump,
-    registry: &TerminalRegistry,
-    include_grid: bool,
-) {
+fn attach_terminal_projections(tree: &mut PaneTreeDump, model: &ApplicationModel) {
     match tree {
         PaneTreeDump::Leaf {
             surface_state,
@@ -1500,21 +1469,15 @@ fn attach_terminal_projections(
             ..
         } => {
             *terminal = match surface_state {
-                SurfaceState::Terminal(terminal) => registry
-                    .snapshot_arc(terminal.terminal_id)
-                    .ok()
-                    .map(|snapshot| {
-                        Box::new(TerminalProjection {
-                            summary: snapshot.summary(),
-                            snapshot: include_grid.then_some(snapshot),
-                        })
-                    }),
+                SurfaceState::Terminal(terminal) => model
+                    .terminal_summary(terminal.terminal_id)
+                    .map(|summary| Box::new(TerminalProjection { summary })),
                 SurfaceState::Empty(_) => None,
             };
         }
         PaneTreeDump::Split { first, second, .. } => {
-            attach_terminal_projections(first, registry, include_grid);
-            attach_terminal_projections(second, registry, include_grid);
+            attach_terminal_projections(first, model);
+            attach_terminal_projections(second, model);
         }
     }
 }
@@ -1564,7 +1527,6 @@ mod tests {
                     status: TerminalStatus::Running,
                     columns: 80,
                     lines: 24,
-                    last_output_revision: 0,
                     agent: Some(DetectedAgent {
                         kind: AgentKind::ClaudeCode,
                         active: true,
@@ -2157,7 +2119,6 @@ mod tests {
                     status: TerminalStatus::Running,
                     columns: 80,
                     lines: 24,
-                    last_output_revision: 0,
                     agent: None,
                     agent_label: None,
                 }),

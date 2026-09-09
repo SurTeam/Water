@@ -9,9 +9,10 @@ use thiserror::Error;
 use crate::agent::AgentKind;
 use crate::terminal::{
     DEFAULT_COLUMNS, DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_LINES,
-    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES,
-    MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES,
-    default_shell_args, default_shell_program,
+    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_REPLAY_HISTORY_BYTES, DEFAULT_SCROLLBACK_LINES,
+    MAX_COLUMNS, MAX_LINES, MAX_REPLAY_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_BYTES,
+    MIN_MAX_TOTAL_SCROLLBACK_BYTES, MIN_REPLAY_HISTORY_BYTES, default_shell_args,
+    default_shell_program,
 };
 
 const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC Nerd Font";
@@ -397,6 +398,10 @@ pub struct TerminalConfig {
     /// Aggregate byte budget shared by the scrollback grids of all
     /// terminals. Bytes (not rows) because a row's cost scales with width.
     pub max_total_scrollback_bytes: usize,
+    /// Server-side raw replay-history byte budget per terminal. This is the
+    /// resync source for re-attaching clients and headless captures; it is
+    /// separate from (and typically much larger than) the GUI scrollback.
+    pub replay_history_bytes: usize,
     /// Font family used by terminal rows.
     pub font_family: String,
     /// Terminal font size in logical pixels.
@@ -413,6 +418,7 @@ impl Default for TerminalConfig {
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             inactive_scrollback_lines: DEFAULT_INACTIVE_SCROLLBACK_LINES,
             max_total_scrollback_bytes: DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
+            replay_history_bytes: DEFAULT_REPLAY_HISTORY_BYTES,
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
@@ -432,6 +438,9 @@ impl TerminalConfig {
         self.max_total_scrollback_bytes = self
             .max_total_scrollback_bytes
             .clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES);
+        self.replay_history_bytes = self
+            .replay_history_bytes
+            .clamp(MIN_REPLAY_HISTORY_BYTES, MAX_REPLAY_BYTES);
         if self.font_family.trim().is_empty() {
             self.font_family = DEFAULT_FONT_FAMILY.to_owned();
         } else {
@@ -610,10 +619,20 @@ pub fn is_valid_switch_tab_source(source: &str) -> bool {
     }
     #[cfg(not(feature = "gui"))]
     {
-        // A headless server never interprets shortcuts. Preserve structural
-        // validation without pulling GPUI and its platform stack into the
-        // portable server binary.
-        true
+        // A headless server never interprets shortcuts, but it must normalize
+        // config exactly like the GUI. Accept a modifier chain followed by
+        // the single `#` key and reject extra key components.
+        let mut parts = source.split('-').peekable();
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                return part == "#";
+            }
+            if !matches!(part, "cmd" | "ctrl" | "alt" | "shift" | "fn") || !seen.insert(part) {
+                return false;
+            }
+        }
+        false
     }
 }
 
@@ -1234,8 +1253,14 @@ mod tests {
         assert_eq!(config.theme.colors().active_pane_border, 0x339966);
         assert_eq!(config.theme.colors().tab_active_background, 0x339966);
         assert_eq!(config.theme.colors().sidebar_background, 0x000000);
-        assert_eq!(config.theme.colors().sidebar_connection_background, 0x000000);
-        assert_eq!(config.theme.colors().sidebar_connection_active_background, 0x000000);
+        assert_eq!(
+            config.theme.colors().sidebar_connection_background,
+            0x000000
+        );
+        assert_eq!(
+            config.theme.colors().sidebar_connection_active_background,
+            0x000000
+        );
         assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
         assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
         assert_eq!(
@@ -1443,6 +1468,7 @@ mod tests {
                 scrollback_lines: usize::MAX,
                 inactive_scrollback_lines: usize::MAX,
                 max_total_scrollback_bytes: usize::MAX,
+                replay_history_bytes: usize::MAX,
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,

@@ -8,6 +8,7 @@ pub mod control;
 mod embedded_servers;
 pub mod event;
 pub mod ids;
+pub mod metrics;
 pub mod pane;
 #[cfg(feature = "gui")]
 pub mod remote;

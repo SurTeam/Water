@@ -8,10 +8,11 @@ use crate::app::model::{AgentDump, MemoryStats, StateDump, WorkspaceDump};
 use crate::command::{AppCommand, CommandError, OperationSnapshot};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, PaneId, TerminalId, WorkspaceId};
-use crate::terminal::{TerminalSnapshot, with_compact_terminal_cell_wire};
+use crate::terminal::{TerminalReplay, WireTerminalEvent};
 use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+/// Version 2 replaces rendered terminal snapshots with ordered raw PTY events.
+pub const PROTOCOL_VERSION: u32 = 2;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Push frames the server sends on a GUI session connection.
@@ -22,6 +23,10 @@ const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// plain reply frame carrying the same request id.
 pub const PUSH_SNAPSHOT_METHOD: &str = "push.snapshot";
 pub const PUSH_UI_METHOD: &str = "push.ui";
+/// Ordered raw terminal stream event (see `TerminalStreamEvent`). These
+/// frames must reach the client in sequence order; the session writer never
+/// coalesces or reorders them.
+pub const PUSH_TERMINAL_METHOD: &str = "push.terminal";
 
 /// A single length-prefixed JSON frame, shared by both directions.
 ///
@@ -57,6 +62,22 @@ impl WireMessage {
             request_id: 0,
             method: Some(PUSH_SNAPSHOT_METHOD.to_owned()),
             params: serde_json::to_value(state).ok(),
+            ok: None,
+            result: None,
+            error: None,
+        }
+    }
+
+    /// A `push.terminal` frame carrying one ordered raw terminal event.
+    pub fn push_terminal(terminal_id: TerminalId, event: &WireTerminalEvent) -> Self {
+        Self {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 0,
+            method: Some(PUSH_TERMINAL_METHOD.to_owned()),
+            params: Some(serde_json::json!({
+                "terminal_id": terminal_id,
+                "event": event,
+            })),
             ok: None,
             result: None,
             error: None,
@@ -161,6 +182,8 @@ pub enum RpcMethod {
     EventList { after_sequence: Option<u64> },
     #[serde(rename = "debug.memory")]
     DebugMemory,
+    #[serde(rename = "debug.metrics")]
+    DebugMetrics,
     #[serde(rename = "terminal.contains")]
     TerminalContains {
         terminal_id: TerminalId,
@@ -172,8 +195,15 @@ pub enum RpcMethod {
         terminal_id: TerminalId,
         timeout_ms: u64,
     },
-    #[serde(rename = "terminal.snapshot")]
+    /// Bounded raw replay history; the caller replays it through a
+    /// temporary local terminal to inspect the screen.
+    #[serde(rename = "terminal.replay", alias = "terminal.snapshot")]
     TerminalSnapshot { terminal_id: TerminalId },
+    /// Live raw-stream attachment: the response carries the ordered
+    /// historical replay, then `push.terminal` frames stream the live tail
+    /// on a GUI session connection.
+    #[serde(rename = "terminal.attach")]
+    TerminalAttach { terminal_id: TerminalId },
     #[serde(rename = "ui.keystroke")]
     UiKeystroke { keystroke: String },
     #[serde(rename = "ui.snapshot")]
@@ -275,7 +305,8 @@ pub enum RpcResult {
     State(StateDump),
     Events(Vec<AppEvent>),
     Memory(MemoryStats),
-    Terminal(TerminalSnapshot),
+    Metrics(Value),
+    TerminalReplay(TerminalReplay),
     UiKeystroke(UiKeystrokeResult),
     Ui(UiSnapshot),
     Screenshot(UiScreenshot),
@@ -284,6 +315,18 @@ pub enum RpcResult {
     SessionOpen(SessionOpenResponse),
     ServerInfo(ServerInfoResponse),
     ServerShutdown { ack: bool },
+}
+
+/// Result of `terminal.attach`. `first_seq` is `None` when the ring is
+/// empty; `size` is the replay-start geometry (the dimensions to use before
+/// applying the events).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalAttachResponse {
+    pub terminal_id: TerminalId,
+    pub first_seq: Option<u64>,
+    pub last_seq: u64,
+    pub size: crate::terminal::TerminalSize,
+    pub replay: Vec<WireTerminalEvent>,
 }
 
 /// Result of `session.open`.
@@ -307,6 +350,13 @@ pub struct ServerInfoResponse {
     pub ui_sessions: u32,
 }
 
+/// Parsed `push.terminal` frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TerminalPush {
+    pub terminal_id: TerminalId,
+    pub event: WireTerminalEvent,
+}
+
 pub fn write_frame<W, T>(writer: &mut W, message: &T) -> io::Result<()>
 where
     W: Write,
@@ -316,10 +366,8 @@ where
     write_frame_payload(writer, &payload)
 }
 
-/// Writes a snapshot push without first expanding the model into a
-/// `serde_json::Value`. Terminal snapshots dominate session traffic, so the
-/// intermediate JSON tree was both a large allocation and a complete second
-/// traversal of every cell.
+/// Writes a control-plane snapshot push without first expanding the model
+/// into an intermediate `serde_json::Value`.
 pub fn write_snapshot_frame<W>(writer: &mut W, state: &StateDump, compact: bool) -> io::Result<()>
 where
     W: Write,
@@ -349,13 +397,11 @@ where
             focused_pane: state.focused_pane,
             agents: &state.agents,
         };
-        with_compact_terminal_cell_wire(|| {
-            serde_json::to_vec(&SnapshotPush {
-                protocol_version: PROTOCOL_VERSION,
-                request_id: 0,
-                method: PUSH_SNAPSHOT_METHOD,
-                params: &compact_state,
-            })
+        serde_json::to_vec(&SnapshotPush {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 0,
+            method: PUSH_SNAPSHOT_METHOD,
+            params: &compact_state,
         })
     } else {
         serde_json::to_vec(&SnapshotPush {

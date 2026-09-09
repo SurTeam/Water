@@ -36,6 +36,12 @@ pub const DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES: usize = 64 * 1024 * 1024;
 pub const MIN_MAX_TOTAL_SCROLLBACK_BYTES: usize = 64 * 1024;
 pub const MAX_TOTAL_SCROLLBACK_BYTES: usize = 1024 * 1024 * 1024;
 pub const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Server-side raw replay history budget per terminal (bytes). The GUI
+/// scrollback grid is a separate, row-based limit; the replay ring is the
+/// resync source for re-attaching clients and headless captures.
+pub const DEFAULT_REPLAY_HISTORY_BYTES: usize = 8 * 1024 * 1024;
+pub const MIN_REPLAY_HISTORY_BYTES: usize = 1024 * 1024;
 /// Approximate on-heap cost of one cell in the worker's alacritty grid.
 pub const ANSI_SCROLLBACK_CELL_BYTES: usize = std::mem::size_of::<Cell>();
 const SCROLLBACK_ROW_OVERHEAD_BYTES: usize = 64;
@@ -291,6 +297,7 @@ thread_local! {
 /// Runs `serialize` with omission of default terminal-cell fields enabled on
 /// this thread. The control protocol negotiates this for modern GUI sessions;
 /// ordinary `state.dump` and legacy clients retain the original full shape.
+#[allow(dead_code)]
 pub(crate) fn with_compact_terminal_cell_wire<T>(serialize: impl FnOnce() -> T) -> T {
     struct Restore<'a> {
         depth: &'a ThreadCell<u32>,
@@ -399,17 +406,14 @@ pub struct TerminalCursor {
 }
 
 /// Cell-free projection of a terminal, safe to embed in state dumps for
-/// tabs that are not currently displayed. Presentations fetch full grids
-/// for visible panes only (tmux/herdr keep history behind one surface).
+/// tabs that are not currently displayed. Screen state (rows, cursor,
+/// viewport) lives on the GUI's local emulator; the projection only carries
+/// control-plane metadata (geometry, process, lifecycle).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalSummary {
     pub terminal_id: TerminalId,
     pub size: TerminalSize,
-    pub revision: u64,
     pub process: TerminalProcessState,
-    pub display_offset: usize,
-    pub viewport_position: i64,
-    pub cursor: TerminalCursor,
     pub process_name: String,
     pub cwd: String,
 }
@@ -641,11 +645,7 @@ impl TerminalSnapshot {
         TerminalSummary {
             terminal_id: self.terminal_id,
             size: self.size,
-            revision: self.revision,
             process: self.process,
-            display_offset: self.display_offset,
-            viewport_position: self.viewport_position,
-            cursor: self.cursor,
             process_name: self.process_name.clone(),
             cwd: self.cwd.clone(),
         }

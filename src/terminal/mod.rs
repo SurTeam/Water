@@ -1,19 +1,20 @@
 use std::path::Path;
 
+mod emulator;
 mod model;
+mod replay;
 mod shell_integration;
 mod snapshot;
+mod stream;
 mod worker;
-
-pub(crate) use snapshot::with_compact_terminal_cell_wire;
 
 pub const HOMEBREW_ZSH: &str = "/opt/homebrew/bin/zsh";
 pub const INTEL_HOMEBREW_ZSH: &str = "/usr/local/bin/zsh";
 pub const SYSTEM_ZSH: &str = "/bin/zsh";
 
 /// Colors used when answering terminal dynamic-color queries (OSC 10/11/12).
-/// Keeping these values with the PTY worker makes the protocol response match
-/// the palette used by the renderer, including user-configured themes.
+/// The GUI-owned emulator uses these values for dynamic-color responses,
+/// keeping query replies aligned with the rendered palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalTheme {
     pub foreground: u32,
@@ -67,16 +68,23 @@ pub fn default_shell_args(program: &str) -> Vec<String> {
     }
 }
 
-pub use model::{TerminalError, TerminalLimits, TerminalManager, TerminalRegistry};
+pub use emulator::{EmulatorEffect, TerminalEmulator, snapshot_from_replay};
+pub use model::{
+    TerminalAttachment, TerminalError, TerminalLimits, TerminalManager, TerminalRegistry,
+    TerminalReplay,
+};
 pub(crate) use model::{TerminalManagerEvent, WakeupCallback};
+pub use replay::{MAX_REPLAY_BYTES, ReplayRing};
 pub use snapshot::{
     DEFAULT_COLUMNS, DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_LINES,
-    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_COLUMNS, MAX_LINES,
-    MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES, MAX_TOTAL_SCROLLBACK_BYTES,
-    MIN_MAX_TOTAL_SCROLLBACK_BYTES, TerminalCell, TerminalCellFlags, TerminalColor, TerminalCursor,
-    TerminalModes, TerminalProcessState, TerminalRowSnapshot, TerminalSize, TerminalSnapshot,
-    TerminalSummary, scrollback_row_bytes,
+    DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES, DEFAULT_REPLAY_HISTORY_BYTES, DEFAULT_SCROLLBACK_LINES,
+    MAX_COLUMNS, MAX_LINES, MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES,
+    MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES, MIN_REPLAY_HISTORY_BYTES,
+    TerminalCell, TerminalCellFlags, TerminalColor, TerminalCursor, TerminalModes,
+    TerminalProcessState, TerminalRowSnapshot, TerminalSize, TerminalSnapshot, TerminalSummary,
+    scrollback_row_bytes,
 };
+pub use stream::{TerminalSeq, TerminalStreamEvent, WireTerminalEvent};
 
 #[cfg(test)]
 mod tests {

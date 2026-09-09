@@ -100,6 +100,7 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
 fn run_debug(client: &ControlClient, arguments: &[String]) -> Result<()> {
     match arguments.first().map(String::as_str) {
         Some("memory") => print_json(&client.memory_stats().context("memory request failed")?)?,
+        Some("metrics") => print_json(&client.metrics().context("metrics request failed")?)?,
         Some(command) => bail!("unknown debug command: {command}"),
         None => bail!("debug requires a command"),
     }

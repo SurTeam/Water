@@ -12,12 +12,16 @@ use crate::app::model::{MemoryStats, StateDump};
 use crate::command::{AppCommand, DispatchError, OperationSnapshot, TerminalCommand};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
-use crate::terminal::TerminalSnapshot;
+use crate::terminal::{
+    DEFAULT_SCROLLBACK_LINES, TerminalReplay, TerminalSnapshot, WireTerminalEvent,
+    snapshot_from_replay,
+};
 use crate::ui::{UiControlClient, UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
 use super::protocol::{
-    PROTOCOL_VERSION, PUSH_SNAPSHOT_METHOD, PUSH_UI_METHOD, RpcError, RpcMethod, RpcRequest,
-    RpcResponse, ServerInfoResponse, SessionOpenResponse, WireMessage, read_frame, write_frame,
+    PROTOCOL_VERSION, PUSH_SNAPSHOT_METHOD, PUSH_TERMINAL_METHOD, PUSH_UI_METHOD, RpcError,
+    RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse, SessionOpenResponse,
+    TerminalAttachResponse, TerminalPush, WireMessage, read_frame, write_frame,
 };
 
 #[derive(Debug, Error)]
@@ -97,17 +101,22 @@ impl ControlClient {
         self.call(RpcMethod::DebugMemory)
     }
 
+    pub fn metrics(&self) -> Result<serde_json::Value, ControlClientError> {
+        self.call(RpcMethod::DebugMetrics)
+    }
+
     pub fn terminal_contains(
         &self,
         terminal_id: TerminalId,
         text: impl Into<String>,
         timeout: Duration,
     ) -> Result<TerminalSnapshot, ControlClientError> {
-        self.call(RpcMethod::TerminalContains {
+        let replay: TerminalReplay = self.call(RpcMethod::TerminalContains {
             terminal_id,
             text: text.into(),
             timeout_ms: timeout.as_millis() as u64,
-        })
+        })?;
+        Ok(snapshot_from_replay(&replay, DEFAULT_SCROLLBACK_LINES))
     }
 
     pub fn wait_terminal_exit(
@@ -115,17 +124,30 @@ impl ControlClient {
         terminal_id: TerminalId,
         timeout: Duration,
     ) -> Result<TerminalSnapshot, ControlClientError> {
-        self.call(RpcMethod::TerminalWaitExit {
+        let replay: TerminalReplay = self.call(RpcMethod::TerminalWaitExit {
             terminal_id,
             timeout_ms: timeout.as_millis() as u64,
-        })
+        })?;
+        Ok(snapshot_from_replay(&replay, DEFAULT_SCROLLBACK_LINES))
     }
 
+    /// Bounded raw replay history; the caller replays the events through a
+    /// temporary local terminal to inspect the screen.
+    pub fn terminal_replay(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<TerminalReplay, ControlClientError> {
+        self.call(RpcMethod::TerminalSnapshot { terminal_id })
+    }
+
+    /// Compatibility inspection API: raw history crosses the socket and is
+    /// rendered in this calling process, never on the server.
     pub fn terminal_snapshot(
         &self,
         terminal_id: TerminalId,
     ) -> Result<TerminalSnapshot, ControlClientError> {
-        self.call(RpcMethod::TerminalSnapshot { terminal_id })
+        let replay = self.terminal_replay(terminal_id)?;
+        Ok(snapshot_from_replay(&replay, DEFAULT_SCROLLBACK_LINES))
     }
 
     pub fn ui_keystroke(
@@ -379,12 +401,9 @@ impl crate::app::CommandTransport for RemoteCommandClient {
             .map_err(into_dispatch_error)
     }
 
-    fn terminal_snapshot(
-        &self,
-        terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    fn terminal_replay(&self, terminal_id: TerminalId) -> Result<TerminalReplay, DispatchError> {
         self.inner
-            .terminal_snapshot(terminal_id)
+            .terminal_replay(terminal_id)
             .map_err(into_dispatch_error)
     }
 }
@@ -405,14 +424,204 @@ fn into_dispatch_error(error: ControlClientError) -> DispatchError {
 /// The server pushes revisioned `ModelSnapshot` frames (coalesced to the
 /// latest per flush) and forwards UI automation requests from other clients
 /// (`waterctl ui.*`). The session owns two background threads: a reader that
-/// decodes push frames and feeds the snapshot channel / UI control channel,
-/// and a writer that serializes reply frames. The returned receiver is the
-/// GUI snapshot stream; it ends when the server closes the session.
+/// decodes push frames and feeds the snapshot channel / UI control channel /
+/// terminal stream channels, and a writer that serializes reply frames.
+///
+/// Terminal attach: [`WaterSession::attach`] requests the ordered raw
+/// replay history on the session connection; the server answers with the
+/// replay and then streams the live tail as `push.terminal` frames, which
+/// the reader routes into the per-terminal channel returned to the caller.
+#[cfg(unix)]
+pub struct WaterSession {
+    next_request_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    attach_tx: std::sync::mpsc::Sender<AttachRequest>,
+    /// Per-terminal live channels; shared with the session reader thread.
+    /// A missing entry means the GUI is not consuming that terminal.
+    terminal_channels: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<TerminalId, std::sync::mpsc::SyncSender<WireTerminalEvent>>,
+        >,
+    >,
+    snapshot_rx: crate::app::SnapshotStream,
+}
+
+struct AttachRequest {
+    request_id: u64,
+    terminal_id: TerminalId,
+    reply: std::sync::mpsc::Sender<AttachReply>,
+}
+
+enum AttachReply {
+    Response(TerminalAttachResponse),
+    Failed(ControlClientError),
+}
+
+impl std::fmt::Debug for WaterSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WaterSession").finish_non_exhaustive()
+    }
+}
+
+/// Live terminal event stream: events buffered while the attach reply was in
+/// flight (prefix) followed by the live channel. The split exists so the
+/// session reader can deliver events with strict (blocking) backpressure
+/// even before the attach call returns, without losing anything.
+#[cfg(unix)]
+pub struct TerminalEventStream {
+    prefix: std::collections::VecDeque<WireTerminalEvent>,
+    rx: std::sync::mpsc::Receiver<WireTerminalEvent>,
+}
+
+#[cfg(unix)]
+impl TerminalEventStream {
+    /// Blocks until the next ordered event; `Err` when the session ended or
+    /// the terminal was detached. Callers treat `Err` as a resync signal
+    /// (re-attach: the server replay ring still holds the history).
+    pub fn recv(&mut self) -> Result<WireTerminalEvent, std::sync::mpsc::RecvError> {
+        if let Some(event) = self.prefix.pop_front() {
+            return Ok(event);
+        }
+        self.rx.recv()
+    }
+
+    /// Non-blocking drain used to batch all terminal events already decoded
+    /// from one socket burst before advancing the local emulator.
+    pub fn try_recv(&mut self) -> Result<WireTerminalEvent, std::sync::mpsc::TryRecvError> {
+        if let Some(event) = self.prefix.pop_front() {
+            return Ok(event);
+        }
+        self.rx.try_recv()
+    }
+
+    pub fn recv_timeout(
+        &mut self,
+        timeout: std::time::Duration,
+    ) -> Result<WireTerminalEvent, std::sync::mpsc::RecvTimeoutError> {
+        if let Some(event) = self.prefix.pop_front() {
+            return Ok(event);
+        }
+        self.rx.recv_timeout(timeout)
+    }
+}
+
+impl std::fmt::Debug for TerminalEventStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalEventStream")
+            .field("prefix", &self.prefix.len())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(unix)]
+impl WaterSession {
+    pub fn snapshot_stream(&self) -> &crate::app::SnapshotStream {
+        &self.snapshot_rx
+    }
+
+    /// Detaches a terminal's live stream.
+    pub fn detach(&self, terminal_id: TerminalId) {
+        self.terminal_channels
+            .lock()
+            .expect("terminal channels poisoned")
+            .remove(&terminal_id);
+    }
+
+    /// Attaches to a terminal's raw stream. Returns the ordered historical
+    /// replay (oldest first, with its start geometry) plus the live event
+    /// stream. Live events whose `seq` is at or below `last_seq` duplicate
+    /// the replay tail and must be skipped. Attaching the same terminal
+    /// again replaces the previous stream (resync).
+    pub fn attach(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<(TerminalAttachResponse, TerminalEventStream), ControlClientError> {
+        // Register the live channel before requesting the replay: the server
+        // registers its subscriber before taking the ring snapshot, so every
+        // event from this point on is either in the replay (deduplicated by
+        // sequence) or buffered here while the reply is in flight.
+        let (events_tx, events_rx) = std::sync::mpsc::sync_channel::<WireTerminalEvent>(1024);
+        self.terminal_channels
+            .lock()
+            .expect("terminal channels poisoned")
+            .insert(terminal_id, events_tx);
+
+        let request_id = self
+            .next_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.attach_tx
+            .send(AttachRequest {
+                request_id,
+                terminal_id,
+                reply: reply_tx,
+            })
+            .map_err(|_| {
+                ControlClientError::Protocol(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "session closed",
+                )))
+            })?;
+        // Drain events arriving while the reply is in flight into the
+        // prefix buffer so the reader never blocks on an unconsumed channel
+        // (which would deadlock the reply itself).
+        let mut prefix = std::collections::VecDeque::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let response = loop {
+            match reply_rx.try_recv() {
+                Ok(reply) => break reply,
+                Err(std::sync::mpsc::TryRecvError::Empty) => match events_rx.try_recv() {
+                    Ok(event) => prefix.push_back(event),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        if std::time::Instant::now() >= deadline {
+                            self.terminal_channels
+                                .lock()
+                                .expect("terminal channels poisoned")
+                                .remove(&terminal_id);
+                            return Err(ControlClientError::Remote {
+                                code: "ATTACH_TIMEOUT".to_owned(),
+                                message: "terminal attach timed out".to_owned(),
+                            });
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(200));
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
+                },
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.terminal_channels
+                        .lock()
+                        .expect("terminal channels poisoned")
+                        .remove(&terminal_id);
+                    return Err(ControlClientError::Remote {
+                        code: "ATTACH_FAILED".to_owned(),
+                        message: "session closed during attach".to_owned(),
+                    });
+                }
+            }
+        };
+        match response {
+            AttachReply::Response(response) => Ok((
+                response,
+                TerminalEventStream {
+                    prefix,
+                    rx: events_rx,
+                },
+            )),
+            AttachReply::Failed(error) => {
+                self.terminal_channels
+                    .lock()
+                    .expect("terminal channels poisoned")
+                    .remove(&terminal_id);
+                Err(error)
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 pub fn connect_water_session(
     socket_path: impl Into<PathBuf>,
     ui_client: UiControlClient,
-) -> Result<crate::app::SnapshotStream, ControlClientError> {
+) -> Result<WaterSession, ControlClientError> {
     let mut stream = std::os::unix::net::UnixStream::connect(socket_path.into())?;
     let request = RpcRequest {
         protocol_version: PROTOCOL_VERSION,
@@ -446,6 +655,7 @@ pub fn connect_water_session(
 
     let (snapshot_tx, snapshot_rx) = crate::app::runtime::snapshot_stream_channel();
     let (write_tx, write_rx) = std::sync::mpsc::channel::<WireMessage>();
+    let (attach_tx, attach_rx) = std::sync::mpsc::channel::<AttachRequest>();
     let mut writer_stream = stream.try_clone()?;
     std::thread::Builder::new()
         .name("water-session-writer".to_owned())
@@ -457,11 +667,28 @@ pub fn connect_water_session(
             }
         })
         .ok();
+    let terminal_channels =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let reader_channels = terminal_channels.clone();
     std::thread::Builder::new()
         .name("water-session-reader".to_owned())
-        .spawn(move || session_reader_loop(stream, snapshot_tx, write_tx, ui_client))
+        .spawn(move || {
+            session_reader_loop(
+                stream,
+                snapshot_tx,
+                write_tx,
+                ui_client,
+                attach_rx,
+                reader_channels,
+            )
+        })
         .ok();
-    Ok(snapshot_rx)
+    Ok(WaterSession {
+        next_request_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        attach_tx,
+        terminal_channels,
+        snapshot_rx,
+    })
 }
 
 /// Fallback for servers that predate `session.open` (the monolithic build):
@@ -494,6 +721,12 @@ fn session_reader_loop(
     snapshot_tx: crate::app::runtime::SnapshotStreamSender,
     write_tx: std::sync::mpsc::Sender<WireMessage>,
     ui_client: UiControlClient,
+    attach_rx: std::sync::mpsc::Receiver<AttachRequest>,
+    terminal_channels: std::sync::Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<TerminalId, std::sync::mpsc::SyncSender<WireTerminalEvent>>,
+        >,
+    >,
 ) {
     #[derive(Deserialize)]
     struct SessionFrame {
@@ -502,12 +735,45 @@ fn session_reader_loop(
         #[serde(default)]
         method: Option<String>,
         #[serde(default)]
+        ok: Option<bool>,
+        #[serde(default)]
         params: Option<Box<serde_json::value::RawValue>>,
+        #[serde(default)]
+        result: Option<Box<serde_json::value::RawValue>>,
+        #[serde(default)]
+        error: Option<RpcError>,
     }
 
+    // Pending attach replies, keyed by the request id we sent.
+    let mut pending_attach: std::collections::HashMap<u64, std::sync::mpsc::Sender<AttachReply>> =
+        std::collections::HashMap::new();
+    // The 50ms read timeout lets attach requests be forwarded between frames
+    // without a second thread; terminal bursts keep the timeout hot anyway.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+
     loop {
+        // Forward attach requests onto the session connection.
+        while let Ok(request) = attach_rx.try_recv() {
+            pending_attach.insert(request.request_id, request.reply);
+            let frame = WireMessage {
+                protocol_version: PROTOCOL_VERSION,
+                request_id: request.request_id,
+                method: Some("terminal.attach".to_owned()),
+                params: Some(serde_json::json!({
+                    "terminal_id": request.terminal_id,
+                })),
+                ok: None,
+                result: None,
+                error: None,
+            };
+            if write_tx.send(frame).is_err() {
+                return;
+            }
+        }
+
         let message: SessionFrame = match read_frame(&mut stream) {
             Ok(message) => message,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(error) => {
                 tracing::warn!(
@@ -518,7 +784,52 @@ fn session_reader_loop(
                 break;
             }
         };
+
+        // Attach responses and stray RPC replies: route to pending replies.
+        if let Some(reply_tx) = pending_attach.remove(&message.request_id) {
+            let reply = match (message.ok, &message.result, message.error) {
+                (Some(true), Some(result), _) => {
+                    match serde_json::from_str::<TerminalAttachResponse>(result.get()) {
+                        Ok(response) => AttachReply::Response(response),
+                        Err(error) => AttachReply::Failed(ControlClientError::Protocol(error)),
+                    }
+                }
+                (_, _, Some(error)) => AttachReply::Failed(ControlClientError::Remote {
+                    code: error.code,
+                    message: error.message,
+                }),
+                _ => AttachReply::Failed(ControlClientError::Remote {
+                    code: "ATTACH_FAILED".to_owned(),
+                    message: "malformed attach reply".to_owned(),
+                }),
+            };
+            let _ = reply_tx.send(reply);
+            continue;
+        }
+
         match message.method.as_deref() {
+            Some(PUSH_TERMINAL_METHOD) => {
+                let Some(params) = message.params.as_deref() else {
+                    continue;
+                };
+                let Ok(push) = serde_json::from_str::<TerminalPush>(params.get()) else {
+                    continue;
+                };
+                // Blocking send: a slow GUI backpressures the PTY through the
+                // whole chain (socket -> server session writer -> worker
+                // fanout) instead of dropping output. A terminal without a
+                // registered consumer (not attached / detached) is skipped;
+                // the server replay ring remains the resync source.
+                let sender = terminal_channels
+                    .lock()
+                    .expect("terminal channels poisoned")
+                    .get(&push.terminal_id)
+                    .cloned();
+                let Some(sender) = sender else {
+                    continue;
+                };
+                let _ = sender.send(push.event);
+            }
             Some(PUSH_SNAPSHOT_METHOD) => {
                 let Some(params) = message.params.as_deref() else {
                     continue;
@@ -697,6 +1008,10 @@ impl ControlClient {
         Err(ControlClientError::Unsupported)
     }
 
+    pub fn metrics(&self) -> Result<serde_json::Value, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
     pub fn terminal_contains(
         &self,
         _terminal_id: TerminalId,
@@ -718,6 +1033,13 @@ impl ControlClient {
         &self,
         _terminal_id: TerminalId,
     ) -> Result<TerminalSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
+    pub fn terminal_replay(
+        &self,
+        _terminal_id: TerminalId,
+    ) -> Result<TerminalReplay, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 
@@ -821,10 +1143,7 @@ impl crate::app::CommandTransport for RemoteCommandClient {
     ) -> Result<TerminalSnapshot, DispatchError> {
         Err(DispatchError::ChannelClosed)
     }
-    fn terminal_snapshot(
-        &self,
-        _terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    fn terminal_replay(&self, _terminal_id: TerminalId) -> Result<TerminalReplay, DispatchError> {
         Err(DispatchError::ChannelClosed)
     }
 }

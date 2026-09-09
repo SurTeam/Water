@@ -3,7 +3,7 @@ pub mod protocol;
 pub mod server;
 
 pub use client::{
-    ControlClient, ControlClientError, RemoteCommandClient, connect_water_session,
+    ControlClient, ControlClientError, RemoteCommandClient, WaterSession, connect_water_session,
     spawn_state_polling_fallback,
 };
 pub use protocol::{

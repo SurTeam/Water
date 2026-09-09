@@ -151,17 +151,21 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
     // Snapshot stream + UI automation: prefer the push session; fall back to
     // state polling against pre-split servers.
     let (ui_control_client, ui_control_receiver) = ui_control_channel();
-    let snapshot_receiver = match connect_water_session(&socket_path, ui_control_client.clone()) {
-        Ok(receiver) => receiver,
+    let terminal_session = match connect_water_session(&socket_path, ui_control_client.clone()) {
+        Ok(session) => Some(session),
         Err(error) => {
             tracing::warn!(
                 target: "water::workspace",
                 ?error,
                 "session.open unavailable; falling back to state polling"
             );
-            spawn_state_polling_fallback(transport.clone())
+            None
         }
     };
+    let snapshot_receiver = terminal_session
+        .as_ref()
+        .map(|session| session.snapshot_stream().clone())
+        .unwrap_or_else(|| spawn_state_polling_fallback(transport.clone()));
 
     let detach_on_quit = config.server.detach_on_quit;
     let ui_application = WaterApplication::new_with_config_path(
@@ -193,6 +197,7 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
             snapshot_receiver,
             ui_control_client,
             ui_control_receiver,
+            terminal_session,
         );
     });
 

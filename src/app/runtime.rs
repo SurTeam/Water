@@ -12,11 +12,15 @@ use crate::command::{
 use crate::config::AppConfig;
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
-use crate::terminal::{TerminalSnapshot, WakeupCallback};
+use crate::terminal::{
+    DEFAULT_SCROLLBACK_LINES, TerminalAttachment, TerminalReplay, TerminalSnapshot, WakeupCallback,
+    snapshot_from_replay,
+};
 
 /// A single-consumer, latest-only model snapshot stream. Socket and SSH
 /// readers can continue receiving at transport speed while a slower renderer
 /// skips obsolete revisions instead of replaying an unbounded frame backlog.
+#[derive(Clone)]
 pub struct SnapshotStream(ModelSnapshotReceiver);
 
 impl std::fmt::Debug for SnapshotStream {
@@ -73,16 +77,20 @@ enum ModelRequest {
         terminal_id: TerminalId,
         text: String,
         timeout: Duration,
-        reply: Sender<Result<TerminalSnapshot, DispatchError>>,
+        reply: Sender<Result<TerminalReplay, DispatchError>>,
     },
     TerminalExit {
         terminal_id: TerminalId,
         timeout: Duration,
-        reply: Sender<Result<TerminalSnapshot, DispatchError>>,
+        reply: Sender<Result<TerminalReplay, DispatchError>>,
     },
-    TerminalSnapshot {
+    TerminalReplay {
         terminal_id: TerminalId,
-        reply: Sender<Result<crate::terminal::TerminalSnapshot, DispatchError>>,
+        reply: Sender<Result<TerminalReplay, DispatchError>>,
+    },
+    TerminalAttach {
+        terminal_id: TerminalId,
+        reply: Sender<Result<TerminalAttachment, DispatchError>>,
     },
     TerminalEventWake,
     Shutdown,
@@ -91,7 +99,7 @@ enum ModelRequest {
 /// A single-consumer snapshot stream that keeps only the newest pending model
 /// snapshot. Terminal output can produce snapshots faster than GPUI can paint;
 /// intermediate projections are not useful once a newer revision exists.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ModelSnapshotReceiver {
     channel: Arc<SnapshotChannel>,
 }
@@ -275,6 +283,18 @@ impl CommandClient {
         text: impl Into<String>,
         timeout: Duration,
     ) -> Result<TerminalSnapshot, DispatchError> {
+        let replay = self.terminal_contains_replay(terminal_id, text, timeout)?;
+        Ok(snapshot_from_replay(&replay, DEFAULT_SCROLLBACK_LINES))
+    }
+
+    /// Waits on the server's raw-output predicate and returns raw history;
+    /// callers that need cells replay it locally.
+    pub fn terminal_contains_replay(
+        &self,
+        terminal_id: TerminalId,
+        text: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<TerminalReplay, DispatchError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.request_tx
             .send(ModelRequest::TerminalContains {
@@ -292,6 +312,17 @@ impl CommandClient {
         terminal_id: TerminalId,
         timeout: Duration,
     ) -> Result<TerminalSnapshot, DispatchError> {
+        let replay = self.wait_terminal_exit_replay(terminal_id, timeout)?;
+        Ok(snapshot_from_replay(&replay, DEFAULT_SCROLLBACK_LINES))
+    }
+
+    /// Waits only on the server-owned lifecycle state and returns raw replay
+    /// history without constructing a terminal emulator on the model thread.
+    pub fn wait_terminal_exit_replay(
+        &self,
+        terminal_id: TerminalId,
+        timeout: Duration,
+    ) -> Result<TerminalReplay, DispatchError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.request_tx
             .send(ModelRequest::TerminalExit {
@@ -303,13 +334,32 @@ impl CommandClient {
         reply_rx.recv().map_err(|_| DispatchError::ChannelClosed)?
     }
 
-    pub fn terminal_snapshot(
+    /// Returns the bounded raw replay history; callers build a temporary
+    /// local terminal and replay the events to inspect the screen.
+    pub fn terminal_replay(
         &self,
         terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, DispatchError> {
+    ) -> Result<TerminalReplay, DispatchError> {
         let (reply_tx, reply_rx) = mpsc::channel();
         self.request_tx
-            .send(ModelRequest::TerminalSnapshot {
+            .send(ModelRequest::TerminalReplay {
+                terminal_id,
+                reply: reply_tx,
+            })
+            .map_err(|_| DispatchError::ChannelClosed)?;
+        reply_rx.recv().map_err(|_| DispatchError::ChannelClosed)?
+    }
+
+    /// Registers a live event channel with the PTY worker and returns the
+    /// ordered historical replay. The returned attachment's `events`
+    /// receiver must be pumped by exactly one thread.
+    pub fn terminal_attach(
+        &self,
+        terminal_id: TerminalId,
+    ) -> Result<TerminalAttachment, DispatchError> {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.request_tx
+            .send(ModelRequest::TerminalAttach {
                 terminal_id,
                 reply: reply_tx,
             })
@@ -363,8 +413,7 @@ pub trait CommandTransport: Send + Sync {
         timeout: Duration,
     ) -> Result<TerminalSnapshot, DispatchError>;
 
-    fn terminal_snapshot(&self, terminal_id: TerminalId)
-    -> Result<TerminalSnapshot, DispatchError>;
+    fn terminal_replay(&self, terminal_id: TerminalId) -> Result<TerminalReplay, DispatchError>;
 }
 
 impl CommandTransport for CommandClient {
@@ -416,11 +465,8 @@ impl CommandTransport for CommandClient {
         CommandClient::wait_terminal_exit(self, terminal_id, timeout)
     }
 
-    fn terminal_snapshot(
-        &self,
-        terminal_id: TerminalId,
-    ) -> Result<TerminalSnapshot, DispatchError> {
-        CommandClient::terminal_snapshot(self, terminal_id)
+    fn terminal_replay(&self, terminal_id: TerminalId) -> Result<TerminalReplay, DispatchError> {
+        CommandClient::terminal_replay(self, terminal_id)
     }
 }
 
@@ -559,8 +605,11 @@ fn run_model_thread(
             } => {
                 let _ = reply.send(dispatcher.wait_terminal_exit(terminal_id, timeout));
             }
-            ModelRequest::TerminalSnapshot { terminal_id, reply } => {
-                let _ = reply.send(dispatcher.terminal_snapshot(terminal_id));
+            ModelRequest::TerminalReplay { terminal_id, reply } => {
+                let _ = reply.send(dispatcher.terminal_replay(terminal_id));
+            }
+            ModelRequest::TerminalAttach { terminal_id, reply } => {
+                let _ = reply.send(dispatcher.terminal_attach(terminal_id));
             }
             ModelRequest::TerminalEventWake => {}
             ModelRequest::Shutdown => break,

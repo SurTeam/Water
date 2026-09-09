@@ -52,7 +52,6 @@ pub struct TerminalSurfaceState {
     pub status: TerminalStatus,
     pub columns: usize,
     pub lines: usize,
-    pub last_output_revision: u64,
     /// The coding agent currently running in the terminal's foreground,
     /// reclassified on every process-metadata refresh. This is the canonical
     /// pane<->agent binding consumed by the sidebar, the state dump, and

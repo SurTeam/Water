@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{
@@ -15,7 +15,8 @@ use crate::ui::UiControlClient;
 
 use super::protocol::{
     PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
-    SessionOpenResponse, WireMessage, read_frame, write_frame, write_snapshot_frame,
+    SessionOpenResponse, TerminalAttachResponse, WireMessage, read_frame, write_frame,
+    write_snapshot_frame,
 };
 
 /// How long the session writer waits for the first pending push before
@@ -97,6 +98,13 @@ impl Session {
     /// without blocking.
     fn push(&self, item: SessionWriterItem) -> bool {
         self.writer_tx.try_send(item).is_ok()
+    }
+
+    /// Blocking variant for the ordered terminal stream: a slow writer
+    /// backpressures the PTY (via the worker fanout) instead of dropping
+    /// events.
+    fn push_blocking(&self, item: SessionWriterItem) -> bool {
+        self.writer_tx.send(item).is_ok()
     }
 }
 
@@ -302,7 +310,8 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: Arc<ServerSt
                 continue;
             }
         };
-        let (response, pending_session) = handle_request(request, &state);
+        let (response, pending_session, pending_terminal) =
+            handle_request(request, &state, session.as_ref());
         if let Some(pending) = pending_session {
             let writer_stream = match stream.try_clone() {
                 Ok(writer_stream) => writer_stream,
@@ -328,6 +337,9 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: Arc<ServerSt
             continue;
         }
         send_response(&mut stream, session.as_ref(), &response);
+        if let Some(pending) = pending_terminal {
+            spawn_terminal_pump(pending.session, pending.terminal_id, pending.events);
+        }
     }
     // Connection closed: drop the session (writer channel closes, pushes are
     // dropped) and unblock any pending UI forward.
@@ -351,13 +363,12 @@ fn send_response(
 ) {
     match session {
         Some(session) => {
-            if !session.push(SessionWriterItem::Message(WireMessage::from_response(
+            // Replies share the ordered writer with terminal pushes. Blocking
+            // avoids both loss and concurrent direct writes that could splice
+            // two length-prefixed frames together.
+            let _ = session.push_blocking(SessionWriterItem::Message(WireMessage::from_response(
                 response,
-            ))) {
-                // Writer gone: fall back to a direct write so the client at
-                // least sees a final answer.
-                let _ = write_frame(stream, response);
-            }
+            )));
         }
         None => {
             let _ = write_frame(stream, response);
@@ -369,18 +380,38 @@ fn send_response(
 fn handle_request(
     request: RpcRequest,
     state: &ServerState,
-) -> (RpcResponse, Option<PendingSession>) {
+    session: Option<&Arc<Session>>,
+) -> (
+    RpcResponse,
+    Option<PendingSession>,
+    Option<PendingTerminalPump>,
+) {
     if let RpcMethod::SessionOpen {
         compact_snapshots, ..
     } = request.method
     {
-        return open_session(request.request_id, state, compact_snapshots);
+        let (response, pending) = open_session(request.request_id, state, compact_snapshots);
+        return (response, pending, None);
     }
-    (handle_regular(request, state), None)
+    let mut pending_terminal = None;
+    let response = handle_regular(request, state, session, &mut pending_terminal);
+    (response, None, pending_terminal)
 }
 
 #[cfg(unix)]
-fn handle_regular(request: RpcRequest, state: &ServerState) -> RpcResponse {
+struct PendingTerminalPump {
+    session: Arc<Session>,
+    terminal_id: crate::ids::TerminalId,
+    events: std::sync::mpsc::Receiver<crate::terminal::TerminalStreamEvent>,
+}
+
+#[cfg(unix)]
+fn handle_regular(
+    request: RpcRequest,
+    state: &ServerState,
+    session: Option<&Arc<Session>>,
+    pending_terminal: &mut Option<PendingTerminalPump>,
+) -> RpcResponse {
     if request.protocol_version != PROTOCOL_VERSION {
         return RpcResponse::failure(
             request.request_id,
@@ -433,11 +464,14 @@ fn handle_regular(request: RpcRequest, state: &ServerState) -> RpcResponse {
             Ok(memory) => RpcResponse::success(request.request_id, &memory),
             Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
         },
+        RpcMethod::DebugMetrics => {
+            RpcResponse::success(request.request_id, &crate::metrics::snapshot())
+        }
         RpcMethod::TerminalContains {
             terminal_id,
             text,
             timeout_ms,
-        } => match state.client.terminal_contains(
+        } => match state.client.terminal_contains_replay(
             terminal_id,
             text,
             std::time::Duration::from_millis(timeout_ms),
@@ -450,14 +484,51 @@ fn handle_regular(request: RpcRequest, state: &ServerState) -> RpcResponse {
             timeout_ms,
         } => match state
             .client
-            .wait_terminal_exit(terminal_id, std::time::Duration::from_millis(timeout_ms))
+            .wait_terminal_exit_replay(terminal_id, std::time::Duration::from_millis(timeout_ms))
         {
             Ok(snapshot) => RpcResponse::success(request.request_id, &snapshot),
             Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
         },
         RpcMethod::TerminalSnapshot { terminal_id } => {
-            match state.client.terminal_snapshot(terminal_id) {
-                Ok(snapshot) => RpcResponse::success(request.request_id, &snapshot),
+            match state.client.terminal_replay(terminal_id) {
+                Ok(replay) => RpcResponse::success(request.request_id, &replay),
+                Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
+            }
+        }
+        RpcMethod::TerminalAttach { terminal_id } => {
+            match state.client.terminal_attach(terminal_id) {
+                Ok(attachment) => {
+                    let response = RpcResponse::success(
+                        request.request_id,
+                        &TerminalAttachResponse {
+                            terminal_id,
+                            first_seq: attachment.replay.first().map(|event| event.seq()),
+                            last_seq: attachment.last_seq,
+                            size: attachment
+                                .replay
+                                .iter()
+                                .find_map(|event| event.size())
+                                .unwrap_or_default(),
+                            replay: attachment
+                                .replay
+                                .into_iter()
+                                .map(|event| event.to_wire())
+                                .collect(),
+                        },
+                    );
+                    // Live tail: one pump thread per attachment feeds the
+                    // session writer in strict order. Without a session
+                    // there is no push channel; the replay alone answers
+                    // one-shot callers.
+                    if let Some(session) = session {
+                        *pending_terminal = Some(PendingTerminalPump {
+                            session: session.clone(),
+                            terminal_id,
+                            events: attachment.events,
+                        });
+                    }
+                    response
+                }
                 Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
             }
         }
@@ -676,39 +747,63 @@ fn forward_ui_request(
     })
 }
 
+/// Pumps one live terminal attachment into the session writer until the
+/// worker channel disconnects (terminal exited/removed) or the session
+/// writer stops. Ordering is strict: one `push.terminal` frame per event, in
+/// sequence order, never coalesced.
+#[cfg(unix)]
+fn spawn_terminal_pump(
+    session: Arc<Session>,
+    terminal_id: crate::ids::TerminalId,
+    events: Receiver<crate::terminal::TerminalStreamEvent>,
+) {
+    std::thread::Builder::new()
+        .name("water-terminal-pump".to_owned())
+        .spawn(move || {
+            for event in events {
+                let frame = WireMessage::push_terminal(terminal_id, &event.to_wire());
+                if !session.push_blocking(SessionWriterItem::Message(frame)) {
+                    break;
+                }
+            }
+        })
+        .ok();
+}
+
 #[cfg(unix)]
 fn session_writer(
     mut stream: std::os::unix::net::UnixStream,
     rx: Receiver<SessionWriterItem>,
     compact_snapshots: bool,
 ) {
-    let mut pending_message: Option<WireMessage> = None;
+    // Messages (handshakes, forwarded UI requests, ordered `push.terminal`
+    // frames) must reach the wire in arrival order; they are never
+    // coalesced. Snapshots are latest-wins: at most one per flush, written
+    // after the messages so terminal stream order is untouched.
+    let mut pending_messages: VecDeque<WireMessage> = VecDeque::new();
     let mut pending_snapshot: Option<ModelSnapshot> = None;
     loop {
         match rx.recv_timeout(SESSION_FLUSH_INTERVAL) {
-            Ok(item) => {
-                queue_item(item, &mut pending_message, &mut pending_snapshot);
-            }
+            Ok(item) => queue_item(item, &mut pending_messages, &mut pending_snapshot),
             Err(RecvTimeoutError::Disconnected) => break,
             Err(_) => {}
         }
         while let Ok(item) = rx.try_recv() {
-            queue_item(item, &mut pending_message, &mut pending_snapshot);
+            queue_item(item, &mut pending_messages, &mut pending_snapshot);
         }
-        if pending_message.is_none() && pending_snapshot.is_none() {
+        if pending_messages.is_empty() && pending_snapshot.is_none() {
             continue;
         }
-        // Messages first (session handshake, forwarded UI requests), then at
-        // most one coalesced snapshot per flush.
-        if let Some(message) = pending_message.take()
-            && write_frame(&mut stream, &message).is_err()
-        {
-            return;
+        while let Some(message) = pending_messages.pop_front() {
+            if write_frame(&mut stream, &message).is_err() {
+                return;
+            }
         }
-        if let Some(snapshot) = pending_snapshot.take()
-            && write_snapshot_frame(&mut stream, &snapshot, compact_snapshots).is_err()
-        {
-            return;
+        if let Some(snapshot) = pending_snapshot.take() {
+            if write_snapshot_frame(&mut stream, &snapshot, compact_snapshots).is_err() {
+                return;
+            }
+            crate::metrics::inc(crate::metrics::model_snapshot_pushes());
         }
     }
 }
@@ -716,18 +811,12 @@ fn session_writer(
 #[cfg(unix)]
 fn queue_item(
     item: SessionWriterItem,
-    pending_message: &mut Option<WireMessage>,
+    pending_messages: &mut VecDeque<WireMessage>,
     pending_snapshot: &mut Option<ModelSnapshot>,
 ) {
     match item {
-        // The queue keeps the oldest undelivered message plus the latest
-        // snapshot; a message that arrives while one is already pending means
-        // the client cannot keep up, and the older one (typically a forwarded
-        // UI request whose reply then times out server-side) is dropped.
         SessionWriterItem::Message(message) => {
-            if pending_message.is_none() {
-                *pending_message = Some(message);
-            }
+            pending_messages.push_back(message);
         }
         SessionWriterItem::Snapshot(snapshot) => {
             *pending_snapshot = Some(snapshot);
@@ -816,7 +905,7 @@ mod tests {
 
     #[test]
     fn snapshot_items_coalesce_to_the_latest_revision() {
-        let mut message: Option<WireMessage> = None;
+        let mut messages: VecDeque<WireMessage> = VecDeque::new();
         let mut snapshot: Option<ModelSnapshot> = None;
         for revision in [1_u64, 2, 3] {
             let state = crate::app::StateDump {
@@ -829,11 +918,44 @@ mod tests {
             };
             queue_item(
                 SessionWriterItem::Snapshot(state),
-                &mut message,
+                &mut messages,
                 &mut snapshot,
             );
         }
-        assert!(message.is_none());
+        assert!(messages.is_empty());
         assert_eq!(snapshot.as_ref().unwrap().state_revision, 3);
+    }
+
+    #[test]
+    fn terminal_messages_keep_arrival_order() {
+        let mut messages: VecDeque<WireMessage> = VecDeque::new();
+        let mut snapshot: Option<ModelSnapshot> = None;
+        for seq in 1..=4u64 {
+            let event = crate::terminal::TerminalStreamEvent::Resize {
+                seq,
+                size: crate::terminal::TerminalSize::new(80, 24),
+            };
+            queue_item(
+                SessionWriterItem::Message(WireMessage::push_terminal(
+                    crate::ids::TerminalId::new(1),
+                    &event.to_wire(),
+                )),
+                &mut messages,
+                &mut snapshot,
+            );
+        }
+        assert_eq!(messages.len(), 4);
+        let seqs: Vec<u64> = messages
+            .iter()
+            .filter_map(|message| {
+                message
+                    .params
+                    .as_ref()?
+                    .get("event")?
+                    .get("seq")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
     }
 }

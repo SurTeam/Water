@@ -11,13 +11,21 @@ name = "water"
 path = "src/lib.rs"
 
 [features]
-default = ["gui", "runtime-screenshot"]
+default = ["gui"]
 gui = ["dep:gpui", "dep:gpui_platform"]
 # Keep the runtime screenshot hook available to the local control interface.
 # GPUI gates its scene-to-image API behind this feature.
 runtime-screenshot = ["gui", "gpui/test-support", "gpui_platform/test-support", "dep:image"]
 # Reserved for tracing/profiling integrations; disabled by default in release builds.
 profiling = []
+
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+overflow-checks = false
 
 [[bin]]
 name = "water"

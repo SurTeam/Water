@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -8,7 +7,7 @@ use crate::{
     ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId},
     pane::{Pane, PaneDirection, PaneNode, SplitAxis},
     surface::{SurfaceKind, SurfaceState, TerminalStatus, TerminalSurfaceState},
-    terminal::{TerminalSnapshot, TerminalSummary},
+    terminal::{TerminalProcessState, TerminalSize, TerminalSummary},
     workspace::{Tab, Workspace},
 };
 
@@ -135,15 +134,12 @@ pub struct TabDump {
     pub tree: PaneTreeDump,
 }
 
-/// Terminal state carried by a projected pane leaf.
+/// Terminal state carried by a projected pane leaf. Screen state (rows,
+/// cursor, viewport) lives on the GUI's local terminal emulator, fed by the
+/// ordered raw stream; the projection only carries control-plane metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TerminalProjection {
     pub summary: TerminalSummary,
-    /// Shared (not copied) grid from the terminal registry. Present only on
-    /// the displayed tab of each workspace; waiters and waterctl fetch the
-    /// grid for any single terminal through the registry RPC instead.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot: Option<Arc<TerminalSnapshot>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -157,9 +153,8 @@ pub enum PaneTreeDump {
         surface_id: SurfaceId,
         surface_kind: SurfaceKind,
         surface_state: SurfaceState,
-        /// Cell-free metadata plus, for displayed tabs only, a shared
-        /// reference to the registry's single grid snapshot. Hidden tabs
-        /// never duplicate their grid into the projection layer.
+        /// Cell-free terminal metadata. The GUI builds and owns the
+        /// terminal screen locally from the raw PTY stream.
         #[serde(default)]
         terminal: Option<Box<TerminalProjection>>,
     },
@@ -197,19 +192,16 @@ impl PaneTreeDump {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemoryStats {
     pub terminal_count: usize,
-    /// Configured per-terminal scrollback limit (focused rows).
+    /// Configured per-terminal GUI scrollback limit (focused rows).
     pub scrollback_lines: usize,
-    /// Rows the focused terminal retains after losing focus.
+    /// Rows the GUI terminal retains after losing focus.
     pub inactive_scrollback_lines: usize,
-    /// Aggregate byte ceiling shared by all terminal scrollback grids.
-    pub max_total_scrollback_bytes: usize,
-    /// Currently retained scrollback across all workers (budget accounting).
-    pub retained_scrollback_lines: usize,
-    pub retained_scrollback_bytes: usize,
-    /// Estimated heap bytes pinned by snapshot grids and recent-output
-    /// buffers still held by the terminal registry (including retired
-    /// terminals inside the auto-close race window).
-    pub registry_snapshot_bytes: usize,
+    /// Configured server replay-history byte budget per terminal.
+    pub replay_history_bytes: usize,
+    /// Raw bytes currently retained by the server replay rings plus
+    /// recent-output buffers (including retired terminals inside the
+    /// auto-close race window).
+    pub retained_replay_bytes: usize,
     pub visible_cells: usize,
     pub surface_count: usize,
     pub shape_cache_entries: usize,
@@ -632,18 +624,6 @@ impl ApplicationModel {
             .and_then(|workspace_id| self.active_pane_for_workspace(workspace_id))
     }
 
-    /// The terminal that currently owns the user's attention. Used to
-    /// propagate focus to PTY workers so background tabs can be trimmed to
-    /// their inactive scrollback tail.
-    pub(crate) fn focused_terminal_id(&self) -> Option<TerminalId> {
-        let pane_id = self.active_pane()?;
-        let pane = self.panes.get(&pane_id)?;
-        match self.surfaces.get(&pane.surface)? {
-            SurfaceState::Terminal(terminal) => Some(terminal.terminal_id),
-            SurfaceState::Empty(_) => None,
-        }
-    }
-
     pub(crate) fn pane_ids_in_tab(&self, tab_id: TabId) -> Option<Vec<PaneId>> {
         let tab = self.tabs.get(&tab_id)?;
         let mut pane_ids = Vec::new();
@@ -835,20 +815,20 @@ impl ApplicationModel {
         })
     }
 
-    pub(crate) fn set_terminal_output_revision(
-        &mut self,
-        terminal_id: TerminalId,
-        revision: u64,
-    ) -> bool {
-        for surface in self.surfaces.values_mut() {
-            if let SurfaceState::Terminal(terminal) = surface
-                && terminal.terminal_id == terminal_id
-            {
-                terminal.last_output_revision = revision;
-                return true;
-            }
-        }
-        false
+    /// Control-plane projection of a terminal: geometry and process/lifecycle
+    /// metadata. Screen state never crosses the wire in the state dump.
+    pub(crate) fn terminal_summary(&self, terminal_id: TerminalId) -> Option<TerminalSummary> {
+        let terminal = self.terminal_surface(terminal_id)?;
+        Some(TerminalSummary {
+            terminal_id: terminal.terminal_id,
+            size: TerminalSize::new(terminal.columns, terminal.lines),
+            process: match terminal.status {
+                TerminalStatus::Running => TerminalProcessState::Running,
+                TerminalStatus::Exited { code } => TerminalProcessState::Exited { code },
+            },
+            process_name: terminal.process_name.clone(),
+            cwd: terminal.cwd.clone(),
+        })
     }
 
     pub(crate) fn set_terminal_status(
@@ -1089,10 +1069,8 @@ impl ApplicationModel {
             terminal_count,
             scrollback_lines: 0,
             inactive_scrollback_lines: 0,
-            max_total_scrollback_bytes: 0,
-            retained_scrollback_lines: 0,
-            retained_scrollback_bytes: 0,
-            registry_snapshot_bytes: 0,
+            replay_history_bytes: 0,
+            retained_replay_bytes: 0,
             visible_cells: self
                 .surfaces
                 .values()
@@ -1197,7 +1175,6 @@ mod tests {
                     status: TerminalStatus::Running,
                     columns: 80,
                     lines: 24,
-                    last_output_revision: 0,
                     agent: None,
                     agent_label: None,
                 }),

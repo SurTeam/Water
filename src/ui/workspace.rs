@@ -233,7 +233,9 @@ impl std::future::Future for CaretSleep {
 /// dismissal share one path without introducing model-owned UI state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialogState {
-    ConfirmCloseWorkspace { workspace_id: WorkspaceId },
+    ConfirmCloseWorkspace {
+        workspace_id: WorkspaceId,
+    },
     ConnectRemote,
     RenameWorkspace {
         connection_id: ConnectionId,
@@ -820,6 +822,9 @@ pub struct WorkspaceView {
     selected_workspace: Option<WorkspaceId>,
     focused_pane: Option<PaneId>,
     scroll_accumulators: BTreeMap<TerminalId, TerminalScrollState>,
+    /// Locally rendered terminal snapshots, built from this connection's
+    /// local emulators (the server projects control-plane metadata only).
+    terminal_snapshots: BTreeMap<TerminalId, std::sync::Arc<TerminalSnapshot>>,
     active_trackpad_scrolls: BTreeSet<TerminalId>,
     pending_viewport_requests: BTreeMap<TerminalId, (PaneId, i64)>,
     viewport_request_frame_pending: bool,
@@ -960,6 +965,7 @@ impl WorkspaceView {
             reported_mouse: None,
             last_reported_mouse_cell: None,
             sidebar_collapsed,
+            terminal_snapshots: BTreeMap::new(),
             collapsed_connections: BTreeSet::new(),
             collapsed_workspaces: BTreeSet::new(),
             sidebar_scroll: ScrollHandle::new(),
@@ -1103,7 +1109,10 @@ impl WorkspaceView {
             self.reset_active_connection_projection(connection);
         }
         self.context_menu = None;
-        if self.dialog.is_some_and(|dialog| !self.dialog_target_exists(dialog)) {
+        if self
+            .dialog
+            .is_some_and(|dialog| !self.dialog_target_exists(dialog))
+        {
             self.dialog = None;
             self.clear_dialog_input();
         }
@@ -1635,14 +1644,13 @@ impl WorkspaceView {
         connection_id: ConnectionId,
         pane_id: PaneId,
     ) -> Option<&AgentDump> {
-        self.connection_by_id(connection_id)
-            .and_then(|connection| {
-                connection
-                    .snapshot
-                    .agents
-                    .iter()
-                    .find(|agent| agent.pane_id == pane_id)
-            })
+        self.connection_by_id(connection_id).and_then(|connection| {
+            connection
+                .snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.pane_id == pane_id)
+        })
     }
 
     fn workspace_dumps(&self) -> Vec<&WorkspaceDump> {
@@ -1715,7 +1723,9 @@ impl WorkspaceView {
                 pane_id,
             } => self
                 .agent_by_pane_id_in(connection_id, pane_id)
-                .is_some_and(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running)),
+                .is_some_and(|agent| {
+                    matches!(agent.status, crate::surface::TerminalStatus::Running)
+                }),
         }
     }
 
@@ -1748,12 +1758,7 @@ impl WorkspaceView {
         self.dialog_is_text_input() && !self.dialog_input.trim().is_empty()
     }
 
-    fn set_dialog_input(
-        &mut self,
-        value: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn set_dialog_input(&mut self, value: String, window: &mut Window, cx: &mut Context<Self>) {
         self.dialog_input = value;
         self.dialog_caret = self.dialog_input.len();
         self.dialog_ime_base = self.dialog_caret;
@@ -1776,16 +1781,18 @@ impl WorkspaceView {
                 cx.background_executor()
                     .spawn(CaretSleep::after(std::time::Duration::from_millis(530)))
                     .await;
-                let still_owned = entity.update(cx, |view, cx| {
-                    if view.dialog_input_generation == generation && view.dialog_is_text_input() {
-                        view.dialog_caret_visible = !view.dialog_caret_visible;
-                        cx.notify();
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .unwrap_or(false);
+                let still_owned = entity
+                    .update(cx, |view, cx| {
+                        if view.dialog_input_generation == generation && view.dialog_is_text_input()
+                        {
+                            view.dialog_caret_visible = !view.dialog_caret_visible;
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
                 if !still_owned {
                     break;
                 }
@@ -1837,16 +1844,16 @@ impl WorkspaceView {
                     self.dialog = Some(DialogState::ConnectRemote);
                     return;
                 }
-                let destination =
-                    match crate::remote::validate_ssh_destination(&self.dialog_input) {
-                        Ok(destination) => destination,
-                        Err(error) => {
-                            self.dialog = Some(DialogState::ConnectRemote);
-                            self.remote_connection_error = Some(error.to_string());
-                            cx.notify();
-                            return;
-                        }
-                    };
+                let destination = match crate::remote::validate_ssh_destination(&self.dialog_input)
+                {
+                    Ok(destination) => destination,
+                    Err(error) => {
+                        self.dialog = Some(DialogState::ConnectRemote);
+                        self.remote_connection_error = Some(error.to_string());
+                        cx.notify();
+                        return;
+                    }
+                };
                 if self.remote_connection_pending {
                     self.dialog = Some(DialogState::ConnectRemote);
                     return;
@@ -2041,7 +2048,8 @@ impl WorkspaceView {
             .find(|(index, _)| *index < self.dialog_caret)
             .map(|(index, _)| index)
             .unwrap_or(0);
-        self.dialog_input.replace_range(char_start..self.dialog_caret, "");
+        self.dialog_input
+            .replace_range(char_start..self.dialog_caret, "");
         self.dialog_caret = char_start;
         self.dialog_ime_base = char_start;
         self.dialog_caret_visible = true;
@@ -2259,6 +2267,100 @@ impl WorkspaceView {
         }
     }
 
+    /// Viewport moves are GUI-local in the raw-stream architecture: apply
+    /// them to the local emulator immediately (the server-side command is a
+    /// wire-compatibility no-op), then refresh the local snapshot.
+    fn apply_local_viewport(
+        &mut self,
+        terminal_id: TerminalId,
+        target: Option<i64>,
+        delta: Option<i64>,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(application) = self.application.clone() else {
+            return;
+        };
+        let connection_id = self.active_connection;
+        if let Some(target) = target {
+            application.terminal_scroll_to(connection_id, terminal_id, target);
+        }
+        if let Some(delta) = delta {
+            application.terminal_scroll_by(connection_id, terminal_id, delta);
+        }
+        if let Some(previous) = self.terminal_snapshots.get(&terminal_id).cloned() {
+            if let Some(snapshot) =
+                application.terminal_snapshot(connection_id, terminal_id, Some(&previous))
+            {
+                shift_selection_for_viewport(
+                    &mut self.selection,
+                    terminal_id,
+                    &previous,
+                    &snapshot,
+                );
+                self.terminal_snapshots.insert(terminal_id, snapshot);
+            }
+        }
+    }
+
+    /// Refreshes the locally rendered snapshots for terminals whose raw
+    /// stream advanced, then requests one repaint for the whole view.
+    pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
+        if changed.is_empty() {
+            return;
+        }
+        let Some(application) = self.application.clone() else {
+            return;
+        };
+        let connection_id = self.active_connection;
+        let mut displayed = BTreeSet::new();
+        if let Some(workspace) = self.selected_workspace_dump()
+            && let Some(active_tab) = workspace.active_tab
+            && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+        {
+            collect_terminal_ids(&tab.tree, &mut displayed);
+        }
+        let mut needs_notify = false;
+        for &terminal_id in changed {
+            if !displayed.contains(&terminal_id) {
+                // The connection-level emulator was still advanced above;
+                // avoid materializing rows or repainting a hidden tab.
+                self.terminal_snapshots.remove(&terminal_id);
+                crate::metrics::inc(crate::metrics::hidden_terminal_updates());
+                continue;
+            }
+            let previous = self.terminal_snapshots.get(&terminal_id).cloned();
+            let previous_ref = previous.as_deref();
+            let snapshot = application.terminal_snapshot(connection_id, terminal_id, previous_ref);
+            match (previous, snapshot) {
+                (Some(previous), Some(snapshot)) => {
+                    shift_selection_for_viewport(
+                        &mut self.selection,
+                        terminal_id,
+                        &previous,
+                        &snapshot,
+                    );
+                    self.terminal_snapshots.insert(terminal_id, snapshot);
+                }
+                (None, Some(snapshot)) => {
+                    self.terminal_snapshots.insert(terminal_id, snapshot);
+                }
+                (_, None) => {
+                    self.terminal_snapshots.remove(&terminal_id);
+                    if let Some(selection) = &self.selection
+                        && selection.terminal_id == terminal_id
+                    {
+                        self.selection = None;
+                    }
+                }
+            }
+            needs_notify = true;
+        }
+        if needs_notify {
+            crate::metrics::inc(crate::metrics::terminal_notifies());
+            cx.notify();
+        }
+    }
+
     fn active_terminal_id(&self) -> Option<TerminalId> {
         let focused_pane = self.focused_pane?;
         let workspace = self.selected_workspace_dump()?;
@@ -2273,7 +2375,10 @@ impl WorkspaceView {
         let workspace = workspace_dump_for_snapshot(&self.snapshot, workspace_id)?;
         let active_tab_id = workspace.active_tab?;
         let tab = workspace.tabs.iter().find(|tab| tab.id == active_tab_id)?;
-        terminal_snapshot_for_pane(&tab.tree, focused_pane)
+        let terminal_id = terminal_id_for_pane(&tab.tree, focused_pane)?;
+        self.terminal_snapshots
+            .get(&terminal_id)
+            .map(std::sync::Arc::as_ref)
     }
 
     fn ime_marked_text_for(&self, terminal_id: TerminalId) -> Option<String> {
@@ -2309,12 +2414,30 @@ impl WorkspaceView {
     }
 
     fn terminal_snapshot_for(&self, terminal_id: TerminalId) -> Option<&TerminalSnapshot> {
-        let workspace_id = self.selected_workspace?;
-        let workspace = workspace_dump_for_snapshot(&self.snapshot, workspace_id)?;
-        workspace
-            .tabs
-            .iter()
-            .find_map(|tab| terminal_snapshot_for_id(&tab.tree, terminal_id))
+        self.terminal_snapshots
+            .get(&terminal_id)
+            .map(std::sync::Arc::as_ref)
+    }
+
+    /// Ensures the raw stream is attached and returns the locally rendered
+    /// snapshot for a terminal (building it on first use).
+    fn local_terminal_snapshot(
+        &mut self,
+        terminal_id: TerminalId,
+        _cx: &mut Context<Self>,
+    ) -> Option<std::sync::Arc<TerminalSnapshot>> {
+        if let Some(cached) = self.terminal_snapshots.get(&terminal_id).cloned() {
+            return Some(cached);
+        }
+        let Some(application) = self.application.clone() else {
+            return None;
+        };
+        let connection_id = self.active_connection;
+        application.ensure_terminal_attached(connection_id, terminal_id);
+        let snapshot = application.terminal_snapshot(connection_id, terminal_id, None)?;
+        self.terminal_snapshots
+            .insert(terminal_id, snapshot.clone());
+        Some(snapshot)
     }
 
     fn terminal_scroll_offset_for_snapshot(&self, snapshot: &TerminalSnapshot) -> f32 {
@@ -2358,8 +2481,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) {
         // Input can arrive much faster than a display refresh. Preserve every
-        // UI-local fractional delta, but cross the socket/model boundary only
-        // once per frame with the latest absolute target for each terminal.
+        // fractional delta and commit the latest local target once per frame.
         record_latest_viewport_request(
             &mut self.pending_viewport_requests,
             terminal_id,
@@ -2372,22 +2494,10 @@ impl WorkspaceView {
         self.viewport_request_frame_pending = true;
         cx.on_next_frame(window, |this, _window, _cx| {
             this.viewport_request_frame_pending = false;
-            for (terminal_id, (pane_id, target)) in
+            for (terminal_id, (_pane_id, target)) in
                 std::mem::take(&mut this.pending_viewport_requests)
             {
-                if !this.enqueue_terminal_command(
-                    terminal_id,
-                    TerminalCommand::SetViewportPosition {
-                        terminal_id: Some(terminal_id),
-                        pane_id: Some(pane_id),
-                        target,
-                    },
-                ) {
-                    // A disconnected model/server cannot acknowledge further
-                    // viewport targets. Stop the display-paced producer after
-                    // the first failure instead of logging once per frame.
-                    this.mouse_scroll_animations.remove(&terminal_id);
-                }
+                this.apply_local_viewport(terminal_id, Some(target), None, _cx);
             }
         });
     }
@@ -2917,14 +3027,7 @@ impl WorkspaceView {
                 -20
             };
             self.scroll_accumulators.remove(&terminal_id);
-            self.enqueue_terminal_command(
-                terminal_id,
-                TerminalCommand::Scroll {
-                    terminal_id: Some(terminal_id),
-                    pane_id: None,
-                    lines,
-                },
-            );
+            self.apply_local_viewport(terminal_id, None, Some(lines), cx);
             return;
         }
         let Some(text) = terminal_input_for_keystroke_with_modes(keystroke, modes) else {
@@ -2999,7 +3102,11 @@ impl WorkspaceView {
         {
             connection.snapshot = snapshot.clone();
         }
-        update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
+        if let Some(selection) = &self.selection
+            && terminal_projection_in_snapshot(&snapshot, selection.terminal_id).is_none()
+        {
+            self.selection = None;
+        }
         self.selected_workspace =
             workspace_selection_after_snapshot(self.selected_workspace, &snapshot);
         self.focused_pane =
@@ -3078,19 +3185,14 @@ impl WorkspaceView {
             else {
                 return false;
             };
-            if let Some(snapshot) = projection.snapshot.as_deref() {
+            if let Some(snapshot) = self.terminal_snapshots.get(terminal_id) {
                 reconcile_visual_scroll(state, snapshot);
             }
-            true
+            projection.summary.terminal_id == *terminal_id
         });
         self.mouse_scroll_animations
             .retain(|terminal_id, animation| {
-                let Some(projection) =
-                    terminal_projection_in_snapshot(installed_snapshot, *terminal_id)
-                else {
-                    return false;
-                };
-                let Some(snapshot) = projection.snapshot.as_deref() else {
+                let Some(snapshot) = self.terminal_snapshots.get(terminal_id) else {
                     return false;
                 };
                 let base = snapshot.viewport_position as f32;
@@ -3099,12 +3201,7 @@ impl WorkspaceView {
             });
         self.pending_viewport_requests
             .retain(|terminal_id, (_, target)| {
-                let Some(projection) =
-                    terminal_projection_in_snapshot(installed_snapshot, *terminal_id)
-                else {
-                    return false;
-                };
-                let Some(snapshot) = projection.snapshot.as_deref() else {
+                let Some(snapshot) = self.terminal_snapshots.get(terminal_id) else {
                     return false;
                 };
                 !((snapshot.rows_before.is_empty() && *target > snapshot.viewport_position)
@@ -4222,11 +4319,7 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        let mut button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .flex();
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4326,15 +4419,13 @@ impl WorkspaceView {
                 theme.inactive_pane_border
             }));
         if enabled {
-            button = button
-                .cursor_pointer()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                        this.confirm_dialog(cx);
-                        cx.stop_propagation();
-                    }),
-                );
+            button = button.cursor_pointer().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.confirm_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            );
         }
         button
             .child(SharedString::from(label.to_owned()))
@@ -4403,11 +4494,7 @@ impl WorkspaceView {
                     .child(SharedString::from(format!("Current name: {title}"))),
             )
             .child(self.render_text_input_row("Workspace name", theme));
-        let mut button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .flex();
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4434,12 +4521,9 @@ impl WorkspaceView {
                 .items_center()
                 .justify_center()
                 .bg(rgba(DIALOG_SCRIM))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    |_event: &MouseDownEvent, _window, cx| {
-                        cx.stop_propagation();
-                    },
-                )
+                .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                })
                 .on_mouse_down(
                     MouseButton::Right,
                     |_event: &MouseDownEvent, _window, cx| {
@@ -4731,7 +4815,7 @@ impl WorkspaceView {
     }
 
     fn render_pane_tree(
-        &self,
+        &mut self,
         tab_id: TabId,
         tree: &PaneTreeDump,
         window_active: bool,
@@ -4755,7 +4839,7 @@ impl WorkspaceView {
 
     #[allow(clippy::too_many_arguments)]
     fn render_pane_tree_with_grow(
-        &self,
+        &mut self,
         tab_id: TabId,
         tree: &PaneTreeDump,
         path: &[bool],
@@ -4794,7 +4878,12 @@ impl WorkspaceView {
                     SurfaceState::Terminal(terminal) => Some(terminal.terminal_id),
                     SurfaceState::Empty(_) => None,
                 };
-                let terminal_grid = terminal.as_ref().and_then(|p| p.snapshot.clone());
+                let terminal_grid = terminal
+                    .as_ref()
+                    .map(|projection| {
+                        self.local_terminal_snapshot(projection.summary.terminal_id, cx)
+                    })
+                    .flatten();
                 let mouse_modes = terminal_grid
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
@@ -4805,6 +4894,7 @@ impl WorkspaceView {
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_grid
                         .map(|snapshot| {
+                            crate::metrics::inc(crate::metrics::terminal_renders());
                             let ime_text = self.ime_marked_text_for(snapshot.terminal_id);
                             let scroll_offset_rows = if smooth_scroll {
                                 self.terminal_scroll_offset_for_snapshot(&snapshot)
@@ -5145,7 +5235,7 @@ impl WorkspaceView {
     }
 
     fn render_active_tab(
-        &self,
+        &mut self,
         window_active: bool,
         metrics: TerminalMetrics,
         theme: ThemeColors,
@@ -5160,7 +5250,9 @@ impl WorkspaceView {
         let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab_id) else {
             return render_empty_tab_state(theme, &self.config.shortcuts.new_terminal_tab);
         };
-        self.render_pane_tree(tab.id, &tab.tree, window_active, metrics, theme, cx)
+        let tab_id = tab.id;
+        let tree = tab.tree.clone();
+        self.render_pane_tree(tab_id, &tree, window_active, metrics, theme, cx)
     }
 }
 
@@ -5363,14 +5455,6 @@ fn focused_pane_for_workspace(
                 .filter(|pane_id| workspace_active_tab_contains_pane(workspace, *pane_id))
         })
         .or_else(|| workspace_active_pane(workspace))
-}
-
-fn terminal_snapshot_in_snapshot(
-    snapshot: &ModelSnapshot,
-    terminal_id: TerminalId,
-) -> Option<&TerminalSnapshot> {
-    terminal_projection_in_snapshot(snapshot, terminal_id)
-        .and_then(|projection| projection.snapshot.as_deref())
 }
 
 /// Whether the terminal is projected anywhere in the state (grid or summary
@@ -5783,74 +5867,29 @@ fn normalize_utf16_range(range: Range<usize>, length: usize) -> Range<usize> {
     if start <= end { start..end } else { end..end }
 }
 
-fn update_terminal_selection_for_snapshot(
+/// Drifts a terminal selection to follow a viewport move applied locally.
+fn shift_selection_for_viewport(
     selection: &mut Option<TerminalSelection>,
-    previous: &ModelSnapshot,
-    next: &ModelSnapshot,
-) {
-    let Some(terminal_id) = selection.as_ref().map(|selection| selection.terminal_id) else {
-        return;
-    };
-    if terminal_projection_in_snapshot(next, terminal_id).is_none() {
-        // The terminal was removed from every workspace. Do not leave a
-        // selection referring to a dead projection.
-        *selection = None;
-        return;
-    }
-    // Viewport drift tracking needs both grids; hidden tabs only project
-    // summaries, in which case the selection stays as-is until the tab is
-    // displayed again.
-    let (Some(previous_snapshot), Some(next_snapshot)) = (
-        terminal_snapshot_in_snapshot(previous, terminal_id),
-        terminal_snapshot_in_snapshot(next, terminal_id),
-    ) else {
-        return;
-    };
-    let Some(selection_state) = selection.as_mut() else {
-        return;
-    };
-    update_terminal_selection_for_viewport(selection_state, previous_snapshot, next_snapshot);
-}
-
-fn update_terminal_selection_for_viewport(
-    selection: &mut TerminalSelection,
+    terminal_id: TerminalId,
     previous: &TerminalSnapshot,
     next: &TerminalSnapshot,
 ) {
+    let Some(selection_state) = selection
+        .as_mut()
+        .filter(|selection| selection.terminal_id == terminal_id)
+    else {
+        return;
+    };
     let delta = next
         .viewport_position
         .saturating_sub(previous.viewport_position);
-    shift_terminal_selection_rows(selection, delta);
+    shift_terminal_selection_rows(selection_state, delta);
 }
 
 fn shift_terminal_selection_rows(selection: &mut TerminalSelection, delta: i64) {
     let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     selection.anchor.position.row = selection.anchor.position.row.saturating_add(delta);
     selection.head.position.row = selection.head.position.row.saturating_add(delta);
-}
-
-fn terminal_snapshot_for_id(
-    tree: &PaneTreeDump,
-    terminal_id: TerminalId,
-) -> Option<&TerminalSnapshot> {
-    terminal_projection_for_id(tree, terminal_id)?
-        .snapshot
-        .as_deref()
-}
-
-fn terminal_snapshot_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<&TerminalSnapshot> {
-    match tree {
-        PaneTreeDump::Leaf {
-            pane_id: leaf_id,
-            terminal,
-            ..
-        } if *leaf_id == pane_id => terminal
-            .as_ref()
-            .and_then(|projection| projection.snapshot.as_deref()),
-        PaneTreeDump::Leaf { .. } => None,
-        PaneTreeDump::Split { first, second, .. } => terminal_snapshot_for_pane(first, pane_id)
-            .or_else(|| terminal_snapshot_for_pane(second, pane_id)),
-    }
 }
 
 fn terminal_id_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<TerminalId> {
@@ -5866,6 +5905,20 @@ fn terminal_id_for_pane(tree: &PaneTreeDump, pane_id: PaneId) -> Option<Terminal
         PaneTreeDump::Leaf { .. } => None,
         PaneTreeDump::Split { first, second, .. } => {
             terminal_id_for_pane(first, pane_id).or_else(|| terminal_id_for_pane(second, pane_id))
+        }
+    }
+}
+
+fn collect_terminal_ids(tree: &PaneTreeDump, terminal_ids: &mut BTreeSet<TerminalId>) {
+    match tree {
+        PaneTreeDump::Leaf { terminal, .. } => {
+            if let Some(terminal) = terminal {
+                terminal_ids.insert(terminal.summary.terminal_id);
+            }
+        }
+        PaneTreeDump::Split { first, second, .. } => {
+            collect_terminal_ids(first, terminal_ids);
+            collect_terminal_ids(second, terminal_ids);
         }
     }
 }
@@ -8428,12 +8481,14 @@ mod tests {
         next.display_offset = 6;
         next.viewport_position = 6;
 
-        let mut selection = TerminalSelection {
+        let selection = TerminalSelection {
             terminal_id,
             anchor: endpoint(1, 2, TerminalSelectionSide::Left),
             head: endpoint(2, 4, TerminalSelectionSide::Right),
         };
-        update_terminal_selection_for_viewport(&mut selection, &previous, &next);
+        let mut wrapped = Some(selection);
+        shift_selection_for_viewport(&mut wrapped, terminal_id, &previous, &next);
+        let selection = wrapped.expect("selection remains present");
 
         assert_eq!(selection.anchor.position.row, 5);
         assert_eq!(selection.head.position.row, 6);
@@ -8451,12 +8506,14 @@ mod tests {
         // on the same visible cells. It must not move the selection highlight.
         next.viewport_position = previous.viewport_position;
 
-        let mut selection = TerminalSelection {
+        let selection = TerminalSelection {
             terminal_id,
             anchor: endpoint(1, 2, TerminalSelectionSide::Left),
             head: endpoint(2, 4, TerminalSelectionSide::Right),
         };
-        update_terminal_selection_for_viewport(&mut selection, &previous, &next);
+        let mut wrapped = Some(selection);
+        shift_selection_for_viewport(&mut wrapped, terminal_id, &previous, &next);
+        let selection = wrapped.expect("selection remains present");
 
         assert_eq!(selection.anchor.position.row, 1);
         assert_eq!(selection.head.position.row, 2);
@@ -9176,11 +9233,17 @@ mod tests {
             )
             .unwrap();
         let dump = client.state_dump().unwrap();
+        let local_snapshot = Arc::new(crate::terminal::snapshot_from_replay(
+            &client.terminal_replay(terminal_id).unwrap(),
+            2_000,
+        ));
 
         let (view, cx) = cx.add_window_view(|_, cx| {
             WorkspaceView::new(client.clone(), dump.clone(), cx.focus_handle())
         });
         view.update_in(cx, |view, _window, cx| {
+            view.terminal_snapshots
+                .insert(terminal_id, local_snapshot.clone());
             // Give hit-testing a stable, measured grid (the real window
             // measures via request_layout; the test host does not paint).
             view.terminal_metrics = TerminalMetrics {
@@ -9235,10 +9298,7 @@ mod tests {
                     surface_state,
                     terminal,
                     ..
-                } => match (
-                    surface_state,
-                    terminal.as_ref().and_then(|p| p.snapshot.as_ref()),
-                ) {
+                } => match (surface_state, terminal.as_ref()) {
                     (SurfaceState::Terminal(state), Some(_)) => Some(state.terminal_id),
                     _ => None,
                 },
@@ -9284,7 +9344,10 @@ mod tests {
             .client()
             .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
             .unwrap();
-        remote_host.client().wait_operation(remote_operation).unwrap();
+        remote_host
+            .client()
+            .wait_operation(remote_operation)
+            .unwrap();
         let local_dump = local_host.client().state_dump().unwrap();
         let remote_dump = remote_host.client().state_dump().unwrap();
         let (local_id, local_title) = {
@@ -9302,8 +9365,16 @@ mod tests {
             (workspace.id, workspace.title.clone())
         };
         assert_eq!(local_id, remote_id, "test relies on an ID collision");
-        assert_eq!(local_title, remote_title, "test relies on a title collision");
-        (local_host, remote_host, (local_id, local_title), (remote_id, remote_title))
+        assert_eq!(
+            local_title, remote_title,
+            "test relies on a title collision"
+        );
+        (
+            local_host,
+            remote_host,
+            (local_id, local_title),
+            (remote_id, remote_title),
+        )
     }
 
     #[gpui::test]
@@ -9361,8 +9432,7 @@ mod tests {
         cx.run_until_parked();
         let remote_dump = remote_host.client().state_dump().unwrap();
         assert_eq!(
-            remote_dump.workspaces[0].title,
-            title,
+            remote_dump.workspaces[0].title, title,
             "confirming with the untouched name is a no-op rename"
         );
 
@@ -9379,7 +9449,10 @@ mod tests {
             view.confirm_dialog(cx);
         });
         cx.run_until_parked();
-        assert_eq!(remote_host.client().state_dump().unwrap().workspaces[0].title, "Build box");
+        assert_eq!(
+            remote_host.client().state_dump().unwrap().workspaces[0].title,
+            "Build box"
+        );
         assert_eq!(
             local_host.client().state_dump().unwrap().workspaces[0].title,
             title,
@@ -9396,11 +9469,7 @@ mod tests {
                 "Build box"
             );
             assert_eq!(
-                view.connection_by_id(local_id)
-                    .unwrap()
-                    .snapshot
-                    .workspaces[0]
-                    .title,
+                view.connection_by_id(local_id).unwrap().snapshot.workspaces[0].title,
                 title
             );
         });
@@ -9477,9 +9546,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dialog_input_caret_editing_follows_arrow_and_delete_keys(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn dialog_input_caret_editing_follows_arrow_and_delete_keys(cx: &mut gpui::TestAppContext) {
         let (mut local_host, mut _remote_host, (local_ws, title), _) =
             two_hosts_with_colliding_workspaces();
         let local_client: Arc<dyn CommandTransport> = Arc::new(local_host.client());
@@ -9500,7 +9567,10 @@ mod tests {
         });
         view.update_in(cx, |view, _, _| {
             assert_eq!(view.dialog_caret, title.len() - 1);
-            assert_eq!(&view.dialog_input[..view.dialog_caret], &title[..title.len() - 1]);
+            assert_eq!(
+                &view.dialog_input[..view.dialog_caret],
+                &title[..title.len() - 1]
+            );
             assert_eq!(&view.dialog_input[view.dialog_caret..], "1");
         });
         // Delete removes the character after the caret ("1").

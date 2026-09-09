@@ -10,6 +10,7 @@ use water::command::{
 };
 use water::config::AppConfig;
 use water::surface::SurfaceState;
+use water::terminal::snapshot_from_replay;
 
 fn dispatch_ok(dispatcher: &mut CommandDispatcher, command: AppCommand) -> OperationResult {
     let operation_id = dispatcher.dispatch(command);
@@ -28,19 +29,6 @@ fn first_terminal(tree: &PaneTreeDump) -> Option<(water::ids::PaneId, water::ids
         PaneTreeDump::Leaf { .. } => None,
         PaneTreeDump::Split { first, second, .. } => {
             first_terminal(first).or_else(|| first_terminal(second))
-        }
-    }
-}
-
-fn first_terminal_snapshot(tree: &PaneTreeDump) -> Option<&water::terminal::TerminalSnapshot> {
-    match tree {
-        PaneTreeDump::Leaf {
-            terminal: Some(projection),
-            ..
-        } => projection.snapshot.as_deref(),
-        PaneTreeDump::Leaf { .. } => None,
-        PaneTreeDump::Split { first, second, .. } => {
-            first_terminal_snapshot(first).or_else(|| first_terminal_snapshot(second))
         }
     }
 }
@@ -293,7 +281,7 @@ fn new_in_workspace_targets_an_inactive_workspace_and_inherits_its_cwd() {
 }
 
 #[test]
-fn all_workspace_projections_include_terminal_snapshots() {
+fn model_snapshots_only_include_terminal_control_plane() {
     let mut dispatcher = CommandDispatcher::new();
     let first = match dispatch_ok(
         &mut dispatcher,
@@ -367,23 +355,19 @@ fn all_workspace_projections_include_terminal_snapshots() {
                 workspace.id,
                 tab.id
             );
-            // Grid cells are projected for the displayed tab of every
-            // workspace; hidden tabs stay metadata-only.
-            if workspace.active_tab == Some(tab.id) {
-                assert!(
-                    first_terminal_snapshot(&tab.tree).is_some(),
-                    "displayed tab {} lacks a terminal grid",
-                    tab.id
-                );
-            }
         }
     }
-    let second_workspace = state
+    let _second_workspace = state
         .workspaces
         .iter()
         .find(|workspace| workspace.id == second)
         .unwrap();
-    let second_snapshot = first_terminal_snapshot(&second_workspace.tabs[0].tree).unwrap();
+    let wire = serde_json::to_string(&state).unwrap();
+    assert!(!wire.contains("\"cells\""));
+    assert!(!wire.contains("\"rows_before\""));
+    assert!(!wire.contains("\"viewport_position\""));
+    let replay = dispatcher.terminal_replay(second_terminal).unwrap();
+    let second_snapshot = snapshot_from_replay(&replay, 2_000);
     assert!(
         second_snapshot
             .visible_text()
@@ -428,13 +412,12 @@ fn hidden_tabs_project_summaries_only_and_fetch_grids_per_terminal() {
     assert_eq!(workspace.active_tab, Some(workspace.tabs[1].id));
     let summary = first_terminal_summary(&hidden.tree).expect("hidden tab keeps a summary");
     assert_eq!(summary.terminal_id, first_terminal);
-    assert!(
-        first_terminal_snapshot(&hidden.tree).is_none(),
-        "hidden tabs must not duplicate grid cells into the projection"
-    );
+    let hidden_wire = serde_json::to_string(&hidden.tree).unwrap();
+    assert!(!hidden_wire.contains("\"cells\""));
 
-    // The registry remains the single source of truth for hidden grids.
-    let fetched = dispatcher.terminal_snapshot(first_terminal).unwrap();
+    // Inspection replays the server's raw history in this caller.
+    let replay = dispatcher.terminal_replay(first_terminal).unwrap();
+    let fetched = snapshot_from_replay(&replay, 2_000);
     assert_eq!(fetched.terminal_id, first_terminal);
     assert_eq!(fetched.size.columns, 80);
 }
@@ -471,15 +454,13 @@ fn process_metadata_drives_titles_and_cwd_inheritance_until_explicit_rename() {
         result => panic!("unexpected result: {result:?}"),
     };
 
-    let snapshot = dispatcher
+    dispatcher
         .wait_terminal_contains(terminal, "WATER_META_DONE", Duration::from_secs(5))
         .unwrap();
     let expected_cwd = std::fs::canonicalize(Path::new("/tmp"))
         .unwrap()
         .display()
         .to_string();
-    assert_eq!(snapshot.cwd, expected_cwd);
-    assert!(!snapshot.process_name.is_empty());
     assert!(dispatcher.pump_background_events());
 
     let state = dispatcher.state_dump();
@@ -575,7 +556,7 @@ fn process_metadata_drives_titles_and_cwd_inheritance_until_explicit_rename() {
     assert!(
         dispatcher
             .terminal_registry()
-            .snapshot(inherited_terminal)
+            .replay(inherited_terminal)
             .is_err()
     );
 }
@@ -608,9 +589,10 @@ fn closing_a_pane_terminates_the_terminal_process_group() {
         OperationResult::TerminalSpawned { terminal_id } => terminal_id,
         result => panic!("unexpected result: {result:?}"),
     };
-    let snapshot = dispatcher
+    let replay = dispatcher
         .wait_terminal_contains(terminal_id, "WATER_CHILD_", Duration::from_secs(5))
         .unwrap();
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     let child_pid = snapshot
         .visible_text()
         .lines()
@@ -645,16 +627,11 @@ fn closing_a_pane_terminates_the_terminal_process_group() {
         }
     }
     assert!(!alive, "terminal descendant process survived pane close");
-    assert!(
-        dispatcher
-            .terminal_registry()
-            .snapshot(terminal_id)
-            .is_err()
-    );
+    assert!(dispatcher.terminal_registry().replay(terminal_id).is_err());
 }
 
 #[test]
-fn background_tab_scrollback_is_trimmed_to_the_inactive_tail() {
+fn background_tab_output_is_retained_as_bounded_raw_replay() {
     let mut config = AppConfig::default();
     config.terminal.scrollback_lines = 100;
     config.terminal.inactive_scrollback_lines = 10;
@@ -694,12 +671,10 @@ fn background_tab_scrollback_is_trimmed_to_the_inactive_tail() {
         .expect("background tab output reaches the registry");
 
     let stats = dispatcher.memory_stats();
-    // Without focus-aware trimming this background tab alone would retain
-    // its full 100-row limit; the cap below only holds if the worker honored
-    // the 10-row inactive tail (plus room for the focused tab's startup).
+    assert!(stats.retained_replay_bytes > 0, "{stats:?}");
     assert!(
-        stats.retained_scrollback_lines <= 40,
-        "background tab must stay at the inactive tail: {stats:?}"
+        stats.retained_replay_bytes <= stats.replay_history_bytes * stats.terminal_count,
+        "raw replay rings must honor their per-terminal hard limit: {stats:?}"
     );
     assert_eq!(stats.scrollback_lines, 100);
     assert_eq!(stats.inactive_scrollback_lines, 10);
@@ -726,10 +701,8 @@ fn send_text(dispatcher: &mut CommandDispatcher, terminal_id: water::ids::Termin
 }
 
 #[test]
-fn absolute_viewport_request_scrolls_real_shell_history_and_acks() {
-    let mut config = AppConfig::default();
-    config.terminal.scrollback_lines = 500;
-    let mut dispatcher = CommandDispatcher::with_config(config);
+fn viewport_compatibility_command_never_mutates_the_server_terminal_stream() {
+    let mut dispatcher = CommandDispatcher::new();
     dispatch_ok(
         &mut dispatcher,
         AppCommand::Workspace(WorkspaceCommand::Create),
@@ -739,50 +712,24 @@ fn absolute_viewport_request_scrolls_real_shell_history_and_acks() {
         AppCommand::Tab(TabCommand::New { title: None }),
     );
     let terminal_id = focused_terminal_id(&dispatcher);
-    let registry = dispatcher.terminal_registry();
-
-    send_text(
-        &mut dispatcher,
-        terminal_id,
-        "for i in $(seq 1 80); do echo VIEWPORT_LINE_$i; done\n",
-    );
-    let bottom = registry
-        .contains_text(terminal_id, "VIEWPORT_LINE_80", Duration::from_secs(10))
-        .expect("history reaches the terminal");
-    assert!(bottom.rows_before.len() >= 3);
-
-    let target = bottom.viewport_position + 3;
-    dispatch_ok(
+    let before = dispatcher.terminal_replay(terminal_id).unwrap().last_seq;
+    let result = dispatch_ok(
         &mut dispatcher,
         AppCommand::Terminal(TerminalCommand::SetViewportPosition {
             terminal_id: Some(terminal_id),
             pane_id: None,
-            target,
+            target: 3,
         }),
     );
-    let scrolled = registry
-        .wait_viewport_position(terminal_id, target, Duration::from_secs(2))
-        .expect("worker acknowledges absolute viewport target");
-    assert!(std::sync::Arc::ptr_eq(
-        &scrolled.rows[0],
-        &bottom.rows_before[2]
+    assert!(matches!(
+        result,
+        OperationResult::TerminalViewportPositionSet { terminal_id: id, target: 3 }
+            if id == terminal_id
     ));
-
-    dispatch_ok(
-        &mut dispatcher,
-        AppCommand::Terminal(TerminalCommand::SetViewportPosition {
-            terminal_id: Some(terminal_id),
-            pane_id: None,
-            target: bottom.viewport_position,
-        }),
+    assert_eq!(
+        dispatcher.terminal_replay(terminal_id).unwrap().last_seq,
+        before
     );
-    registry
-        .wait_viewport_position(
-            terminal_id,
-            bottom.viewport_position,
-            Duration::from_secs(2),
-        )
-        .expect("worker returns to the bottom viewport");
 }
 
 #[test]
@@ -822,7 +769,8 @@ fn clear_command_erases_scrollback_via_shell_integration() {
         .contains_text(terminal_id, "RESULT_42", Duration::from_secs(10))
         .expect("clear and marker executed");
 
-    let snapshot = registry.snapshot(terminal_id).unwrap();
+    let replay = registry.replay(terminal_id).unwrap();
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     let visible = snapshot.visible_text();
     assert!(visible.contains("RESULT_42"));
     assert!(
@@ -867,7 +815,8 @@ fn ctrl_l_pushes_the_prompt_to_the_top_without_erasing_scrollback() {
         .contains_text(terminal_id, "CTRL_L_KEPT_42", Duration::from_secs(10))
         .expect("post-ctrl-l marker executed");
 
-    let snapshot = registry.snapshot(terminal_id).unwrap();
+    let replay = registry.replay(terminal_id).unwrap();
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     let visible = snapshot.visible_text();
     assert!(visible.contains("CTRL_L_KEPT_42"));
     assert!(
@@ -881,7 +830,7 @@ fn ctrl_l_pushes_the_prompt_to_the_top_without_erasing_scrollback() {
 }
 
 #[test]
-fn closing_tabs_releases_retained_scrollback_memory() {
+fn closing_tabs_releases_retained_replay_memory() {
     let mut config = AppConfig::default();
     config.terminal.scrollback_lines = 2000;
     config.terminal.inactive_scrollback_lines = 500;
@@ -914,7 +863,7 @@ fn closing_tabs_releases_retained_scrollback_memory() {
     }
 
     let before = dispatcher.memory_stats();
-    assert!(before.retained_scrollback_bytes > 4_000_000, "{before:?}");
+    assert!(before.retained_replay_bytes > 0, "{before:?}");
 
     let first_tab = {
         let state = dispatcher.state_dump();
@@ -929,21 +878,16 @@ fn closing_tabs_releases_retained_scrollback_memory() {
 
     let after = dispatcher.memory_stats();
     assert!(
-        after.retained_scrollback_bytes < before.retained_scrollback_bytes,
-        "closed tabs must release their scrollback budget: {before:?} -> {after:?}"
+        after.retained_replay_bytes < before.retained_replay_bytes,
+        "closed tabs must release their replay budget: {before:?} -> {after:?}"
     );
-    assert!(
-        after.registry_snapshot_bytes < before.registry_snapshot_bytes,
-        "closed tabs must release their registry snapshots: {before:?} -> {after:?}"
-    );
-    // The surviving tab keeps its own (focused) scrollback — that is the
-    // remaining budget, not a leak.
+    // The surviving tab keeps its own bounded raw history.
     assert!(
         dispatcher.terminal_registry().terminal_count() == 1,
         "only the surviving tab keeps a registry entry"
     );
     assert!(
-        after.retained_scrollback_bytes >= 3_000_000,
-        "the focused surviving tab keeps its history: {after:?}"
+        after.retained_replay_bytes > 0,
+        "the surviving tab keeps its replay history: {after:?}"
     );
 }

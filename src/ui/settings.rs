@@ -635,9 +635,11 @@ impl SettingsView {
             SettingField::ThemeSidebarConnectionBackground => {
                 self.config.theme.sidebar_connection_background.clone()
             }
-            SettingField::ThemeSidebarConnectionActiveBackground => {
-                self.config.theme.sidebar_connection_active_background.clone()
-            }
+            SettingField::ThemeSidebarConnectionActiveBackground => self
+                .config
+                .theme
+                .sidebar_connection_active_background
+                .clone(),
             SettingField::ThemeSidebarWorkspaceBackground => {
                 self.config.theme.sidebar_workspace_background.clone()
             }

@@ -12,11 +12,14 @@ use gpui::{
 
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
+use crate::control::protocol::TerminalAttachResponse;
 use crate::control::{
-    ControlClient, RemoteCommandClient, connect_water_session, spawn_state_polling_fallback,
+    ControlClient, RemoteCommandClient, WaterSession, connect_water_session,
+    spawn_state_polling_fallback,
 };
-use crate::ids::ConnectionId;
+use crate::ids::{ConnectionId, TerminalId};
 use crate::remote::SshTunnel;
+use crate::terminal::{TerminalEmulator, TerminalStreamEvent, TerminalTheme, WireTerminalEvent};
 
 #[cfg(feature = "runtime-screenshot")]
 use super::control::UiScreenshot;
@@ -89,6 +92,34 @@ struct ManagedConnection {
     _tunnel: Option<SshTunnel>,
     local_socket: Option<PathBuf>,
     last_snapshot_apply: std::time::Instant,
+    /// Raw-stream terminal plane: session handle plus the local emulators.
+    /// Emulators are mutated on the GPUI main thread only.
+    terminal: Option<TerminalConnection>,
+}
+
+/// One connection's terminal plane. The session owns the socket streams; the
+/// emulators own the screens; `events_tx` carries stream events from the
+/// pump threads to the main-thread listener.
+pub(crate) struct TerminalConnection {
+    pub session: Arc<WaterSession>,
+    pub emulators: std::collections::BTreeMap<TerminalId, TerminalEmulator>,
+    pub pending_attachments: std::collections::BTreeSet<TerminalId>,
+    pub events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    pub scrollback_lines: usize,
+    pub theme: TerminalTheme,
+}
+
+pub(crate) enum TerminalEventMsg {
+    Attached {
+        terminal_id: TerminalId,
+        response: TerminalAttachResponse,
+    },
+    Event {
+        terminal_id: TerminalId,
+        event: WireTerminalEvent,
+    },
+    /// The terminal's pump ended (process exit, detach, session end).
+    Detached { terminal_id: TerminalId },
 }
 
 struct RemoteConnectionSetup {
@@ -96,6 +127,7 @@ struct RemoteConnectionSetup {
     client: Arc<dyn CommandTransport>,
     snapshot: ModelSnapshot,
     snapshot_receiver: crate::app::SnapshotStream,
+    terminal_session: Option<WaterSession>,
     tunnel: SshTunnel,
     local_socket: PathBuf,
 }
@@ -134,6 +166,7 @@ impl WaterApplication {
                     _tunnel: None,
                     local_socket: None,
                     last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
+                    terminal: None,
                 }]),
                 next_connection_id: Cell::new(2),
                 ui_control_client: RefCell::new(None),
@@ -224,21 +257,25 @@ impl WaterApplication {
                             .map_err(|error| error.to_string())?,
                     );
                     let snapshot = client.state_dump().map_err(|error| error.to_string())?;
-                    let snapshot_receiver = connect_water_session(&local_socket, ui_control_client)
-                        .unwrap_or_else(|error| {
-                            tracing::warn!(
-                                target: "water::workspace",
-                                ?error,
-                                destination = %connection_destination,
-                                "remote session push unavailable; falling back to state polling"
-                            );
-                            spawn_state_polling_fallback(client.clone())
-                        });
+                    let (snapshot_receiver, terminal_session) =
+                        match connect_water_session(&local_socket, ui_control_client) {
+                            Ok(session) => (session.snapshot_stream().clone(), Some(session)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "water::workspace",
+                                    ?error,
+                                    destination = %connection_destination,
+                                    "remote session push unavailable; falling back to state polling"
+                                );
+                                (spawn_state_polling_fallback(client.clone()), None)
+                            }
+                        };
                     Ok::<_, String>(RemoteConnectionSetup {
                         destination: connection_destination,
                         client,
                         snapshot,
                         snapshot_receiver,
+                        terminal_session,
                         tunnel,
                         local_socket,
                     })
@@ -285,12 +322,19 @@ impl WaterApplication {
             client: setup.client,
             snapshot: setup.snapshot,
         };
+        let terminal = setup
+            .terminal_session
+            .map(|session| self.build_terminal_connection(cx, connection_id, session));
         self.state.connections.borrow_mut().push(ManagedConnection {
             projection: projection.clone(),
             _tunnel: Some(setup.tunnel),
             local_socket: Some(setup.local_socket),
             last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
+            terminal,
         });
+        for terminal_id in terminal_ids_in_snapshot(&projection.snapshot) {
+            self.ensure_terminal_attached(connection_id, terminal_id);
+        }
         let views = self.state.views.borrow().clone();
         let mut live_views = Vec::with_capacity(views.len());
         for view in views {
@@ -435,6 +479,7 @@ impl WaterApplication {
         snapshot_receiver: crate::app::SnapshotStream,
         ui_control_client: UiControlClient,
         ui_control_receiver: UiControlReceiver,
+        terminal_session: Option<WaterSession>,
     ) {
         self.state
             .ui_control_client
@@ -465,6 +510,26 @@ impl WaterApplication {
         });
         cx.set_menus(application_menus());
 
+        if let Some(session) = terminal_session {
+            let terminal = self.build_terminal_connection(cx, ConnectionId::new(1), session);
+            self.state
+                .connections
+                .borrow_mut()
+                .iter_mut()
+                .find(|connection| connection.projection.id == ConnectionId::new(1))
+                .map(|connection| connection.terminal = Some(terminal));
+            let terminal_ids = self
+                .state
+                .connections
+                .borrow()
+                .iter()
+                .find(|connection| connection.projection.id == ConnectionId::new(1))
+                .map(|connection| terminal_ids_in_snapshot(&connection.projection.snapshot))
+                .unwrap_or_default();
+            for terminal_id in terminal_ids {
+                self.ensure_terminal_attached(ConnectionId::new(1), terminal_id);
+            }
+        }
         self.spawn_snapshot_listener(cx, ConnectionId::new(1), snapshot_receiver)
             .detach();
         self.spawn_ui_control_listener(cx, ui_control_receiver)
@@ -572,6 +637,7 @@ impl WaterApplication {
     ) -> Task<()> {
         let receiver = std::sync::Arc::new(receiver);
         let state = self.state.clone();
+        let application = self.clone();
         cx.spawn(async move |cx| {
             loop {
                 let receiver_for_worker = receiver.clone();
@@ -620,6 +686,9 @@ impl WaterApplication {
                 if !installed {
                     continue;
                 }
+                for terminal_id in terminal_ids_in_snapshot(&snapshot) {
+                    application.ensure_terminal_attached(connection_id, terminal_id);
+                }
                 let views = state.views.borrow().clone();
                 let mut live_views = Vec::with_capacity(views.len());
                 for view in views {
@@ -639,6 +708,369 @@ impl WaterApplication {
                 state.views.replace(live_views);
             }
         })
+    }
+
+    /// Builds the terminal plane for a connection: owns the session, starts
+    /// the main-thread event listener, and holds the local emulators.
+    fn build_terminal_connection(
+        &self,
+        cx: &mut App,
+        connection_id: ConnectionId,
+        session: WaterSession,
+    ) -> TerminalConnection {
+        let (events_tx, events_rx) = std::sync::mpsc::sync_channel(1024);
+        let config = self.config();
+        let colors = config.theme.colors();
+        let theme = TerminalTheme::new(
+            colors.terminal_foreground,
+            colors.terminal_background,
+            colors.cursor_background,
+        );
+        let connection = TerminalConnection {
+            session: Arc::new(session),
+            emulators: std::collections::BTreeMap::new(),
+            pending_attachments: std::collections::BTreeSet::new(),
+            events_tx,
+            scrollback_lines: config.terminal.scrollback_lines,
+            theme,
+        };
+        self.spawn_terminal_event_listener(cx, connection_id, events_rx)
+            .detach();
+        connection
+    }
+
+    /// Main-thread listener for raw terminal stream events: batches events
+    /// off the pump threads, applies them to the connection's emulators,
+    /// forwards emulator query responses to the PTY, and refreshes the
+    /// views' terminal snapshots.
+    fn spawn_terminal_event_listener(
+        &self,
+        cx: &mut App,
+        connection_id: ConnectionId,
+        receiver: std::sync::mpsc::Receiver<TerminalEventMsg>,
+    ) -> Task<()> {
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let application = self.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                let receiver_for_worker = receiver.clone();
+                let batch = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let receiver = receiver_for_worker
+                            .lock()
+                            .expect("terminal event receiver poisoned");
+                        let first = receiver.recv().ok()?;
+                        let mut batch = vec![first];
+                        while let Ok(message) = receiver.try_recv() {
+                            batch.push(message);
+                        }
+                        Some(batch)
+                    })
+                    .await;
+                let Some(batch) = batch else {
+                    break;
+                };
+                cx.update(|cx| application.apply_terminal_events(connection_id, batch, cx));
+            }
+        })
+    }
+
+    /// Applies a batch of stream events to the connection's emulators.
+    /// Views are refreshed for the changed terminals.
+    fn apply_terminal_events(
+        &self,
+        connection_id: ConnectionId,
+        batch: Vec<TerminalEventMsg>,
+        cx: &mut App,
+    ) {
+        use crate::command::{AppCommand, TerminalCommand};
+
+        let mut changed = std::collections::BTreeSet::new();
+        let mut resync = Vec::new();
+        {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(connection) = connections
+                .iter_mut()
+                .find(|connection| connection.projection.id == connection_id)
+            else {
+                return;
+            };
+            let Some(terminal) = connection.terminal.as_mut() else {
+                return;
+            };
+            let mut pty_writes: Vec<(TerminalId, Vec<u8>)> = Vec::new();
+            let mut grouped =
+                std::collections::BTreeMap::<TerminalId, Vec<TerminalEventMsg>>::new();
+            for message in batch {
+                let terminal_id = match &message {
+                    TerminalEventMsg::Attached { terminal_id, .. }
+                    | TerminalEventMsg::Event { terminal_id, .. }
+                    | TerminalEventMsg::Detached { terminal_id } => *terminal_id,
+                };
+                grouped.entry(terminal_id).or_default().push(message);
+            }
+            for (terminal_id, messages) in grouped {
+                let mut wire_events = Vec::new();
+                let mut detached = false;
+                for message in messages {
+                    match message {
+                        TerminalEventMsg::Attached { response, .. } => {
+                            terminal.pending_attachments.remove(&terminal_id);
+                            let mut emulator = TerminalEmulator::with_theme(
+                                terminal_id,
+                                response.size,
+                                terminal.scrollback_lines,
+                                terminal.theme,
+                            );
+                            let mut tracked_size = response.size;
+                            let mut replay_events = Vec::with_capacity(response.replay.len());
+                            for wire in &response.replay {
+                                let Some(event) =
+                                    TerminalStreamEvent::from_wire(wire, tracked_size)
+                                else {
+                                    continue;
+                                };
+                                if let TerminalStreamEvent::Resize { size, .. } = event {
+                                    tracked_size = size;
+                                }
+                                crate::metrics::add(
+                                    crate::metrics::replay_bytes_received(),
+                                    event.output_bytes(),
+                                );
+                                replay_events.push(event);
+                            }
+                            emulator.apply_batch(&replay_events);
+                            let _ = emulator.take_dirty();
+                            emulator.start_live();
+                            terminal.emulators.insert(terminal_id, emulator);
+                            changed.insert(terminal_id);
+                        }
+                        TerminalEventMsg::Event { event, .. } => wire_events.push(event),
+                        TerminalEventMsg::Detached { .. } => detached = true,
+                    }
+                }
+                if let Some(emulator) = terminal.emulators.get_mut(&terminal_id) {
+                    let mut tracked_size = emulator.size();
+                    let mut stream_events = Vec::with_capacity(wire_events.len());
+                    for wire in &wire_events {
+                        let Some(event) = TerminalStreamEvent::from_wire(wire, tracked_size) else {
+                            continue;
+                        };
+                        if let TerminalStreamEvent::Resize { size, .. } = event {
+                            tracked_size = size;
+                        }
+                        crate::metrics::add(
+                            crate::metrics::terminal_bytes_received(),
+                            event.output_bytes(),
+                        );
+                        stream_events.push(event);
+                    }
+                    let effects = emulator.apply_batch(&stream_events);
+                    let emulator_dirty = emulator.take_dirty();
+                    for bytes in emulator.pty_writes() {
+                        pty_writes.push((terminal_id, bytes));
+                    }
+                    if effects.iter().any(|effect| {
+                        matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
+                    }) {
+                        terminal.emulators.remove(&terminal_id);
+                        resync.push(terminal_id);
+                    }
+                    if emulator_dirty {
+                        changed.insert(terminal_id);
+                    }
+                }
+                if detached {
+                    terminal.pending_attachments.remove(&terminal_id);
+                    terminal.emulators.remove(&terminal_id);
+                    changed.insert(terminal_id);
+                }
+            }
+            let client = connection.projection.client.clone();
+            for (terminal_id, bytes) in pty_writes {
+                let _ = client.enqueue(AppCommand::Terminal(TerminalCommand::SendBytes {
+                    terminal_id: Some(terminal_id),
+                    pane_id: None,
+                    bytes,
+                }));
+            }
+        }
+        for terminal_id in resync {
+            self.ensure_terminal_attached(connection_id, terminal_id);
+        }
+        if changed.is_empty() {
+            return;
+        }
+        let changed = changed.into_iter().collect::<Vec<_>>();
+        let views = self.state.views.borrow().clone();
+        let mut live_views = Vec::with_capacity(views.len());
+        for view in views {
+            if view
+                .update(cx, |workspace, cx| {
+                    workspace.apply_terminal_events(&changed, cx)
+                })
+                .is_ok()
+            {
+                live_views.push(view);
+            }
+        }
+        self.state.views.replace(live_views);
+    }
+
+    /// Attaches the connection's raw stream for one terminal (first render
+    /// or resync). Replays the bounded history into a fresh local emulator,
+    /// then flips it live and starts the pump.
+    pub(crate) fn ensure_terminal_attached(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+    ) {
+        let terminal_exists = self
+            .state
+            .connections
+            .borrow()
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+            .and_then(|connection| {
+                terminal_size_in_snapshot(&connection.projection.snapshot, terminal_id)
+            })
+            .is_some();
+        if !terminal_exists {
+            return;
+        }
+        let (session, events_tx) = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(connection) = connections
+                .iter_mut()
+                .find(|connection| connection.projection.id == connection_id)
+            else {
+                return;
+            };
+            let Some(terminal) = connection.terminal.as_mut() else {
+                return;
+            };
+            if terminal.emulators.contains_key(&terminal_id)
+                || !terminal.pending_attachments.insert(terminal_id)
+            {
+                return;
+            }
+            (terminal.session.clone(), terminal.events_tx.clone())
+        };
+        let spawn_result = std::thread::Builder::new()
+            .name(format!("water-terminal-events-{terminal_id}"))
+            .spawn(move || match session.attach(terminal_id) {
+                Ok((response, stream)) => {
+                    if events_tx
+                        .send(TerminalEventMsg::Attached {
+                            terminal_id,
+                            response,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let mut stream = stream;
+                    while let Ok(event) = stream.recv() {
+                        if events_tx
+                            .send(TerminalEventMsg::Event { terminal_id, event })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    let _ = events_tx.send(TerminalEventMsg::Detached { terminal_id });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        target: "water::workspace",
+                        ?error,
+                        %terminal_id,
+                        "terminal attach failed"
+                    );
+                    let _ = events_tx.send(TerminalEventMsg::Detached { terminal_id });
+                }
+            });
+        if spawn_result.is_err()
+            && let Some(terminal) = self
+                .state
+                .connections
+                .borrow_mut()
+                .iter_mut()
+                .find(|connection| connection.projection.id == connection_id)
+                .and_then(|connection| connection.terminal.as_mut())
+        {
+            terminal.pending_attachments.remove(&terminal_id);
+        }
+    }
+
+    /// Builds a renderable snapshot for one terminal from its local
+    /// emulator, reusing unchanged rows from `previous`.
+    pub(crate) fn terminal_snapshot(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        previous: Option<&crate::terminal::TerminalSnapshot>,
+    ) -> Option<std::sync::Arc<crate::terminal::TerminalSnapshot>> {
+        let connections = self.state.connections.borrow();
+        let connection = connections
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)?;
+        let terminal = connection.terminal.as_ref()?;
+        let emulator = terminal.emulators.get(&terminal_id)?;
+        Some(std::sync::Arc::new(emulator.snapshot(previous)))
+    }
+
+    pub(crate) fn terminal_scroll_by(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        delta: i64,
+    ) -> bool {
+        let mut connections = self.state.connections.borrow_mut();
+        let Some(connection) = connections
+            .iter_mut()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_mut() else {
+            return false;
+        };
+        match terminal.emulators.get_mut(&terminal_id) {
+            Some(emulator) => {
+                let before = emulator.viewport_position();
+                emulator.scroll_by(delta);
+                emulator.viewport_position() != before
+            }
+            None => false,
+        }
+    }
+
+    pub(crate) fn terminal_scroll_to(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        target: i64,
+    ) -> bool {
+        let mut connections = self.state.connections.borrow_mut();
+        let Some(connection) = connections
+            .iter_mut()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_mut() else {
+            return false;
+        };
+        match terminal.emulators.get_mut(&terminal_id) {
+            Some(emulator) => {
+                let before = emulator.viewport_position();
+                emulator.scroll_to(target);
+                emulator.viewport_position() != before
+            }
+            None => false,
+        }
     }
 
     fn spawn_ui_control_listener(&self, cx: &mut App, receiver: UiControlReceiver) -> Task<()> {
@@ -1183,6 +1615,7 @@ mod tests {
                 local_socket: None,
                 last_snapshot_apply: std::time::Instant::now()
                     - WaterApplication::SNAPSHOT_MIN_INTERVAL,
+                terminal: None,
             });
 
         let connections = application.connection_projections();
@@ -1385,4 +1818,60 @@ mod tests {
 
         host.shutdown();
     }
+}
+
+/// The configured size of one terminal inside a projected state dump.
+fn terminal_size_in_snapshot(
+    snapshot: &ModelSnapshot,
+    terminal_id: TerminalId,
+) -> Option<crate::terminal::TerminalSize> {
+    for workspace in &snapshot.workspaces {
+        for tab in &workspace.tabs {
+            let mut stack = std::vec::Vec::with_capacity(8);
+            stack.push(&tab.tree);
+            while let Some(tree) = stack.pop() {
+                match tree {
+                    crate::app::model::PaneTreeDump::Leaf { terminal, .. } => {
+                        if let Some(terminal) = terminal
+                            && terminal.summary.terminal_id == terminal_id
+                        {
+                            return Some(terminal.summary.size);
+                        }
+                    }
+                    crate::app::model::PaneTreeDump::Split { first, second, .. } => {
+                        stack.push(first);
+                        stack.push(second);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// All terminal identities projected by a control-plane snapshot. Stream
+/// attachment is eager so hidden terminals keep their local emulator current.
+fn terminal_ids_in_snapshot(snapshot: &ModelSnapshot) -> Vec<TerminalId> {
+    let mut terminal_ids = Vec::new();
+    for workspace in &snapshot.workspaces {
+        for tab in &workspace.tabs {
+            let mut stack = vec![&tab.tree];
+            while let Some(tree) = stack.pop() {
+                match tree {
+                    crate::app::model::PaneTreeDump::Leaf { terminal, .. } => {
+                        if let Some(terminal) = terminal {
+                            terminal_ids.push(terminal.summary.terminal_id);
+                        }
+                    }
+                    crate::app::model::PaneTreeDump::Split { first, second, .. } => {
+                        stack.push(first);
+                        stack.push(second);
+                    }
+                }
+            }
+        }
+    }
+    terminal_ids.sort_unstable();
+    terminal_ids.dedup();
+    terminal_ids
 }

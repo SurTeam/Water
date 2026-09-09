@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -9,35 +9,39 @@ use thiserror::Error;
 
 use crate::ids::TerminalId;
 
-use super::TerminalSnapshot;
-use super::TerminalTheme;
+use super::replay::MAX_REPLAY_BYTES;
+use super::replay::ReplayRing;
 use super::snapshot::{
     DEFAULT_INACTIVE_SCROLLBACK_LINES, DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
-    DEFAULT_SCROLLBACK_LINES, MAX_RECENT_OUTPUT_BYTES, MAX_SCROLLBACK_LINES,
-    MAX_TOTAL_SCROLLBACK_BYTES, MIN_MAX_TOTAL_SCROLLBACK_BYTES, TerminalProcessState, TerminalSize,
-    TerminalSummary, scrollback_row_bytes,
+    DEFAULT_REPLAY_HISTORY_BYTES, DEFAULT_SCROLLBACK_LINES, MAX_SCROLLBACK_LINES,
+    MIN_MAX_TOTAL_SCROLLBACK_BYTES, MIN_REPLAY_HISTORY_BYTES, TerminalProcessState, TerminalSize,
+};
+use super::stream::{
+    TerminalSeq, TerminalStreamEvent, WireTerminalEvent, decode_base64, encode_base64,
 };
 
-/// Retired terminals keep a compact final snapshot for waiters that race
+/// Retired terminals keep a compact final replay for waiters that race
 /// with pane auto-close. The window stays small so closed tabs cannot pin
 /// memory long after they were closed.
 const MAX_RETIRED_TERMINALS: usize = 16;
-/// Viewport rows kept when a retired terminal's snapshot is compacted.
-const RETIRED_SNAPSHOT_TAIL_LINES: usize = 24;
 /// Recent-output bytes kept when a retired terminal is compacted.
 const RETIRED_RECENT_OUTPUT_BYTES: usize = 8 * 1024;
+/// Raw replay bytes kept when a terminal is retired.
+const RETIRED_REPLAY_BYTES: usize = 1024 * 1024;
 pub(crate) type WakeupCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 pub(crate) type WakeupSlot = Arc<Mutex<Option<WakeupCallback>>>;
 
-/// Per-terminal and aggregate scrollback limits resolved from `AppConfig`.
+/// Per-terminal and aggregate limits resolved from `AppConfig`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TerminalLimits {
-    /// Scrollback rows a focused terminal may retain.
+    /// Scrollback rows the GUI terminal emulator retains (focused terminal).
     pub scrollback_lines: usize,
-    /// Scrollback rows a terminal retains once it loses focus.
+    /// Scrollback rows the GUI terminal retains once it loses focus.
     pub inactive_scrollback_lines: usize,
-    /// Aggregate byte budget shared by all terminal scrollback grids.
+    /// Aggregate byte budget shared by the GUI scrollback grids.
     pub max_total_scrollback_bytes: usize,
+    /// Hard byte limit for the server's per-terminal raw replay history.
+    pub replay_history_bytes: usize,
 }
 
 impl Default for TerminalLimits {
@@ -46,6 +50,7 @@ impl Default for TerminalLimits {
             scrollback_lines: DEFAULT_SCROLLBACK_LINES,
             inactive_scrollback_lines: DEFAULT_INACTIVE_SCROLLBACK_LINES,
             max_total_scrollback_bytes: DEFAULT_MAX_TOTAL_SCROLLBACK_BYTES,
+            replay_history_bytes: DEFAULT_REPLAY_HISTORY_BYTES,
         }
     }
 }
@@ -59,149 +64,50 @@ impl TerminalLimits {
             .min(self.scrollback_lines);
         self.max_total_scrollback_bytes = self
             .max_total_scrollback_bytes
-            .clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES);
+            .clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, 1024 * 1024 * 1024);
+        self.replay_history_bytes = self
+            .replay_history_bytes
+            .clamp(MIN_REPLAY_HISTORY_BYTES, MAX_REPLAY_BYTES);
         self
     }
 }
 
-/// Coordinates scrollback growth across terminal workers in bytes.
+/// The bounded raw replay history of one terminal, as returned by
+/// `waterctl terminal snapshot` and `terminal.attach`. The caller replays
+/// the events through a temporary local Alacritty terminal to inspect the
+/// screen; the server itself keeps no long-running emulator.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TerminalReplay {
+    pub terminal_id: TerminalId,
+    /// Authoritative lifecycle state owned by the server.
+    pub process: TerminalProcessState,
+    /// Oldest surviving sequence (`None` when the ring is empty).
+    #[serde(default)]
+    pub first_seq: Option<TerminalSeq>,
+    /// Sequence of the newest event.
+    pub last_seq: TerminalSeq,
+    /// Geometry of the oldest surviving event: the screen dimensions a
+    /// replier must use before applying the events.
+    pub size: TerminalSize,
+    /// Wire form of the ordered events (base64 output bytes).
+    pub events: Vec<WireTerminalEvent>,
+}
+
+/// The ordered raw event stream a client receives when attaching to a
+/// terminal: the bounded historical replay plus a live event channel.
 ///
-/// The budget is accounted in estimated heap bytes, not rows, because a
-/// row's cost scales with the terminal width. A focused terminal that is
-/// scrolled away from live output borrows the unused global budget so new
-/// output cannot evict the rows the user is looking at. A terminal that
-/// loses focus is trimmed to its inactive tail and releases the rest of its
-/// reservation, mirroring how tmux keeps only `history-limit` rows per
-/// window and how herdr keeps background panes cheap.
-#[derive(Clone, Debug)]
-pub(crate) struct ScrollbackBudget {
-    state: Arc<Mutex<ScrollbackBudgetState>>,
-    max_bytes: usize,
-}
-
-#[derive(Debug, Default)]
-struct ScrollbackBudgetState {
-    entries: BTreeMap<TerminalId, ScrollbackBudgetEntry>,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ScrollbackBudgetEntry {
-    retained_rows: usize,
-    retained_bytes: usize,
-    reservation_bytes: usize,
-}
-
-impl ScrollbackBudget {
-    pub(crate) fn new(max_bytes: usize) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(ScrollbackBudgetState::default())),
-            max_bytes: max_bytes.clamp(MIN_MAX_TOTAL_SCROLLBACK_BYTES, MAX_TOTAL_SCROLLBACK_BYTES),
-        }
-    }
-
-    pub(crate) fn register(&self, terminal_id: TerminalId, base_limit_rows: usize, columns: usize) {
-        let mut state = self.state.lock().expect("scrollback budget poisoned");
-        if state.entries.contains_key(&terminal_id) {
-            return;
-        }
-        let reserved = state
-            .entries
-            .values()
-            .map(|entry| entry.reservation_bytes)
-            .sum::<usize>();
-        let reservation = base_limit_rows
-            .saturating_mul(scrollback_row_bytes(columns))
-            .min(self.max_bytes.saturating_sub(reserved));
-        state.entries.insert(
-            terminal_id,
-            ScrollbackBudgetEntry {
-                retained_rows: 0,
-                retained_bytes: 0,
-                reservation_bytes: reservation,
-            },
-        );
-    }
-
-    pub(crate) fn unregister(&self, terminal_id: TerminalId) {
-        self.state
-            .lock()
-            .expect("scrollback budget poisoned")
-            .entries
-            .remove(&terminal_id);
-    }
-
-    /// Returns the history row limit this terminal may use right now.
-    ///
-    /// `base_limit_rows` already reflects focus (an unfocused terminal passes
-    /// its smaller inactive limit). Only a focused terminal that is scrolled
-    /// away from live output (`borrow`) may expand into the unused budget.
-    /// Updating the reservation before the worker changes its `Grid` makes
-    /// concurrent PTY workers observe the same global ceiling.
-    pub(crate) fn limit_for(
-        &self,
-        terminal_id: TerminalId,
-        retained_rows: usize,
-        columns: usize,
-        base_limit_rows: usize,
-        borrow: bool,
-    ) -> usize {
-        let row_bytes = scrollback_row_bytes(columns);
-        let mut state = self.state.lock().expect("scrollback budget poisoned");
-        let reserved_by_others = state
-            .entries
-            .iter()
-            .filter(|(id, _)| **id != terminal_id)
-            .map(|(_, entry)| entry.reservation_bytes)
-            .sum::<usize>();
-        let available_bytes = self.max_bytes.saturating_sub(reserved_by_others);
-        let base_bytes = base_limit_rows.saturating_mul(row_bytes);
-        let limit_bytes = if borrow {
-            available_bytes.max(base_bytes)
-        } else {
-            base_bytes.min(available_bytes)
-        };
-        let limit_rows = limit_bytes / row_bytes;
-        if let Some(entry) = state.entries.get_mut(&terminal_id) {
-            entry.retained_rows = retained_rows;
-            entry.retained_bytes = retained_rows.saturating_mul(row_bytes);
-            entry.reservation_bytes = limit_rows.saturating_mul(row_bytes);
-        }
-        limit_rows
-    }
-
-    pub(crate) fn sync(&self, terminal_id: TerminalId, retained_rows: usize, columns: usize) {
-        let row_bytes = scrollback_row_bytes(columns);
-        if let Some(entry) = self
-            .state
-            .lock()
-            .expect("scrollback budget poisoned")
-            .entries
-            .get_mut(&terminal_id)
-        {
-            entry.retained_rows = retained_rows;
-            entry.retained_bytes = retained_rows.saturating_mul(row_bytes);
-        }
-    }
-
-    pub(crate) fn retained_rows(&self) -> usize {
-        self.state
-            .lock()
-            .expect("scrollback budget poisoned")
-            .entries
-            .values()
-            .map(|entry| entry.retained_rows)
-            .sum()
-    }
-
-    pub(crate) fn retained_bytes(&self) -> usize {
-        self.state
-            .lock()
-            .expect("scrollback budget poisoned")
-            .entries
-            .values()
-            .map(|entry| entry.retained_bytes)
-            .sum()
-    }
+/// The replay and the live tail overlap: events delivered live that are
+/// already in the replay carry `seq <= last_seq` and are skipped by the
+/// client (strict monotonic sequences make the handoff seamless).
+#[derive(Debug)]
+pub struct TerminalAttachment {
+    /// Historical events, oldest first (bounded by the replay ring budget).
+    pub replay: Vec<TerminalStreamEvent>,
+    /// Sequence of the newest event in the replay. Live events with
+    /// `seq <= last_seq` are duplicates and must be skipped.
+    pub last_seq: u64,
+    /// Live events from the PTY worker.
+    pub events: Receiver<TerminalStreamEvent>,
 }
 
 #[derive(Debug)]
@@ -209,21 +115,15 @@ pub(crate) enum TerminalWorkerCommand {
     SendText(Vec<u8>),
     SendBytes(Vec<u8>),
     Resize(TerminalSize),
-    Scroll(i32),
-    SetViewportPosition {
-        target: i64,
+    Attach {
+        sender: SyncSender<TerminalStreamEvent>,
+        reply: Sender<(Vec<TerminalStreamEvent>, TerminalSeq)>,
     },
-    /// Informs the worker whether its terminal is the focused one, so the
-    /// scrollback reconciler applies the focused or the inactive limit.
-    SetFocused(bool),
     Shutdown,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum TerminalManagerEvent {
-    OutputChanged {
-        terminal_id: TerminalId,
-    },
     ProcessChanged {
         terminal_id: TerminalId,
         process_name: String,
@@ -283,9 +183,12 @@ impl std::fmt::Debug for TerminalEntry {
 
 #[derive(Debug)]
 struct TerminalEntryState {
-    snapshot: Arc<TerminalSnapshot>,
+    process: TerminalProcessState,
+    /// Bounded raw replay history. The PTY worker is the only writer;
+    /// attach/capture paths read ordered snapshots of it.
+    replay: Arc<ReplayRing>,
+    /// Trailing raw output used by `contains` fast paths.
     recent_output: String,
-    output_event_pending: bool,
 }
 
 impl Default for TerminalRegistry {
@@ -304,15 +207,15 @@ impl TerminalRegistry {
     pub(crate) fn register(
         &self,
         terminal_id: TerminalId,
-        snapshot: TerminalSnapshot,
+        replay: Arc<ReplayRing>,
         command_tx: Sender<TerminalWorkerCommand>,
         wakeup: WakeupSlot,
     ) -> Result<(), TerminalError> {
         let entry = Arc::new(TerminalEntry {
             state: Mutex::new(TerminalEntryState {
-                snapshot: Arc::new(snapshot),
+                process: TerminalProcessState::Running,
+                replay,
                 recent_output: String::new(),
-                output_event_pending: false,
             }),
             changed: Condvar::new(),
             command_tx,
@@ -334,42 +237,70 @@ impl TerminalRegistry {
             .remove(&terminal_id);
     }
 
-    pub fn snapshot(&self, terminal_id: TerminalId) -> Result<TerminalSnapshot, TerminalError> {
-        Ok(self.snapshot_arc(terminal_id)?.as_ref().clone())
-    }
-
-    /// Shares the registry's snapshot without copying its grid cells. State
-    /// dumps and the UI projection layer use this so exactly one full grid
-    /// exists per terminal (the tmux/herdr single-source-of-truth split).
-    pub fn snapshot_arc(
+    /// Process state without touching the replay history.
+    pub fn process_state(
         &self,
         terminal_id: TerminalId,
-    ) -> Result<Arc<TerminalSnapshot>, TerminalError> {
+    ) -> Result<TerminalProcessState, TerminalError> {
         let entry = self.entry(terminal_id)?;
-        Ok(entry
-            .state
-            .lock()
-            .expect("terminal entry poisoned")
-            .snapshot
-            .clone())
+        Ok(entry.state.lock().expect("terminal entry poisoned").process)
     }
 
-    /// Cell-free metadata view for terminals whose grid is not projected.
-    pub fn summary(&self, terminal_id: TerminalId) -> Option<TerminalSummary> {
-        let entry = self
-            .entries
+    /// Attaches a live client: registers a bounded event channel with the
+    /// PTY worker and returns the ordered historical replay. The worker
+    /// registers the subscriber before taking the replay snapshot, so the
+    /// client never misses an event (overlaps are deduplicated by sequence).
+    pub fn attach(&self, terminal_id: TerminalId) -> Result<TerminalAttachment, TerminalError> {
+        let entry = self.entry(terminal_id)?;
+        let (sender, events) = mpsc::sync_channel(256);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        {
+            let state = entry.state.lock().expect("terminal entry poisoned");
+            if matches!(state.process, TerminalProcessState::Exited { .. })
+                && state.replay.is_finished()
+            {
+                // The worker is gone; the replay is the whole history.
+                let replay = state.replay.to_stream();
+                let last_seq = state.replay.last_seq();
+                return Ok(TerminalAttachment {
+                    replay,
+                    last_seq,
+                    events,
+                });
+            }
+        }
+        entry
+            .command_tx
+            .send(TerminalWorkerCommand::Attach {
+                sender,
+                reply: reply_tx,
+            })
+            .map_err(|_| TerminalError::WorkerClosed(terminal_id))?;
+        if let Some(wakeup) = entry
+            .wakeup
             .lock()
-            .expect("terminal registry poisoned")
-            .get(&terminal_id)
-            .cloned()?;
-        Some(
-            entry
-                .state
-                .lock()
-                .expect("terminal entry poisoned")
-                .snapshot
-                .summary(),
-        )
+            .expect("terminal wakeup poisoned")
+            .as_ref()
+            .cloned()
+        {
+            wakeup();
+        }
+        let (replay, last_seq) = reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| TerminalError::WorkerClosed(terminal_id))?;
+        Ok(TerminalAttachment {
+            replay,
+            last_seq,
+            events,
+        })
+    }
+
+    /// The full bounded replay history in wire form, plus its bounds and the
+    /// replay-start geometry.
+    pub fn replay(&self, terminal_id: TerminalId) -> Result<TerminalReplay, TerminalError> {
+        let entry = self.entry(terminal_id)?;
+        let state = entry.state.lock().expect("terminal entry poisoned");
+        Ok(state.replay(terminal_id))
     }
 
     pub fn contains_text(
@@ -377,15 +308,15 @@ impl TerminalRegistry {
         terminal_id: TerminalId,
         needle: &str,
         timeout: Duration,
-    ) -> Result<TerminalSnapshot, TerminalError> {
+    ) -> Result<TerminalReplay, TerminalError> {
         let entry = self.entry(terminal_id)?;
         let deadline = Instant::now() + timeout;
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         loop {
-            if state.recent_output.contains(needle) || state.snapshot.contains_text(needle) {
-                return Ok(state.snapshot.as_ref().clone());
+            if state.recent_output.contains(needle) || state.replay.raw_contains(needle) {
+                return Ok(state.replay(terminal_id));
             }
-            if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
+            if matches!(state.process, TerminalProcessState::Exited { .. }) {
                 return Err(TerminalError::ProcessExited(terminal_id));
             }
             let now = Instant::now();
@@ -404,51 +335,17 @@ impl TerminalRegistry {
         }
     }
 
-    /// Waits for the PTY worker to publish an acknowledgement of an absolute
-    /// viewport target. This observes revisioned snapshots and never exposes
-    /// the mutable terminal grid to callers.
-    pub fn wait_viewport_position(
-        &self,
-        terminal_id: TerminalId,
-        target: i64,
-        timeout: Duration,
-    ) -> Result<TerminalSnapshot, TerminalError> {
-        let entry = self.entry(terminal_id)?;
-        let deadline = Instant::now() + timeout;
-        let mut state = entry.state.lock().expect("terminal entry poisoned");
-        loop {
-            if state.snapshot.viewport_position == target {
-                return Ok(state.snapshot.as_ref().clone());
-            }
-            if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
-                return Err(TerminalError::ProcessExited(terminal_id));
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Err(TerminalError::Timeout(timeout.as_millis() as u64));
-            }
-            let (new_state, result) = entry
-                .changed
-                .wait_timeout(state, deadline.saturating_duration_since(now))
-                .expect("terminal entry poisoned");
-            state = new_state;
-            if result.timed_out() {
-                return Err(TerminalError::Timeout(timeout.as_millis() as u64));
-            }
-        }
-    }
-
     pub fn wait_process_exit(
         &self,
         terminal_id: TerminalId,
         timeout: Duration,
-    ) -> Result<TerminalSnapshot, TerminalError> {
+    ) -> Result<TerminalReplay, TerminalError> {
         let entry = self.entry(terminal_id)?;
         let deadline = Instant::now() + timeout;
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         loop {
-            if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
-                return Ok(state.snapshot.as_ref().clone());
+            if matches!(state.process, TerminalProcessState::Exited { .. }) {
+                return Ok(state.replay(terminal_id));
             }
             let now = Instant::now();
             if now >= deadline {
@@ -474,7 +371,7 @@ impl TerminalRegistry {
         let entry = self.entry(terminal_id)?;
         {
             let state = entry.state.lock().expect("terminal entry poisoned");
-            if matches!(state.snapshot.process, TerminalProcessState::Exited { .. }) {
+            if matches!(state.process, TerminalProcessState::Exited { .. }) {
                 return Err(TerminalError::NotRunning(terminal_id));
             }
         }
@@ -494,15 +391,10 @@ impl TerminalRegistry {
         Ok(())
     }
 
-    /// Publishes the latest worker snapshot and returns whether the model
-    /// needs a new output notification. At most one output event per terminal
-    /// is queued until the model atomically takes the latest snapshot.
-    pub(crate) fn publish(
-        &self,
-        terminal_id: TerminalId,
-        snapshot: TerminalSnapshot,
-        output: &[u8],
-    ) -> bool {
+    /// Records a raw output batch: extends the recent-output tail and wakes
+    /// condition waiters. This is notification, not state — the terminal
+    /// screen itself lives on the GUI.
+    pub(crate) fn publish_output(&self, terminal_id: TerminalId, output: &[u8]) {
         let Some(entry) = self
             .entries
             .lock()
@@ -510,40 +402,17 @@ impl TerminalRegistry {
             .get(&terminal_id)
             .cloned()
         else {
-            return false;
+            return;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
-        state.snapshot = Arc::new(snapshot);
         if !output.is_empty() {
-            // The waiters only ever match against the trailing
-            // MAX_RECENT_OUTPUT_BYTES of the stream. Pushing just the chunk
-            // tail keeps that invariant (the stream tail always survives the
-            // trim) while a large drain chunk no longer costs a full
-            // lossy-conversion copy per tick.
-            let tail_start = output.len().saturating_sub(MAX_RECENT_OUTPUT_BYTES);
+            let tail_start = output.len().saturating_sub(64 * 1024);
             state
                 .recent_output
                 .push_str(&String::from_utf8_lossy(&output[tail_start..]));
-            trim_recent_output(&mut state.recent_output, MAX_RECENT_OUTPUT_BYTES);
+            trim_recent_output(&mut state.recent_output, 64 * 1024);
         }
-        let should_notify = !state.output_event_pending;
-        state.output_event_pending = true;
         entry.changed.notify_all();
-        should_notify
-    }
-
-    /// Takes the newest snapshot represented by a queued output event and
-    /// clears that event while holding the same lock used by publishers. A
-    /// later publication will therefore always queue a fresh notification.
-    pub(crate) fn take_output_snapshot(
-        &self,
-        terminal_id: TerminalId,
-    ) -> Result<Arc<TerminalSnapshot>, TerminalError> {
-        let entry = self.entry(terminal_id)?;
-        let mut state = entry.state.lock().expect("terminal entry poisoned");
-        let snapshot = state.snapshot.clone();
-        state.output_event_pending = false;
-        Ok(snapshot)
     }
 
     pub(crate) fn mark_exited(&self, terminal_id: TerminalId, code: Option<i32>) {
@@ -557,14 +426,12 @@ impl TerminalRegistry {
             return;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
-        let exited = Arc::make_mut(&mut state.snapshot);
-        exited.process = TerminalProcessState::Exited { code };
+        state.process = TerminalProcessState::Exited { code };
         entry.changed.notify_all();
     }
 
-    /// Replaces a retired terminal's retained state with a bounded tail so
-    /// closed tabs cannot pin full grids in memory until the retirement
-    /// limit evicts them.
+    /// Bounds a retired terminal's retained history so closed tabs cannot
+    /// pin full replays in memory until the retirement limit evicts them.
     pub(crate) fn compact_for_retirement(&self, terminal_id: TerminalId) {
         let Some(entry) = self
             .entries
@@ -576,7 +443,7 @@ impl TerminalRegistry {
             return;
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
-        state.snapshot = Arc::new(state.snapshot.compacted_tail(RETIRED_SNAPSHOT_TAIL_LINES));
+        state.replay.trim_to(RETIRED_REPLAY_BYTES);
         trim_recent_output(&mut state.recent_output, RETIRED_RECENT_OUTPUT_BYTES);
         entry.changed.notify_all();
     }
@@ -588,10 +455,9 @@ impl TerminalRegistry {
             .len()
     }
 
-    /// Estimated heap bytes pinned by the snapshots and recent-output
-    /// buffers the registry retains. Exposed through `waterctl debug
-    /// memory` so operators can watch closed tabs release memory.
-    pub fn retained_snapshot_bytes(&self) -> usize {
+    /// Raw bytes pinned by replay rings and recent-output buffers.
+    /// Exposed through `waterctl debug memory`.
+    pub fn retained_replay_bytes(&self) -> usize {
         let entries: Vec<_> = self
             .entries
             .lock()
@@ -603,18 +469,7 @@ impl TerminalRegistry {
             .iter()
             .map(|entry| {
                 let state = entry.state.lock().expect("terminal entry poisoned");
-                let snapshot = &state.snapshot;
-                let overscan_cells: usize = snapshot
-                    .rows_before
-                    .iter()
-                    .chain(snapshot.rows_after.iter())
-                    .map(|row| row.len())
-                    .sum();
-                (snapshot.cell_count() + overscan_cells)
-                    * std::mem::size_of::<crate::terminal::TerminalCell>()
-                    + state.recent_output.len()
-                    + snapshot.process_name.len()
-                    + snapshot.cwd.len()
+                state.replay.total_bytes() + state.recent_output.len()
             })
             .sum()
     }
@@ -626,6 +481,28 @@ impl TerminalRegistry {
             .get(&terminal_id)
             .cloned()
             .ok_or(TerminalError::NotFound(terminal_id))
+    }
+}
+
+impl TerminalEntryState {
+    fn replay(&self, terminal_id: TerminalId) -> TerminalReplay {
+        TerminalReplay {
+            terminal_id,
+            process: self.process,
+            first_seq: self.replay.first_seq(),
+            last_seq: self.replay.last_seq(),
+            size: self
+                .replay
+                .first_size()
+                .or_else(|| self.replay.last_size())
+                .unwrap_or_default(),
+            events: self
+                .replay
+                .to_stream()
+                .into_iter()
+                .map(|event| event.to_wire())
+                .collect(),
+        }
     }
 }
 
@@ -707,12 +584,7 @@ fn bundled_terminfo_dir() -> Option<PathBuf> {
 }
 
 /// Best-effort hint for the macOS zone allocator to consolidate freed
-/// regions after large terminal grids were dropped. This is a nudge, not a
-/// guarantee: libmalloc commonly keeps `MADV_FREE` pages counted in `ps`
-/// RSS for reuse (the classic tmux "cleared history, RSS stayed 1GB"
-/// report). The authoritative accounting is `waterctl debug memory`
-/// (`retained_scrollback_bytes` + `registry_snapshot_bytes`), which does
-/// drop as soon as workers and registry entries are released.
+/// regions after large terminal state was dropped.
 fn release_allocator_pressure() {
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
@@ -729,10 +601,7 @@ fn release_allocator_pressure() {
 
 pub struct TerminalManager {
     registry: TerminalRegistry,
-    theme: TerminalTheme,
     limits: TerminalLimits,
-    scrollback_budget: ScrollbackBudget,
-    focused_terminal: Option<TerminalId>,
     event_tx: Sender<TerminalManagerEvent>,
     event_rx: Receiver<TerminalManagerEvent>,
     event_wakeup: Option<WakeupCallback>,
@@ -758,7 +627,7 @@ impl std::fmt::Debug for TerminalManager {
 
 impl TerminalManager {
     pub fn new() -> Self {
-        Self::new_with_wakeup_and_limits(None, TerminalLimits::default(), TerminalTheme::default())
+        Self::new_with_wakeup_and_limits(None, TerminalLimits::default())
     }
 
     pub fn new_with_scrollback(scrollback_lines: usize) -> Self {
@@ -768,23 +637,18 @@ impl TerminalManager {
                 scrollback_lines,
                 ..TerminalLimits::default()
             },
-            TerminalTheme::default(),
         )
     }
 
     pub(crate) fn new_with_wakeup_and_limits(
         event_wakeup: Option<WakeupCallback>,
         limits: TerminalLimits,
-        theme: TerminalTheme,
     ) -> Self {
         let limits = limits.normalized();
         let (event_tx, event_rx) = mpsc::channel();
         Self {
             registry: TerminalRegistry::new(),
-            theme,
             limits,
-            scrollback_budget: ScrollbackBudget::new(limits.max_total_scrollback_bytes),
-            focused_terminal: None,
             event_tx,
             event_rx,
             event_wakeup,
@@ -853,29 +717,24 @@ impl TerminalManager {
         };
         let pty = alacritty_terminal::tty::new(&options, window_size, terminal_id.get())
             .map_err(|error| TerminalError::SpawnFailed(error.to_string()))?;
-        let mut initial_snapshot = TerminalSnapshot::empty(terminal_id, size);
-        initial_snapshot.process_name = fallback_process_name.clone();
-        initial_snapshot.cwd = fallback_cwd.display().to_string();
+        // The replay ring exists from spawn: its first event (sequence 1) is
+        // the initial geometry anchor.
+        let replay = ReplayRing::new(size, self.limits.replay_history_bytes);
         let (command_tx, command_rx) = mpsc::channel();
         let wakeup = Arc::new(Mutex::new(None));
         self.registry.register(
             terminal_id,
-            initial_snapshot,
+            replay.clone(),
             command_tx.clone(),
             wakeup.clone(),
         )?;
-        self.scrollback_budget
-            .register(terminal_id, self.limits.scrollback_lines, size.columns);
 
         let event_tx = self.event_tx.clone();
         let event_wakeup = self.event_wakeup.clone();
         let registry = self.registry.clone();
         let worker_wakeup = wakeup.clone();
-        let scrollback_lines = self.limits.scrollback_lines;
-        let inactive_scrollback_lines = self.limits.inactive_scrollback_lines;
-        let scrollback_budget = self.scrollback_budget.clone();
+        let replay_budget = self.limits.replay_history_bytes;
         let metadata_executor = self.metadata_executor.clone();
-        let theme = self.theme;
         let join_handle = match thread::Builder::new()
             .name(format!("water-terminal-{terminal_id}"))
             .spawn(move || {
@@ -883,9 +742,7 @@ impl TerminalManager {
                     super::worker::WorkerConfig::new(
                         terminal_id,
                         size,
-                        scrollback_lines,
-                        inactive_scrollback_lines,
-                        scrollback_budget,
+                        replay.clone(),
                         command_rx,
                         super::worker::WorkerChannels::new(
                             registry,
@@ -899,14 +756,13 @@ impl TerminalManager {
                             fallback_cwd,
                             fallback_cmdline,
                         },
-                    )
-                    .with_theme(theme),
+                    ),
                     pty,
-                )
+                );
+                let _ = replay_budget;
             }) {
             Ok(join_handle) => join_handle,
             Err(error) => {
-                self.scrollback_budget.unregister(terminal_id);
                 self.registry.remove(terminal_id);
                 return Err(TerminalError::SpawnFailed(error.to_string()));
             }
@@ -939,57 +795,22 @@ impl TerminalManager {
             .send(terminal_id, TerminalWorkerCommand::Resize(size))
     }
 
-    pub fn scroll(&self, terminal_id: TerminalId, lines: i32) -> Result<(), TerminalError> {
-        self.registry
-            .send(terminal_id, TerminalWorkerCommand::Scroll(lines))
-    }
-
-    pub fn set_viewport_position(
-        &self,
-        terminal_id: TerminalId,
-        target: i64,
-    ) -> Result<(), TerminalError> {
-        self.registry.send(
-            terminal_id,
-            TerminalWorkerCommand::SetViewportPosition { target },
-        )
-    }
-
-    /// Updates which terminal currently owns the user's attention. The
-    /// focused terminal keeps its full scrollback reservation and may borrow
-    /// unused budget; a demoted terminal is trimmed to its inactive tail by
-    /// its own worker as soon as the command is applied.
-    pub(crate) fn set_focused_terminal(&mut self, focused: Option<TerminalId>) {
-        if self.focused_terminal == focused {
-            return;
-        }
-        let previous = std::mem::replace(&mut self.focused_terminal, focused);
-        for terminal_id in previous.into_iter().chain(focused) {
-            let value = Some(terminal_id) == focused;
-            let _ = self
-                .registry
-                .send(terminal_id, TerminalWorkerCommand::SetFocused(value));
-        }
+    pub fn attach(&self, terminal_id: TerminalId) -> Result<TerminalAttachment, TerminalError> {
+        self.registry.attach(terminal_id)
     }
 
     pub fn remove(&mut self, terminal_id: TerminalId) {
         self.stop_worker(terminal_id);
-        if self.focused_terminal == Some(terminal_id) {
-            self.focused_terminal = None;
-        }
         self.retired.retain(|retired| *retired != terminal_id);
         self.registry.remove(terminal_id);
         release_allocator_pressure();
     }
 
     /// Stops a terminal worker after its pane has been closed, but retains a
-    /// compact final snapshot for waiters that race with the auto-close
-    /// event. Retired snapshots are bounded and removed at the limit.
+    /// bounded final replay for waiters that race with the auto-close event.
+    /// Retired replays are bounded and removed at the limit.
     pub(crate) fn retire(&mut self, terminal_id: TerminalId) {
         self.stop_worker(terminal_id);
-        if self.focused_terminal == Some(terminal_id) {
-            self.focused_terminal = None;
-        }
         self.retired.retain(|retired| *retired != terminal_id);
         self.retired.push_back(terminal_id);
         self.registry.compact_for_retirement(terminal_id);
@@ -1039,16 +860,12 @@ impl TerminalManager {
         self.limits.max_total_scrollback_bytes
     }
 
-    pub fn retained_scrollback_lines(&self) -> usize {
-        self.scrollback_budget.retained_rows()
+    pub fn replay_history_bytes(&self) -> usize {
+        self.limits.replay_history_bytes
     }
 
-    pub fn retained_scrollback_bytes(&self) -> usize {
-        self.scrollback_budget.retained_bytes()
-    }
-
-    pub fn retained_snapshot_bytes(&self) -> usize {
-        self.registry.retained_snapshot_bytes()
+    pub fn retained_replay_bytes(&self) -> usize {
+        self.registry.retained_replay_bytes()
     }
 
     pub fn shutdown_all(&mut self) {
@@ -1071,99 +888,140 @@ impl Drop for TerminalManager {
     }
 }
 
+// Kept for wire/API compatibility of the terminal snapshot surface.
+#[allow(dead_code)]
+fn _base64_roundtrip(data: &[u8]) -> Option<Vec<u8>> {
+    decode_base64(&encode_base64(data))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::stream::TerminalStreamEvent;
 
-    #[test]
-    fn active_terminal_borrows_and_releases_global_scrollback_budget() {
-        let columns = 16;
-        let row = scrollback_row_bytes(columns);
-        let budget = ScrollbackBudget::new(row * 1_000);
-        let first = TerminalId::new(1);
-        let second = TerminalId::new(2);
-        budget.register(first, 100, columns);
-        budget.register(second, 100, columns);
-
-        assert_eq!(budget.limit_for(first, 0, columns, 100, true), 900);
-        assert_eq!(budget.limit_for(second, 0, columns, 100, false), 100);
-
-        assert_eq!(budget.limit_for(first, 0, columns, 100, false), 100);
-        assert_eq!(budget.limit_for(second, 0, columns, 100, true), 900);
-
-        budget.sync(second, 12, columns);
-        assert_eq!(budget.retained_rows(), 12);
-        assert_eq!(budget.retained_bytes(), 12 * row);
-        budget.unregister(second);
-        assert_eq!(budget.retained_rows(), 0);
+    fn test_ring() -> Arc<ReplayRing> {
+        ReplayRing::new(TerminalSize::new(80, 24), 64 * 1024)
     }
 
     #[test]
-    fn budget_accounts_wide_rows_in_bytes_not_rows() {
-        let row80 = scrollback_row_bytes(80);
-        let row160 = scrollback_row_bytes(160);
-        let budget = ScrollbackBudget::new(row80 * 40);
-        let terminal_id = TerminalId::new(7);
-        // A 40-row 80-column history fills the budget exactly when borrowing.
-        assert_eq!(budget.limit_for(terminal_id, 0, 80, 4, true), 40);
-        // 160-column rows cost roughly twice as many bytes, so the same
-        // budget yields far fewer of them and never exceeds the byte cap.
-        let wide_rows = budget.limit_for(terminal_id, 0, 160, 4, true);
-        assert!(wide_rows < 40);
-        assert!(wide_rows.saturating_mul(row160) <= row80 * 40);
-    }
-
-    #[test]
-    fn retired_snapshot_compaction_keeps_the_visible_tail() {
-        use crate::terminal::TerminalCell;
-        let terminal_id = TerminalId::new(3);
-        let size = TerminalSize::new(4, 60);
-        let mut snapshot = TerminalSnapshot::empty(terminal_id, size);
-        for row in 0..size.lines {
-            *snapshot.cell_mut(row, 0).unwrap() = TerminalCell {
-                character: char::from(b'0' + (row % 10) as u8),
-                ..TerminalCell::default()
-            };
-        }
-        snapshot.revision = 41;
-        let compacted = snapshot.compacted_tail(24);
-        assert_eq!(compacted.size.lines, 24);
-        assert_eq!(compacted.cell_count(), 24 * size.columns);
-        assert_eq!(compacted.cell(0, 0).unwrap().character, '6');
-        assert_eq!(compacted.cell(23, 0).unwrap().character, '9');
-        assert!(compacted.rows_before.is_empty());
-        assert_eq!(compacted.revision, 41);
-    }
-
-    #[test]
-    fn terminal_output_notifications_coalesce_until_latest_snapshot_is_taken() {
+    fn registry_attach_delivers_replay_and_live_events() {
         let registry = TerminalRegistry::new();
         let terminal_id = TerminalId::new(1);
-        let size = TerminalSize::new(8, 2);
-        let (command_tx, _command_rx) = mpsc::channel();
+        let replay = test_ring();
+        let (command_tx, command_rx) = mpsc::channel();
         registry
             .register(
                 terminal_id,
-                TerminalSnapshot::empty(terminal_id, size),
+                replay.clone(),
                 command_tx,
                 Arc::new(Mutex::new(None)),
             )
             .unwrap();
 
-        let mut first = TerminalSnapshot::empty(terminal_id, size);
-        first.revision = 1;
-        assert!(registry.publish(terminal_id, first, b"first"));
+        // Simulate the worker side: an attach command is answered with the
+        // ring snapshot and a live channel.
+        let replay_for_worker = replay.clone();
+        std::thread::spawn(move || match command_rx.recv().unwrap() {
+            TerminalWorkerCommand::Attach { sender, reply } => {
+                let replay_events = replay_for_worker.to_stream();
+                let last_seq = replay_for_worker.last_seq();
+                let _ = reply.send((replay_events, last_seq));
+                let size = TerminalSize::new(80, 24);
+                let bytes: Arc<[u8]> = Arc::from(b"print\n".to_vec());
+                let seq = replay_for_worker.push_output(size, bytes.clone());
+                let event = TerminalStreamEvent::Output { seq, size, bytes };
+                let _ = sender.send(event.clone());
+                let _ = sender.send(event);
+            }
+            other => panic!("unexpected command {other:?}"),
+        });
 
-        let mut latest = TerminalSnapshot::empty(terminal_id, size);
-        latest.revision = 2;
-        assert!(!registry.publish(terminal_id, latest, b"latest"));
-        assert_eq!(
-            registry.take_output_snapshot(terminal_id).unwrap().revision,
-            2
-        );
+        let attachment = registry.attach(terminal_id).unwrap();
+        assert_eq!(attachment.last_seq, 1);
+        let first = attachment
+            .events
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        let second = attachment
+            .events
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(first.seq(), second.seq());
+        assert_eq!(first.output_bytes(), b"print\n".len());
+    }
 
-        let mut next = TerminalSnapshot::empty(terminal_id, size);
-        next.revision = 3;
-        assert!(registry.publish(terminal_id, next, b"next"));
+    #[test]
+    fn wait_process_exit_uses_lifecycle_state() {
+        let registry = TerminalRegistry::new();
+        let terminal_id = TerminalId::new(2);
+        let (command_tx, _command_rx) = mpsc::channel();
+        registry
+            .register(
+                terminal_id,
+                test_ring(),
+                command_tx,
+                Arc::new(Mutex::new(None)),
+            )
+            .unwrap();
+
+        let waiter_registry = registry.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_registry.wait_process_exit(terminal_id, Duration::from_secs(5))
+        });
+        registry.mark_exited(terminal_id, Some(3));
+        let replay = waiter.join().unwrap().unwrap();
+        assert!(matches!(
+            replay.process,
+            TerminalProcessState::Exited { code: Some(3) }
+        ));
+    }
+
+    #[test]
+    fn replay_snapshot_rebuilds_the_screen_from_raw_events() {
+        let registry = TerminalRegistry::new();
+        let terminal_id = TerminalId::new(3);
+        let replay = test_ring();
+        let (command_tx, _command_rx) = mpsc::channel();
+        registry
+            .register(
+                terminal_id,
+                replay.clone(),
+                command_tx,
+                Arc::new(Mutex::new(None)),
+            )
+            .unwrap();
+
+        let size = TerminalSize::new(80, 24);
+        replay.push_output(size, Arc::from(b"WATER_CAPTURE_ME\r\n".to_vec()));
+        let capture = registry.replay(terminal_id).unwrap();
+        let snapshot = crate::terminal::snapshot_from_replay(&capture, 2_000);
+        assert!(snapshot.visible_text().contains("WATER_CAPTURE_ME"));
+
+        // Resize history is honored by the replay.
+        let wide = TerminalSize::new(100, 30);
+        replay.push_resize(wide);
+        let capture = registry.replay(terminal_id).unwrap();
+        let snapshot = crate::terminal::snapshot_from_replay(&capture, 2_000);
+        assert_eq!(snapshot.size.columns, 100);
+    }
+
+    #[test]
+    fn contains_text_matches_the_raw_replay_history() {
+        let registry = TerminalRegistry::new();
+        let terminal_id = TerminalId::new(4);
+        let (command_tx, _command_rx) = mpsc::channel();
+        registry
+            .register(
+                terminal_id,
+                test_ring(),
+                command_tx,
+                Arc::new(Mutex::new(None)),
+            )
+            .unwrap();
+        registry.publish_output(terminal_id, b"needle-haystack-needle\n");
+        let replay = registry
+            .contains_text(terminal_id, "needle-haystack", Duration::from_secs(1))
+            .unwrap();
+        assert_eq!(replay.terminal_id, terminal_id);
     }
 }

@@ -11,6 +11,7 @@ use water::command::{
 use water::event::AppEventKind;
 use water::terminal::{
     TerminalColor, TerminalProcessState, default_shell_args, default_shell_program,
+    snapshot_from_replay,
 };
 
 #[test]
@@ -106,9 +107,10 @@ fn terminal_worker_captures_output_and_ansi_cell_attributes() {
         result => panic!("unexpected result: {result:?}"),
     };
 
-    let snapshot = dispatcher
+    let replay = dispatcher
         .wait_terminal_contains(terminal_id, "RED", Duration::from_secs(5))
         .expect("terminal output arrives");
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     assert_eq!(snapshot.cell(0, 0).unwrap().character, 'R');
     assert_eq!(
         snapshot.cell(0, 0).unwrap().fg,
@@ -168,9 +170,10 @@ fn binary_terminal_output_does_not_leave_device_responses_in_zsh_input() {
         dispatcher.wait_operation(send_binary).unwrap().status,
         OperationStatus::Succeeded
     );
-    let snapshot = dispatcher
+    let replay = dispatcher
         .wait_terminal_contains(terminal_id, "BINARY_DONE", Duration::from_secs(5))
         .expect("binary command completes");
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     assert!(!snapshot.visible_text().contains("6c"));
 
     let send_follow_up = dispatcher.dispatch(AppCommand::Terminal(TerminalCommand::SendText {
@@ -182,9 +185,10 @@ fn binary_terminal_output_does_not_leave_device_responses_in_zsh_input() {
         dispatcher.wait_operation(send_follow_up).unwrap().status,
         OperationStatus::Succeeded
     );
-    let snapshot = dispatcher
+    let replay = dispatcher
         .wait_terminal_contains(terminal_id, "AFTER", Duration::from_secs(5))
         .expect("follow-up command reaches zsh");
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     assert!(!snapshot.visible_text().contains("6c"));
 }
 
@@ -232,7 +236,7 @@ fn exited_terminal_closes_a_non_final_pane_automatically() {
     assert_eq!(tab.tree.pane_count(), 1);
     assert_ne!(tab.active_pane, new_pane);
     assert_eq!(dispatcher.memory_stats().terminal_count, 1);
-    assert!(dispatcher.terminal_registry().snapshot(terminal_id).is_ok());
+    assert!(dispatcher.terminal_registry().replay(terminal_id).is_ok());
     assert!(dispatcher.all_events().iter().any(|event| matches!(
         event.kind,
         AppEventKind::PaneClosed { pane_id } if pane_id == new_pane
@@ -374,16 +378,15 @@ fn model_host_projects_terminal_snapshots_without_mutable_ui_access() {
         .unwrap();
     let state = client.state_dump().unwrap();
     let tree = &state.workspace.unwrap().tabs[0].tree;
-    let snapshot = match tree {
+    assert!(matches!(
+        tree,
         water::app::model::PaneTreeDump::Leaf {
-            terminal: Some(projection),
+            terminal: Some(_),
             ..
-        } => projection
-            .snapshot
-            .as_ref()
-            .unwrap_or_else(|| panic!("displayed tab must project its grid: {tree:?}")),
-        tree => panic!("expected terminal leaf, got {tree:?}"),
-    };
+        }
+    ));
+    let replay = client.terminal_replay(terminal_id).unwrap();
+    let snapshot = snapshot_from_replay(&replay, 2_000);
     assert_eq!(snapshot.size.columns, 40);
     assert_eq!(snapshot.size.lines, 8);
     assert!(snapshot.visible_text().contains("MODEL_HOST_READY"));
