@@ -15,7 +15,7 @@ use crate::ui::UiControlClient;
 
 use super::protocol::{
     PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
-    SessionOpenResponse, WireMessage, read_frame, write_frame,
+    SessionOpenResponse, WireMessage, read_frame, write_frame, write_snapshot_frame,
 };
 
 /// How long the session writer waits for the first pending push before
@@ -317,7 +317,9 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: Arc<ServerSt
             };
             std::thread::Builder::new()
                 .name("water-session-writer".to_owned())
-                .spawn(move || session_writer(writer_stream, pending.writer_rx))
+                .spawn(move || {
+                    session_writer(writer_stream, pending.writer_rx, pending.compact_snapshots)
+                })
                 .ok();
             session = Some(pending.session);
             // `open_session` already queued the response frame on the
@@ -368,8 +370,11 @@ fn handle_request(
     request: RpcRequest,
     state: &ServerState,
 ) -> (RpcResponse, Option<PendingSession>) {
-    if let RpcMethod::SessionOpen { .. } = request.method {
-        return open_session(request.request_id, state);
+    if let RpcMethod::SessionOpen {
+        compact_snapshots, ..
+    } = request.method
+    {
+        return open_session(request.request_id, state, compact_snapshots);
     }
     (handle_regular(request, state), None)
 }
@@ -523,6 +528,7 @@ fn handle_regular(request: RpcRequest, state: &ServerState) -> RpcResponse {
 struct PendingSession {
     session: Arc<Session>,
     writer_rx: std::sync::mpsc::Receiver<SessionWriterItem>,
+    compact_snapshots: bool,
 }
 
 /// Registers a long-lived GUI session: creates the session, queues the
@@ -530,7 +536,11 @@ struct PendingSession {
 /// writer, and returns the pending writer for the connection handler to
 /// spawn.
 #[cfg(unix)]
-fn open_session(request_id: u64, state: &ServerState) -> (RpcResponse, Option<PendingSession>) {
+fn open_session(
+    request_id: u64,
+    state: &ServerState,
+    compact_snapshots: bool,
+) -> (RpcResponse, Option<PendingSession>) {
     let session_id = state.next_session_id.fetch_add(1, Ordering::Relaxed);
     let (writer_tx, writer_rx) = mpsc::sync_channel::<SessionWriterItem>(32);
     let session = Arc::new(Session::new(session_id, writer_tx));
@@ -557,7 +567,14 @@ fn open_session(request_id: u64, state: &ServerState) -> (RpcResponse, Option<Pe
     if let Ok(current) = state.client.state_dump() {
         session.push(SessionWriterItem::Snapshot(current));
     }
-    (response, Some(PendingSession { session, writer_rx }))
+    (
+        response,
+        Some(PendingSession {
+            session,
+            writer_rx,
+            compact_snapshots,
+        }),
+    )
 }
 
 /// Dispatches a UI automation request: in-process when the server embedded
@@ -660,7 +677,11 @@ fn forward_ui_request(
 }
 
 #[cfg(unix)]
-fn session_writer(mut stream: std::os::unix::net::UnixStream, rx: Receiver<SessionWriterItem>) {
+fn session_writer(
+    mut stream: std::os::unix::net::UnixStream,
+    rx: Receiver<SessionWriterItem>,
+    compact_snapshots: bool,
+) {
     let mut pending_message: Option<WireMessage> = None;
     let mut pending_snapshot: Option<ModelSnapshot> = None;
     loop {
@@ -685,7 +706,7 @@ fn session_writer(mut stream: std::os::unix::net::UnixStream, rx: Receiver<Sessi
             return;
         }
         if let Some(snapshot) = pending_snapshot.take()
-            && write_frame(&mut stream, &WireMessage::push_snapshot(&snapshot)).is_err()
+            && write_snapshot_frame(&mut stream, &snapshot, compact_snapshots).is_err()
         {
             return;
         }

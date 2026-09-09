@@ -5,6 +5,8 @@ mod shell_integration;
 mod snapshot;
 mod worker;
 
+pub(crate) use snapshot::with_compact_terminal_cell_wire;
+
 pub const HOMEBREW_ZSH: &str = "/opt/homebrew/bin/zsh";
 pub const INTEL_HOMEBREW_ZSH: &str = "/usr/local/bin/zsh";
 pub const SYSTEM_ZSH: &str = "/bin/zsh";

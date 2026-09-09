@@ -8,6 +8,7 @@ use alacritty_terminal::term::{
 use alacritty_terminal::vte::ansi::{Color, Rgb};
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
+use std::cell::Cell as ThreadCell;
 use std::sync::Arc;
 
 /// Raw row reserve on each side of the viewport. This is deliberately wider
@@ -117,6 +118,7 @@ impl TerminalCellFlags {
     const WIDE_SPACER: u16 = 1 << 6;
     const LEADING_WIDE_SPACER: u16 = 1 << 7;
     const WRAPLINE: u16 = 1 << 8;
+    const DIM: u16 = 1 << 9;
 
     fn set(&mut self, flag: u16, value: bool) {
         if value {
@@ -162,6 +164,10 @@ impl TerminalCellFlags {
         self.0 & Self::WRAPLINE != 0
     }
 
+    pub fn dim(self) -> bool {
+        self.0 & Self::DIM != 0
+    }
+
     pub fn set_wide(&mut self, value: bool) {
         self.set(Self::WIDE, value);
     }
@@ -181,6 +187,7 @@ impl TerminalCellFlags {
         compact.set(Self::ITALIC, flags.contains(Flags::ITALIC));
         compact.set(Self::UNDERLINE, flags.intersects(Flags::ALL_UNDERLINES));
         compact.set(Self::STRIKE, flags.contains(Flags::STRIKEOUT));
+        compact.set(Self::DIM, flags.contains(Flags::DIM));
         compact.set(Self::WIDE, flags.contains(Flags::WIDE_CHAR));
         compact.set(Self::WIDE_SPACER, flags.contains(Flags::WIDE_CHAR_SPACER));
         compact.set(
@@ -195,15 +202,30 @@ impl TerminalCellFlags {
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct TerminalCellFlagsWire {
+    #[serde(skip_serializing_if = "is_false")]
     inverse: bool,
+    #[serde(skip_serializing_if = "is_false")]
     bold: bool,
+    #[serde(skip_serializing_if = "is_false")]
     italic: bool,
+    #[serde(skip_serializing_if = "is_false")]
     underline: bool,
+    #[serde(skip_serializing_if = "is_false")]
     strike: bool,
+    #[serde(skip_serializing_if = "is_false")]
+    dim: bool,
+    #[serde(skip_serializing_if = "is_false")]
     wide: bool,
+    #[serde(skip_serializing_if = "is_false")]
     wide_spacer: bool,
+    #[serde(skip_serializing_if = "is_false")]
     leading_wide_spacer: bool,
+    #[serde(skip_serializing_if = "is_false")]
     wrapline: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Serialize for TerminalCellFlags {
@@ -217,6 +239,7 @@ impl Serialize for TerminalCellFlags {
             italic: self.italic(),
             underline: self.underline(),
             strike: self.strike(),
+            dim: self.dim(),
             wide: self.wide(),
             wide_spacer: self.wide_spacer(),
             leading_wide_spacer: self.leading_wide_spacer(),
@@ -238,6 +261,7 @@ impl<'de> Deserialize<'de> for TerminalCellFlags {
         flags.set(Self::ITALIC, wire.italic);
         flags.set(Self::UNDERLINE, wire.underline);
         flags.set(Self::STRIKE, wire.strike);
+        flags.set(Self::DIM, wire.dim);
         flags.set(Self::WIDE, wire.wide);
         flags.set(Self::WIDE_SPACER, wire.wide_spacer);
         flags.set(Self::LEADING_WIDE_SPACER, wire.leading_wide_spacer);
@@ -246,21 +270,107 @@ impl<'de> Deserialize<'de> for TerminalCellFlags {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct TerminalCell {
+    #[serde(default = "default_cell_character")]
     pub character: char,
+    #[serde(default = "default_cell_foreground")]
     pub fg: TerminalColor,
+    #[serde(default = "default_cell_background")]
     pub bg: TerminalColor,
+    #[serde(default)]
     pub flags: TerminalCellFlags,
+    #[serde(default)]
     pub zerowidth: SmallVec<[char; 2]>,
+}
+
+thread_local! {
+    static COMPACT_CELL_WIRE_DEPTH: ThreadCell<u32> = const { ThreadCell::new(0) };
+}
+
+/// Runs `serialize` with omission of default terminal-cell fields enabled on
+/// this thread. The control protocol negotiates this for modern GUI sessions;
+/// ordinary `state.dump` and legacy clients retain the original full shape.
+pub(crate) fn with_compact_terminal_cell_wire<T>(serialize: impl FnOnce() -> T) -> T {
+    struct Restore<'a> {
+        depth: &'a ThreadCell<u32>,
+        previous: u32,
+    }
+
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            self.depth.set(self.previous);
+        }
+    }
+
+    COMPACT_CELL_WIRE_DEPTH.with(|depth| {
+        let previous = depth.get();
+        depth.set(previous.saturating_add(1));
+        let _restore = Restore { depth, previous };
+        serialize()
+    })
+}
+
+impl Serialize for TerminalCell {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct as _;
+
+        let compact = COMPACT_CELL_WIRE_DEPTH.with(|depth| depth.get() != 0);
+        let character_is_default = self.character == default_cell_character();
+        let foreground_is_default = self.fg == default_cell_foreground();
+        let background_is_default = self.bg == default_cell_background();
+        let flags_are_default = self.flags == TerminalCellFlags::default();
+        let zerowidth_is_default = self.zerowidth.is_empty();
+        let field_count = if compact {
+            usize::from(!character_is_default)
+                + usize::from(!foreground_is_default)
+                + usize::from(!background_is_default)
+                + usize::from(!flags_are_default)
+                + usize::from(!zerowidth_is_default)
+        } else {
+            5
+        };
+        let mut wire = serializer.serialize_struct("TerminalCell", field_count)?;
+        if !compact || !character_is_default {
+            wire.serialize_field("character", &self.character)?;
+        }
+        if !compact || !foreground_is_default {
+            wire.serialize_field("fg", &self.fg)?;
+        }
+        if !compact || !background_is_default {
+            wire.serialize_field("bg", &self.bg)?;
+        }
+        if !compact || !flags_are_default {
+            wire.serialize_field("flags", &self.flags)?;
+        }
+        if !compact || !zerowidth_is_default {
+            wire.serialize_field("zerowidth", &self.zerowidth)?;
+        }
+        wire.end()
+    }
+}
+
+fn default_cell_character() -> char {
+    ' '
+}
+
+fn default_cell_foreground() -> TerminalColor {
+    TerminalColor::Named { value: 256 }
+}
+
+fn default_cell_background() -> TerminalColor {
+    TerminalColor::Named { value: 257 }
 }
 
 impl Default for TerminalCell {
     fn default() -> Self {
         Self {
-            character: ' ',
-            fg: TerminalColor::Named { value: 256 },
-            bg: TerminalColor::Named { value: 257 },
+            character: default_cell_character(),
+            fg: default_cell_foreground(),
+            bg: default_cell_background(),
             flags: TerminalCellFlags::default(),
             zerowidth: SmallVec::new(),
         }
@@ -899,5 +1009,59 @@ mod tests {
         let decoded: TerminalSnapshot = serde_json::from_value(legacy.into()).unwrap();
         assert!(decoded.rows_before.is_empty());
         assert!(decoded.rows_after.is_empty());
+    }
+
+    #[test]
+    fn dim_cell_style_survives_snapshot_projection_and_wire_roundtrip() {
+        assert_eq!(
+            serde_json::to_value(TerminalCellFlags::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let flags = TerminalCellFlags::from_alacritty(Flags::DIM);
+        assert!(flags.dim());
+
+        let mut snapshot = TerminalSnapshot::empty(TerminalId::new(1), TerminalSize::new(2, 1));
+        snapshot.cell_mut(0, 0).unwrap().flags = flags;
+        let encoded = serde_json::to_vec(&snapshot).unwrap();
+        let decoded: TerminalSnapshot = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.cell(0, 0).unwrap().flags.dim());
+    }
+
+    #[test]
+    fn negotiated_compact_cell_wire_omits_defaults_and_restores_serializer_mode() {
+        let default_cell = TerminalCell::default();
+        let full = serde_json::to_value(&default_cell).unwrap();
+        assert_eq!(full.as_object().unwrap().len(), 5);
+
+        let compact =
+            with_compact_terminal_cell_wire(|| serde_json::to_value(&default_cell).unwrap());
+        assert_eq!(compact, serde_json::json!({}));
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(compact).unwrap(),
+            default_cell
+        );
+        assert_eq!(
+            serde_json::to_value(&default_cell)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            5
+        );
+
+        let mut styled = TerminalCell {
+            character: 'A',
+            ..TerminalCell::default()
+        };
+        styled.flags = TerminalCellFlags::from_alacritty(Flags::DIM);
+        let compact = with_compact_terminal_cell_wire(|| serde_json::to_value(&styled).unwrap());
+        assert_eq!(
+            compact,
+            serde_json::json!({ "character": "A", "flags": { "dim": true } })
+        );
+        assert_eq!(
+            serde_json::from_value::<TerminalCell>(compact).unwrap(),
+            styled
+        );
     }
 }

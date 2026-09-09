@@ -3,12 +3,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::app::model::ModelSnapshot;
 use crate::app::model::{MemoryStats, StateDump};
-use crate::command::{AppCommand, DispatchError, OperationSnapshot};
+use crate::command::{AppCommand, DispatchError, OperationSnapshot, TerminalCommand};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::TerminalSnapshot;
@@ -189,6 +190,7 @@ impl ControlClient {
     pub fn session_open(&self) -> Result<SessionOpenResponse, ControlClientError> {
         self.call(RpcMethod::SessionOpen {
             role: "gui".to_owned(),
+            compact_snapshots: true,
         })
     }
 
@@ -250,7 +252,9 @@ impl RemoteCommandClient {
             .name("water-cmd-queue".to_owned())
             .spawn(move || {
                 let mut stream = stream;
-                for command in enqueue_rx {
+                let mut deferred = None;
+                while let Some(mut command) = deferred.take().or_else(|| enqueue_rx.recv().ok()) {
+                    coalesce_queued_viewport_commands(&mut command, &enqueue_rx, &mut deferred);
                     let request_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let request = RpcRequest {
                         protocol_version: PROTOCOL_VERSION,
@@ -271,6 +275,47 @@ impl RemoteCommandClient {
             })
             .ok();
         Ok(Self { inner, enqueue_tx })
+    }
+}
+
+#[cfg(unix)]
+fn viewport_command_key(
+    command: &AppCommand,
+) -> Option<(Option<TerminalId>, Option<crate::ids::PaneId>)> {
+    let AppCommand::Terminal(TerminalCommand::SetViewportPosition {
+        terminal_id,
+        pane_id,
+        ..
+    }) = command
+    else {
+        return None;
+    };
+    Some((*terminal_id, *pane_id))
+}
+
+#[cfg(unix)]
+fn same_viewport_command_stream(left: &AppCommand, right: &AppCommand) -> bool {
+    viewport_command_key(left)
+        .zip(viewport_command_key(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
+#[cfg(unix)]
+fn coalesce_queued_viewport_commands(
+    command: &mut AppCommand,
+    receiver: &std::sync::mpsc::Receiver<AppCommand>,
+    deferred: &mut Option<AppCommand>,
+) {
+    if viewport_command_key(command).is_none() {
+        return;
+    }
+    while let Ok(next) = receiver.try_recv() {
+        if same_viewport_command_stream(command, &next) {
+            *command = next;
+        } else {
+            *deferred = Some(next);
+            break;
+        }
     }
 }
 
@@ -374,6 +419,7 @@ pub fn connect_water_session(
         request_id: 0,
         method: RpcMethod::SessionOpen {
             role: "gui".to_owned(),
+            compact_snapshots: true,
         },
     };
     write_frame(&mut stream, &request)?;
@@ -449,9 +495,19 @@ fn session_reader_loop(
     write_tx: std::sync::mpsc::Sender<WireMessage>,
     ui_client: UiControlClient,
 ) {
+    #[derive(Deserialize)]
+    struct SessionFrame {
+        #[serde(default)]
+        request_id: u64,
+        #[serde(default)]
+        method: Option<String>,
+        #[serde(default)]
+        params: Option<Box<serde_json::value::RawValue>>,
+    }
+
     loop {
-        let value: serde_json::Value = match read_frame(&mut stream) {
-            Ok(value) => value,
+        let message: SessionFrame = match read_frame(&mut stream) {
+            Ok(message) => message,
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(error) => {
                 tracing::warn!(
@@ -462,23 +518,12 @@ fn session_reader_loop(
                 break;
             }
         };
-        let message: WireMessage = match serde_json::from_value(value) {
-            Ok(message) => message,
-            Err(error) => {
-                tracing::warn!(
-                    target: "water::automation",
-                    ?error,
-                    "malformed water session frame"
-                );
-                continue;
-            }
-        };
         match message.method.as_deref() {
             Some(PUSH_SNAPSHOT_METHOD) => {
-                let Some(params) = &message.params else {
+                let Some(params) = message.params.as_deref() else {
                     continue;
                 };
-                let Ok(state) = serde_json::from_value::<ModelSnapshot>(params.clone()) else {
+                let Ok(state) = serde_json::from_str::<ModelSnapshot>(params.get()) else {
                     continue;
                 };
                 if snapshot_tx.send(state).is_err() {
@@ -486,7 +531,10 @@ fn session_reader_loop(
                 }
             }
             Some(PUSH_UI_METHOD) => {
-                let Some(params) = &message.params else {
+                let Some(params) = message.params.as_deref() else {
+                    continue;
+                };
+                let Ok(params) = serde_json::from_str::<serde_json::Value>(params.get()) else {
                     continue;
                 };
                 let method = params
@@ -560,6 +608,45 @@ fn string_error(error: String) -> RpcError {
 fn serialize_value<T: serde::Serialize>(value: T) -> Result<serde_json::Value, RpcError> {
     serde_json::to_value(value)
         .map_err(|error| RpcError::new("SERIALIZATION_FAILED", error.to_string()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use crate::ids::PaneId;
+
+    fn viewport(target: i64) -> AppCommand {
+        AppCommand::Terminal(TerminalCommand::SetViewportPosition {
+            terminal_id: Some(TerminalId::new(3)),
+            pane_id: Some(PaneId::new(5)),
+            target,
+        })
+    }
+
+    #[test]
+    fn queued_viewport_requests_are_latest_wins_without_crossing_other_commands() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(viewport(4)).unwrap();
+        tx.send(viewport(7)).unwrap();
+        tx.send(AppCommand::Terminal(TerminalCommand::SendText {
+            terminal_id: Some(TerminalId::new(3)),
+            pane_id: Some(PaneId::new(5)),
+            text: "x".to_owned(),
+        }))
+        .unwrap();
+        tx.send(viewport(9)).unwrap();
+
+        let mut command = viewport(1);
+        let mut deferred = None;
+        coalesce_queued_viewport_commands(&mut command, &rx, &mut deferred);
+
+        assert_eq!(command, viewport(7));
+        assert!(matches!(
+            deferred,
+            Some(AppCommand::Terminal(TerminalCommand::SendText { .. }))
+        ));
+        assert_eq!(rx.try_recv().unwrap(), viewport(9));
+    }
 }
 
 #[cfg(not(unix))]

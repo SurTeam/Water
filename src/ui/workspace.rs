@@ -6650,7 +6650,13 @@ fn terminal_row_data_for_cells(
         let mut character = String::new();
         character.push(cell.character);
         character.extend(cell.zerowidth.iter().copied());
-        let color = rgb(color_to_rgb(foreground, true, options.theme)).into();
+        let foreground_color = color_to_rgb(foreground, true, options.theme);
+        let foreground_color = if cell.flags.dim() && !(cursor_at_cell && options.cursor_focused) {
+            dim_terminal_color(foreground_color)
+        } else {
+            foreground_color
+        };
+        let color = rgb(foreground_color).into();
         let run = TextRun {
             len: character.len(),
             font: fonts[usize::from(cell.flags.italic()) + usize::from(cell.flags.bold()) * 2]
@@ -6673,7 +6679,7 @@ fn terminal_row_data_for_cells(
             run: run.clone(),
             width_columns,
         };
-        if cell.flags.wide() {
+        if cell.flags.wide() || requires_cell_scaling {
             flush_chunk(
                 &mut chunks,
                 &mut current_text,
@@ -6698,7 +6704,6 @@ fn terminal_row_data_for_cells(
             current_text.push_str(&character);
             append_terminal_text_run(&mut current_runs, run);
             current_cells.push(text_cell);
-            current_requires_cell_scaling |= requires_cell_scaling;
         }
     }
     flush_chunk(
@@ -6939,6 +6944,12 @@ fn theme_color(value: u32) -> TerminalColor {
         green: ((value >> 8) & 0xff) as u8,
         blue: (value & 0xff) as u8,
     }
+}
+
+fn dim_terminal_color(color: u32) -> u32 {
+    const DIM_FACTOR: f32 = 0.66;
+    let channel = |shift: u32| (((color >> shift) & 0xff) as f32 * DIM_FACTOR).round() as u32;
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 fn basic_color(index: usize) -> u32 {
@@ -8059,6 +8070,36 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![(0, 1, "a"), (1, 2, "界"), (3, 1, "b ")]
         );
+    }
+
+    #[test]
+    fn isolated_unicode_does_not_force_ascii_neighbors_into_per_cell_shaping() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(6, 1));
+        for (column, character) in ['a', 'b', '·', 'c', 'd'].into_iter().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+        let options = TerminalRenderOptions {
+            metrics: TerminalMetrics::default(),
+            theme: AppConfig::default().theme.colors(),
+            cursor_focused: false,
+            scroll_offset_rows: 0.0,
+        };
+
+        let (chunks, _) = terminal_row_data(&snapshot, 0, None, options, "monospace");
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[0].text, "ab");
+        assert!(!chunks[0].requires_cell_scaling);
+        assert_eq!(chunks[1].text, "·");
+        assert!(chunks[1].requires_cell_scaling);
+        assert_eq!(chunks[2].text, "cd ");
+        assert!(!chunks[2].requires_cell_scaling);
+    }
+
+    #[test]
+    fn dim_terminal_colors_match_alacritty_intensity() {
+        assert_eq!(dim_terminal_color(0xffffff), 0xa8a8a8);
+        assert_eq!(dim_terminal_color(0x804020), 0x542a15);
     }
 
     #[test]
