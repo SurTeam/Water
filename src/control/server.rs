@@ -496,6 +496,7 @@ fn handle_regular(request: RpcRequest, state: &ServerState) -> RpcResponse {
             &ServerInfoResponse {
                 server_pid: std::process::id(),
                 protocol_version: PROTOCOL_VERSION,
+                server_version: env!("CARGO_PKG_VERSION").to_owned(),
                 socket_path: state.socket_path.display().to_string(),
                 ui_sessions: state.ui_session_count(),
             },
@@ -546,6 +547,7 @@ fn open_session(request_id: u64, state: &ServerState) -> (RpcResponse, Option<Pe
         &SessionOpenResponse {
             server_pid: std::process::id(),
             protocol_version: PROTOCOL_VERSION,
+            server_version: env!("CARGO_PKG_VERSION").to_owned(),
             socket_path: state.socket_path.display().to_string(),
         },
     );

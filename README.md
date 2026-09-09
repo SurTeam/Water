@@ -45,13 +45,22 @@ toolchain other than `stable`.
 ## Remote servers
 
 Choose **Connect Remote…** in the sidebar and enter an OpenSSH host/config
-alias such as `build-box` or `alice@example.com`. Water reuses an OpenSSH
-ControlMaster, detects the remote OS and CPU with `uname`, and selects only the
-matching embedded server. On first use it streams the gzip payload to the
-remote host and atomically installs it beneath
+alias such as `build-box` or `alice@example.com`. The connection appears in
+the current window as its own collapsible server group alongside **Local**;
+each group projects that server's workspaces. Right-click a remote group and
+choose **Disconnect** to remove only the local UI connection while leaving its
+server, shells, and workspaces running, or **Kill Server** to stop that remote
+server.
+
+Water reuses an OpenSSH ControlMaster, detects the remote OS and CPU with
+`uname`, and selects only the matching embedded server. On first use it streams
+the gzip payload to the remote host and atomically installs it beneath
 `~/.cache/water/server/<version+payload-hash>/<target>/`; subsequent sessions
-reuse that cached executable. Terminal snapshots still use the latest-only
-stream, so transport delay cannot accumulate obsolete render frames.
+reuse that cached executable. Remote control sockets are isolated by client and
+protocol version: a compatible client resumes the existing server, while a
+different version starts its own server without disturbing the old one.
+Terminal snapshots still use the latest-only stream, so transport delay cannot
+accumulate obsolete render frames.
 
 SSH authentication is non-interactive and follows the user's OpenSSH config
 and agent. The remote host needs a POSIX shell and `gzip`; it does not need a

@@ -7,11 +7,10 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::control::ControlClient;
+use crate::control::{ControlClient, PROTOCOL_VERSION};
 
 const REMOTE_START_TIMEOUT: Duration = Duration::from_secs(12);
 const REMOTE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
-const DEFAULT_REMOTE_CONTROL_SOCKET: &str = "/tmp/water.sock";
 
 #[derive(Debug, Error)]
 pub enum SshConnectionError {
@@ -42,13 +41,14 @@ pub struct SshTunnel {
     destination: String,
     local_socket: PathBuf,
     control_socket: PathBuf,
+    remote_socket: PathBuf,
     forward_spec: String,
 }
 
 impl SshTunnel {
     pub fn connect(destination: &str) -> Result<Self, SshConnectionError> {
         let destination = validate_ssh_destination(destination)?;
-        let remote_socket = remote_control_socket();
+        let remote_socket = remote_control_socket(&destination);
         let (local_socket, control_socket) = connection_paths(&destination, &remote_socket);
         remove_known_socket(&local_socket, "remove stale local Water forward")?;
         ensure_control_master(&destination, &control_socket)?;
@@ -74,9 +74,10 @@ impl SshTunnel {
             destination,
             local_socket,
             control_socket,
+            remote_socket: remote_socket.clone(),
             forward_spec,
         };
-        if tunnel.client().ping().is_err() {
+        if !tunnel.server_is_compatible() {
             start_remote_server(&tunnel.destination, &tunnel.control_socket, &remote_socket)?;
             tunnel.wait_until_ready()?;
         }
@@ -87,14 +88,25 @@ impl SshTunnel {
         &self.local_socket
     }
 
+    pub fn remote_socket(&self) -> &Path {
+        &self.remote_socket
+    }
+
     fn client(&self) -> ControlClient {
         ControlClient::new(self.local_socket.clone())
+    }
+
+    fn server_is_compatible(&self) -> bool {
+        self.client().server_info().is_ok_and(|info| {
+            info.protocol_version == PROTOCOL_VERSION
+                && info.server_version == env!("CARGO_PKG_VERSION")
+        })
     }
 
     fn wait_until_ready(&self) -> Result<(), SshConnectionError> {
         let deadline = Instant::now() + REMOTE_START_TIMEOUT;
         while Instant::now() < deadline {
-            if self.client().ping().is_ok() {
+            if self.server_is_compatible() {
                 return Ok(());
             }
             std::thread::sleep(REMOTE_RETRY_INTERVAL);
@@ -137,17 +149,22 @@ pub fn validate_ssh_destination(destination: &str) -> Result<String, SshConnecti
 }
 
 fn connection_paths(destination: &str, remote_socket: &Path) -> (PathBuf, PathBuf) {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    destination.hash(&mut hasher);
-    remote_socket.hash(&mut hasher);
-    let identity = hasher.finish();
+    let mut forward_hasher = std::collections::hash_map::DefaultHasher::new();
+    destination.hash(&mut forward_hasher);
+    remote_socket.hash(&mut forward_hasher);
+    let forward_identity = forward_hasher.finish();
+    let mut master_hasher = std::collections::hash_map::DefaultHasher::new();
+    destination.hash(&mut master_hasher);
+    let master_identity = master_hasher.finish();
     #[cfg(unix)]
     let user = unsafe { libc::geteuid() };
     #[cfg(not(unix))]
     let user = 0_u32;
     (
-        PathBuf::from(format!("/tmp/water-ssh-{user}-{identity:016x}.sock")),
-        PathBuf::from(format!("/tmp/water-ssh-{user}-{identity:016x}.ctl")),
+        PathBuf::from(format!(
+            "/tmp/water-ssh-{user}-{forward_identity:016x}.sock"
+        )),
+        PathBuf::from(format!("/tmp/water-ssh-{user}-{master_identity:016x}.ctl")),
     )
 }
 
@@ -210,7 +227,7 @@ fn start_remote_server(
             destination,
             control_socket,
             &format!(
-                "rm -f -- {remote_socket_quoted}; command -v {server_program} >/dev/null 2>&1 || exit 127; nohup {server_program} --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null &"
+                "rm -f -- {remote_socket_quoted}; command -v {server_program} >/dev/null 2>&1 || exit 127; {server_program} --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null"
             ),
             "start configured remote Water server",
         );
@@ -233,7 +250,7 @@ fn start_remote_server(
         destination,
         control_socket,
         &format!(
-            "rm -f -- {remote_socket_quoted}; if command -v water-server >/dev/null 2>&1; then nohup water-server --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null & elif command -v water >/dev/null 2>&1; then nohup water server --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null & else exit 127; fi"
+            "rm -f -- {remote_socket_quoted}; if command -v water-server >/dev/null 2>&1; then water-server --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null; elif command -v water >/dev/null 2>&1; then water server --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null; else exit 127; fi"
         ),
         "start installed remote Water server",
     )
@@ -315,7 +332,7 @@ fn install_and_start_embedded_server(
         destination,
         control_socket,
         &format!(
-            "rm -f -- {remote_socket}; nohup {quoted_program} --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null &"
+            "rm -f -- {remote_socket}; {quoted_program} --daemonize --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null"
         ),
         "start bundled remote Water server",
     )
@@ -341,10 +358,27 @@ fn run_remote_command(
     ensure_success(&output, action)
 }
 
-fn remote_control_socket() -> PathBuf {
+fn versioned_remote_control_socket(
+    destination: &str,
+    version: &str,
+    protocol_version: u32,
+) -> PathBuf {
+    let identity = stable_payload_id(destination.as_bytes());
+    PathBuf::from(format!(
+        "/tmp/water-v{version}-p{protocol_version}-{identity:016x}.sock"
+    ))
+}
+
+fn remote_control_socket(destination: &str) -> PathBuf {
     std::env::var_os("WATER_REMOTE_CONTROL_SOCKET")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_REMOTE_CONTROL_SOCKET))
+        .unwrap_or_else(|| {
+            versioned_remote_control_socket(
+                destination,
+                env!("CARGO_PKG_VERSION"),
+                PROTOCOL_VERSION,
+            )
+        })
 }
 
 fn ssh_output<'a>(
@@ -473,8 +507,30 @@ mod tests {
         let first = connection_paths("alpha", remote);
         assert_eq!(first, connection_paths("alpha", remote));
         assert_ne!(first, connection_paths("beta", remote));
+        assert_eq!(
+            first.1,
+            connection_paths("alpha", Path::new("/tmp/another.sock")).1
+        );
         assert!(first.0.as_os_str().len() < 100);
         assert!(first.1.as_os_str().len() < 100);
+    }
+
+    #[test]
+    fn remote_socket_is_isolated_by_client_version_and_protocol() {
+        let current = versioned_remote_control_socket("alpha", "1.2.3", 4);
+        assert_eq!(
+            current,
+            versioned_remote_control_socket("alpha", "1.2.3", 4)
+        );
+        assert_ne!(
+            current,
+            versioned_remote_control_socket("alpha", "1.2.4", 4)
+        );
+        assert_ne!(
+            current,
+            versioned_remote_control_socket("alpha", "1.2.3", 5)
+        );
+        assert_ne!(current, versioned_remote_control_socket("beta", "1.2.3", 4));
     }
 
     #[test]
@@ -502,11 +558,27 @@ mod tests {
             .client()
             .ping()
             .expect("remote Water server should reply");
+        let server_pid = tunnel
+            .client()
+            .server_info()
+            .expect("remote Water server should report its identity")
+            .server_pid;
+        let remote_socket = tunnel.remote_socket().to_path_buf();
+        drop(tunnel);
+
+        let tunnel = SshTunnel::connect(&destination).expect("SSH master should be reusable");
+        assert_eq!(
+            tunnel
+                .client()
+                .server_info()
+                .expect("disconnect must leave the remote server alive")
+                .server_pid,
+            server_pid
+        );
         tunnel
             .client()
             .server_shutdown()
             .expect("remote Water server should accept shutdown");
-        let remote_socket = remote_control_socket();
         let socket_gone = format!(
             "test ! -S {}",
             shell_quote(&remote_socket.display().to_string())
@@ -548,10 +620,14 @@ mod tests {
         );
         drop(tunnel);
 
-        let reused = SshTunnel::connect(&destination).expect("SSH master should be reusable");
+        let reused = SshTunnel::connect(&destination).expect("SSH master should remain reusable");
         reused
             .client()
             .ping()
             .expect("re-established forward should reply");
+        reused
+            .client()
+            .server_shutdown()
+            .expect("restarted test server should shut down during cleanup");
     }
 }

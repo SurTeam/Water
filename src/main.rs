@@ -16,7 +16,6 @@ use water::remote::SshTunnel;
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
-    init_tracing();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let explicit_server_mode = arguments
         .first()
@@ -24,6 +23,7 @@ fn main() -> Result<()> {
     if explicit_server_mode {
         run_server_via_dedicated_binary(&arguments[1..])
     } else {
+        init_tracing();
         run_gui(arguments.into_iter())
     }
 }
@@ -151,7 +151,7 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
     // Snapshot stream + UI automation: prefer the push session; fall back to
     // state polling against pre-split servers.
     let (ui_control_client, ui_control_receiver) = ui_control_channel();
-    let snapshot_receiver = match connect_water_session(&socket_path, ui_control_client) {
+    let snapshot_receiver = match connect_water_session(&socket_path, ui_control_client.clone()) {
         Ok(receiver) => receiver,
         Err(error) => {
             tracing::warn!(
@@ -170,6 +170,9 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
         config,
         startup.config_path.clone(),
     );
+    if let (Some(destination), Some(tunnel)) = (startup.ssh_destination.clone(), ssh_tunnel) {
+        ui_application.set_initial_remote_connection(destination, tunnel, socket_path.clone());
+    }
     let shutdown_socket_path = socket_path.clone();
     ui_application.set_server_shutdown_handler(move || {
         if let Err(error) = ControlClient::new(shutdown_socket_path.clone()).server_shutdown() {
@@ -185,7 +188,12 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
         platform_application().with_restart_arguments(std::env::args_os().skip(1).collect());
     application.on_reopen(move |cx| reopen_application.reopen(cx));
     application.run(move |cx: &mut App| {
-        ui_application.install(cx, snapshot_receiver, ui_control_receiver);
+        ui_application.install(
+            cx,
+            snapshot_receiver,
+            ui_control_client,
+            ui_control_receiver,
+        );
     });
 
     // The GUI is gone: detach the server (tmux semantics) or stop it when

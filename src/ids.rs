@@ -46,6 +46,7 @@ define_id!(PaneId);
 define_id!(SurfaceId);
 define_id!(TerminalId);
 define_id!(SessionId);
+define_id!(ConnectionId);
 define_id!(OperationId);
 
 /// Allocates monotonically increasing values and converts them into a typed ID.

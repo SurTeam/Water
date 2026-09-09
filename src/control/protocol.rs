@@ -284,6 +284,8 @@ pub enum RpcResult {
 pub struct SessionOpenResponse {
     pub server_pid: u32,
     pub protocol_version: u32,
+    #[serde(default)]
+    pub server_version: String,
     pub socket_path: String,
 }
 
@@ -292,6 +294,8 @@ pub struct SessionOpenResponse {
 pub struct ServerInfoResponse {
     pub server_pid: u32,
     pub protocol_version: u32,
+    #[serde(default)]
+    pub server_version: String,
     pub socket_path: String,
     pub ui_sessions: u32,
 }

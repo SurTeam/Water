@@ -25,8 +25,12 @@ pub fn init_tracing() {
 }
 
 pub fn run(arguments: impl Iterator<Item = String>) -> Result<()> {
-    set_server_process_name();
     let startup = parse_server_options(arguments)?;
+    if startup.daemonize {
+        daemonize().context("could not detach water-server")?;
+    }
+    init_tracing();
+    set_server_process_name();
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let socket_path = resolve_socket_path(&startup, &config);
@@ -70,6 +74,7 @@ struct ServerOptions {
     config_path: PathBuf,
     initial_workspace: Option<bool>,
     initial_terminal: Option<bool>,
+    daemonize: bool,
 }
 
 fn parse_server_options(mut args: impl Iterator<Item = String>) -> Result<ServerOptions> {
@@ -79,6 +84,7 @@ fn parse_server_options(mut args: impl Iterator<Item = String>) -> Result<Server
         .unwrap_or_else(AppConfig::default_load_path);
     let mut initial_workspace = None;
     let mut initial_terminal = None;
+    let mut daemonize = false;
     while let Some(argument) = args.next() {
         if argument == "--control-socket" {
             socket_path = Some(
@@ -97,12 +103,14 @@ fn parse_server_options(mut args: impl Iterator<Item = String>) -> Result<Server
         } else if argument == "--empty-workspace" || argument == "--no-initial-workspace" {
             initial_workspace = Some(false);
             initial_terminal = Some(false);
+        } else if argument == "--daemonize" {
+            daemonize = true;
         } else if argument == "--version" || argument == "-V" {
             println!("water-server {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);
         } else if argument == "--help" || argument == "-h" {
             println!(
-                "water-server [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace]"
+                "water-server [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [--daemonize]"
             );
             std::process::exit(0);
         } else {
@@ -114,7 +122,35 @@ fn parse_server_options(mut args: impl Iterator<Item = String>) -> Result<Server
         config_path,
         initial_workspace,
         initial_terminal,
+        daemonize,
     })
+}
+
+#[cfg(unix)]
+fn daemonize() -> std::io::Result<()> {
+    // SAFETY: this runs before the model, PTY, control, or tracing threads are
+    // created. The parent exits immediately so SSH can return; the child keeps
+    // the caller's cwd and redirected stdio, then enters a session with no
+    // controlling terminal.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if pid > 0 {
+        unsafe { libc::_exit(0) };
+    }
+    if unsafe { libc::setsid() } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn daemonize() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "daemon mode is only supported on Unix",
+    ))
 }
 
 fn resolve_socket_path(startup: &ServerOptions, config: &AppConfig) -> PathBuf {
@@ -236,6 +272,7 @@ mod tests {
                 "--control-socket=/tmp/water-test.sock",
                 "--config=/tmp/water-test.json",
                 "--empty-workspace",
+                "--daemonize",
             ]
             .into_iter()
             .map(str::to_owned),
@@ -248,5 +285,6 @@ mod tests {
         assert_eq!(options.config_path, Path::new("/tmp/water-test.json"));
         assert_eq!(options.initial_workspace, Some(false));
         assert_eq!(options.initial_terminal, Some(false));
+        assert!(options.daemonize);
     }
 }

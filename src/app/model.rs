@@ -148,6 +148,9 @@ pub struct TerminalProjection {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+// Leaf is the overwhelmingly common snapshot shape. Keeping it inline avoids
+// another allocation and pointer chase in the terminal rendering hot path.
+#[allow(clippy::large_enum_variant)]
 pub enum PaneTreeDump {
     Leaf {
         pane_id: PaneId,

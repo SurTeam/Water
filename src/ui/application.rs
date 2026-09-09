@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -12,14 +12,20 @@ use gpui::{
 
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
+use crate::control::{
+    ControlClient, RemoteCommandClient, connect_water_session, spawn_state_polling_fallback,
+};
+use crate::ids::ConnectionId;
+use crate::remote::SshTunnel;
 
-use super::WorkspaceView;
 #[cfg(feature = "runtime-screenshot")]
 use super::control::UiScreenshot;
 use super::control::{
     UiControlReceiver, UiControlRequest, UiKeystrokeResult, UiSnapshot, UiWheelResult,
 };
 use super::settings::SettingsView;
+use super::workspace::{WorkspaceConnection, WorkspaceConnectionKind};
+use super::{UiControlClient, WorkspaceView};
 
 actions!(
     water,
@@ -61,14 +67,14 @@ pub struct WaterApplication {
 }
 
 struct WaterApplicationState {
-    client: std::sync::Arc<dyn CommandTransport>,
+    connections: RefCell<Vec<ManagedConnection>>,
+    next_connection_id: Cell<u64>,
+    ui_control_client: RefCell<Option<UiControlClient>>,
     config: RefCell<AppConfig>,
     config_path: PathBuf,
-    snapshot: RefCell<ModelSnapshot>,
     views: RefCell<Vec<WeakEntity<WorkspaceView>>>,
     settings_window: RefCell<Option<WindowHandle<SettingsView>>>,
     shutdown_server: RefCell<Option<Arc<dyn Fn() + Send + Sync>>>,
-    last_snapshot_apply: RefCell<std::time::Instant>,
     // Startup window dimensions are fixed for this process. Settings keeps
     // the newly saved values visible, but they take effect after restarting
     // Water (or for brand-new windows opened in time).
@@ -76,6 +82,22 @@ struct WaterApplicationState {
     window_height: f32,
     window_min_width: f32,
     window_min_height: f32,
+}
+
+struct ManagedConnection {
+    projection: WorkspaceConnection,
+    _tunnel: Option<SshTunnel>,
+    local_socket: Option<PathBuf>,
+    last_snapshot_apply: std::time::Instant,
+}
+
+struct RemoteConnectionSetup {
+    destination: String,
+    client: Arc<dyn CommandTransport>,
+    snapshot: ModelSnapshot,
+    snapshot_receiver: crate::app::SnapshotStream,
+    tunnel: SshTunnel,
+    local_socket: PathBuf,
 }
 
 impl WaterApplication {
@@ -94,28 +116,252 @@ impl WaterApplication {
         config_path: PathBuf,
     ) -> Self {
         let config = config.normalized();
+        let local_connection = WorkspaceConnection {
+            id: ConnectionId::new(1),
+            title: "Local".to_owned(),
+            kind: WorkspaceConnectionKind::Local,
+            client,
+            snapshot,
+        };
         Self {
             state: Rc::new(WaterApplicationState {
                 window_width: config.startup.window_width,
                 window_height: config.startup.window_height,
                 window_min_width: config.startup.window_min_width,
                 window_min_height: config.startup.window_min_height,
-                client,
+                connections: RefCell::new(vec![ManagedConnection {
+                    projection: local_connection,
+                    _tunnel: None,
+                    local_socket: None,
+                    last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
+                }]),
+                next_connection_id: Cell::new(2),
+                ui_control_client: RefCell::new(None),
                 config: RefCell::new(config),
                 config_path,
-                snapshot: RefCell::new(snapshot),
                 views: RefCell::new(Vec::new()),
                 settings_window: RefCell::new(None),
                 shutdown_server: RefCell::new(None),
-                last_snapshot_apply: RefCell::new(
-                    std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
-                ),
             }),
         }
     }
 
     pub(crate) fn config(&self) -> AppConfig {
         self.state.config.borrow().clone()
+    }
+
+    /// Marks the startup transport as SSH-backed. Normal launches keep the
+    /// first connection named Local; the legacy `--ssh` entry point remains
+    /// useful and now projects the correct remote title in the same sidebar.
+    pub fn set_initial_remote_connection(
+        &self,
+        destination: String,
+        tunnel: SshTunnel,
+        local_socket: PathBuf,
+    ) {
+        let mut connections = self.state.connections.borrow_mut();
+        let Some(connection) = connections.first_mut() else {
+            return;
+        };
+        connection.projection.title = destination;
+        connection.projection.kind = WorkspaceConnectionKind::Remote;
+        connection._tunnel = Some(tunnel);
+        connection.local_socket = Some(local_socket);
+    }
+
+    fn connection_projections(&self) -> Vec<WorkspaceConnection> {
+        self.state
+            .connections
+            .borrow()
+            .iter()
+            .map(|connection| connection.projection.clone())
+            .collect()
+    }
+
+    pub(crate) fn connect_remote(
+        &self,
+        destination: String,
+        origin: WeakEntity<WorkspaceView>,
+        cx: &mut App,
+    ) {
+        if let Some(connection_id) = self
+            .state
+            .connections
+            .borrow()
+            .iter()
+            .find(|connection| {
+                connection.projection.kind == WorkspaceConnectionKind::Remote
+                    && connection.projection.title == destination
+            })
+            .map(|connection| connection.projection.id)
+        {
+            let _ = origin.update(cx, |view, cx| {
+                view.finish_remote_connection(Ok(connection_id), cx);
+            });
+            return;
+        }
+
+        let Some(ui_control_client) = self.state.ui_control_client.borrow().clone() else {
+            let _ = origin.update(cx, |view, cx| {
+                view.finish_remote_connection(
+                    Err("Water UI control session is not ready".to_owned()),
+                    cx,
+                );
+            });
+            return;
+        };
+        let application = self.clone();
+        cx.spawn(async move |cx| {
+            let connection_destination = destination.clone();
+            let setup = cx
+                .background_executor()
+                .spawn(async move {
+                    let tunnel = SshTunnel::connect(&connection_destination)
+                        .map_err(|error| error.to_string())?;
+                    let local_socket = tunnel.local_socket().to_path_buf();
+                    let client: Arc<dyn CommandTransport> = Arc::new(
+                        RemoteCommandClient::connect(&local_socket)
+                            .map_err(|error| error.to_string())?,
+                    );
+                    let snapshot = client.state_dump().map_err(|error| error.to_string())?;
+                    let snapshot_receiver = connect_water_session(&local_socket, ui_control_client)
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(
+                                target: "water::workspace",
+                                ?error,
+                                destination = %connection_destination,
+                                "remote session push unavailable; falling back to state polling"
+                            );
+                            spawn_state_polling_fallback(client.clone())
+                        });
+                    Ok::<_, String>(RemoteConnectionSetup {
+                        destination: connection_destination,
+                        client,
+                        snapshot,
+                        snapshot_receiver,
+                        tunnel,
+                        local_socket,
+                    })
+                })
+                .await;
+
+            let result = match setup {
+                Ok(setup) => Ok(cx.update(|cx| application.register_remote_connection(setup, cx))),
+                Err(error) => Err(error),
+            };
+            let _ = origin.update(cx, |view, cx| {
+                view.finish_remote_connection(result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn register_remote_connection(
+        &self,
+        setup: RemoteConnectionSetup,
+        cx: &mut App,
+    ) -> ConnectionId {
+        if let Some(existing) = self
+            .state
+            .connections
+            .borrow()
+            .iter()
+            .find(|connection| {
+                connection.projection.kind == WorkspaceConnectionKind::Remote
+                    && connection.projection.title == setup.destination
+            })
+            .map(|connection| connection.projection.id)
+        {
+            return existing;
+        }
+        let connection_id = ConnectionId::new(self.state.next_connection_id.get());
+        self.state
+            .next_connection_id
+            .set(self.state.next_connection_id.get().saturating_add(1));
+        let projection = WorkspaceConnection {
+            id: connection_id,
+            title: setup.destination,
+            kind: WorkspaceConnectionKind::Remote,
+            client: setup.client,
+            snapshot: setup.snapshot,
+        };
+        self.state.connections.borrow_mut().push(ManagedConnection {
+            projection: projection.clone(),
+            _tunnel: Some(setup.tunnel),
+            local_socket: Some(setup.local_socket),
+            last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
+        });
+        let views = self.state.views.borrow().clone();
+        let mut live_views = Vec::with_capacity(views.len());
+        for view in views {
+            if view
+                .update(cx, |workspace, cx| {
+                    workspace.install_connection(projection.clone(), cx);
+                })
+                .is_ok()
+            {
+                live_views.push(view);
+            }
+        }
+        self.state.views.replace(live_views);
+        self.spawn_snapshot_listener(cx, connection_id, setup.snapshot_receiver)
+            .detach();
+        connection_id
+    }
+
+    pub(crate) fn disconnect_connection(&self, connection_id: ConnectionId, cx: &mut App) {
+        self.remove_remote_connection(connection_id, false, cx);
+    }
+
+    pub(crate) fn kill_connection(&self, connection_id: ConnectionId, cx: &mut App) {
+        self.remove_remote_connection(connection_id, true, cx);
+    }
+
+    fn remove_remote_connection(
+        &self,
+        connection_id: ConnectionId,
+        kill_server: bool,
+        cx: &mut App,
+    ) {
+        let removed = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(index) = connections.iter().position(|connection| {
+                connection.projection.id == connection_id
+                    && connection.projection.kind == WorkspaceConnectionKind::Remote
+            }) else {
+                return;
+            };
+            connections.remove(index)
+        };
+        let views = self.state.views.borrow().clone();
+        let mut live_views = Vec::with_capacity(views.len());
+        for view in views {
+            if view
+                .update(cx, |workspace, cx| {
+                    workspace.remove_connection(connection_id, cx);
+                })
+                .is_ok()
+            {
+                live_views.push(view);
+            }
+        }
+        self.state.views.replace(live_views);
+
+        let _ = std::thread::Builder::new()
+            .name("water-ssh-disconnect".to_owned())
+            .spawn(move || {
+                if kill_server
+                    && let Some(socket_path) = removed.local_socket.as_ref()
+                    && let Err(error) = ControlClient::new(socket_path).server_shutdown()
+                {
+                    tracing::warn!(
+                        target: "water::workspace",
+                        ?error,
+                        "failed to stop disconnected remote server"
+                    );
+                }
+                drop(removed);
+            });
     }
 
     /// Installs the explicit lifecycle action used by the application menu.
@@ -171,8 +417,12 @@ impl WaterApplication {
         &self,
         cx: &mut App,
         snapshot_receiver: crate::app::SnapshotStream,
+        ui_control_client: UiControlClient,
         ui_control_receiver: UiControlReceiver,
     ) {
+        self.state
+            .ui_control_client
+            .replace(Some(ui_control_client));
         cx.set_quit_mode(QuitMode::Explicit);
         let config = self.config();
         cx.clear_key_bindings();
@@ -199,7 +449,8 @@ impl WaterApplication {
         });
         cx.set_menus(application_menus());
 
-        self.spawn_snapshot_listener(cx, snapshot_receiver).detach();
+        self.spawn_snapshot_listener(cx, ConnectionId::new(1), snapshot_receiver)
+            .detach();
         self.spawn_ui_control_listener(cx, ui_control_receiver)
             .detach();
         self.open_window(cx);
@@ -219,10 +470,16 @@ impl WaterApplication {
 
     pub fn open_window(&self, cx: &mut App) {
         let config = self.config();
+        let connections = self.connection_projections();
+        let active_connection = connections
+            .first()
+            .map_or(ConnectionId::new(1), |connection| connection.id);
+        let application = self.clone();
         let root = cx.new(|cx| {
-            WorkspaceView::new_with_config(
-                self.state.client.clone(),
-                self.state.snapshot.borrow().clone(),
+            WorkspaceView::new_with_connections(
+                Some(application),
+                connections,
+                active_connection,
                 cx.focus_handle(),
                 config.clone(),
             )
@@ -294,6 +551,7 @@ impl WaterApplication {
     fn spawn_snapshot_listener(
         &self,
         cx: &mut App,
+        connection_id: ConnectionId,
         receiver: crate::app::SnapshotStream,
     ) -> Task<()> {
         let receiver = std::sync::Arc::new(receiver);
@@ -311,7 +569,15 @@ impl WaterApplication {
                 // Pace snapshot application independently from parser work.
                 // Intermediate revisions are already dropped upstream, while
                 // an 8 ms ceiling keeps output continuous on 60/120 Hz panels.
-                let elapsed = state.last_snapshot_apply.borrow().elapsed();
+                let Some(elapsed) = state
+                    .connections
+                    .borrow()
+                    .iter()
+                    .find(|connection| connection.projection.id == connection_id)
+                    .map(|connection| connection.last_snapshot_apply.elapsed())
+                else {
+                    break;
+                };
                 if elapsed < Self::SNAPSHOT_MIN_INTERVAL {
                     cx.background_executor()
                         .spawn(async move {
@@ -319,15 +585,35 @@ impl WaterApplication {
                         })
                         .await;
                 }
-                state.last_snapshot_apply.replace(std::time::Instant::now());
-
-                state.snapshot.replace(snapshot.clone());
+                let installed = {
+                    let mut connections = state.connections.borrow_mut();
+                    let Some(connection) = connections
+                        .iter_mut()
+                        .find(|connection| connection.projection.id == connection_id)
+                    else {
+                        break;
+                    };
+                    if snapshot.state_revision <= connection.projection.snapshot.state_revision {
+                        false
+                    } else {
+                        connection.last_snapshot_apply = std::time::Instant::now();
+                        connection.projection.snapshot = snapshot.clone();
+                        true
+                    }
+                };
+                if !installed {
+                    continue;
+                }
                 let views = state.views.borrow().clone();
                 let mut live_views = Vec::with_capacity(views.len());
                 for view in views {
                     if view
                         .update(cx, |workspace, cx| {
-                            workspace.install_snapshot(snapshot.clone(), cx);
+                            workspace.install_connection_snapshot(
+                                connection_id,
+                                snapshot.clone(),
+                                cx,
+                            );
                         })
                         .is_ok()
                     {

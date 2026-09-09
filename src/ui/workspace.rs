@@ -21,7 +21,7 @@ use crate::command::{
     TerminalCommand, WorkspaceCommand,
 };
 use crate::config::{AppConfig, DEFAULT_TERMINAL_LINE_HEIGHT, ThemeColors};
-use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
+use crate::ids::{ConnectionId, PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
 use crate::terminal::{
@@ -33,7 +33,7 @@ use super::application::{
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateTab10, HideWindow, IgnoreQuit,
     MinimizeWindow, NewTerminalTab, NewWorkspace, NextTab, NextWorkspace, PreviousTab,
     PreviousWorkspace, RenameTab, RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
-    shortcut_matches_or_default,
+    WaterApplication, shortcut_matches_or_default,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
@@ -51,6 +51,21 @@ const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 /// Pixels to move the sidebar per captured pointer move near an edge.
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
 const SPLIT_DIVIDER_WIDTH_PX: f32 = 6.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceConnectionKind {
+    Local,
+    Remote,
+}
+
+#[derive(Clone)]
+pub(crate) struct WorkspaceConnection {
+    pub(crate) id: ConnectionId,
+    pub(crate) title: String,
+    pub(crate) kind: WorkspaceConnectionKind,
+    pub(crate) client: Arc<dyn CommandTransport>,
+    pub(crate) snapshot: ModelSnapshot,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct TerminalMetrics {
@@ -98,9 +113,16 @@ struct ContextMenuState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextMenuTarget {
-    Workspace(WorkspaceId),
+    Connection(ConnectionId),
+    Workspace {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+    },
     Tab(TabId),
-    Agent(PaneId),
+    Agent {
+        connection_id: ConnectionId,
+        pane_id: PaneId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -706,6 +728,9 @@ impl InputHandler for TerminalInputHandler {
 }
 
 pub struct WorkspaceView {
+    application: Option<WaterApplication>,
+    connections: Vec<WorkspaceConnection>,
+    active_connection: ConnectionId,
     client: std::sync::Arc<dyn CommandTransport>,
     snapshot: ModelSnapshot,
     config: AppConfig,
@@ -733,7 +758,8 @@ pub struct WorkspaceView {
     reported_mouse: Option<(TerminalId, MouseButton)>,
     last_reported_mouse_cell: Option<(TerminalId, TerminalCellPosition)>,
     sidebar_collapsed: bool,
-    collapsed_workspaces: BTreeSet<WorkspaceId>,
+    collapsed_connections: BTreeSet<ConnectionId>,
+    collapsed_workspaces: BTreeSet<(ConnectionId, WorkspaceId)>,
     sidebar_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
     /// Tab-strip shape seen at the last snapshot install; changes trigger a
@@ -782,13 +808,47 @@ impl WorkspaceView {
         focus_handle: FocusHandle,
         config: AppConfig,
     ) -> Self {
+        let connection_id = ConnectionId::new(1);
+        Self::new_with_connections(
+            None,
+            vec![WorkspaceConnection {
+                id: connection_id,
+                title: "Local".to_owned(),
+                kind: WorkspaceConnectionKind::Local,
+                client,
+                snapshot,
+            }],
+            connection_id,
+            focus_handle,
+            config,
+        )
+    }
+
+    pub(crate) fn new_with_connections(
+        application: Option<WaterApplication>,
+        connections: Vec<WorkspaceConnection>,
+        active_connection: ConnectionId,
+        focus_handle: FocusHandle,
+        config: AppConfig,
+    ) -> Self {
         let config = config.normalized();
+        let active = connections
+            .iter()
+            .find(|connection| connection.id == active_connection)
+            .or_else(|| connections.first())
+            .expect("workspace view requires at least one connection");
+        let client = active.client.clone();
+        let snapshot = active.snapshot.clone();
+        let active_connection = active.id;
         let selected_workspace = workspace_selection_after_snapshot(None, &snapshot);
         let focused_pane =
             focused_pane_for_workspace(&snapshot, selected_workspace, snapshot.focused_pane);
         let sidebar_width = config.ui.sidebar_width;
         let sidebar_collapsed = !config.ui.sidebar_visible;
         Self {
+            application,
+            connections,
+            active_connection,
             client,
             snapshot,
             config,
@@ -814,6 +874,7 @@ impl WorkspaceView {
             reported_mouse: None,
             last_reported_mouse_cell: None,
             sidebar_collapsed,
+            collapsed_connections: BTreeSet::new(),
             collapsed_workspaces: BTreeSet::new(),
             sidebar_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
@@ -849,6 +910,112 @@ impl WorkspaceView {
         self.selected_workspace
     }
 
+    fn connection_by_id(&self, connection_id: ConnectionId) -> Option<&WorkspaceConnection> {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == connection_id)
+    }
+
+    fn reset_active_connection_projection(&mut self, connection: WorkspaceConnection) {
+        self.active_connection = connection.id;
+        self.client = connection.client;
+        self.snapshot = connection.snapshot;
+        self.selected_workspace = workspace_selection_after_snapshot(None, &self.snapshot);
+        self.focused_pane = focused_pane_for_workspace(
+            &self.snapshot,
+            self.selected_workspace,
+            self.snapshot.focused_pane,
+        );
+        self.scroll_accumulators.clear();
+        self.active_trackpad_scrolls.clear();
+        self.pending_viewport_requests.clear();
+        self.mouse_scroll_animations.clear();
+        self.render_caches
+            .lock()
+            .expect("terminal render caches poisoned")
+            .clear();
+        self.pending_tab = None;
+        self.last_revealed_tab = None;
+        self.split_drag = None;
+        self.selection = None;
+        self.clear_ime();
+    }
+
+    fn select_connection_locally(
+        &mut self,
+        connection_id: ConnectionId,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.active_connection == connection_id {
+            return false;
+        }
+        let Some(connection) = self.connection_by_id(connection_id).cloned() else {
+            return false;
+        };
+        self.reset_active_connection_projection(connection);
+        cx.notify();
+        true
+    }
+
+    pub(crate) fn install_connection(
+        &mut self,
+        connection: WorkspaceConnection,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(existing) = self
+            .connections
+            .iter_mut()
+            .find(|existing| existing.id == connection.id)
+        {
+            *existing = connection;
+        } else {
+            self.connections.push(connection);
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn install_connection_snapshot(
+        &mut self,
+        connection_id: ConnectionId,
+        snapshot: ModelSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if connection_id == self.active_connection {
+            self.install_snapshot(snapshot, cx);
+            return;
+        }
+        let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == connection_id)
+        else {
+            return;
+        };
+        if snapshot.state_revision > connection.snapshot.state_revision {
+            connection.snapshot = snapshot;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn remove_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        cx: &mut Context<Self>,
+    ) {
+        self.connections
+            .retain(|connection| connection.id != connection_id);
+        self.collapsed_connections.remove(&connection_id);
+        self.collapsed_workspaces
+            .retain(|(id, _)| *id != connection_id);
+        if self.active_connection == connection_id
+            && let Some(connection) = self.connections.first().cloned()
+        {
+            self.reset_active_connection_projection(connection);
+        }
+        self.context_menu = None;
+        cx.notify();
+    }
+
     fn select_workspace_locally(
         &mut self,
         workspace_id: WorkspaceId,
@@ -881,12 +1048,33 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn toggle_workspace_collapsed(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
-        if !self.workspace_exists(workspace_id) {
+    fn toggle_connection_collapsed(&mut self, connection_id: ConnectionId, cx: &mut Context<Self>) {
+        if self.connection_by_id(connection_id).is_none() {
             return;
         }
-        if !self.collapsed_workspaces.remove(&workspace_id) {
-            self.collapsed_workspaces.insert(workspace_id);
+        if !self.collapsed_connections.remove(&connection_id) {
+            self.collapsed_connections.insert(connection_id);
+        }
+        cx.notify();
+    }
+
+    fn toggle_workspace_collapsed(
+        &mut self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let exists = self
+            .connection_by_id(connection_id)
+            .is_some_and(|connection| {
+                workspace_exists_in_snapshot(&connection.snapshot, workspace_id)
+            });
+        if !exists {
+            return;
+        }
+        let key = (connection_id, workspace_id);
+        if !self.collapsed_workspaces.remove(&key) {
+            self.collapsed_workspaces.insert(key);
         }
         cx.notify();
     }
@@ -1373,15 +1561,29 @@ impl WorkspaceView {
 
     fn context_menu_target_exists(&self, target: ContextMenuTarget) -> bool {
         match target {
-            ContextMenuTarget::Workspace(workspace_id) => {
-                self.workspace_by_id(workspace_id).is_some()
-            }
+            ContextMenuTarget::Connection(connection_id) => self
+                .connection_by_id(connection_id)
+                .is_some_and(|connection| connection.kind == WorkspaceConnectionKind::Remote),
+            ContextMenuTarget::Workspace {
+                connection_id,
+                workspace_id,
+            } => self
+                .connection_by_id(connection_id)
+                .is_some_and(|connection| {
+                    workspace_exists_in_snapshot(&connection.snapshot, workspace_id)
+                }),
             ContextMenuTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
-            ContextMenuTarget::Agent(pane_id) => {
-                self.agent_by_pane_id(pane_id).is_some_and(|agent| {
-                    matches!(agent.status, crate::surface::TerminalStatus::Running)
-                })
-            }
+            ContextMenuTarget::Agent {
+                connection_id,
+                pane_id,
+            } => self
+                .connection_by_id(connection_id)
+                .is_some_and(|connection| {
+                    connection.snapshot.agents.iter().any(|agent| {
+                        agent.pane_id == pane_id
+                            && matches!(agent.status, crate::surface::TerminalStatus::Running)
+                    })
+                }),
         }
     }
 
@@ -1453,68 +1655,22 @@ impl WorkspaceView {
                             return;
                         }
                     };
-                let executable = match std::env::current_exe() {
-                    Ok(executable) => executable,
-                    Err(error) => {
-                        self.dialog = Some(DialogState::ConnectRemote);
-                        self.remote_connection_error =
-                            Some(format!("Could not locate the Water executable: {error}"));
-                        cx.notify();
-                        return;
-                    }
-                };
                 if self.remote_connection_pending {
                     self.dialog = Some(DialogState::ConnectRemote);
                     return;
                 }
+                let Some(application) = self.application.clone() else {
+                    self.dialog = Some(DialogState::ConnectRemote);
+                    self.remote_connection_error =
+                        Some("Remote connections are unavailable in this view".to_owned());
+                    cx.notify();
+                    return;
+                };
                 self.dialog = Some(DialogState::ConnectRemote);
                 self.remote_connection_pending = true;
                 self.remote_connection_error = None;
                 cx.notify();
-                cx.spawn(async move |entity, cx| {
-                    let connection_destination = destination.clone();
-                    let connection = cx
-                        .background_executor()
-                        .spawn(async move {
-                            crate::remote::SshTunnel::connect(&connection_destination).map(drop)
-                        })
-                        .await;
-                    let _ = entity.update(cx, |view, cx| {
-                        if !view.remote_connection_pending
-                            || view.dialog != Some(DialogState::ConnectRemote)
-                        {
-                            return;
-                        }
-                        view.remote_connection_pending = false;
-                        match connection {
-                            Ok(()) => {
-                                match std::process::Command::new(executable)
-                                    .arg("--ssh")
-                                    .arg(&destination)
-                                    .stdin(std::process::Stdio::null())
-                                    .stdout(std::process::Stdio::null())
-                                    .spawn()
-                                {
-                                    Ok(_) => {
-                                        view.dialog = None;
-                                        view.remote_host_value.clear();
-                                        view.remote_connection_error = None;
-                                    }
-                                    Err(error) => {
-                                        view.remote_connection_error = Some(format!(
-                                            "Could not open remote Water window: {error}"
-                                        ));
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                view.remote_connection_error = Some(error.to_string());
-                            }
-                        }
-                        cx.notify();
-                    });
-                })
-                .detach();
+                application.connect_remote(destination, cx.entity().downgrade(), cx);
                 return;
             }
         }
@@ -1540,6 +1696,32 @@ impl WorkspaceView {
         self.remote_connection_pending = false;
         self.dialog = Some(DialogState::ConnectRemote);
         self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn finish_remote_connection(
+        &mut self,
+        result: Result<ConnectionId, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.remote_connection_pending || self.dialog != Some(DialogState::ConnectRemote) {
+            if let Ok(connection_id) = result
+                && let Some(application) = self.application.clone()
+            {
+                application.disconnect_connection(connection_id, cx);
+            }
+            return;
+        }
+        self.remote_connection_pending = false;
+        match result {
+            Ok(connection_id) => {
+                self.dialog = None;
+                self.remote_host_value.clear();
+                self.remote_connection_error = None;
+                self.select_connection_locally(connection_id, cx);
+            }
+            Err(error) => self.remote_connection_error = Some(error),
+        }
         cx.notify();
     }
 
@@ -2479,13 +2661,24 @@ impl WorkspaceView {
         if snapshot.state_revision <= self.snapshot.state_revision {
             return;
         }
+        if let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == self.active_connection)
+        {
+            connection.snapshot = snapshot.clone();
+        }
         update_terminal_selection_for_snapshot(&mut self.selection, &self.snapshot, &snapshot);
         self.selected_workspace =
             workspace_selection_after_snapshot(self.selected_workspace, &snapshot);
         self.focused_pane =
             focused_pane_for_workspace(&snapshot, self.selected_workspace, self.focused_pane);
+        let active_connection = self.active_connection;
         self.collapsed_workspaces
-            .retain(|workspace_id| workspace_exists_in_snapshot(&snapshot, *workspace_id));
+            .retain(|(connection_id, workspace_id)| {
+                *connection_id != active_connection
+                    || workspace_exists_in_snapshot(&snapshot, *workspace_id)
+            });
         self.snapshot = snapshot;
         // A snapshot that moved the visible tab away from a split under
         // drag (tab closed/activated elsewhere mid-drag) cancels the drag.
@@ -2873,6 +3066,7 @@ impl WorkspaceView {
 
     fn render_sidebar_workspace(
         &self,
+        connection_id: ConnectionId,
         workspace: &WorkspaceDump,
         agents: &[&AgentDump],
         active_workspace: Option<WorkspaceId>,
@@ -2880,8 +3074,11 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace_id = workspace.id;
-        let active = active_workspace == Some(workspace_id);
-        let collapsed = self.collapsed_workspaces.contains(&workspace_id);
+        let active =
+            self.active_connection == connection_id && active_workspace == Some(workspace_id);
+        let collapsed = self
+            .collapsed_workspaces
+            .contains(&(connection_id, workspace_id));
         let running_agent_count = agents
             .iter()
             .filter(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running))
@@ -2908,6 +3105,7 @@ impl WorkspaceView {
         let workspace_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
+            this.select_connection_locally(connection_id, cx);
             this.select_workspace_locally(workspace_id, cx);
             this.focused_pane = workspace_active_pane;
             this.begin_sidebar_drag(SidebarDragSource::Workspace(workspace_id), event.position);
@@ -2920,7 +3118,9 @@ impl WorkspaceView {
             cx.stop_propagation();
         });
         let disclosure = div()
-            .id(format!("workspace-disclosure-{workspace_id}"))
+            .id(format!(
+                "workspace-disclosure-{connection_id}-{workspace_id}"
+            ))
             .w(px(SIDEBAR_DISCLOSURE_WIDTH))
             .flex_shrink_0()
             .items_center()
@@ -2932,12 +3132,12 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                    this.toggle_workspace_collapsed(workspace_id, cx);
+                    this.toggle_workspace_collapsed(connection_id, workspace_id, cx);
                     cx.stop_propagation();
                 }),
             );
         let mut workspace_row = div()
-            .id(format!("workspace-{workspace_id}"))
+            .id(format!("workspace-{connection_id}-{workspace_id}"))
             .h(px(self.config.ui.sidebar_header_height))
             .w_full()
             .px(px(10.))
@@ -2951,8 +3151,12 @@ impl WorkspaceView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.select_connection_locally(connection_id, cx);
                     this.context_menu = Some(ContextMenuState {
-                        target: ContextMenuTarget::Workspace(workspace_id),
+                        target: ContextMenuTarget::Workspace {
+                            connection_id,
+                            workspace_id,
+                        },
                         position: event.position,
                     });
                     this.focus_handle.focus(window, cx);
@@ -2978,36 +3182,145 @@ impl WorkspaceView {
         }
 
         let mut group = div()
-            .id(format!("workspace-group-{workspace_id}"))
+            .id(format!("workspace-group-{connection_id}-{workspace_id}"))
             .w_full()
             .flex()
             .flex_col()
             .child(workspace_row);
         if !collapsed {
             for agent in agents {
-                group = group.child(self.render_sidebar_agent(agent, theme, cx));
+                group = group.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
             }
         }
         group.into_any_element()
     }
 
-    fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
-        let active_workspace = self.active_workspace_id();
-        let mut list = div()
-            .id("workspace-list")
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_y_scroll()
-            .track_scroll(&self.sidebar_scroll)
-            .flex_col();
-        for workspace in self.workspace_dumps() {
-            let agents = self
+    fn render_sidebar_connection(
+        &self,
+        connection: &WorkspaceConnection,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let connection_id = connection.id;
+        let collapsed = self.collapsed_connections.contains(&connection_id);
+        let selected = self.active_connection == connection_id;
+        let disclosure = div()
+            .id(format!("connection-disclosure-{connection_id}"))
+            .w(px(SIDEBAR_DISCLOSURE_WIDTH))
+            .flex_shrink_0()
+            .items_center()
+            .justify_center()
+            .flex()
+            .cursor_pointer()
+            .child(SharedString::from(if collapsed { "▸" } else { "▾" }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
+                    this.toggle_connection_collapsed(connection_id, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        let title = connection.title.clone();
+        let kind_label = match connection.kind {
+            WorkspaceConnectionKind::Local => "LOCAL",
+            WorkspaceConnectionKind::Remote => "SSH",
+        };
+        let mut header = div()
+            .id(format!("connection-{connection_id}"))
+            .h(px(34.))
+            .w_full()
+            .px(px(10.))
+            .items_center()
+            .gap(px(6.))
+            .flex()
+            .flex_none()
+            .cursor_pointer()
+            .bg(rgb(if selected {
+                theme.tab_inactive_background
+            } else {
+                theme.sidebar_background
+            }))
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
+            .child(disclosure)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .child(SharedString::from(title)),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(9.))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(kind_label),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                    this.context_menu = None;
+                    this.focus_handle.focus(window, cx);
+                    this.select_connection_locally(connection_id, cx);
+                    cx.stop_propagation();
+                }),
+            );
+        if connection.kind == WorkspaceConnectionKind::Remote {
+            header = header.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.context_menu = Some(ContextMenuState {
+                        target: ContextMenuTarget::Connection(connection_id),
+                        position: event.position,
+                    });
+                    this.focus_handle.focus(window, cx);
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            );
+        }
+
+        let mut group = div()
+            .id(format!("connection-group-{connection_id}"))
+            .w_full()
+            .flex()
+            .flex_col()
+            .child(header);
+        if collapsed {
+            return group.into_any_element();
+        }
+
+        let active_workspace = if selected {
+            self.active_workspace_id()
+        } else {
+            None
+        };
+        let workspaces = if connection.snapshot.workspaces.is_empty() {
+            connection.snapshot.workspace.iter().collect::<Vec<_>>()
+        } else {
+            connection.snapshot.workspaces.iter().collect::<Vec<_>>()
+        };
+        if workspaces.is_empty() {
+            group = group.child(
+                div()
+                    .h(px(24.))
+                    .w_full()
+                    .pl(px(34.))
+                    .items_center()
+                    .flex()
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child("No workspaces"),
+            );
+        }
+        for workspace in workspaces {
+            let agents = connection
                 .snapshot
                 .agents
                 .iter()
                 .filter(|agent| agent.workspace_id == workspace.id)
                 .collect::<Vec<_>>();
-            list = list.child(self.render_sidebar_workspace(
+            group = group.child(self.render_sidebar_workspace(
+                connection_id,
                 workspace,
                 &agents,
                 active_workspace,
@@ -3015,17 +3328,19 @@ impl WorkspaceView {
                 cx,
             ));
         }
-        if self.snapshot.agents.is_empty() {
-            list = list.child(
-                div()
-                    .h(px(22.))
-                    .w_full()
-                    .px(px(10.))
-                    .items_center()
-                    .flex()
-                    .text_color(rgb(theme.inactive_pane_border))
-                    .child("No agents detected"),
-            );
+        group.into_any_element()
+    }
+
+    fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let mut list = div()
+            .id("workspace-list")
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_y_scroll()
+            .track_scroll(&self.sidebar_scroll)
+            .flex_col();
+        for connection in &self.connections {
+            list = list.child(self.render_sidebar_connection(connection, theme, cx));
         }
         let list_bounds = self.sidebar_scroll.bounds();
         let indicator = self.sidebar_drop_preview.and_then(|preview| {
@@ -3102,14 +3417,16 @@ impl WorkspaceView {
     /// workspace and tab in the model).
     fn render_sidebar_agent(
         &self,
+        connection_id: ConnectionId,
         agent: &AgentDump,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let workspace_id = agent.workspace_id;
         let pane_id = agent.pane_id;
-        let focused_here =
-            self.selected_workspace == Some(workspace_id) && self.focused_pane == Some(pane_id);
+        let focused_here = self.active_connection == connection_id
+            && self.selected_workspace == Some(workspace_id)
+            && self.focused_pane == Some(pane_id);
         let row_background = if focused_here {
             rgb(theme.sidebar_agent_active_background)
         } else {
@@ -3160,6 +3477,7 @@ impl WorkspaceView {
         let agent_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             this.context_menu = None;
             this.focus_handle.focus(window, cx);
+            this.select_connection_locally(connection_id, cx);
             this.select_workspace_locally(workspace_id, cx);
             this.focused_pane = Some(pane_id);
             this.begin_sidebar_drag(
@@ -3179,7 +3497,7 @@ impl WorkspaceView {
             cx.stop_propagation();
         });
         let mut row = div()
-            .id(format!("agent-pane-{pane_id}"))
+            .id(format!("agent-pane-{connection_id}-{pane_id}"))
             .h(px(28.))
             .w_full()
             .px(px(10.))
@@ -3212,8 +3530,12 @@ impl WorkspaceView {
             row = row.on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.select_connection_locally(connection_id, cx);
                     this.context_menu = Some(ContextMenuState {
-                        target: ContextMenuTarget::Agent(pane_id),
+                        target: ContextMenuTarget::Agent {
+                            connection_id,
+                            pane_id,
+                        },
                         position: event.position,
                     });
                     this.focus_handle.focus(window, cx);
@@ -3260,7 +3582,11 @@ impl WorkspaceView {
         let context_menu = self.context_menu?;
         let target = context_menu.target;
         let rename = match target {
-            ContextMenuTarget::Workspace(workspace_id) => self.render_context_menu_item(
+            ContextMenuTarget::Connection(_) => None,
+            ContextMenuTarget::Workspace {
+                connection_id: _,
+                workspace_id,
+            } => Some(self.render_context_menu_item(
                 "Rename workspace",
                 theme,
                 move |this, _event, window, cx| {
@@ -3268,8 +3594,8 @@ impl WorkspaceView {
                     this.begin_rename_workspace(workspace_id, window, cx);
                 },
                 cx,
-            ),
-            ContextMenuTarget::Tab(tab_id) => self.render_context_menu_item(
+            )),
+            ContextMenuTarget::Tab(tab_id) => Some(self.render_context_menu_item(
                 "Rename tab",
                 theme,
                 move |this, _event, window, cx| {
@@ -3277,8 +3603,11 @@ impl WorkspaceView {
                     this.begin_rename_tab(tab_id, window, cx);
                 },
                 cx,
-            ),
-            ContextMenuTarget::Agent(pane_id) => self.render_context_menu_item(
+            )),
+            ContextMenuTarget::Agent {
+                connection_id: _,
+                pane_id,
+            } => Some(self.render_context_menu_item(
                 "Rename agent",
                 theme,
                 move |this, _event, window, cx| {
@@ -3286,10 +3615,14 @@ impl WorkspaceView {
                     this.begin_rename_agent(pane_id, window, cx);
                 },
                 cx,
-            ),
+            )),
         };
         let close = match target {
-            ContextMenuTarget::Workspace(workspace_id) => Some(self.render_context_menu_item(
+            ContextMenuTarget::Connection(_) => None,
+            ContextMenuTarget::Workspace {
+                connection_id: _,
+                workspace_id,
+            } => Some(self.render_context_menu_item(
                 "Close workspace",
                 theme,
                 move |this, _event, window, cx| {
@@ -3312,7 +3645,7 @@ impl WorkspaceView {
                 },
                 cx,
             )),
-            ContextMenuTarget::Agent(_) => None,
+            ContextMenuTarget::Agent { .. } => None,
         };
         let mut menu = div()
             .id("workspace-context-menu")
@@ -3323,10 +3656,37 @@ impl WorkspaceView {
             .gap(px(2.))
             .bg(rgb(theme.chrome_background))
             .border_1()
-            .border_color(rgb(theme.inactive_pane_border))
-            .child(rename);
+            .border_color(rgb(theme.inactive_pane_border));
+        if let Some(rename) = rename {
+            menu = menu.child(rename);
+        }
         if let Some(close) = close {
             menu = menu.child(close);
+        }
+        if let ContextMenuTarget::Connection(connection_id) = target {
+            menu = menu
+                .child(self.render_context_menu_item(
+                    "Disconnect",
+                    theme,
+                    move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        if let Some(application) = this.application.clone() {
+                            application.disconnect_connection(connection_id, cx);
+                        }
+                    },
+                    cx,
+                ))
+                .child(self.render_context_menu_item(
+                    "Kill Server",
+                    theme,
+                    move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        if let Some(application) = this.application.clone() {
+                            application.kill_connection(connection_id, cx);
+                        }
+                    },
+                    cx,
+                ));
         }
         let position = context_menu.position;
         Some(
@@ -7586,6 +7946,83 @@ mod tests {
             normalize_utf16_range(std::ops::Range { start: 3, end: 1 }, 4),
             1..1
         );
+    }
+
+    #[gpui::test]
+    fn connection_projection_switches_colliding_workspace_ids_without_cross_talk(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut local_host = crate::app::ModelHost::start();
+        let local_client: Arc<dyn CommandTransport> = Arc::new(local_host.client());
+        let local_operation = local_client
+            .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+            .unwrap();
+        local_client.wait_operation(local_operation).unwrap();
+
+        let mut remote_host = crate::app::ModelHost::start();
+        let remote_client: Arc<dyn CommandTransport> = Arc::new(remote_host.client());
+        for _ in 0..2 {
+            let operation = remote_client
+                .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+                .unwrap();
+            remote_client.wait_operation(operation).unwrap();
+        }
+
+        let local_id = ConnectionId::new(1);
+        let remote_id = ConnectionId::new(2);
+        let connections = vec![
+            WorkspaceConnection {
+                id: local_id,
+                title: "Local".to_owned(),
+                kind: WorkspaceConnectionKind::Local,
+                client: local_client,
+                snapshot: local_host.client().state_dump().unwrap(),
+            },
+            WorkspaceConnection {
+                id: remote_id,
+                title: "build-box".to_owned(),
+                kind: WorkspaceConnectionKind::Remote,
+                client: remote_client,
+                snapshot: remote_host.client().state_dump().unwrap(),
+            },
+        ];
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                connections,
+                local_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        assert_eq!(
+            view.update_in(cx, |view, _, _| (
+                view.active_connection,
+                view.workspace_dumps().len()
+            )),
+            (local_id, 1)
+        );
+        view.update_in(cx, |view, _, cx| {
+            assert!(view.select_connection_locally(remote_id, cx));
+        });
+        assert_eq!(
+            view.update_in(cx, |view, _, _| (
+                view.active_connection,
+                view.workspace_dumps().len()
+            )),
+            (remote_id, 2)
+        );
+        view.update_in(cx, |view, _, cx| view.remove_connection(remote_id, cx));
+        assert_eq!(
+            view.update_in(cx, |view, _, _| (
+                view.active_connection,
+                view.workspace_dumps().len()
+            )),
+            (local_id, 1)
+        );
+
+        local_host.shutdown();
+        remote_host.shutdown();
     }
 
     #[gpui::test]
