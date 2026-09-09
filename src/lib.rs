@@ -4,10 +4,14 @@ pub mod automation;
 pub mod command;
 pub mod config;
 pub mod control;
+#[cfg(feature = "gui")]
+mod embedded_servers;
 pub mod event;
 pub mod ids;
 pub mod pane;
+#[cfg(feature = "gui")]
 pub mod remote;
+pub mod server;
 pub mod surface;
 pub mod terminal;
 pub mod ui;

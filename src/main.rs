@@ -1,6 +1,4 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
@@ -20,16 +18,10 @@ use water::ui::{WaterApplication, ui_control_channel};
 fn main() -> Result<()> {
     init_tracing();
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let dedicated_server_binary = std::env::current_exe()
-        .ok()
-        .and_then(|path| path.file_stem().map(|name| name == "water-server"))
-        .unwrap_or(false);
     let explicit_server_mode = arguments
         .first()
         .is_some_and(|argument| argument == "server" || argument == "--server");
-    if dedicated_server_binary {
-        run_server(arguments.into_iter())
-    } else if explicit_server_mode {
+    if explicit_server_mode {
         run_server_via_dedicated_binary(&arguments[1..])
     } else {
         run_gui(arguments.into_iter())
@@ -47,7 +39,7 @@ fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
         "water-server"
     });
     if !dedicated.is_file() {
-        return run_server(arguments.iter().cloned());
+        return water::server::run(arguments.iter().cloned());
     }
 
     let mut command = std::process::Command::new(dedicated);
@@ -66,102 +58,6 @@ fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
             bail!("water-server exited with {status}")
         }
     }
-}
-
-/// Headless server: owns the model and every PTY, no GUI. This is the tmux-
-/// style backend that GUI clients attach to; sessions survive GUI exits.
-fn run_server(arguments: impl Iterator<Item = String>) -> Result<()> {
-    set_server_process_name();
-    let startup = parse_startup_options(arguments)?;
-    if startup.ssh_destination.is_some() {
-        bail!("--ssh is only valid for the Water GUI");
-    }
-    let config = AppConfig::load_from_path(&startup.config_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let socket_path = resolve_socket_path(&startup, &config)?;
-    let mut model_host = ModelHost::start_with_config(config.clone());
-    let client = model_host.client();
-    let initial_workspace = startup
-        .initial_workspace
-        .unwrap_or(config.startup.initial_workspace);
-    let initial_terminal = startup
-        .initial_terminal
-        .unwrap_or(config.startup.initial_terminal)
-        && initial_workspace;
-    ensure_initial_workspace(&client, initial_workspace, initial_terminal);
-    let (mut control_server, shutdown_rx) = ControlServer::start(
-        socket_path.clone(),
-        client,
-        None,
-        Some(model_host.take_snapshot_receiver()),
-    )
-    .with_context(|| {
-        format!(
-            "failed to start control socket at {}",
-            socket_path.display()
-        )
-    })?;
-    tracing::info!(
-        target: "water::workspace",
-        pid = std::process::id(),
-        socket = %socket_path.display(),
-        "water server listening"
-    );
-    wait_for_shutdown(shutdown_rx);
-    control_server.shutdown();
-    model_host.shutdown();
-    tracing::info!(target: "water::workspace", "water server stopped");
-    Ok(())
-}
-
-/// Give process and thread inspectors an unambiguous server label even
-/// though the GUI and server currently share one executable image.
-fn set_server_process_name() {
-    #[cfg(target_os = "macos")]
-    unsafe {
-        unsafe extern "C" {
-            fn setprogname(name: *const libc::c_char);
-            fn pthread_setname_np(name: *const libc::c_char) -> libc::c_int;
-        }
-        setprogname(c"water-server".as_ptr());
-        let _ = pthread_setname_np(c"water-server".as_ptr());
-    }
-
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let _ = libc::prctl(libc::PR_SET_NAME, c"water-server".as_ptr(), 0, 0, 0);
-    }
-}
-
-#[cfg(unix)]
-fn wait_for_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
-    static SIGNAL_RECEIVED: AtomicBool = AtomicBool::new(false);
-    unsafe extern "C" fn on_signal(_: libc::c_int) {
-        SIGNAL_RECEIVED.store(true, Ordering::Release);
-    }
-    unsafe {
-        let handler = on_signal as *const () as usize;
-        libc::signal(libc::SIGINT, handler);
-        libc::signal(libc::SIGTERM, handler);
-        // A detached server must survive the controlling terminal closing.
-        libc::signal(libc::SIGHUP, libc::SIG_IGN);
-    }
-    loop {
-        match shutdown_rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(()) => break,
-            Err(RecvTimeoutError::Timeout) => {
-                if SIGNAL_RECEIVED.load(Ordering::Acquire) {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn wait_for_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
-    let _ = shutdown_rx.recv();
 }
 
 /// GUI client: resolves (or auto-starts) the server, attaches, and renders.

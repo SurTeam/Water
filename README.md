@@ -8,6 +8,8 @@
 - macOS is the first supported platform
 - GPUI is pinned to the upstream Zed revision documented in [`ARCHITECTURE.md`](ARCHITECTURE.md)
 - macOS Xcode must include the Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`)
+- Release app packaging additionally requires `rustup`, Zig,
+  `cargo-zigbuild`, `gzip`, and `rg` for the four embedded server targets
 
 ## Run
 
@@ -31,6 +33,32 @@ open dist/Water.app
 ```
 
 The editable icon source is [`assets/macos/Water.svg`](assets/macos/Water.svg); the generated bundle resource is [`assets/macos/Water.icns`](assets/macos/Water.icns). For distribution signing, set `CODESIGN_IDENTITY` to a valid Developer ID Application identity before running the script. Notarization remains a separate release step.
+
+The app build also produces and embeds four headless server payloads:
+`aarch64-apple-darwin`, `x86_64-apple-darwin`,
+`aarch64-unknown-linux-musl`, and `x86_64-unknown-linux-musl`. The Linux
+servers are static musl executables built through `cargo-zigbuild`. Run
+`scripts/build-embedded-servers.sh` directly to refresh only these payloads;
+set `WATER_RUST_TOOLCHAIN` when release packaging should use a rustup
+toolchain other than `stable`.
+
+## Remote servers
+
+Choose **Connect Remote…** in the sidebar and enter an OpenSSH host/config
+alias such as `build-box` or `alice@example.com`. Water reuses an OpenSSH
+ControlMaster, detects the remote OS and CPU with `uname`, and selects only the
+matching embedded server. On first use it streams the gzip payload to the
+remote host and atomically installs it beneath
+`~/.cache/water/server/<version+payload-hash>/<target>/`; subsequent sessions
+reuse that cached executable. Terminal snapshots still use the latest-only
+stream, so transport delay cannot accumulate obsolete render frames.
+
+SSH authentication is non-interactive and follows the user's OpenSSH config
+and agent. The remote host needs a POSIX shell and `gzip`; it does not need a
+preinstalled Water binary or Rust toolchain. Development builds made with a
+plain `cargo build` intentionally omit the cross-target payloads and retain a
+PATH-based `water-server` fallback. Distribution builds made through
+`scripts/build-macos-app.sh` fail if any required embedded payload is missing.
 
 ## Application defaults
 

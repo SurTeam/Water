@@ -599,9 +599,22 @@ pub fn switch_tab_binding(switch_tab_source: &str, tab_index: usize) -> String {
 /// replaced with a digit.
 pub fn is_valid_switch_tab_source(source: &str) -> bool {
     let source = source.trim();
-    source.matches('#').count() == 1
-        && source.split_whitespace().count() == 1
-        && gpui::Keystroke::parse(&source.replace('#', "1")).is_ok()
+    let structurally_valid =
+        source.matches('#').count() == 1 && source.split_whitespace().count() == 1;
+    if !structurally_valid {
+        return false;
+    }
+    #[cfg(feature = "gui")]
+    {
+        gpui::Keystroke::parse(&source.replace('#', "1")).is_ok()
+    }
+    #[cfg(not(feature = "gui"))]
+    {
+        // A headless server never interprets shortcuts. Preserve structural
+        // validation without pulling GPUI and its platform stack into the
+        // portable server binary.
+        true
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

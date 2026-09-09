@@ -50,7 +50,7 @@ The current upstream examples explicitly use `AppContext` for `cx.new`, `cx.open
 
 `WaterApplication` owns native-window/menu lifecycle only. `Cmd-N` creates another `WorkspaceView`, while each view keeps its own focus, selection, IME, and layout transients. A GPUI-side latest-snapshot fan-out updates every live weak view handle; it does not own or mutate `ApplicationModel`. Window-local actions are installed on the focused `WorkspaceView` root so `Cmd-W`, `Cmd-M`, terminal-tab creation, and split actions receive the correct `Window` instead of depending on `App::active_window()`. `Cmd-Q` is both bound to a no-op focused action and consumed by an application keystroke interceptor. `QuitMode::Explicit` keeps the model and PTYs alive when the last window is hidden.
 
-The control socket exposes `ui.keystroke` and `ui.snapshot` as running-application test interfaces. UI requests cross a dedicated channel to the GPUI thread; synthetic keys are dispatched through `Window::dispatch_keystroke`, not translated into direct model mutation. Pane input remains `TerminalCommand::SendText` through the normal dispatcher path, while `waterctl pane content` resolves the pane's terminal snapshot and returns an exact viewport cell range. The macOS bundle is assembled by `scripts/build-macos-app.sh` from the release binary, `assets/macos/Info.plist`, and the Water-owned `.icns` resource.
+The control socket exposes `ui.keystroke` and `ui.snapshot` as running-application test interfaces. UI requests cross a dedicated channel to the GPUI thread; synthetic keys are dispatched through `Window::dispatch_keystroke`, not translated into direct model mutation. Pane input remains `TerminalCommand::SendText` through the normal dispatcher path, while `waterctl pane content` resolves the pane's terminal snapshot and returns an exact viewport cell range. Remote GUI windows use the identical Unix-socket protocol through an OpenSSH ControlMaster stream-local forward; SSH setup, platform detection, payload upload, and readiness waits run off the GPUI thread and do not introduce a second mutation path. The macOS bundle is assembled by `scripts/build-macos-app.sh` from the release binary, `assets/macos/Info.plist`, the Water-owned `.icns` resource, and four compressed headless server payloads for Darwin/Linux on arm64/x86_64. The Linux payloads are static musl executables. Only the `uname`-matched payload is streamed to a remote host, atomically installed in that user's cache, and reused by content identity.
 
 ## Ownership and data flow
 
@@ -229,6 +229,7 @@ Unit tests cover model topology, command behavior, terminal parsing, ANSI cell a
 | `app/model` | model thread | command dispatcher only | none |
 | `command` | model thread / operation cells | dispatch lifecycle | operation wait outside model loop |
 | `control/server` | socket worker | enqueue commands | socket I/O only |
+| `remote` | GPUI background executor / OpenSSH workers | none | SSH setup, payload transfer, and server readiness |
 | `automation` | test/CLI caller | scenario backend | fixture/scenario file I/O only |
 | `ui` | GPUI thread | view projection only | no blocking I/O |
 | `terminal` | dedicated PTY worker | `Term`, parser, PTY I/O | all PTY/parser work off UI; registry waits may block only the caller/model request |

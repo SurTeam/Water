@@ -1,5 +1,6 @@
 use std::ffi::{OsStr, OsString};
 use std::hash::{Hash, Hasher};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -29,6 +30,8 @@ pub enum SshConnectionError {
     },
     #[error("remote Water server at {destination} did not become ready within 12 seconds")]
     ServerTimeout { destination: String },
+    #[error("remote platform {system}/{machine} has no bundled Water server")]
+    UnsupportedPlatform { system: String, machine: String },
 }
 
 /// A local Unix-socket forward owned by a reusable OpenSSH ControlMaster.
@@ -65,7 +68,7 @@ impl SshTunnel {
             ],
             "establish SSH Water socket forward",
         )?;
-        ensure_success(forward, "establish SSH Water socket forward")?;
+        ensure_success(&forward, "establish SSH Water socket forward")?;
 
         let tunnel = Self {
             destination,
@@ -192,7 +195,7 @@ fn ensure_control_master(
         ],
         "open reusable SSH connection",
     )?;
-    ensure_success(master, "open reusable SSH connection")
+    ensure_success(&master, "open reusable SSH connection")
 }
 
 fn start_remote_server(
@@ -200,18 +203,130 @@ fn start_remote_server(
     control_socket: &Path,
     remote_socket: &Path,
 ) -> Result<(), SshConnectionError> {
-    let remote_socket = shell_quote(&remote_socket.display().to_string());
-    let launch = if let Ok(server_program) = std::env::var("WATER_REMOTE_SERVER_COMMAND") {
+    let remote_socket_quoted = shell_quote(&remote_socket.display().to_string());
+    if let Ok(server_program) = std::env::var("WATER_REMOTE_SERVER_COMMAND") {
         let server_program = shell_quote(&server_program);
-        format!(
-            "command -v {server_program} >/dev/null 2>&1 || exit 127; nohup {server_program} --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null &"
-        )
-    } else {
-        format!(
-            "if command -v water-server >/dev/null 2>&1; then nohup water-server --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null & elif command -v water >/dev/null 2>&1; then nohup water server --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null & else exit 127; fi"
-        )
-    };
-    let command = format!("if test ! -S {remote_socket}; then {launch} fi");
+        return run_remote_command(
+            destination,
+            control_socket,
+            &format!(
+                "rm -f -- {remote_socket_quoted}; command -v {server_program} >/dev/null 2>&1 || exit 127; nohup {server_program} --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null &"
+            ),
+            "start configured remote Water server",
+        );
+    }
+
+    let target = detect_remote_target(destination, control_socket)?;
+    if let Some(payload) = crate::embedded_servers::payload_for_target(target) {
+        return install_and_start_embedded_server(
+            destination,
+            control_socket,
+            remote_socket,
+            payload,
+        );
+    }
+
+    // Development builds intentionally contain empty placeholders so normal
+    // checks do not cross-compile four release binaries. Packaged builds make
+    // all payloads mandatory and never take this compatibility fallback.
+    run_remote_command(
+        destination,
+        control_socket,
+        &format!(
+            "rm -f -- {remote_socket_quoted}; if command -v water-server >/dev/null 2>&1; then nohup water-server --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null & elif command -v water >/dev/null 2>&1; then nohup water server --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null & else exit 127; fi"
+        ),
+        "start installed remote Water server",
+    )
+}
+
+fn detect_remote_target(
+    destination: &str,
+    control_socket: &Path,
+) -> Result<&'static str, SshConnectionError> {
+    let output = ssh_capture(
+        [
+            OsStr::new("-S"),
+            control_socket.as_os_str(),
+            OsStr::new("-o"),
+            OsStr::new("BatchMode=yes"),
+            OsStr::new(destination),
+            OsStr::new("uname -s; uname -m"),
+        ],
+        "detect remote platform",
+    )?;
+    ensure_success(&output, "detect remote platform")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout.lines();
+    let system = lines.next().unwrap_or_default().trim().to_owned();
+    let machine = lines.next().unwrap_or_default().trim().to_owned();
+    crate::embedded_servers::target_for_uname(&system, &machine)
+        .ok_or(SshConnectionError::UnsupportedPlatform { system, machine })
+}
+
+fn install_and_start_embedded_server(
+    destination: &str,
+    control_socket: &Path,
+    remote_socket: &Path,
+    payload: crate::embedded_servers::EmbeddedServerPayload,
+) -> Result<(), SshConnectionError> {
+    let payload_id = stable_payload_id(payload.gzip);
+    let relative_directory = format!(
+        ".cache/water/server/{}-{payload_id:016x}/{}",
+        env!("CARGO_PKG_VERSION"),
+        payload.target
+    );
+    let quoted_directory = format!("\"$HOME/{relative_directory}\"");
+    let quoted_program = format!("\"$HOME/{relative_directory}/water-server\"");
+
+    let present_command =
+        format!("test -x {quoted_program} && {quoted_program} --version >/dev/null 2>&1");
+    let present = ssh_capture(
+        [
+            OsStr::new("-S"),
+            control_socket.as_os_str(),
+            OsStr::new("-o"),
+            OsStr::new("BatchMode=yes"),
+            OsStr::new(destination),
+            OsStr::new(&present_command),
+        ],
+        "check cached remote Water server",
+    )?;
+    if !present.status.success() {
+        let install = format!(
+            "umask 077; directory={quoted_directory}; program={quoted_program}; mkdir -p -- \"$directory\" || exit 1; temporary=\"$directory/.water-server.$$\"; trap 'rm -f -- \"$temporary\"' EXIT HUP INT TERM; gzip -dc >\"$temporary\" && chmod 700 \"$temporary\" && mv -f -- \"$temporary\" \"$program\""
+        );
+        let output = ssh_input(
+            [
+                OsStr::new("-S"),
+                control_socket.as_os_str(),
+                OsStr::new("-o"),
+                OsStr::new("BatchMode=yes"),
+                OsStr::new(destination),
+                OsStr::new(&install),
+            ],
+            payload.gzip,
+            "install bundled remote Water server",
+        )?;
+        ensure_success(&output, "install bundled remote Water server")?;
+    }
+
+    let remote_socket = shell_quote(&remote_socket.display().to_string());
+    run_remote_command(
+        destination,
+        control_socket,
+        &format!(
+            "rm -f -- {remote_socket}; nohup {quoted_program} --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null &"
+        ),
+        "start bundled remote Water server",
+    )
+}
+
+fn run_remote_command(
+    destination: &str,
+    control_socket: &Path,
+    command: &str,
+    action: &'static str,
+) -> Result<(), SshConnectionError> {
     let output = ssh_output(
         [
             OsStr::new("-S"),
@@ -219,11 +334,11 @@ fn start_remote_server(
             OsStr::new("-o"),
             OsStr::new("BatchMode=yes"),
             OsStr::new(destination),
-            OsStr::new(&command),
+            OsStr::new(command),
         ],
-        "start remote Water server",
+        action,
     )?;
-    ensure_success(output, "start remote Water server")
+    ensure_success(&output, action)
 }
 
 fn remote_control_socket() -> PathBuf {
@@ -236,12 +351,7 @@ fn ssh_output<'a>(
     arguments: impl IntoIterator<Item = &'a OsStr>,
     action: &'static str,
 ) -> Result<Output, SshConnectionError> {
-    let mut command = Command::new(ssh_program());
-    if let Some(config) = std::env::var_os("WATER_SSH_CONFIG") {
-        command.arg("-F").arg(config);
-    }
-    command
-        .args(arguments)
+    ssh_command(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -249,11 +359,59 @@ fn ssh_output<'a>(
         .map_err(|source| SshConnectionError::Io { action, source })
 }
 
+fn ssh_capture<'a>(
+    arguments: impl IntoIterator<Item = &'a OsStr>,
+    action: &'static str,
+) -> Result<Output, SshConnectionError> {
+    ssh_command(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|source| SshConnectionError::Io { action, source })
+}
+
+fn ssh_input<'a>(
+    arguments: impl IntoIterator<Item = &'a OsStr>,
+    input: &[u8],
+    action: &'static str,
+) -> Result<Output, SshConnectionError> {
+    let mut child = ssh_command(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| SshConnectionError::Io { action, source })?;
+    let write_result = child
+        .stdin
+        .take()
+        .expect("piped SSH stdin")
+        .write_all(input);
+    let output = child
+        .wait_with_output()
+        .map_err(|source| SshConnectionError::Io { action, source })?;
+    if let Err(source) = write_result
+        && output.status.success()
+    {
+        return Err(SshConnectionError::Io { action, source });
+    }
+    Ok(output)
+}
+
+fn ssh_command<'a>(arguments: impl IntoIterator<Item = &'a OsStr>) -> Command {
+    let mut command = Command::new(ssh_program());
+    if let Some(config) = std::env::var_os("WATER_SSH_CONFIG") {
+        command.arg("-F").arg(config);
+    }
+    command.args(arguments);
+    command
+}
+
 fn ssh_program() -> OsString {
     std::env::var_os("WATER_SSH_PROGRAM").unwrap_or_else(|| OsString::from("ssh"))
 }
 
-fn ensure_success(output: Output, action: &'static str) -> Result<(), SshConnectionError> {
+fn ensure_success(output: &Output, action: &'static str) -> Result<(), SshConnectionError> {
     if output.status.success() {
         return Ok(());
     }
@@ -278,6 +436,12 @@ fn remove_known_socket(path: &Path, action: &'static str) -> Result<(), SshConne
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn stable_payload_id(payload: &[u8]) -> u64 {
+    payload.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
 }
 
 #[cfg(test)]
@@ -319,6 +483,12 @@ mod tests {
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }
 
+    #[test]
+    fn payload_identity_is_stable_and_content_sensitive() {
+        assert_eq!(stable_payload_id(b"water"), 0xd3ca_cd4c_82e5_be70);
+        assert_ne!(stable_payload_id(b"water"), stable_payload_id(b"Water"));
+    }
+
     /// Opt-in end-to-end check used by development/CI environments that can
     /// provide an SSH destination. The normal test suite stays hermetic and
     /// never waits on network state.
@@ -332,6 +502,50 @@ mod tests {
             .client()
             .ping()
             .expect("remote Water server should reply");
+        tunnel
+            .client()
+            .server_shutdown()
+            .expect("remote Water server should accept shutdown");
+        let remote_socket = remote_control_socket();
+        let socket_gone = format!(
+            "test ! -S {}",
+            shell_quote(&remote_socket.display().to_string())
+        );
+        let deadline = Instant::now() + REMOTE_START_TIMEOUT;
+        while Instant::now() < deadline {
+            let state = ssh_capture(
+                [
+                    OsStr::new("-S"),
+                    tunnel.control_socket.as_os_str(),
+                    OsStr::new("-o"),
+                    OsStr::new("BatchMode=yes"),
+                    OsStr::new(&destination),
+                    OsStr::new(&socket_gone),
+                ],
+                "wait for test server shutdown",
+            )
+            .expect("shutdown probe should run");
+            if state.status.success() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        assert!(
+            ssh_capture(
+                [
+                    OsStr::new("-S"),
+                    tunnel.control_socket.as_os_str(),
+                    OsStr::new("-o"),
+                    OsStr::new("BatchMode=yes"),
+                    OsStr::new(&destination),
+                    OsStr::new(&socket_gone),
+                ],
+                "confirm test server shutdown",
+            )
+            .expect("shutdown confirmation should run")
+            .status
+            .success()
+        );
         drop(tunnel);
 
         let reused = SshTunnel::connect(&destination).expect("SSH master should be reusable");
