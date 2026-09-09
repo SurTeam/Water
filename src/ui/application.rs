@@ -310,11 +310,27 @@ impl WaterApplication {
     }
 
     pub(crate) fn disconnect_connection(&self, connection_id: ConnectionId, cx: &mut App) {
-        self.remove_remote_connection(connection_id, false, cx);
+        self.defer_remote_connection_removal(connection_id, false, cx);
     }
 
     pub(crate) fn kill_connection(&self, connection_id: ConnectionId, cx: &mut App) {
-        self.remove_remote_connection(connection_id, true, cx);
+        self.defer_remote_connection_removal(connection_id, true, cx);
+    }
+
+    fn defer_remote_connection_removal(
+        &self,
+        connection_id: ConnectionId,
+        kill_server: bool,
+        cx: &mut App,
+    ) {
+        let application = self.clone();
+        // These actions are commonly dispatched from a WorkspaceView mouse
+        // callback. Fan-out updates must wait until that entity has been
+        // returned to GPUI, otherwise updating the originating view re-enters
+        // its active mutable borrow and panics.
+        cx.defer(move |cx| {
+            application.remove_remote_connection(connection_id, kill_server, cx);
+        });
     }
 
     fn remove_remote_connection(
@@ -1139,6 +1155,69 @@ mod tests {
         assert!(labels.contains(&"Rename Workspace"));
         assert!(labels.contains(&"Rename Tab"));
         assert!(labels.contains(&"Toggle Sidebar"));
+    }
+
+    #[gpui::test]
+    fn kill_remote_connection_defers_view_fanout_until_callback_returns(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = crate::app::ModelHost::start();
+        let client: Arc<dyn CommandTransport> = Arc::new(host.client());
+        let snapshot = host.client().state_dump().unwrap();
+        let application =
+            WaterApplication::new(client.clone(), snapshot.clone(), AppConfig::default());
+        let remote_id = ConnectionId::new(2);
+        application
+            .state
+            .connections
+            .borrow_mut()
+            .push(ManagedConnection {
+                projection: WorkspaceConnection {
+                    id: remote_id,
+                    title: "test-remote".to_owned(),
+                    kind: WorkspaceConnectionKind::Remote,
+                    client,
+                    snapshot,
+                },
+                _tunnel: None,
+                local_socket: None,
+                last_snapshot_apply: std::time::Instant::now()
+                    - WaterApplication::SNAPSHOT_MIN_INTERVAL,
+            });
+
+        let connections = application.connection_projections();
+        let application_for_view = application.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                Some(application_for_view),
+                connections,
+                ConnectionId::new(1),
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        application.state.views.borrow_mut().push(view.downgrade());
+
+        // This is the same nesting as the context-menu mouse callback. Before
+        // removal was deferred, kill_connection synchronously updated `view`
+        // again here and GPUI aborted on the re-entrant mutable entity update.
+        view.update_in(cx, |_, _, cx| {
+            application.kill_connection(remote_id, cx);
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            application
+                .state
+                .connections
+                .borrow()
+                .iter()
+                .map(|connection| connection.projection.id)
+                .collect::<Vec<_>>(),
+            vec![ConnectionId::new(1)]
+        );
+        assert_eq!(application.state.views.borrow().len(), 1);
+        host.shutdown();
     }
 
     #[gpui::test]
