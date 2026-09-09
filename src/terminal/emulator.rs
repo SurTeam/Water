@@ -281,6 +281,18 @@ impl TerminalEmulator {
         self.term.grid().display_offset() as i64
     }
 
+    /// Debug: grid state for diagnosing scroll/overscan issues.
+    pub fn grid_debug(&self) -> (usize, usize, usize, i32, i32) {
+        let grid = self.term.grid();
+        (
+            grid.display_offset(),
+            grid.total_lines(),
+            grid.screen_lines(),
+            grid.topmost_line().0,
+            grid.bottommost_line().0,
+        )
+    }
+
     /// Rows of history currently retained above the viewport. The grid's
     /// `display_offset` is exactly the number of history rows above the
     /// viewport, so this equals [`TerminalEmulator::viewport_position`].
@@ -314,6 +326,11 @@ impl TerminalEmulator {
     pub fn scroll_to_bottom(&mut self) {
         self.term.scroll_display(Scroll::Bottom);
         self.dirty = true;
+    }
+
+    #[cfg(test)]
+    pub fn term_for_debug(&self) -> &alacritty_terminal::term::Term<EmulatorProxy> {
+        &self.term
     }
 
     pub fn cursor_visible(&self) -> bool {

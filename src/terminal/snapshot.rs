@@ -771,6 +771,11 @@ impl TerminalSnapshot {
             .total_lines()
             .saturating_sub(size.lines) as i64;
         let history_bottom = viewport_position.saturating_sub(history_len);
+        // The overscan window must cover the scrolled viewport: when the
+        // viewport is pinned at display_offset D, the paint can address
+        // source rows down to -(D + unacked_offset). Size the overscan to
+        // the full display_offset so scrolling to the top never paints blanks.
+        let overscan_rows = (display_offset as usize).max(VIEWPORT_OVERSCAN_ROWS);
         let mut materialized_cells = 0;
         let rows = (0..size.lines)
             .map(|row| {
@@ -785,25 +790,27 @@ impl TerminalSnapshot {
             })
             .collect();
 
-        let viewport_start = -(display_offset as i32);
-        let viewport_end = viewport_start + size.lines as i32 - 1;
         let topmost = term.grid().topmost_line().0;
         let bottommost = term.grid().bottommost_line().0;
-        let rows_before = (1..=VIEWPORT_OVERSCAN_ROWS)
-            .map_while(|distance| {
-                let line = viewport_start.saturating_sub(distance as i32);
-                (line >= topmost).then(|| {
-                    Self::row_from_alacritty(
-                        term,
-                        Line(line),
-                        size.columns,
-                        previous,
-                        (-(distance as i64)).saturating_sub(viewport_position),
-                        &mut materialized_cells,
-                    )
-                })
-            })
-            .collect();
+        let viewport_start = -(display_offset as i32);
+        let viewport_end = viewport_start + size.lines as i32 - 1;
+        let mut rows_before = Vec::new();
+        for distance in 1..=overscan_rows {
+            let line = viewport_start.saturating_sub(distance as i32);
+            if line < topmost {
+                break;
+            }
+            rows_before.push(
+                Self::row_from_alacritty(
+                    term,
+                    Line(line),
+                    size.columns,
+                    previous,
+                    (-(distance as i64)).saturating_sub(viewport_position),
+                    &mut materialized_cells,
+                ),
+            );
+        }
         let rows_after = (1..=VIEWPORT_OVERSCAN_ROWS)
             .map_while(|distance| {
                 let line = viewport_end.saturating_add(distance as i32);
@@ -875,9 +882,14 @@ impl TerminalSnapshot {
         physical_row: i64,
         materialized_cells: &mut usize,
     ) -> TerminalRowSnapshot {
+        // Reuse an unchanged row from the previous snapshot when the row is
+        // actually present in that snapshot's storage. The previous snapshot
+        // only stores rows within its own overscan window, so a row that was
+        // scrolled out of that window must be materialized fresh.
         if let Some(previous) = previous {
             let relative = physical_row.saturating_add(previous.viewport_position);
             if let Ok(relative) = i32::try_from(relative)
+                && previous.relative_row(relative).is_some()
                 && let Some(row) = previous.relative_row(relative)
                 && row.len() == columns
                 && row.iter().enumerate().all(|(column, snapshot_cell)| {

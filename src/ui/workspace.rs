@@ -2446,12 +2446,15 @@ impl WorkspaceView {
             .get(&snapshot.terminal_id)
             .map(|state| state.visual_unacked_rows)
             .unwrap_or(0.0);
-        // The offset may extend into the full retained scrollback, not just
-        // the materialized overscan window (rows_before is a paint-only cap).
-        offset.clamp(
-            -(snapshot.rows_after.len() as f32),
-            snapshot.history_len as f32,
-        )
+        // The painted content is limited to the materialized overscan window
+        // (rows_before/rows_after). The user can still *scroll* to the full
+        // history (the viewport_position moves via the local emulator), but
+        // the unacked visual offset that shifts the paint is capped at the
+        // overscan so the paint never addresses rows the snapshot cannot
+        // resolve. Once the viewport ACK lands, the snapshot is rebuilt with
+        // a new overscan window centered on the new viewport.
+        let overscan = snapshot.rows_before.len() as f32;
+        offset.clamp(-(snapshot.rows_after.len() as f32), overscan)
     }
 
     fn accumulate_terminal_scroll(
@@ -6896,6 +6899,36 @@ impl gpui::Element for TerminalRenderElement {
         let snapshot_end = self.snapshot.size.lines as i32 + self.snapshot.rows_after.len() as i32;
         let prepared_rows =
             terminal_prepared_source_rows(source_rows.clone(), snapshot_first, snapshot_end);
+        if std::env::var_os("WATER_DEBUG_SCROLL").is_some() {
+            let missing: Vec<i32> = source_rows
+                .clone()
+                .filter(|r| self.snapshot.relative_row_snapshot(*r).is_none())
+                .collect();
+            // For each visible source row, report whether the paint can
+            // resolve it and what text the first row contains.
+            let first_row_text: String = source_rows
+                .clone()
+                .next()
+                .and_then(|r| self.snapshot.relative_row_snapshot(r))
+                .map(|cells| {
+                    let s: String = cells.iter().map(|c| c.character).collect();
+                    s.chars().take(40).collect()
+                })
+                .unwrap_or_default();
+            tracing::warn!(
+                target: "water::scroll",
+                terminal_id = %self.snapshot.terminal_id,
+                viewport = self.snapshot.viewport_position,
+                history_len = self.snapshot.history_len,
+                rows_before = self.snapshot.rows_before.len(),
+                scroll_offset = scroll_offset_rows,
+                source_rows = ?source_rows.clone(),
+                prepared = ?prepared_rows.clone(),
+                missing_source_rows = ?missing,
+                first_visible_row_text = %first_row_text,
+                "terminal paint: visible source rows vs available"
+            );
+        }
         if !prepared_rows.is_empty() {
             for source_row in prepared_rows {
                 if cache.rows.contains_key(&source_row) {
