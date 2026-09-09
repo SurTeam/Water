@@ -42,6 +42,9 @@ const TAB_SCROLL_NUDGE_PX: f32 = 160.0;
 /// Width of the sidebar disclosure column. Agent rows indent by the same
 /// amount so nested rows line up with their workspace title.
 const SIDEBAR_DISCLOSURE_WIDTH: f32 = 18.0;
+/// Scrim painted behind in-window dialogs; darker than the old 60%
+/// overlay so the background reads as inactive while a dialog is open.
+const DIALOG_SCRIM: u32 = 0x000000e6;
 /// Movement needed before a row click becomes a drag gesture.
 const SIDEBAR_DRAG_THRESHOLD_PX: f32 = 4.0;
 /// A drop boundary is active only near a group edge, not throughout a row.
@@ -100,9 +103,11 @@ enum TerminalSelectionSide {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RenameTarget {
-    Workspace(WorkspaceId),
     Tab(TabId),
-    Agent(PaneId),
+    Agent {
+        connection_id: ConnectionId,
+        pane_id: PaneId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -172,12 +177,68 @@ struct SplitDrag {
 
 type SplitBounds = Arc<Mutex<BTreeMap<(TabId, Vec<bool>), SplitRect>>>;
 
+/// Wakes a polled future once `deadline` passes. GPUI's pinned scheduler has
+/// no sleep primitive, so the timer runs on a short-lived thread that hands
+/// the wakeup through an mpsc channel; the channel is created lazily on the
+/// first poll, so a future that is ready (or dropped) never spawns a thread.
+struct CaretSleep {
+    deadline: std::time::Instant,
+    notified: Option<std::sync::mpsc::Receiver<()>>,
+}
+
+impl CaretSleep {
+    fn after(duration: std::time::Duration) -> Self {
+        Self {
+            deadline: std::time::Instant::now() + duration,
+            notified: None,
+        }
+    }
+}
+
+impl std::future::Future for CaretSleep {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if std::time::Instant::now() >= self.deadline {
+            return std::task::Poll::Ready(());
+        }
+        let deadline = self.deadline;
+        let receiver = self.notified.get_or_insert_with(|| {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _ = std::thread::Builder::new()
+                .name("water-dialog-caret".to_owned())
+                .spawn(move || {
+                    let delay = deadline.saturating_duration_since(std::time::Instant::now());
+                    std::thread::sleep(delay);
+                    let _ = sender.send(());
+                });
+            receiver
+        });
+        match receiver.try_recv() {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                return std::task::Poll::Ready(());
+            }
+        }
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}
+
 /// In-window dialogs are kept as view state so their presentation and
 /// dismissal share one path without introducing model-owned UI state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DialogState {
     ConfirmCloseWorkspace { workspace_id: WorkspaceId },
     ConnectRemote,
+    RenameWorkspace {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -794,7 +855,18 @@ pub struct WorkspaceView {
     titlebar_dragging: bool,
     rename_target: Option<RenameTarget>,
     rename_value: String,
-    remote_host_value: String,
+    /// Shared editable value for the text-input dialogs (connect remote,
+    /// rename workspace). `dialog_caret` is a byte offset into `dialog_input`.
+    dialog_input: String,
+    dialog_caret: usize,
+    dialog_caret_visible: bool,
+    /// Byte offset in `dialog_input` where the current IME composition
+    /// region starts; committed or cancelled through the EntityInputHandler
+    /// overrides below while a text-input dialog is open.
+    dialog_ime_base: usize,
+    /// Bumped every time a text-input dialog opens; the caret blink task for
+    /// a previous dialog notices the mismatch and stops.
+    dialog_input_generation: u64,
     remote_connection_error: Option<String>,
     remote_connection_pending: bool,
     context_menu: Option<ContextMenuState>,
@@ -905,7 +977,11 @@ impl WorkspaceView {
             titlebar_dragging: false,
             rename_target: None,
             rename_value: String::new(),
-            remote_host_value: String::new(),
+            dialog_input: String::new(),
+            dialog_caret: 0,
+            dialog_caret_visible: true,
+            dialog_ime_base: 0,
+            dialog_input_generation: 0,
             remote_connection_error: None,
             remote_connection_pending: false,
             context_menu: None,
@@ -1027,6 +1103,10 @@ impl WorkspaceView {
             self.reset_active_connection_projection(connection);
         }
         self.context_menu = None;
+        if self.dialog.is_some_and(|dialog| !self.dialog_target_exists(dialog)) {
+            self.dialog = None;
+            self.clear_dialog_input();
+        }
         cx.notify();
     }
 
@@ -1539,6 +1619,32 @@ impl WorkspaceView {
         workspace_dump_for_snapshot(&self.snapshot, workspace_id)
     }
 
+    /// Looks a workspace up in a specific connection's projection so IDs that
+    /// collide across local and remote servers never mix up rows.
+    fn workspace_by_id_in(
+        &self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+    ) -> Option<&WorkspaceDump> {
+        self.connection_by_id(connection_id)
+            .and_then(|connection| workspace_dump_for_snapshot(&connection.snapshot, workspace_id))
+    }
+
+    fn agent_by_pane_id_in(
+        &self,
+        connection_id: ConnectionId,
+        pane_id: PaneId,
+    ) -> Option<&AgentDump> {
+        self.connection_by_id(connection_id)
+            .and_then(|connection| {
+                connection
+                    .snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| agent.pane_id == pane_id)
+            })
+    }
+
     fn workspace_dumps(&self) -> Vec<&WorkspaceDump> {
         if self.snapshot.workspaces.is_empty() {
             self.snapshot.workspace.iter().collect()
@@ -1603,11 +1709,13 @@ impl WorkspaceView {
 
     fn rename_target_exists(&self, target: RenameTarget) -> bool {
         match target {
-            RenameTarget::Workspace(workspace_id) => self.workspace_by_id(workspace_id).is_some(),
             RenameTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
-            RenameTarget::Agent(pane_id) => self.agent_by_pane_id(pane_id).is_some_and(|agent| {
-                matches!(agent.status, crate::surface::TerminalStatus::Running)
-            }),
+            RenameTarget::Agent {
+                connection_id,
+                pane_id,
+            } => self
+                .agent_by_pane_id_in(connection_id, pane_id)
+                .is_some_and(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running)),
         }
     }
 
@@ -1617,7 +1725,73 @@ impl WorkspaceView {
                 self.workspace_by_id(workspace_id).is_some()
             }
             DialogState::ConnectRemote => true,
+            DialogState::RenameWorkspace {
+                connection_id,
+                workspace_id,
+            } => self
+                .workspace_by_id_in(connection_id, workspace_id)
+                .is_some(),
         }
+    }
+
+    /// True while a dialog with an editable text input is open.
+    fn dialog_is_text_input(&self) -> bool {
+        matches!(
+            self.dialog,
+            Some(DialogState::ConnectRemote) | Some(DialogState::RenameWorkspace { .. })
+        )
+    }
+
+    /// The text-input dialog's confirm action is only available while the
+    /// input has non-whitespace content.
+    fn dialog_input_is_valid(&self) -> bool {
+        self.dialog_is_text_input() && !self.dialog_input.trim().is_empty()
+    }
+
+    fn set_dialog_input(
+        &mut self,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.dialog_input = value;
+        self.dialog_caret = self.dialog_input.len();
+        self.dialog_ime_base = self.dialog_caret;
+        self.dialog_caret_visible = true;
+        self.remote_connection_error = None;
+        self.dialog_input_generation += 1;
+        self.start_caret_blink(cx);
+        self.focus_handle.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Toggles the input caret roughly twice per second while a text-input
+    /// dialog stays open. Each dialog generation owns exactly one blink
+    /// task: when a newer dialog opens or the view drops, the older loop
+    /// notices and stops.
+    fn start_caret_blink(&mut self, cx: &mut Context<Self>) {
+        let generation = self.dialog_input_generation;
+        cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor()
+                    .spawn(CaretSleep::after(std::time::Duration::from_millis(530)))
+                    .await;
+                let still_owned = entity.update(cx, |view, cx| {
+                    if view.dialog_input_generation == generation && view.dialog_is_text_input() {
+                        view.dialog_caret_visible = !view.dialog_caret_visible;
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .unwrap_or(false);
+                if !still_owned {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn dispatch_close_workspace(&mut self, workspace_id: WorkspaceId, cx: &mut Context<Self>) {
@@ -1659,8 +1833,12 @@ impl WorkspaceView {
                 self.dispatch_close_workspace(workspace_id, cx);
             }
             DialogState::ConnectRemote => {
+                if self.dialog_input.trim().is_empty() {
+                    self.dialog = Some(DialogState::ConnectRemote);
+                    return;
+                }
                 let destination =
-                    match crate::remote::validate_ssh_destination(&self.remote_host_value) {
+                    match crate::remote::validate_ssh_destination(&self.dialog_input) {
                         Ok(destination) => destination,
                         Err(error) => {
                             self.dialog = Some(DialogState::ConnectRemote);
@@ -1687,13 +1865,41 @@ impl WorkspaceView {
                 application.connect_remote(destination, cx.entity().downgrade(), cx);
                 return;
             }
+            DialogState::RenameWorkspace {
+                connection_id,
+                workspace_id,
+            } => {
+                let title = self.dialog_input.trim().to_owned();
+                if title.is_empty() {
+                    self.dialog = Some(DialogState::RenameWorkspace {
+                        connection_id,
+                        workspace_id,
+                    });
+                    cx.notify();
+                    return;
+                }
+                self.clear_dialog_input();
+                self.dispatch_on(
+                    connection_id,
+                    AppCommand::Workspace(WorkspaceCommand::Rename {
+                        workspace_id: Some(workspace_id),
+                        title,
+                    }),
+                    cx,
+                );
+            }
         }
         cx.notify();
     }
 
+    fn clear_dialog_input(&mut self) {
+        self.dialog_input.clear();
+        self.dialog_caret = 0;
+    }
+
     fn cancel_dialog(&mut self, cx: &mut Context<Self>) {
         if self.dialog.take().is_some() {
-            self.remote_host_value.clear();
+            self.clear_dialog_input();
             self.remote_connection_error = None;
             self.remote_connection_pending = false;
             cx.notify();
@@ -1705,12 +1911,11 @@ impl WorkspaceView {
             return;
         }
         self.context_menu = None;
-        self.remote_host_value.clear();
+        self.clear_dialog_input();
         self.remote_connection_error = None;
         self.remote_connection_pending = false;
         self.dialog = Some(DialogState::ConnectRemote);
-        self.focus_handle.focus(window, cx);
-        cx.notify();
+        self.set_dialog_input(String::new(), window, cx);
     }
 
     pub(crate) fn finish_remote_connection(
@@ -1730,7 +1935,7 @@ impl WorkspaceView {
         match result {
             Ok(connection_id) => {
                 self.dialog = None;
-                self.remote_host_value.clear();
+                self.clear_dialog_input();
                 self.remote_connection_error = None;
                 self.select_connection_locally(connection_id, cx);
             }
@@ -1749,34 +1954,121 @@ impl WorkspaceView {
             }
             return true;
         }
-        match (self.dialog, event.keystroke.key.as_str()) {
-            (_, "enter" | "return") => self.confirm_dialog(cx),
-            (_, "escape") => self.cancel_dialog(cx),
-            (Some(DialogState::ConnectRemote), "backspace") => {
-                self.remote_host_value.pop();
-                self.remote_connection_error = None;
-                cx.notify();
-            }
-            (Some(DialogState::ConnectRemote), _)
-                if !event.keystroke.modifiers.platform
+        let key = event.keystroke.key.as_str();
+        if self.dialog_is_text_input() {
+            match key {
+                "enter" | "return" => self.confirm_dialog(cx),
+                "escape" => self.cancel_dialog(cx),
+                "backspace" => {
+                    self.edit_dialog_input_before_caret(cx);
+                }
+                "delete" => {
+                    self.edit_dialog_input_after_caret(cx);
+                }
+                "left" => self.move_dialog_caret(-1, cx),
+                "right" => self.move_dialog_caret(1, cx),
+                "home" => self.set_dialog_caret(0, cx),
+                "end" => self.set_dialog_caret(self.dialog_input.len(), cx),
+                _ if !event.keystroke.modifiers.platform
                     && !event.keystroke.modifiers.control
                     && !event.keystroke.modifiers.alt
                     && event.keystroke.key_char.is_some() =>
-            {
-                if let Some(character) = event.keystroke.key_char.as_deref() {
-                    self.remote_host_value.push_str(character);
-                    self.remote_connection_error = None;
-                    cx.notify();
+                {
+                    if let Some(character) = event.keystroke.key_char.as_deref() {
+                        let insert_at = self.dialog_caret.clamp(0, self.dialog_input.len());
+                        self.dialog_input.insert_str(insert_at, character);
+                        self.dialog_caret = insert_at + character.len();
+                        self.dialog_ime_base = self.dialog_caret;
+                        self.dialog_caret_visible = true;
+                        self.remote_connection_error = None;
+                        cx.notify();
+                    }
                 }
+                _ => {}
             }
+            return true;
+        }
+        match (self.dialog, key) {
+            (_, "enter" | "return") => self.confirm_dialog(cx),
+            (_, "escape") => self.cancel_dialog(cx),
             _ => {}
         }
         true
     }
 
+    fn set_dialog_caret(&mut self, byte_offset: usize, cx: &mut Context<Self>) {
+        let byte_offset = byte_offset.clamp(0, self.dialog_input.len());
+        if self.dialog_caret == byte_offset {
+            return;
+        }
+        self.dialog_caret = byte_offset;
+        self.dialog_ime_base = byte_offset;
+        self.dialog_caret_visible = true;
+        cx.notify();
+    }
+
+    /// Moves the caret by `delta` whole characters, clamped to the value.
+    fn move_dialog_caret(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.dialog_input.is_empty() || delta == 0 {
+            return;
+        }
+        let mut boundaries: Vec<usize> = self
+            .dialog_input
+            .char_indices()
+            .map(|(index, _)| index)
+            .collect();
+        boundaries.push(self.dialog_input.len());
+        let rank = boundaries
+            .iter()
+            .rposition(|boundary| *boundary <= self.dialog_caret)
+            .unwrap_or(0);
+        let target = if delta < 0 {
+            rank.saturating_sub((-delta) as usize)
+        } else {
+            (rank + delta as usize).min(boundaries.len() - 1)
+        };
+        self.set_dialog_caret(boundaries[target], cx);
+    }
+
+    fn edit_dialog_input_before_caret(&mut self, cx: &mut Context<Self>) {
+        if self.dialog_caret == 0 {
+            return;
+        }
+        let char_start = self
+            .dialog_input
+            .char_indices()
+            .rev()
+            .find(|(index, _)| *index < self.dialog_caret)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.dialog_input.replace_range(char_start..self.dialog_caret, "");
+        self.dialog_caret = char_start;
+        self.dialog_ime_base = char_start;
+        self.dialog_caret_visible = true;
+        self.remote_connection_error = None;
+        cx.notify();
+    }
+
+    fn edit_dialog_input_after_caret(&mut self, cx: &mut Context<Self>) {
+        let caret = self.dialog_caret.clamp(0, self.dialog_input.len());
+        let Some((char_start, character)) = self
+            .dialog_input
+            .char_indices()
+            .find(|(index, _)| *index >= caret)
+        else {
+            return;
+        };
+        let char_end = char_start + character.len_utf8();
+        self.dialog_input.replace_range(char_start..char_end, "");
+        self.dialog_ime_base = caret;
+        self.dialog_caret_visible = true;
+        self.remote_connection_error = None;
+        cx.notify();
+    }
+
     fn begin_rename_active_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(workspace_id) = self.active_workspace_id() {
-            self.begin_rename_workspace(workspace_id, window, cx);
+            self.begin_rename_workspace(self.active_connection, workspace_id, window, cx);
         }
     }
 
@@ -1790,8 +2082,12 @@ impl WorkspaceView {
         }
     }
 
+    /// Opens the shared text-input dialog for renaming a workspace. The
+    /// dialog is scoped to the owning connection, so workspaces whose IDs
+    /// collide across local and remote servers cannot be mixed up.
     fn begin_rename_workspace(
         &mut self,
+        connection_id: ConnectionId,
         workspace_id: WorkspaceId,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1800,16 +2096,19 @@ impl WorkspaceView {
             return;
         }
         let Some(workspace_title) = self
-            .workspace_by_id(workspace_id)
+            .workspace_by_id_in(connection_id, workspace_id)
             .map(|workspace| workspace.title.clone())
         else {
             return;
         };
         self.context_menu = None;
-        self.rename_target = Some(RenameTarget::Workspace(workspace_id));
-        self.rename_value = workspace_title;
-        self.focus_handle.focus(window, cx);
-        cx.notify();
+        self.rename_target = None;
+        self.rename_value.clear();
+        self.dialog = Some(DialogState::RenameWorkspace {
+            connection_id,
+            workspace_id,
+        });
+        self.set_dialog_input(workspace_title, window, cx);
     }
 
     fn begin_rename_tab(&mut self, tab_id: TabId, window: &mut Window, cx: &mut Context<Self>) {
@@ -1830,19 +2129,28 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn begin_rename_agent(&mut self, pane_id: PaneId, window: &mut Window, cx: &mut Context<Self>) {
+    fn begin_rename_agent(
+        &mut self,
+        connection_id: ConnectionId,
+        pane_id: PaneId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.has_transient_ui() {
             return;
         }
         let Some(agent_label) = self
-            .agent_by_pane_id(pane_id)
+            .agent_by_pane_id_in(connection_id, pane_id)
             .filter(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running))
             .map(|agent| agent.display_label().to_owned())
         else {
             return;
         };
         self.context_menu = None;
-        self.rename_target = Some(RenameTarget::Agent(pane_id));
+        self.rename_target = Some(RenameTarget::Agent {
+            connection_id,
+            pane_id,
+        });
         self.rename_value = agent_label;
         self.focus_handle.focus(window, cx);
         cx.notify();
@@ -1861,27 +2169,34 @@ impl WorkspaceView {
         };
         let title = self.rename_value.trim().to_owned();
         self.rename_value.clear();
-        if title.is_empty() && !matches!(target, RenameTarget::Agent(_)) {
+        if title.is_empty() && !matches!(target, RenameTarget::Agent { .. }) {
             cx.notify();
             return;
         }
-        let command = match target {
-            RenameTarget::Workspace(workspace_id) => {
-                AppCommand::Workspace(WorkspaceCommand::Rename {
-                    workspace_id: Some(workspace_id),
-                    title,
-                })
+        match target {
+            RenameTarget::Tab(tab_id) => {
+                self.dispatch(
+                    AppCommand::Tab(TabCommand::Rename {
+                        tab_id: Some(tab_id),
+                        title,
+                    }),
+                    cx,
+                );
             }
-            RenameTarget::Tab(tab_id) => AppCommand::Tab(TabCommand::Rename {
-                tab_id: Some(tab_id),
-                title,
-            }),
-            RenameTarget::Agent(pane_id) => AppCommand::Pane(PaneCommand::RenameAgent {
-                pane_id: Some(pane_id),
-                label: title,
-            }),
-        };
-        self.dispatch(command, cx);
+            RenameTarget::Agent {
+                connection_id,
+                pane_id,
+            } => {
+                self.dispatch_on(
+                    connection_id,
+                    AppCommand::Pane(PaneCommand::RenameAgent {
+                        pane_id: Some(pane_id),
+                        label: title,
+                    }),
+                    cx,
+                );
+            }
+        }
         cx.notify();
     }
 
@@ -2948,8 +3263,27 @@ impl WorkspaceView {
     }
 
     fn dispatch(&mut self, command: AppCommand, cx: &mut Context<Self>) {
+        self.dispatch_on(self.active_connection, command, cx);
+    }
+
+    /// Runs a command through the transport of `connection_id`. Used for
+    /// sidebar actions that target a non-active connection (for example
+    /// renaming a remote workspace); the resulting snapshot is installed on
+    /// that connection's projection instead of the active one.
+    fn dispatch_on(
+        &mut self,
+        connection_id: ConnectionId,
+        command: AppCommand,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(client) = self
+            .connection_by_id(connection_id)
+            .map(|connection| connection.client.clone())
+        else {
+            cx.notify();
+            return;
+        };
         let command_name = command.type_name();
-        let client = self.client.clone();
         cx.spawn(async move |entity, cx| {
             let result: Result<
                 Option<(ModelSnapshot, OperationResult)>,
@@ -2978,7 +3312,11 @@ impl WorkspaceView {
                 .await;
             if let Ok(Some((snapshot, operation_result))) = result {
                 let _ = entity.update(cx, |view, cx| {
-                    view.install_snapshot(snapshot, cx);
+                    if view.active_connection == connection_id {
+                        view.install_snapshot(snapshot, cx);
+                    } else {
+                        view.install_connection_snapshot(connection_id, snapshot, cx);
+                    }
                     view.apply_operation_result(operation_result, cx);
                 });
             } else if let Err(error) = result {
@@ -3099,11 +3437,6 @@ impl WorkspaceView {
             .iter()
             .filter(|agent| matches!(agent.status, crate::surface::TerminalStatus::Running))
             .count();
-        let workspace_title = if self.rename_target == Some(RenameTarget::Workspace(workspace_id)) {
-            format!("{}▌", self.rename_value)
-        } else {
-            workspace.title.clone()
-        };
         let workspace_background = if active {
             rgb(theme.sidebar_workspace_active_background)
         } else {
@@ -3186,7 +3519,7 @@ impl WorkspaceView {
                     .flex_1()
                     .min_w(px(0.))
                     .truncate()
-                    .child(SharedString::from(workspace_title)),
+                    .child(SharedString::from(workspace.title.clone())),
             );
         if self.config.ui.sidebar_show_agent_count && running_agent_count > 0 {
             workspace_row = workspace_row.child(
@@ -3220,22 +3553,6 @@ impl WorkspaceView {
         let connection_id = connection.id;
         let collapsed = self.collapsed_connections.contains(&connection_id);
         let selected = self.active_connection == connection_id;
-        let disclosure = div()
-            .id(format!("connection-disclosure-{connection_id}"))
-            .w(px(SIDEBAR_DISCLOSURE_WIDTH))
-            .flex_shrink_0()
-            .items_center()
-            .justify_center()
-            .flex()
-            .cursor_pointer()
-            .child(SharedString::from(if collapsed { "▸" } else { "▾" }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                    this.toggle_connection_collapsed(connection_id, cx);
-                    cx.stop_propagation();
-                }),
-            );
         let title = connection.title.clone();
         let kind_label = match connection.kind {
             WorkspaceConnectionKind::Local => "LOCAL",
@@ -3247,17 +3564,15 @@ impl WorkspaceView {
             .w_full()
             .px(px(10.))
             .items_center()
-            .gap(px(6.))
             .flex()
             .flex_none()
             .cursor_pointer()
             .bg(rgb(if selected {
-                theme.tab_inactive_background
+                theme.sidebar_connection_active_background
             } else {
-                theme.sidebar_background
+                theme.sidebar_connection_background
             }))
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
-            .child(disclosure)
             .child(
                 div()
                     .flex_1()
@@ -3278,6 +3593,7 @@ impl WorkspaceView {
                     this.context_menu = None;
                     this.focus_handle.focus(window, cx);
                     this.select_connection_locally(connection_id, cx);
+                    this.toggle_connection_collapsed(connection_id, cx);
                     cx.stop_propagation();
                 }),
             );
@@ -3485,7 +3801,11 @@ impl WorkspaceView {
             .find(|segment| !segment.is_empty())
             .unwrap_or("")
             .to_owned();
-        let agent_label = if self.rename_target == Some(RenameTarget::Agent(pane_id)) {
+        let agent_label = if self.rename_target
+            == Some(RenameTarget::Agent {
+                connection_id,
+                pane_id,
+            }) {
             format!("{}▌", self.rename_value)
         } else {
             agent.display_label().to_owned()
@@ -3600,14 +3920,14 @@ impl WorkspaceView {
         let rename = match target {
             ContextMenuTarget::Connection(_) => None,
             ContextMenuTarget::Workspace {
-                connection_id: _,
+                connection_id,
                 workspace_id,
             } => Some(self.render_context_menu_item(
                 "Rename workspace",
                 theme,
                 move |this, _event, window, cx| {
                     this.context_menu = None;
-                    this.begin_rename_workspace(workspace_id, window, cx);
+                    this.begin_rename_workspace(connection_id, workspace_id, window, cx);
                 },
                 cx,
             )),
@@ -3621,14 +3941,14 @@ impl WorkspaceView {
                 cx,
             )),
             ContextMenuTarget::Agent {
-                connection_id: _,
+                connection_id,
                 pane_id,
             } => Some(self.render_context_menu_item(
                 "Rename agent",
                 theme,
                 move |this, _event, window, cx| {
                     this.context_menu = None;
-                    this.begin_rename_agent(pane_id, window, cx);
+                    this.begin_rename_agent(connection_id, pane_id, window, cx);
                 },
                 cx,
             )),
@@ -3744,8 +4064,11 @@ impl WorkspaceView {
         if dialog == DialogState::ConnectRemote {
             return Some(self.render_connect_remote_dialog(theme, cx));
         }
+        if matches!(dialog, DialogState::RenameWorkspace { .. }) {
+            return Some(self.render_rename_workspace_dialog(theme, cx));
+        }
         let DialogState::ConfirmCloseWorkspace { workspace_id } = dialog else {
-            unreachable!("remote dialog returned above")
+            unreachable!("text-input dialogs returned above")
         };
         let workspace = self.workspace_by_id(workspace_id)?;
         let tab_count = workspace.tabs.len();
@@ -3817,12 +4140,14 @@ impl WorkspaceView {
         Some(
             deferred(
                 div()
+                    .debug_selector(|| "dialog-scrim".into())
                     .size_full()
                     .absolute()
                     .inset_0()
+                    .flex()
                     .items_center()
                     .justify_center()
-                    .bg(rgba(0x00000099))
+                    .bg(rgba(DIALOG_SCRIM))
                     .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
                     })
@@ -3844,11 +4169,6 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let input_text = if self.remote_host_value.is_empty() {
-            SharedString::from("SSH host or config alias…")
-        } else {
-            SharedString::from(format!("{}▌", self.remote_host_value))
-        };
         let cancel = div()
             .h(px(30.))
             .px(px(12.))
@@ -3867,27 +4187,16 @@ impl WorkspaceView {
                 }),
             )
             .child("Cancel");
-        let connect = div()
-            .h(px(30.))
-            .px(px(12.))
-            .items_center()
-            .justify_center()
-            .flex()
-            .cursor_pointer()
-            .bg(rgb(theme.tab_add_background))
-            .text_color(rgb(theme.ui_foreground))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
-                    this.confirm_dialog(cx);
-                    cx.stop_propagation();
-                }),
-            )
-            .child(if self.remote_connection_pending {
-                "Connecting…"
-            } else {
-                "Connect"
-            });
+        let connect_label = if self.remote_connection_pending {
+            "Connecting…"
+        } else {
+            "Connect"
+        };
+        let hint = if self.dialog_input.trim().is_empty() && !self.remote_connection_pending {
+            Some("Enter an SSH host or config alias to continue")
+        } else {
+            None
+        };
         let mut dialog = div()
             .id("connect-remote-dialog")
             .w(px(420.))
@@ -3905,23 +4214,7 @@ impl WorkspaceView {
                     .child("Connect to remote Water"),
             )
             .child("Uses your OpenSSH config and agent. The authenticated connection is reused.")
-            .child(
-                div()
-                    .id("remote-host-input")
-                    .h(px(34.))
-                    .w_full()
-                    .px(px(10.))
-                    .items_center()
-                    .flex()
-                    .border_1()
-                    .border_color(rgb(theme.inactive_pane_border))
-                    .text_color(rgb(if self.remote_host_value.is_empty() {
-                        theme.inactive_pane_border
-                    } else {
-                        theme.ui_foreground
-                    }))
-                    .child(input_text),
-            );
+            .child(self.render_text_input_row("SSH host or config alias…", theme));
         if let Some(error) = &self.remote_connection_error {
             dialog = dialog.child(
                 div()
@@ -3929,27 +4222,224 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        dialog = dialog.child(
-            div()
-                .w_full()
-                .gap(px(8.))
-                .justify_end()
-                .items_center()
-                .flex()
-                .child(cancel)
-                .child(connect),
-        );
+        let mut button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .flex();
+        if let Some(hint) = hint {
+            button_row = button_row.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_right()
+                    .text_size(px(self.config.ui.font_size * 0.875))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(hint),
+            );
+        }
+        button_row = button_row
+            .child(cancel)
+            .child(self.render_dialog_confirm_button(connect_label, theme, cx));
+        dialog = dialog.child(button_row);
         deferred(
             div()
+                .debug_selector(|| "dialog-scrim".into())
                 .size_full()
                 .absolute()
                 .inset_0()
+                .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x00000099))
+                .bg(rgba(DIALOG_SCRIM))
                 .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
                 })
+                .on_mouse_down(
+                    MouseButton::Right,
+                    |_event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                    },
+                )
+                .child(dialog),
+        )
+        .with_priority(20)
+        .into_any_element()
+    }
+
+    /// The bordered, editable row shared by the text-input dialogs. The
+    /// placeholder and typed text are always centered within the input box.
+    fn render_text_input_row(&self, placeholder: &str, theme: ThemeColors) -> AnyElement {
+        let value = &self.dialog_input;
+        let empty = value.is_empty();
+        let caret = self.dialog_caret.clamp(0, value.len());
+        let caret_glyph = if self.dialog_caret_visible { "▌" } else { "" };
+        let display = if empty {
+            format!("{caret_glyph}{placeholder}")
+        } else {
+            format!("{}{caret_glyph}{}", &value[..caret], &value[caret..])
+        };
+        div()
+            .debug_selector(|| "dialog-text-input".into())
+            .id("dialog-text-input")
+            .h(px(34.))
+            .w_full()
+            .px(px(10.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .text_color(rgb(if empty {
+                theme.inactive_pane_border
+            } else {
+                theme.ui_foreground
+            }))
+            .child(SharedString::from(display))
+            .into_any_element()
+    }
+
+    /// Confirm button of a text-input dialog: highlighted while the input is
+    /// valid, dimmed and inert while it is empty.
+    fn render_dialog_confirm_button(
+        &self,
+        label: &str,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let enabled = self.dialog_input_is_valid();
+        let mut button = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .bg(rgb(if enabled {
+                theme.tab_add_background
+            } else {
+                theme.chrome_background
+            }))
+            .text_color(rgb(if enabled {
+                theme.ui_foreground
+            } else {
+                theme.inactive_pane_border
+            }));
+        if enabled {
+            button = button
+                .cursor_pointer()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                        this.confirm_dialog(cx);
+                        cx.stop_propagation();
+                    }),
+                );
+        }
+        button
+            .child(SharedString::from(label.to_owned()))
+            .into_any_element()
+    }
+
+    fn render_rename_workspace_dialog(
+        &self,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(DialogState::RenameWorkspace {
+            connection_id,
+            workspace_id,
+        }) = self.dialog
+        else {
+            return div().into_any_element();
+        };
+        let title = self
+            .workspace_by_id_in(connection_id, workspace_id)
+            .map(|workspace| workspace.title.clone())
+            .unwrap_or_default();
+        let cancel = div()
+            .h(px(30.))
+            .px(px(12.))
+            .items_center()
+            .justify_center()
+            .flex()
+            .cursor_pointer()
+            .text_color(rgb(theme.ui_foreground))
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
+                    this.cancel_dialog(cx);
+                    cx.stop_propagation();
+                }),
+            )
+            .child("Cancel");
+        let hint = if self.dialog_input.trim().is_empty() {
+            Some("Enter a name to rename this workspace")
+        } else {
+            None
+        };
+        let mut dialog = div()
+            .id("rename-workspace-dialog")
+            .w(px(420.))
+            .p(px(20.))
+            .gap(px(12.))
+            .flex()
+            .flex_col()
+            .bg(rgb(theme.chrome_background))
+            .border_1()
+            .border_color(rgb(theme.active_pane_border))
+            .text_color(rgb(theme.ui_foreground))
+            .child(
+                div()
+                    .text_size(px(self.config.ui.font_size * 1.125))
+                    .child("Rename workspace"),
+            )
+            .child(
+                div()
+                    .text_size(px(self.config.ui.font_size * 0.875))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(SharedString::from(format!("Current name: {title}"))),
+            )
+            .child(self.render_text_input_row("Workspace name", theme));
+        let mut button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .flex();
+        if let Some(hint) = hint {
+            button_row = button_row.child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_right()
+                    .text_size(px(self.config.ui.font_size * 0.875))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(hint),
+            );
+        }
+        button_row = button_row
+            .child(cancel)
+            .child(self.render_dialog_confirm_button("Rename", theme, cx));
+        dialog = dialog.child(button_row);
+        deferred(
+            div()
+                .debug_selector(|| "dialog-scrim".into())
+                .size_full()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(DIALOG_SCRIM))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    |_event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                    },
+                )
                 .on_mouse_down(
                     MouseButton::Right,
                     |_event: &MouseDownEvent, _window, cx| {
@@ -5049,6 +5539,11 @@ impl EntityInputHandler for WorkspaceView {
     }
 
     fn unmark_text(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.dialog_is_text_input() {
+            let base = self.dialog_ime_base.clamp(0, self.dialog_caret);
+            self.dialog_input.replace_range(base..self.dialog_caret, "");
+            self.dialog_caret = base;
+        }
         self.reset_ime_marked_text();
         cx.notify();
     }
@@ -5060,6 +5555,22 @@ impl EntityInputHandler for WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dialog_is_text_input() {
+            // The IME commits through this hook; land the composed text at
+            // the dialog caret instead of the terminal below the scrim.
+            let base = self.dialog_ime_base.clamp(0, self.dialog_caret);
+            self.dialog_input.replace_range(base..self.dialog_caret, "");
+            if !new_text.is_empty() {
+                self.dialog_input.insert_str(base, new_text);
+            }
+            self.dialog_caret = base + new_text.len();
+            self.dialog_ime_base = self.dialog_caret;
+            self.dialog_caret_visible = true;
+            self.remote_connection_error = None;
+            self.reset_ime_marked_text();
+            cx.notify();
+            return;
+        }
         let Some(terminal_id) = self.ime_terminal.or_else(|| self.active_terminal_id()) else {
             return;
         };
@@ -5087,6 +5598,20 @@ impl EntityInputHandler for WorkspaceView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dialog_is_text_input() {
+            // Keep the in-progress composition at the dialog caret so pinyin
+            // (or any marked-text IME) can rename workspaces directly.
+            let base = self.dialog_ime_base.clamp(0, self.dialog_caret);
+            self.dialog_input.replace_range(base..self.dialog_caret, "");
+            self.dialog_input.insert_str(base, new_text);
+            self.dialog_caret = base + new_text.len();
+            self.dialog_caret_visible = true;
+            self.ime_terminal = self.active_terminal_id();
+            self.ime_marked_text = new_text.to_owned();
+            self.ime_selected_range = 0..utf16_len(new_text);
+            cx.notify();
+            return;
+        }
         let Some(terminal_id) = self.ime_terminal.or_else(|| self.active_terminal_id()) else {
             return;
         };
@@ -8051,6 +8576,8 @@ mod tests {
                 tab_add_background: 14,
                 ui_foreground: 15,
                 sidebar_background: 16,
+                sidebar_connection_background: 16,
+                sidebar_connection_active_background: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
                 sidebar_drag_indicator: 19,
@@ -8736,5 +9263,300 @@ mod tests {
                 assert_tree_is_terminal(second);
             }
         }
+    }
+
+    /// Two independent model hosts whose first workspaces share both ID and
+    /// default title — the exact local/remote "Workspace 1" collision.
+    fn two_hosts_with_colliding_workspaces() -> (
+        crate::app::ModelHost,
+        crate::app::ModelHost,
+        (WorkspaceId, String),
+        (WorkspaceId, String),
+    ) {
+        let local_host = crate::app::ModelHost::start();
+        let local_operation = local_host
+            .client()
+            .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+            .unwrap();
+        local_host.client().wait_operation(local_operation).unwrap();
+        let remote_host = crate::app::ModelHost::start();
+        let remote_operation = remote_host
+            .client()
+            .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+            .unwrap();
+        remote_host.client().wait_operation(remote_operation).unwrap();
+        let local_dump = local_host.client().state_dump().unwrap();
+        let remote_dump = remote_host.client().state_dump().unwrap();
+        let (local_id, local_title) = {
+            let workspace = local_dump
+                .workspaces
+                .first()
+                .expect("local host creates a workspace");
+            (workspace.id, workspace.title.clone())
+        };
+        let (remote_id, remote_title) = {
+            let workspace = remote_dump
+                .workspaces
+                .first()
+                .expect("remote host creates a workspace");
+            (workspace.id, workspace.title.clone())
+        };
+        assert_eq!(local_id, remote_id, "test relies on an ID collision");
+        assert_eq!(local_title, remote_title, "test relies on a title collision");
+        (local_host, remote_host, (local_id, local_title), (remote_id, remote_title))
+    }
+
+    #[gpui::test]
+    fn rename_dialog_scopes_to_its_own_connection(cx: &mut gpui::TestAppContext) {
+        let (mut local_host, mut remote_host, (_, _), (remote_ws, title)) =
+            two_hosts_with_colliding_workspaces();
+        let local_client: Arc<dyn CommandTransport> = Arc::new(local_host.client());
+        let remote_client: Arc<dyn CommandTransport> = Arc::new(remote_host.client());
+        let local_id = ConnectionId::new(1);
+        let remote_id = ConnectionId::new(2);
+        let connections = vec![
+            WorkspaceConnection {
+                id: local_id,
+                title: "Local".to_owned(),
+                kind: WorkspaceConnectionKind::Local,
+                client: local_client,
+                snapshot: local_host.client().state_dump().unwrap(),
+            },
+            WorkspaceConnection {
+                id: remote_id,
+                title: "build-box".to_owned(),
+                kind: WorkspaceConnectionKind::Remote,
+                client: remote_client,
+                snapshot: remote_host.client().state_dump().unwrap(),
+            },
+        ];
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                connections,
+                local_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.begin_rename_workspace(remote_id, remote_ws, window, cx);
+        });
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(
+                view.dialog,
+                Some(DialogState::RenameWorkspace {
+                    connection_id: remote_id,
+                    workspace_id: remote_ws
+                })
+            );
+            assert_eq!(view.dialog_input, title);
+            assert_eq!(view.dialog_caret, title.len());
+            assert!(
+                view.rename_target.is_none(),
+                "workspace rename no longer uses the inline row caret"
+            );
+        });
+        view.update_in(cx, |view, _, cx| view.confirm_dialog(cx));
+        cx.run_until_parked();
+        let remote_dump = remote_host.client().state_dump().unwrap();
+        assert_eq!(
+            remote_dump.workspaces[0].title,
+            title,
+            "confirming with the untouched name is a no-op rename"
+        );
+
+        // Rename the remote workspace and prove the colliding local row keeps
+        // its own title.
+        view.update_in(cx, |view, window, cx| {
+            view.begin_rename_workspace(remote_id, remote_ws, window, cx);
+        });
+        view.update_in(cx, |view, _, cx| {
+            view.dialog_input.clear();
+            view.dialog_caret = 0;
+            view.dialog_input.insert_str(0, "Build box");
+            view.dialog_caret = 7;
+            view.confirm_dialog(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(remote_host.client().state_dump().unwrap().workspaces[0].title, "Build box");
+        assert_eq!(
+            local_host.client().state_dump().unwrap().workspaces[0].title,
+            title,
+            "the colliding local workspace must stay untouched"
+        );
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(view.dialog, None);
+            assert_eq!(
+                view.connection_by_id(remote_id)
+                    .unwrap()
+                    .snapshot
+                    .workspaces[0]
+                    .title,
+                "Build box"
+            );
+            assert_eq!(
+                view.connection_by_id(local_id)
+                    .unwrap()
+                    .snapshot
+                    .workspaces[0]
+                    .title,
+                title
+            );
+        });
+        local_host.shutdown();
+        remote_host.shutdown();
+    }
+
+    #[gpui::test]
+    fn text_input_dialog_confirm_is_inert_while_empty(cx: &mut gpui::TestAppContext) {
+        let (mut local_host, mut remote_host, _, _) = two_hosts_with_colliding_workspaces();
+        let local_client: Arc<dyn CommandTransport> = Arc::new(local_host.client());
+        let remote_client: Arc<dyn CommandTransport> = Arc::new(remote_host.client());
+        let local_id = ConnectionId::new(1);
+        let remote_id = ConnectionId::new(2);
+        let connections = vec![
+            WorkspaceConnection {
+                id: local_id,
+                title: "Local".to_owned(),
+                kind: WorkspaceConnectionKind::Local,
+                client: local_client,
+                snapshot: local_host.client().state_dump().unwrap(),
+            },
+            WorkspaceConnection {
+                id: remote_id,
+                title: "build-box".to_owned(),
+                kind: WorkspaceConnectionKind::Remote,
+                client: remote_client,
+                snapshot: remote_host.client().state_dump().unwrap(),
+            },
+        ];
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                connections,
+                local_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        // Empty connect-remote input: confirm must keep the dialog open.
+        view.update_in(cx, |view, window, cx| view.begin_connect_remote(window, cx));
+        view.update_in(cx, |view, _, cx| view.confirm_dialog(cx));
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(view.dialog, Some(DialogState::ConnectRemote));
+            assert!(!view.dialog_input_is_valid());
+        });
+        view.update_in(cx, |view, _, cx| view.cancel_dialog(cx));
+
+        // Empty rename input: confirm must keep the dialog open and the model
+        // untouched.
+        view.update_in(cx, |view, window, cx| {
+            view.begin_rename_workspace(remote_id, WorkspaceId::new(99), window, cx);
+        });
+        view.update_in(cx, |view, _, _| {
+            assert!(
+                view.dialog.is_none(),
+                "renaming a workspace on a missing connection is a no-op"
+            );
+        });
+        local_host.shutdown();
+        remote_host.shutdown();
+    }
+
+    fn dialog_key_event(key: &str, key_char: Option<&str>) -> gpui::KeyDownEvent {
+        gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke {
+                modifiers: gpui::Modifiers::none(),
+                key: key.to_owned(),
+                key_char: key_char.map(str::to_owned),
+            },
+            is_held: false,
+            prefer_character_input: false,
+        }
+    }
+
+    #[gpui::test]
+    fn dialog_input_caret_editing_follows_arrow_and_delete_keys(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut local_host, mut _remote_host, (local_ws, title), _) =
+            two_hosts_with_colliding_workspaces();
+        let local_client: Arc<dyn CommandTransport> = Arc::new(local_host.client());
+        let local_id = ConnectionId::new(1);
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new(
+                local_client.clone(),
+                local_host.client().state_dump().unwrap(),
+                cx.focus_handle(),
+            )
+        });
+        view.update_in(cx, |view, window, cx| {
+            view.begin_rename_workspace(local_id, local_ws, window, cx);
+        });
+        // Prefilled title, caret at the end: "Workspace 1|".
+        view.update_in(cx, |view, _, cx| {
+            view.handle_dialog_key(&dialog_key_event("left", None), cx)
+        });
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(view.dialog_caret, title.len() - 1);
+            assert_eq!(&view.dialog_input[..view.dialog_caret], &title[..title.len() - 1]);
+            assert_eq!(&view.dialog_input[view.dialog_caret..], "1");
+        });
+        // Delete removes the character after the caret ("1").
+        view.update_in(cx, |view, _, cx| {
+            view.handle_dialog_key(&dialog_key_event("delete", None), cx)
+        });
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(view.dialog_input, "Workspace ");
+            assert_eq!(view.dialog_caret, "Workspace ".len());
+        });
+        // Home, then type at the start.
+        view.update_in(cx, |view, _, cx| {
+            view.handle_dialog_key(&dialog_key_event("home", None), cx)
+        });
+        view.update_in(cx, |view, _, cx| {
+            view.handle_dialog_key(&dialog_key_event("x", Some("x")), cx)
+        });
+        view.update_in(cx, |view, _, _| {
+            assert_eq!(view.dialog_input, "xWorkspace ");
+            assert_eq!(view.dialog_caret, 1);
+        });
+        view.update_in(cx, |view, _, cx| view.cancel_dialog(cx));
+        local_host.shutdown();
+    }
+
+    #[gpui::test]
+    fn dialog_scrim_covers_the_whole_window_centered(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client = std::sync::Arc::new(host.client());
+        let operation = client
+            .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+            .unwrap();
+        client.wait_operation(operation).unwrap();
+        let snapshot = client.state_dump().unwrap();
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new(client.clone(), snapshot.clone(), cx.focus_handle())
+        });
+        view.update_in(cx, |view, _window, cx| {
+            view.dialog = Some(DialogState::ConnectRemote);
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let window_size = view.update_in(cx, |_, window, _| window.bounds().size);
+        let scrim = cx
+            .debug_bounds("dialog-scrim")
+            .expect("dialog scrim is rendered");
+        assert_eq!(scrim.size, window_size, "the scrim must cover the window");
+        let center = gpui::point(
+            px(f32::from(scrim.origin.x) + f32::from(scrim.size.width) / 2.0),
+            px(f32::from(scrim.origin.y) + f32::from(scrim.size.height) / 2.0),
+        );
+        let window_center = gpui::point(
+            px(f32::from(window_size.width) / 2.0),
+            px(f32::from(window_size.height) / 2.0),
+        );
+        assert_eq!(center, window_center, "the dialog must be window-centered");
+        host.shutdown();
     }
 }

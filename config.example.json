@@ -36,6 +36,8 @@
     "tab_add_background": "#555555",
     "ui_foreground": "#e4e4e4",
     "sidebar_background": "#000000",
+    "sidebar_connection_background": "#000000",
+    "sidebar_connection_active_background": "#000000",
     "sidebar_workspace_background": "#000000",
     "sidebar_agent_background": "#000000",
     "sidebar_workspace_active_background": "#339966",

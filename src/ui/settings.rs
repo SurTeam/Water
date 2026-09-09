@@ -78,6 +78,8 @@ enum SettingField {
     ThemeTabAddBackground,
     ThemeUiForeground,
     ThemeSidebarBackground,
+    ThemeSidebarConnectionBackground,
+    ThemeSidebarConnectionActiveBackground,
     ThemeSidebarWorkspaceBackground,
     ThemeSidebarAgentBackground,
     ThemeSidebarWorkspaceActiveBackground,
@@ -167,6 +169,10 @@ impl SettingField {
             Self::ThemeTabAddBackground => "theme-tab-add-background",
             Self::ThemeUiForeground => "theme-ui-foreground",
             Self::ThemeSidebarBackground => "theme-sidebar-background",
+            Self::ThemeSidebarConnectionBackground => "theme-sidebar-connection-background",
+            Self::ThemeSidebarConnectionActiveBackground => {
+                "theme-sidebar-connection-active-background"
+            }
             Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
             Self::ThemeSidebarAgentBackground => "theme-sidebar-agent-background",
             Self::ThemeSidebarWorkspaceActiveBackground => {
@@ -240,6 +246,8 @@ impl SettingField {
                 | Self::ThemeTabAddBackground
                 | Self::ThemeUiForeground
                 | Self::ThemeSidebarBackground
+                | Self::ThemeSidebarConnectionBackground
+                | Self::ThemeSidebarConnectionActiveBackground
                 | Self::ThemeSidebarWorkspaceBackground
                 | Self::ThemeSidebarAgentBackground
                 | Self::ThemeSidebarWorkspaceActiveBackground
@@ -624,6 +632,12 @@ impl SettingsView {
             SettingField::ThemeTabAddBackground => self.config.theme.tab_add_background.clone(),
             SettingField::ThemeUiForeground => self.config.theme.ui_foreground.clone(),
             SettingField::ThemeSidebarBackground => self.config.theme.sidebar_background.clone(),
+            SettingField::ThemeSidebarConnectionBackground => {
+                self.config.theme.sidebar_connection_background.clone()
+            }
+            SettingField::ThemeSidebarConnectionActiveBackground => {
+                self.config.theme.sidebar_connection_active_background.clone()
+            }
             SettingField::ThemeSidebarWorkspaceBackground => {
                 self.config.theme.sidebar_workspace_background.clone()
             }
@@ -1448,6 +1462,14 @@ impl Render for SettingsView {
             (SettingField::ThemeUiForeground, "界面前景色"),
             (SettingField::ThemeSidebarBackground, "侧边栏背景色"),
             (
+                SettingField::ThemeSidebarConnectionBackground,
+                "未选中主机背景色",
+            ),
+            (
+                SettingField::ThemeSidebarConnectionActiveBackground,
+                "选中主机背景色",
+            ),
+            (
                 SettingField::ThemeSidebarWorkspaceBackground,
                 "未选中工作区背景色",
             ),
@@ -1756,6 +1778,12 @@ fn set_theme_field(
         SettingField::ThemeTabAddBackground => theme.tab_add_background = value,
         SettingField::ThemeUiForeground => theme.ui_foreground = value,
         SettingField::ThemeSidebarBackground => theme.sidebar_background = value,
+        SettingField::ThemeSidebarConnectionBackground => {
+            theme.sidebar_connection_background = value
+        }
+        SettingField::ThemeSidebarConnectionActiveBackground => {
+            theme.sidebar_connection_active_background = value
+        }
         SettingField::ThemeSidebarWorkspaceBackground => theme.sidebar_workspace_background = value,
         SettingField::ThemeSidebarAgentBackground => theme.sidebar_agent_background = value,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {
@@ -1836,6 +1864,10 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         SettingField::ThemeTabAddBackground => colors.tab_add_background,
         SettingField::ThemeUiForeground => colors.ui_foreground,
         SettingField::ThemeSidebarBackground => colors.sidebar_background,
+        SettingField::ThemeSidebarConnectionBackground => colors.sidebar_connection_background,
+        SettingField::ThemeSidebarConnectionActiveBackground => {
+            colors.sidebar_connection_active_background
+        }
         SettingField::ThemeSidebarWorkspaceBackground => colors.sidebar_workspace_background,
         SettingField::ThemeSidebarAgentBackground => colors.sidebar_agent_background,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {
