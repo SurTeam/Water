@@ -109,11 +109,41 @@ mod macos_build {
         output_path
     }
 
-    /// Locate the gpui crate directory relative to this crate. Resolved at
-    /// build-script runtime against this crate's manifest dir, so no checkout
-    /// path is baked into a compiled artifact (which corgi rejects).
+    /// Locate the gpui crate directory. The stub lives in
+    /// `<repo>/scripts/stub-gpui_apple/`, and gpui is a git dependency
+    /// resolved under `~/.cargo/git/checkouts/zed-*/<rev>/crates/gpui`.
     fn find_gpui_crate_dir() -> PathBuf {
-        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("../gpui")
+        // Try the parent-relative path first (works when gpui is a path dep)
+        let local = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../gpui");
+        if local.join("src/scene.rs").is_file() {
+            return local;
+        }
+        // Fall back to searching cargo git checkouts
+        let cargo_home = env::var("CARGO_HOME").unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_default();
+            format!("{home}/.cargo")
+        });
+        let checkouts = Path::new(&cargo_home).join("git/checkouts");
+        if let Ok(mut entries) = std::fs::read_dir(&checkouts) {
+            while let Ok(Some(entry)) = entries.next() {
+                let name = entry.file_name();
+                if !name.to_str().unwrap_or("").starts_with("zed-") {
+                    continue;
+                }
+                // Find any checkout that has crates/gpui/src/scene.rs
+                let base = entry.path();
+                let rev_dirs = std::fs::read_dir(&base).ok();
+                if let Some(mut revs) = rev_dirs {
+                    while let Ok(Some(rev)) = revs.next() {
+                        let candidate = rev.path().join("crates/gpui");
+                        if candidate.join("src/scene.rs").is_file() {
+                            return candidate;
+                        }
+                    }
+                }
+            }
+        }
+        panic!("could not locate gpui crate (scene.rs not found)");
     }
 
     /// To enable runtime compilation, we need to "stitch" the shaders file with the generated header
