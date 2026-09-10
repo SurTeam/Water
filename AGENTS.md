@@ -106,4 +106,11 @@ kill $TEST_PID       # 按 PID 杀，不用 pkill
 ## 测试
 
 - 3 个 dialog 测试（`dialog_input_caret_editing`、`rename_dialog_scopes`、`text_input_dialog_confirm`）是预存失败（workspace ID collision），不是回归。判断是否引入新失败时先看 baseline。
-- `cargo test` 在 Linux 上跑的是 headless 测试（无 X/GPU），UI 渲染需要真机验证。
+- `cargo test` 在 Linux 上跑的是 headless 测试（无 GPU），但 **X 服务器是有的**（X11，LXQt 桌面）。需要 GUI 验证时：
+  ```bash
+  export DISPLAY=:0
+  export XAUTHORITY=$(ls -t /tmp/xauth_* | head -1)  # 每次 SDDM 登录会变
+  ./target/debug/water &
+  ```
+  截图工具：`xwd -root -silent | convert xwd:- out.png`（ImageMagick）。
+- macOS 上无 X，用 `screencapture` 或 GPUI 自带截图。
