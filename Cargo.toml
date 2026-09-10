@@ -67,5 +67,6 @@ gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd1
 # from ~67 MB/s to ~100+ MB/s of parse throughput. Native CPU codegen
 # comes from .cargo/config.toml rustflags (-C target-cpu=native).
 [profile.release]
-lto = true
+opt-level = 3
+lto = "thin"
 codegen-units = 1
