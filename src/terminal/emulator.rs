@@ -328,11 +328,6 @@ impl TerminalEmulator {
         self.dirty = true;
     }
 
-    #[cfg(test)]
-    pub fn term_for_debug(&self) -> &alacritty_terminal::term::Term<EmulatorProxy> {
-        &self.term
-    }
-
     pub fn cursor_visible(&self) -> bool {
         self.term.mode().contains(TermMode::SHOW_CURSOR)
     }

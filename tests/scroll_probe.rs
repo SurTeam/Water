@@ -28,7 +28,6 @@ fn flood_400_inspect_snapshot() {
 
 #[test]
 fn scrollback_retains_all_history_up_to_limit() {
-    let size = TerminalSize::new(80, 24);
     // 132 columns like the user's terminal? Use 132x40 first.
     for (columns, lines) in [(80, 24), (132, 40)] {
         let size = TerminalSize::new(columns, lines);

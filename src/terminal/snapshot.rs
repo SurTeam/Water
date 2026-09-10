@@ -771,11 +771,6 @@ impl TerminalSnapshot {
             .total_lines()
             .saturating_sub(size.lines) as i64;
         let history_bottom = viewport_position.saturating_sub(history_len);
-        // The overscan window must cover the scrolled viewport: when the
-        // viewport is pinned at display_offset D, the paint can address
-        // source rows down to -(D + unacked_offset). Size the overscan to
-        // the full display_offset so scrolling to the top never paints blanks.
-        let overscan_rows = (display_offset as usize).max(VIEWPORT_OVERSCAN_ROWS);
         let mut materialized_cells = 0;
         let rows = (0..size.lines)
             .map(|row| {
@@ -795,7 +790,7 @@ impl TerminalSnapshot {
         let viewport_start = -(display_offset as i32);
         let viewport_end = viewport_start + size.lines as i32 - 1;
         let mut rows_before = Vec::new();
-        for distance in 1..=overscan_rows {
+        for distance in 1..=VIEWPORT_OVERSCAN_ROWS {
             let line = viewport_start.saturating_sub(distance as i32);
             if line < topmost {
                 break;

@@ -12,14 +12,15 @@ use gpui::{
 
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
-use crate::control::protocol::TerminalAttachResponse;
 use crate::control::{
     ControlClient, RemoteCommandClient, WaterSession, connect_water_session,
     spawn_state_polling_fallback,
 };
 use crate::ids::{ConnectionId, TerminalId};
 use crate::remote::SshTunnel;
-use crate::terminal::{TerminalEmulator, TerminalStreamEvent, TerminalTheme, WireTerminalEvent};
+use crate::terminal::{
+    MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalStreamEvent, TerminalTheme,
+};
 
 #[cfg(feature = "runtime-screenshot")]
 use super::control::UiScreenshot;
@@ -98,8 +99,8 @@ struct ManagedConnection {
 }
 
 /// One connection's terminal plane. The session owns the socket streams; the
-/// emulators own the screens; `events_tx` carries stream events from the
-/// pump threads to the main-thread listener.
+/// emulators own the screens; `events_tx` carries decoded stream events from
+/// the pump threads to the main-thread listener.
 pub(crate) struct TerminalConnection {
     pub session: Arc<WaterSession>,
     pub emulators: std::collections::BTreeMap<TerminalId, TerminalEmulator>,
@@ -112,14 +113,55 @@ pub(crate) struct TerminalConnection {
 pub(crate) enum TerminalEventMsg {
     Attached {
         terminal_id: TerminalId,
-        response: TerminalAttachResponse,
+        emulator: Box<TerminalEmulator>,
     },
     Event {
         terminal_id: TerminalId,
-        event: WireTerminalEvent,
+        event: TerminalStreamEvent,
     },
     /// The terminal's pump ended (process exit, detach, session end).
     Detached { terminal_id: TerminalId },
+}
+
+/// Maximum decoded terminal output parsed by GPUI in one foreground turn.
+/// Dense ANSI streams are CPU-heavy even when the PTY and socket finish
+/// quickly, so the event loop must regain control between bounded slices.
+const MAX_TERMINAL_BYTES_PER_UI_TURN: usize = MAX_OUTPUT_EVENT_BYTES;
+const MAX_TERMINAL_MESSAGES_PER_UI_TURN: usize = 64;
+const TERMINAL_UI_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
+
+impl TerminalEventMsg {
+    fn output_bytes(&self) -> usize {
+        match self {
+            Self::Event { event, .. } => event.output_bytes(),
+            Self::Attached { .. } | Self::Detached { .. } => 0,
+        }
+    }
+}
+
+/// Receives one strictly bounded foreground batch. The first event may exceed
+/// the byte budget, but it is then processed alone; an event that would cross
+/// the limit is carried into the next turn instead of being lost or reordered.
+fn recv_terminal_event_batch(
+    receiver: &std::sync::mpsc::Receiver<TerminalEventMsg>,
+    pending: Option<TerminalEventMsg>,
+) -> Option<(Vec<TerminalEventMsg>, Option<TerminalEventMsg>)> {
+    let first = pending.or_else(|| receiver.recv().ok())?;
+    let mut bytes = first.output_bytes();
+    let mut batch = vec![first];
+
+    while batch.len() < MAX_TERMINAL_MESSAGES_PER_UI_TURN {
+        let Ok(message) = receiver.try_recv() else {
+            break;
+        };
+        let message_bytes = message.output_bytes();
+        if bytes > 0 && bytes.saturating_add(message_bytes) > MAX_TERMINAL_BYTES_PER_UI_TURN {
+            return Some((batch, Some(message)));
+        }
+        bytes = bytes.saturating_add(message_bytes);
+        batch.push(message);
+    }
+    Some((batch, None))
 }
 
 struct RemoteConnectionSetup {
@@ -739,7 +781,7 @@ impl WaterApplication {
         connection
     }
 
-    /// Main-thread listener for raw terminal stream events: batches events
+    /// Main-thread listener for decoded terminal stream events: batches events
     /// off the pump threads, applies them to the connection's emulators,
     /// forwards emulator query responses to the PTY, and refreshes the
     /// views' terminal snapshots.
@@ -752,26 +794,25 @@ impl WaterApplication {
         let receiver = Arc::new(std::sync::Mutex::new(receiver));
         let application = self.clone();
         cx.spawn(async move |cx| {
+            let mut pending = None;
             loop {
                 let receiver_for_worker = receiver.clone();
-                let batch = cx
+                let pending_for_worker = pending.take();
+                let received = cx
                     .background_executor()
                     .spawn(async move {
                         let receiver = receiver_for_worker
                             .lock()
                             .expect("terminal event receiver poisoned");
-                        let first = receiver.recv().ok()?;
-                        let mut batch = vec![first];
-                        while let Ok(message) = receiver.try_recv() {
-                            batch.push(message);
-                        }
-                        Some(batch)
+                        recv_terminal_event_batch(&receiver, pending_for_worker)
                     })
                     .await;
-                let Some(batch) = batch else {
+                let Some((batch, next_pending)) = received else {
                     break;
                 };
+                pending = next_pending;
                 cx.update(|cx| application.apply_terminal_events(connection_id, batch, cx));
+                cx.background_executor().timer(TERMINAL_UI_YIELD).await;
             }
         })
     }
@@ -811,61 +852,20 @@ impl WaterApplication {
                 grouped.entry(terminal_id).or_default().push(message);
             }
             for (terminal_id, messages) in grouped {
-                let mut wire_events = Vec::new();
+                let mut stream_events = Vec::new();
                 let mut detached = false;
                 for message in messages {
                     match message {
-                        TerminalEventMsg::Attached { response, .. } => {
+                        TerminalEventMsg::Attached { emulator, .. } => {
                             terminal.pending_attachments.remove(&terminal_id);
-                            let mut emulator = TerminalEmulator::with_theme(
-                                terminal_id,
-                                response.size,
-                                terminal.scrollback_lines,
-                                terminal.theme,
-                            );
-                            let mut tracked_size = response.size;
-                            let mut replay_events = Vec::with_capacity(response.replay.len());
-                            for wire in &response.replay {
-                                let Some(event) =
-                                    TerminalStreamEvent::from_wire(wire, tracked_size)
-                                else {
-                                    continue;
-                                };
-                                if let TerminalStreamEvent::Resize { size, .. } = event {
-                                    tracked_size = size;
-                                }
-                                crate::metrics::add(
-                                    crate::metrics::replay_bytes_received(),
-                                    event.output_bytes(),
-                                );
-                                replay_events.push(event);
-                            }
-                            emulator.apply_batch(&replay_events);
-                            let _ = emulator.take_dirty();
-                            emulator.start_live();
-                            terminal.emulators.insert(terminal_id, emulator);
+                            terminal.emulators.insert(terminal_id, *emulator);
                             changed.insert(terminal_id);
                         }
-                        TerminalEventMsg::Event { event, .. } => wire_events.push(event),
+                        TerminalEventMsg::Event { event, .. } => stream_events.push(event),
                         TerminalEventMsg::Detached { .. } => detached = true,
                     }
                 }
                 if let Some(emulator) = terminal.emulators.get_mut(&terminal_id) {
-                    let mut tracked_size = emulator.size();
-                    let mut stream_events = Vec::with_capacity(wire_events.len());
-                    for wire in &wire_events {
-                        let Some(event) = TerminalStreamEvent::from_wire(wire, tracked_size) else {
-                            continue;
-                        };
-                        if let TerminalStreamEvent::Resize { size, .. } = event {
-                            tracked_size = size;
-                        }
-                        crate::metrics::add(
-                            crate::metrics::terminal_bytes_received(),
-                            event.output_bytes(),
-                        );
-                        stream_events.push(event);
-                    }
                     let effects = emulator.apply_batch(&stream_events);
                     let emulator_dirty = emulator.take_dirty();
                     for bytes in emulator.pty_writes() {
@@ -919,8 +919,8 @@ impl WaterApplication {
     }
 
     /// Attaches the connection's raw stream for one terminal (first render
-    /// or resync). Replays the bounded history into a fresh local emulator,
-    /// then flips it live and starts the pump.
+    /// or resync). The pump decodes the wire format and replays the bounded
+    /// history into a fresh local emulator before handing it to GPUI.
     pub(crate) fn ensure_terminal_attached(
         &self,
         connection_id: ConnectionId,
@@ -939,7 +939,7 @@ impl WaterApplication {
         if !terminal_exists {
             return;
         }
-        let (session, events_tx) = {
+        let (session, events_tx, scrollback_lines, theme) = {
             let mut connections = self.state.connections.borrow_mut();
             let Some(connection) = connections
                 .iter_mut()
@@ -955,23 +955,62 @@ impl WaterApplication {
             {
                 return;
             }
-            (terminal.session.clone(), terminal.events_tx.clone())
+            (
+                terminal.session.clone(),
+                terminal.events_tx.clone(),
+                terminal.scrollback_lines,
+                terminal.theme,
+            )
         };
         let spawn_result = std::thread::Builder::new()
             .name(format!("water-terminal-events-{terminal_id}"))
             .spawn(move || match session.attach(terminal_id) {
                 Ok((response, stream)) => {
+                    let mut emulator = TerminalEmulator::with_theme(
+                        terminal_id,
+                        response.size,
+                        scrollback_lines,
+                        theme,
+                    );
+                    let mut tracked_size = response.size;
+                    let mut replay_events = Vec::with_capacity(response.replay.len());
+                    for wire in &response.replay {
+                        let Some(event) = TerminalStreamEvent::from_wire(wire, tracked_size) else {
+                            continue;
+                        };
+                        if let TerminalStreamEvent::Resize { size, .. } = &event {
+                            tracked_size = *size;
+                        }
+                        crate::metrics::add(
+                            crate::metrics::replay_bytes_received(),
+                            event.output_bytes(),
+                        );
+                        replay_events.push(event);
+                    }
+                    emulator.apply_batch(&replay_events);
+                    let _ = emulator.take_dirty();
+                    emulator.start_live();
                     if events_tx
                         .send(TerminalEventMsg::Attached {
                             terminal_id,
-                            response,
+                            emulator: Box::new(emulator),
                         })
                         .is_err()
                     {
                         return;
                     }
                     let mut stream = stream;
-                    while let Ok(event) = stream.recv() {
+                    while let Ok(wire) = stream.recv() {
+                        let Some(event) = TerminalStreamEvent::from_wire(&wire, tracked_size) else {
+                            continue;
+                        };
+                        if let TerminalStreamEvent::Resize { size, .. } = &event {
+                            tracked_size = *size;
+                        }
+                        crate::metrics::add(
+                            crate::metrics::terminal_bytes_received(),
+                            event.output_bytes(),
+                        );
                         if events_tx
                             .send(TerminalEventMsg::Event { terminal_id, event })
                             .is_err()
@@ -1515,6 +1554,56 @@ fn application_menus() -> Vec<Menu> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn terminal_output_message(seq: u64, byte_count: usize) -> TerminalEventMsg {
+        TerminalEventMsg::Event {
+            terminal_id: TerminalId::new(1),
+            event: TerminalStreamEvent::Output {
+                seq,
+                size: crate::terminal::TerminalSize::new(80, 24),
+                bytes: Arc::from(vec![b'x'; byte_count]),
+            },
+        }
+    }
+
+    fn output_sequence(message: &TerminalEventMsg) -> u64 {
+        match message {
+            TerminalEventMsg::Event { event, .. } => event.seq(),
+            TerminalEventMsg::Attached { .. } | TerminalEventMsg::Detached { .. } => {
+                panic!("expected terminal output event")
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_event_batches_preserve_order_without_exceeding_the_ui_budget() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        for seq in 1..=3 {
+            sender
+                .send(terminal_output_message(
+                    seq,
+                    MAX_TERMINAL_BYTES_PER_UI_TURN * 3 / 4,
+                ))
+                .unwrap();
+        }
+
+        let (first, pending) = recv_terminal_event_batch(&receiver, None).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(output_sequence(&first[0]), 1);
+        assert!(first.iter().map(TerminalEventMsg::output_bytes).sum::<usize>()
+            <= MAX_TERMINAL_BYTES_PER_UI_TURN);
+
+        let (second, pending) = recv_terminal_event_batch(&receiver, pending).unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(output_sequence(&second[0]), 2);
+        assert!(second.iter().map(TerminalEventMsg::output_bytes).sum::<usize>()
+            <= MAX_TERMINAL_BYTES_PER_UI_TURN);
+
+        let (third, pending) = recv_terminal_event_batch(&receiver, pending).unwrap();
+        assert_eq!(third.len(), 1);
+        assert_eq!(output_sequence(&third[0]), 3);
+        assert!(pending.is_none());
+    }
 
     #[test]
     fn custom_titlebar_window_options_keep_the_window_freely_resizable() {

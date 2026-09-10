@@ -2287,18 +2287,18 @@ impl WorkspaceView {
         if let Some(delta) = delta {
             application.terminal_scroll_by(connection_id, terminal_id, delta);
         }
-        if let Some(previous) = self.terminal_snapshots.get(&terminal_id).cloned() {
-            if let Some(snapshot) =
+        if let Some(previous) = self.terminal_snapshots.get(&terminal_id).cloned()
+            && let Some(snapshot) =
                 application.terminal_snapshot(connection_id, terminal_id, Some(&previous))
-            {
-                shift_selection_for_viewport(
-                    &mut self.selection,
-                    terminal_id,
-                    &previous,
-                    &snapshot,
-                );
-                self.terminal_snapshots.insert(terminal_id, snapshot);
-            }
+        {
+            reconcile_local_viewport_snapshot(
+                &mut self.selection,
+                &mut self.scroll_accumulators,
+                terminal_id,
+                &previous,
+                &snapshot,
+            );
+            self.terminal_snapshots.insert(terminal_id, snapshot);
         }
     }
 
@@ -2646,7 +2646,7 @@ impl WorkspaceView {
         // The painted content is shifted by the unacked scroll offset (positive
         // = scrolled up into history), so a pixel row addresses the source row
         // that the paint actually shows — not the viewport's first row.
-        let scroll_offset_rows = self.terminal_scroll_offset_for_snapshot(&snapshot);
+        let scroll_offset_rows = self.terminal_scroll_offset_for_snapshot(snapshot);
         let first_visible =
             terminal_visible_source_rows(snapshot.size.lines, scroll_offset_rows).start;
         let row = (first_visible + mouse.row.saturating_sub(1) as i32)
@@ -5896,6 +5896,23 @@ fn shift_selection_for_viewport(
     shift_terminal_selection_rows(selection_state, delta);
 }
 
+/// Rebases all UI-local viewport state as soon as the local emulator applies
+/// a requested position. There is no worker acknowledgement in the raw-stream
+/// architecture: leaving the accumulated offset pending would apply the same
+/// scroll twice and cap subsequent gestures at the accumulator's safety bound.
+fn reconcile_local_viewport_snapshot(
+    selection: &mut Option<TerminalSelection>,
+    scroll_accumulators: &mut BTreeMap<TerminalId, TerminalScrollState>,
+    terminal_id: TerminalId,
+    previous: &TerminalSnapshot,
+    next: &TerminalSnapshot,
+) {
+    shift_selection_for_viewport(selection, terminal_id, previous, next);
+    if let Some(state) = scroll_accumulators.get_mut(&terminal_id) {
+        reconcile_visual_scroll(state, next);
+    }
+}
+
 fn shift_terminal_selection_rows(selection: &mut TerminalSelection, delta: i64) {
     let delta = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
     selection.anchor.position.row = selection.anchor.position.row.saturating_add(delta);
@@ -6534,7 +6551,6 @@ fn selection_bounds(
     selection: TerminalSelection,
 ) -> Option<(TerminalCellPosition, TerminalCellPosition)> {
     let columns = snapshot.size.columns;
-    let total_cells = snapshot.cell_count();
     let anchor_boundary = selection_boundary_index(selection.anchor, columns);
     let head_boundary = selection_boundary_index(selection.head, columns);
     let (start_endpoint, end_endpoint) = if anchor_boundary <= head_boundary {
@@ -6542,17 +6558,18 @@ fn selection_bounds(
     } else {
         (selection.head, selection.anchor)
     };
-    let total_cells_i64 = total_cells as i64;
-    let mut start =
-        selection_boundary_index(start_endpoint, columns).clamp(0, total_cells_i64) as usize;
-    let mut end =
-        selection_boundary_index(end_endpoint, columns).clamp(0, total_cells_i64) as usize;
+    let first_row = -(snapshot.rows_before.len() as i64);
+    let end_row = snapshot.size.lines.saturating_add(snapshot.rows_after.len()) as i64;
+    let first_cell = first_row.saturating_mul(columns as i64);
+    let end_cell = end_row.saturating_mul(columns as i64);
+    let mut start = selection_boundary_index(start_endpoint, columns).clamp(first_cell, end_cell);
+    let mut end = selection_boundary_index(end_endpoint, columns).clamp(first_cell, end_cell);
     if start >= end {
         return None;
     }
 
     while start < end {
-        let Some(cell) = snapshot.cell(start / columns, start % columns) else {
+        let Some(cell) = terminal_cell_at_linear_index(snapshot, start) else {
             break;
         };
         if cell.flags.leading_wide_spacer() {
@@ -6563,9 +6580,8 @@ fn selection_bounds(
         } else if cell.flags.wide_spacer() {
             // A trailing spacer belongs to the wide base immediately before
             // it. Normalize an endpoint landing on either half to the base.
-            if start > 0
-                && snapshot
-                    .cell((start - 1) / columns, (start - 1) % columns)
+            if start > first_cell
+                && terminal_cell_at_linear_index(snapshot, start - 1)
                     .is_some_and(|cell| cell.flags.wide())
             {
                 start -= 1;
@@ -6577,38 +6593,40 @@ fn selection_bounds(
         }
     }
     if end > start
-        && snapshot
-            .cell(
-                end.saturating_sub(1) / columns,
-                end.saturating_sub(1) % columns,
-            )
+        && terminal_cell_at_linear_index(snapshot, end.saturating_sub(1))
             .is_some_and(|cell| cell.flags.leading_wide_spacer())
     {
         end = end.saturating_sub(1);
     }
     if end > start
-        && snapshot
-            .cell(
-                end.saturating_sub(1) / columns,
-                end.saturating_sub(1) % columns,
-            )
+        && terminal_cell_at_linear_index(snapshot, end.saturating_sub(1))
             .is_some_and(|cell| cell.flags.wide())
     {
-        end = end.saturating_add(1).min(total_cells);
+        end = end.saturating_add(1).min(end_cell);
     }
     if start >= end {
         return None;
     }
     Some((
         TerminalCellPosition {
-            row: (start / columns) as i32,
-            column: start % columns,
+            row: start.div_euclid(columns as i64) as i32,
+            column: start.rem_euclid(columns as i64) as usize,
         },
         TerminalCellPosition {
-            row: ((end - 1) / columns) as i32,
-            column: (end - 1) % columns,
+            row: (end - 1).div_euclid(columns as i64) as i32,
+            column: (end - 1).rem_euclid(columns as i64) as usize,
         },
     ))
+}
+
+fn terminal_cell_at_linear_index(
+    snapshot: &TerminalSnapshot,
+    index: i64,
+) -> Option<&TerminalCell> {
+    let columns = snapshot.size.columns as i64;
+    let row = i32::try_from(index.div_euclid(columns)).ok()?;
+    let column = usize::try_from(index.rem_euclid(columns)).ok()?;
+    snapshot.relative_row(row)?.get(column)
 }
 
 fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelection) -> String {
@@ -6617,7 +6635,9 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
     };
     let mut text = String::new();
     for row in start.row..=end.row {
-        let row_index = row as usize;
+        let Some(cells) = snapshot.relative_row(row) else {
+            continue;
+        };
         let first_column = if row == start.row { start.column } else { 0 };
         let last_column = if row == end.row {
             end.column
@@ -6626,7 +6646,7 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
         };
         let line_start = text.len();
         for column in first_column..=last_column {
-            let Some(cell) = snapshot.cell(row_index, column) else {
+            let Some(cell) = cells.get(column) else {
                 continue;
             };
             if cell.flags.wide_spacer() || cell.flags.leading_wide_spacer() {
@@ -6639,8 +6659,8 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
         let trimmed_len = line.trim_end_matches(' ').len();
         text.truncate(line_start + trimmed_len);
         if row != end.row {
-            let wrapped = snapshot
-                .cell(row_index, snapshot.size.columns.saturating_sub(1))
+            let wrapped = cells
+                .get(snapshot.size.columns.saturating_sub(1))
                 .is_some_and(|cell| cell.flags.wrapline());
             if !wrapped {
                 text.push('\n');
@@ -7933,15 +7953,12 @@ mod tests {
     }
 
     fn endpoint(
-        row: usize,
+        row: i32,
         column: usize,
         side: TerminalSelectionSide,
     ) -> TerminalSelectionEndpoint {
         TerminalSelectionEndpoint {
-            position: TerminalCellPosition {
-                row: row as i32,
-                column,
-            },
+            position: TerminalCellPosition { row, column },
             side,
         }
     }
@@ -8110,6 +8127,32 @@ mod tests {
         let after = state.observed_viewport_position as f32 + state.visual_unacked_rows;
         assert!((state.visual_unacked_rows - 0.25).abs() < f32::EPSILON);
         assert!((before - after).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn local_viewport_reconciliation_allows_scrolling_past_first_batch() {
+        let terminal_id = TerminalId::new(1);
+        let mut states = BTreeMap::new();
+        let mut state = TerminalScrollState::new(0);
+        assert_eq!(state.accumulate(100.0), (Some(100), true));
+        states.insert(terminal_id, state);
+
+        let previous = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 4));
+        let mut next = previous.clone();
+        next.viewport_position = 100;
+        let mut selection = None;
+        reconcile_local_viewport_snapshot(
+            &mut selection,
+            &mut states,
+            terminal_id,
+            &previous,
+            &next,
+        );
+
+        let state = states.get_mut(&terminal_id).unwrap();
+        assert_eq!(state.observed_viewport_position, 100);
+        assert_eq!(state.visual_unacked_rows, 0.0);
+        assert_eq!(state.accumulate(100.0), (Some(200), true));
     }
 
     #[test]
@@ -8478,6 +8521,31 @@ mod tests {
             selected_terminal_text(&snapshot, selection),
             "hell界\nworld"
         );
+    }
+
+    #[test]
+    fn terminal_selection_includes_painted_scrollback_rows() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 2));
+        let history_row = "hist"
+            .chars()
+            .map(|character| TerminalCell {
+                character,
+                ..TerminalCell::default()
+            })
+            .collect::<Vec<_>>();
+        snapshot
+            .rows_before
+            .push(Arc::from(history_row.into_boxed_slice()));
+        let selection = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(-1, 0, TerminalSelectionSide::Left),
+            head: endpoint(-1, 3, TerminalSelectionSide::Right),
+        };
+
+        let (start, end) = selection_bounds(&snapshot, selection).unwrap();
+        assert_eq!((start.row, end.row), (-1, -1));
+        assert_eq!(selected_terminal_text(&snapshot, selection), "hist");
     }
 
     #[test]

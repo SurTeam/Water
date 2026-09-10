@@ -37,15 +37,13 @@ use super::model::{
 use super::replay::ReplayRing;
 use super::snapshot::TerminalSize;
 use super::stream::TerminalStreamEvent;
+use super::MAX_OUTPUT_EVENT_BYTES;
 
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;
 const READER_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
-/// Upper bound for one raw output event. Ticks with more data are split into
-/// consecutive events (still strictly ordered), keeping wire frames small.
-const MAX_OUTPUT_EVENT_BYTES: usize = 256 * 1024;
 /// One tick of the worker loop will coalesce at most this much PTY output
 /// before yielding to command processing.
 const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;

@@ -12,6 +12,10 @@ pub const HOMEBREW_ZSH: &str = "/opt/homebrew/bin/zsh";
 pub const INTEL_HOMEBREW_ZSH: &str = "/usr/local/bin/zsh";
 pub const SYSTEM_ZSH: &str = "/bin/zsh";
 
+/// Shared live-stream/UI slice size. Keeping the producer's events within
+/// this limit lets GPUI yield between parser slices during dense ANSI output.
+pub(crate) const MAX_OUTPUT_EVENT_BYTES: usize = 64 * 1024;
+
 /// Colors used when answering terminal dynamic-color queries (OSC 10/11/12).
 /// The GUI-owned emulator uses these values for dynamic-color responses,
 /// keeping query replies aligned with the rendered palette.
