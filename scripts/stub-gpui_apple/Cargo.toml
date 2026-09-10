@@ -8,6 +8,9 @@ license = "Apache-2.0"
 [lib]
 path = "src/gpui_apple.rs"
 
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cbindgen = "0.28"
+
 [features]
 default = []
 bench-support = ["gpui/bench-support"]
