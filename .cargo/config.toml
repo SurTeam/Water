@@ -1,4 +1,0 @@
-[build]
-# target-cpu is not a valid [profile] key; apply it as a rustflag instead.
-# arm64 native codegen: wider vector units for the memcpy/grid hot paths.
-rustflags = ["-C", "target-cpu=native"]

@@ -58,14 +58,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "test-support"] }
 
-# Terminal parse throughput in dev is ~6 MB/s (opt-0) vs ~70 MB/s in release;
 # use `cargo run --release` for performance-sensitive terminal work.
 
-# The 0.8 s / 61 MB benchmark target is a release-profile target. LTO plus
-# single-codegen-unit plus native CPU codegen push the vte/alacritty grid hot
-# path (which is monomorphized across the water/vte/alacritty crate boundary)
-# from ~67 MB/s to ~100+ MB/s of parse throughput. Native CPU codegen
-# comes from .cargo/config.toml rustflags (-C target-cpu=native).
 [profile.release]
 opt-level = 3
 lto = "thin"
