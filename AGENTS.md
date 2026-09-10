@@ -82,3 +82,28 @@ kill $TEST_PID       # 按 PID 杀，不用 pkill
 - `pkill -x water-srv-dev`（debug/dev-opt server）
 - 按 PID kill（`kill $PID`）
 - `pgrep -x water` 先确认目标再 kill
+
+## 跨平台构建（Linux → macOS）
+
+- macOS arm64 交叉编译依赖 zig cc 作为 linker（`scripts/zig-cc-mac`），系统 `ld64.lld` 有 tbd 解析 bug。
+- Framework stub（`scripts/stub/macos-sdk/`）用 `symbols: ['*']` 通配符，所有 ObjC/framework 符号留 undefined，靠 `-Wl,-undefined -Wl,dynamic_lookup` 在运行时解析。
+- `shaders.metallib` 必须在 Mac 上预编译（`scripts/build-metallib.sh`），产物提交到 `scripts/prebuilt/`。Linux 上无法编译 Metal shader。
+- `gpui_apple` 和 `media` crate 通过 `[patch]` 指向 `scripts/stub-gpui_apple/` 和 `scripts/stub-media/`，在 macOS host 上行为与上游一致，在非 macOS host 上提供 fallback（空 metallib / stub bindings）。
+- 新增 macOS-only 的 framework 依赖时，需要在 `scripts/stub/macos-sdk/` 加对应的 `.tbd` stub。
+- dev 变体用 `--profile dev-opt`（opt-level 3，inherits release），不是 `debug`。`WATER_BUILD_PROFILE` 由 build.rs 从 cargo `PROFILE` 环境变量烘焙，所有 dev/release 判断都用 `!= "release"`。
+
+## 文件系统与 Git
+
+- **文件名大小写敏感**：macOS 默认文件系统不区分大小写，Linux 区分。不要在仓库里同时存在 `Agents.md` 和 `AGENTS.md`（已发生过）。新增文件前 `git ls-files | grep -i <name>` 检查。
+- `.gitignore` 里加 `.pi/`（pi agent 会话目录）。
+
+## 配置与主题
+
+- 新增 `ThemeColors` 字段时，必须同步更新：`ThemeConfig` 结构体 + `Default` impl + `ThemeConfigOverrides` + `apply_to` + `colors()` 方法 + 测试里的 `ThemeColors` 构造。
+- 新增 `UiConfig` / `TerminalConfig` 字段时，同步更新对应的 `Overrides` 结构体和 config 解析（`apply_to`）。
+- 设置面板新增字段需要：`SettingField` 枚举 + `id()` + `is_color()`（如适用）+ `raw_value()` + `apply_edit()` + `color_value()`（如适用）+ render 列表。
+
+## 测试
+
+- 3 个 dialog 测试（`dialog_input_caret_editing`、`rename_dialog_scopes`、`text_input_dialog_confirm`）是预存失败（workspace ID collision），不是回归。判断是否引入新失败时先看 baseline。
+- `cargo test` 在 Linux 上跑的是 headless 测试（无 X/GPU），UI 渲染需要真机验证。
