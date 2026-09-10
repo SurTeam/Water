@@ -61,28 +61,41 @@ impl AppConfig {
     /// automatically when it is the existing user config, which makes the
     /// standard `~/.config/water` layout convenient on every platform.
     pub fn default_path() -> PathBuf {
+        let dir_name = if env!("WATER_BUILD_PROFILE") != "release" {
+            "water-dev"
+        } else {
+            "water"
+        };
         if cfg!(target_os = "macos")
             && let Some(home) = std::env::var_os("HOME")
         {
             return PathBuf::from(home)
                 .join("Library")
                 .join("Application Support")
-                .join("water")
+                .join(dir_name)
                 .join("config.json");
         }
 
-        Self::standard_path()
+        Self::standard_path_with_dir(dir_name)
     }
 
     /// Returns the conventional XDG-style Water config path.
     pub fn standard_path() -> PathBuf {
+        Self::standard_path_with_dir(if env!("WATER_BUILD_PROFILE") != "release" {
+            "water-dev"
+        } else {
+            "water"
+        })
+    }
+
+    fn standard_path_with_dir(dir_name: &str) -> PathBuf {
         if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(config_home).join("water").join("config.json");
+            return PathBuf::from(config_home).join(dir_name).join("config.json");
         }
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home)
                 .join(".config")
-                .join("water")
+                .join(dir_name)
                 .join("config.json");
         }
         PathBuf::from("water-config.json")

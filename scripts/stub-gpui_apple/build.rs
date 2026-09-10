@@ -5,10 +5,11 @@ fn main() {
     macos_build::run();
     #[cfg(not(target_os = "macos"))]
     {
+        use std::path::PathBuf;
         // Cross-compile fallback: use prebuilt metallib if available,
         // otherwise create empty file so include_bytes! works.
         let out = std::env::var("OUT_DIR").unwrap();
-        let prebuilt = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        let prebuilt = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("../../scripts/prebuilt/shaders.metallib");
         if prebuilt.is_file() {
             std::fs::copy(&prebuilt, format!("{out}/shaders.metallib")).ok();

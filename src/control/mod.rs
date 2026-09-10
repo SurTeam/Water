@@ -15,5 +15,11 @@ pub use server::{ControlServer, ControlServerHandle};
 pub fn default_socket_path() -> std::path::PathBuf {
     std::env::var_os("WATER_CONTROL_SOCKET")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp/water.sock"))
+        .unwrap_or_else(|| {
+            if env!("WATER_BUILD_PROFILE") != "release" {
+                std::path::PathBuf::from("/tmp/water-dev.sock")
+            } else {
+                std::path::PathBuf::from("/tmp/water.sock")
+            }
+        })
 }
