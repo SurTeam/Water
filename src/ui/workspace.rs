@@ -2289,6 +2289,49 @@ impl WorkspaceView {
         }
     }
 
+    /// Returns a terminal to its live viewport before user input reaches the
+    /// shell. Cancel every UI-local scroll source first so a request already
+    /// scheduled for the next frame cannot pull the viewport back into
+    /// history after the input-triggered jump.
+    fn focus_terminal_live_bottom(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        self.selection = None;
+        self.active_trackpad_scrolls.remove(&terminal_id);
+        self.mouse_scroll_animations.remove(&terminal_id);
+        let had_pending_request = self
+            .pending_viewport_requests
+            .remove(&terminal_id)
+            .is_some();
+
+        let viewport_position = self
+            .terminal_snapshot_for(terminal_id)
+            .map(|snapshot| snapshot.viewport_position)
+            .unwrap_or_default();
+        let state = self
+            .scroll_accumulators
+            .entry(terminal_id)
+            .or_insert_with(|| TerminalScrollState::new(viewport_position));
+        let was_scrolled = had_pending_request
+            || state.observed_viewport_position != 0
+            || state.visual_unacked_rows != 0.0
+            || state.requested_viewport_position != 0;
+        if !was_scrolled {
+            return;
+        }
+
+        // Preserve the current snapshot as the reconciliation base while
+        // painting as close to the live bottom as its prepared rows allow.
+        // When the emulator acknowledges ScrollTo(0), reconciliation reduces
+        // this visual offset back to zero without a backwards flash.
+        state.visual_unacked_rows = -(state.observed_viewport_position as f32);
+        state.requested_viewport_position = 0;
+        state.request_started_at = Some(Instant::now());
+        scroll_stat_inc(&SCROLL_VIEWPORT_REQUESTS);
+        scroll_stat_max_unacked(state.visual_unacked_rows);
+
+        self.apply_local_viewport(terminal_id, Some(0), None, cx);
+        cx.notify();
+    }
+
     /// Refreshes the locally rendered snapshots for terminals whose raw
     /// stream advanced, then requests one repaint for the whole view.
     pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
@@ -2617,11 +2660,8 @@ impl WorkspaceView {
         position: Point<gpui::Pixels>,
     ) -> Option<TerminalSelectionEndpoint> {
         let snapshot = self.terminal_snapshot_for(terminal_id)?;
-        let mouse = terminal_mouse_position(
-            position,
-            self.terminal_bounds_for(terminal_id),
-            self.terminal_metrics,
-        );
+        let bounds = self.terminal_bounds_for(terminal_id);
+        let mouse = terminal_mouse_position(position, bounds, self.terminal_metrics);
         let column = mouse
             .column
             .saturating_sub(1)
@@ -2635,11 +2675,21 @@ impl WorkspaceView {
         // = scrolled up into history), so a pixel row addresses the source row
         // that the paint actually shows — not the viewport's first row.
         let scroll_offset_rows = self.terminal_scroll_offset_for_snapshot(snapshot);
-        let first_visible =
-            terminal_visible_source_rows(snapshot.size.lines, scroll_offset_rows).start;
-        let row = (first_visible + mouse.row.saturating_sub(1) as i32)
-            .max(-(snapshot.history_len) as i32)
-            .min(snapshot.size.lines as i32 - 1);
+        let first_available = -(snapshot.rows_before.len() as i32);
+        let last_available = snapshot
+            .size
+            .lines
+            .saturating_add(snapshot.rows_after.len())
+            .saturating_sub(1) as i32;
+        let row = terminal_source_row_at(
+            position.y,
+            bounds,
+            self.terminal_metrics,
+            snapshot.size.lines,
+            scroll_offset_rows,
+        )
+        .max(first_available)
+        .min(last_available);
         Some(TerminalSelectionEndpoint {
             position: TerminalCellPosition { row, column },
             side,
@@ -2965,6 +3015,7 @@ impl WorkspaceView {
                     .active_terminal_snapshot()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
+                self.focus_terminal_live_bottom(terminal_id, cx);
                 self.paste_into_terminal(
                     terminal_id,
                     modes.bracketed_paste && self.config.features.bracketed_paste,
@@ -2977,6 +3028,7 @@ impl WorkspaceView {
             if let Some(terminal_id) = self.active_terminal_id()
                 && !self.copy_terminal_selection(terminal_id, cx)
             {
+                self.focus_terminal_live_bottom(terminal_id, cx);
                 self.enqueue_terminal_command(
                     terminal_id,
                     TerminalCommand::SendText {
@@ -2990,6 +3042,7 @@ impl WorkspaceView {
         }
         if shortcut_matches_or_default(&shortcuts.eof, "cmd-d", keystroke) {
             if let Some(terminal_id) = self.active_terminal_id() {
+                self.focus_terminal_live_bottom(terminal_id, cx);
                 self.enqueue_terminal_command(
                     terminal_id,
                     TerminalCommand::SendText {
@@ -3038,7 +3091,7 @@ impl WorkspaceView {
         let special_name =
             terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
                 .is_some();
-        self.selection = None;
+        self.focus_terminal_live_bottom(terminal_id, cx);
         self.clear_ime();
         self.enqueue_terminal_command(
             terminal_id,
@@ -5657,6 +5710,7 @@ impl EntityInputHandler for WorkspaceView {
         self.selection = None;
         self.reset_ime_marked_text();
         if !new_text.is_empty() {
+            self.focus_terminal_live_bottom(terminal_id, cx);
             self.enqueue_terminal_command(
                 terminal_id,
                 TerminalCommand::SendText {
@@ -5720,7 +5774,11 @@ impl EntityInputHandler for WorkspaceView {
                 let end = replacement_start.saturating_add(new_length);
                 end..end
             });
-        self.selection = None;
+        if !new_text.is_empty() {
+            self.focus_terminal_live_bottom(terminal_id, cx);
+        } else {
+            self.selection = None;
+        }
         cx.notify();
     }
 
@@ -7446,6 +7504,49 @@ fn terminal_visible_source_rows(
     let first = -whole - i32::from(fraction > 0.0);
     let end = screen_lines as i32 - whole + i32::from(fraction < 0.0);
     first..end
+}
+
+/// Maps a pointer Y coordinate back to the exact source row painted beneath
+/// it. Rendering shifts the snapped row grid by the fractional part of the
+/// smooth-scroll offset, so hit-testing must undo that shift before choosing
+/// a grid row. Otherwise the lower half of a visually shifted row selects its
+/// previous neighbor.
+fn terminal_source_row_at(
+    position_y: gpui::Pixels,
+    bounds: Option<Bounds<gpui::Pixels>>,
+    metrics: TerminalMetrics,
+    screen_lines: usize,
+    scroll_offset_rows: f32,
+) -> i32 {
+    let visible = terminal_visible_source_rows(screen_lines, scroll_offset_rows);
+    if visible.is_empty() {
+        return 0;
+    }
+    let Some(bounds) = bounds else {
+        return visible.start;
+    };
+
+    let whole = scroll_offset_rows.trunc() as i32;
+    let fraction = scroll_offset_rows - whole as f32;
+    let origin_y = f32::from(bounds.origin.y);
+    let translated_y = f32::from(position_y) - fraction * metrics.line_height;
+    let first_edge = terminal_grid_edge(origin_y, metrics.line_height, 0, metrics.scale_factor);
+    let painted_row = if translated_y < first_edge {
+        -1
+    } else {
+        let (row, _) = terminal_grid_index_at(
+            translated_y,
+            origin_y,
+            metrics.line_height,
+            metrics.scale_factor,
+            f32::from(bounds.size.height),
+        );
+        i32::try_from(row).unwrap_or(i32::MAX)
+    };
+    painted_row
+        .saturating_sub(whole)
+        .max(visible.start)
+        .min(visible.end.saturating_sub(1))
 }
 
 fn terminal_prepared_source_rows(
@@ -9455,6 +9556,12 @@ mod tests {
             assert_eq!(
                 selection.anchor.position.row, -2,
                 "a pixel in the shifted grid must map to the painted source row"
+            );
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), cx);
+            assert_eq!(
+                view.selection.unwrap().anchor.position.row,
+                -1,
+                "the lower half after a fractional shift must map to the next painted row"
             );
             // With the viewport pinned at the bottom (no unacked offset), the
             // mapping is purely viewport-relative.
