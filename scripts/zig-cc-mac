@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cross-linker for *-apple-darwin on Linux.
+# Uses zig cc (its bundled lld handles .tbd stubs and self-contained
+# Rust std). Requires: zig (>= 0.14) on PATH.
+#
+# Usage as -C linker: cargo passes the full link line; we translate the
+# few flags zig cc rejects and resolve -framework X to tbd paths.
+
+zig_path="$(command -v zig)"
+sdk_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/stub" && pwd)/macos-sdk"
+fw_dir="$sdk_dir/System/Library/Frameworks"
+
+zig_target=""
+args=()
+while [[ $# -gt 0 ]]; do
+  arg="$1"
+  case "$arg" in
+    -arch)
+      shift
+      case "$1" in
+        arm64) zig_target="aarch64-macos" ;;
+        x86_64) zig_target="x86_64-macos" ;;
+        *) echo "error: unsupported arch: $1" >&2; exit 1 ;;
+      esac
+      shift
+      ;;
+    -framework)
+      shift
+      fw_name="$1"
+      shift
+      tbd="$fw_dir/$fw_name.framework/$fw_name.tbd"
+      if [[ -f "$tbd" ]]; then
+        args+=("$tbd")
+      fi
+      ;;
+    -liconv)
+      shift
+      ;;
+    -lobjc)
+      shift
+      ;;
+    -mmacosx-version-min=*)
+      shift
+      ;;
+    *)
+      args+=("$arg")
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$zig_target" ]]; then
+  zig_target="aarch64-macos"
+fi
+
+exec "$zig_path" cc -target "$zig_target" -Wl,-undefined -Wl,dynamic_lookup "${args[@]}"

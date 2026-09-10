@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "error: Water.app can only be assembled on macOS" >&2
-  exit 1
-fi
+# Builds the Water.app bundle and a distributable zip.
+#
+# On macOS: builds natively (embedded servers + GUI), assembles, signs, zips.
+# On Linux: cross-compiles aarch64-apple-darwin via zig cc, assembles, zips.
+#           Requires: zig (>= 0.14) on PATH.
+#
+# Environment:
+#   CODESIGN_IDENTITY     codesign identity (default: "-" ad-hoc)
+#   WATER_RUST_TOOLCHAIN  rustup toolchain (default: stable)
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
@@ -17,31 +22,53 @@ macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
 version="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
 server_bundle_dir="$root_dir/target/embedded-servers"
-case "$(uname -m)" in
-  arm64 | aarch64) host_server_target="aarch64-apple-darwin" ;;
-  x86_64 | amd64) host_server_target="x86_64-apple-darwin" ;;
-  *) echo "error: unsupported macOS build architecture: $(uname -m)" >&2; exit 1 ;;
-esac
+rust_toolchain="${WATER_RUST_TOOLCHAIN:-stable}"
+target="aarch64-apple-darwin"
 
 WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" "$root_dir/scripts/build-embedded-servers.sh"
-WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
-  cargo build --release --bin "$binary_name"
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  build_dir="$root_dir/target/release"
+  WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
+    cargo build --release --bin "$binary_name"
+else
+  # Cross-compile on Linux via zig cc
+  if ! command -v zig >/dev/null; then
+    echo "error: zig is required to cross-compile macOS on Linux" >&2
+    exit 1
+  fi
+  build_dir="$root_dir/target/$target/release"
+  export PATH="$root_dir/scripts/stub:$PATH"
+  WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
+    RUSTFLAGS="-C strip=symbols -C linker=$root_dir/scripts/zig-cc-mac" \
+    rustup run "$rust_toolchain" cargo build --release --bin "$binary_name" --target "$target"
+fi
 
 rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir"
-install -m 755 "$root_dir/target/release/$binary_name" "$macos_dir/$binary_name"
-install -m 755 "$root_dir/target/$host_server_target/release/water-server" \
+install -m 755 "$build_dir/$binary_name" "$macos_dir/$binary_name"
+install -m 755 "$root_dir/target/$target/release/water-server" \
   "$macos_dir/water-server"
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
 sed "s/__WATER_VERSION__/$version/g" "$root_dir/assets/macos/Info.plist" > "$contents_dir/Info.plist"
 
-plutil -lint "$contents_dir/Info.plist" >/dev/null
+if command -v plutil >/dev/null; then
+  plutil -lint "$contents_dir/Info.plist" >/dev/null
+else
+  python3 -c "import xml.dom.minidom, sys; xml.dom.minidom.parse('$contents_dir/Info.plist')"
+fi
 
-# Ad-hoc signing makes the local bundle internally consistent. Set
-# CODESIGN_IDENTITY to a Developer ID/Application identity for distribution.
 codesign_identity="${CODESIGN_IDENTITY:--}"
-codesign --force --deep --sign "$codesign_identity" "$app_dir" >/dev/null
-codesign --verify --deep --strict "$app_dir"
+if command -v codesign >/dev/null; then
+  codesign --force --deep --sign "$codesign_identity" "$app_dir" >/dev/null
+  codesign --verify --deep --strict "$app_dir"
+else
+  echo "note: codesign not found; skipping signature steps"
+fi
+
+zip_path="$root_dir/dist/$app_name-$version-macOS-arm64.zip"
+rm -f "$zip_path"
+(cd "$root_dir/dist" && zip -r -X -q "$zip_path" "$app_name.app")
 
 echo "Built $app_dir"
-echo "Launch with: open '$app_dir'"
+echo "Built $zip_path"

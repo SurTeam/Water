@@ -33,6 +33,17 @@ for target in "${targets[@]}"; do
       WATER_BUILDING_PORTABLE_SERVER=1 RUSTC="$rustc_path" RUSTFLAGS="-C strip=symbols" \
       rustup run "$rust_toolchain" cargo zigbuild --release --no-default-features \
         --bin water-server --target "$target"
+  elif [[ "$target" == *-apple-darwin && "$(uname -s)" != "Darwin" ]]; then
+    # Cross-compile on non-macOS hosts via zig cc (scripts/zig-cc-mac)
+    if ! command -v zig >/dev/null; then
+      echo "error: zig is required to cross-compile $target on $(uname -s)" >&2
+      exit 1
+    fi
+    env -u WATER_SERVER_BUNDLE_DIR -u WATER_REQUIRE_EMBEDDED_SERVERS \
+      WATER_BUILDING_PORTABLE_SERVER=1 \
+      RUSTFLAGS="-C strip=symbols -C linker=$root_dir/scripts/zig-cc-mac" \
+      rustup run "$rust_toolchain" cargo build --release --no-default-features \
+        --bin water-server --target "$target"
   else
     env -u WATER_SERVER_BUNDLE_DIR -u WATER_REQUIRE_EMBEDDED_SERVERS \
       WATER_BUILDING_PORTABLE_SERVER=1 RUSTC="$rustc_path" RUSTFLAGS="-C strip=symbols" \

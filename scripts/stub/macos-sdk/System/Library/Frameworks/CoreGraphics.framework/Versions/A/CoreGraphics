@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>archive-version</key><integer>2</integer>
+  <key>kind</key><string>root-symbol</string>
+  <key>uuid</key><string>00000000-0000-0000-0000-000000000000</string>
+  <key>attributes</key><dict>
+    <key>nore_export</key><true/>
+  </dict>
+  <key>symbols</key><dict>
+    <key>non-weak-undefined</key><dict>
+      <key>targets</key><array>
+        <dict>
+          <key>architecture</key><string>arm64</string>
+          <key>platform</key><string>macos</string>
+          <key>version</key><string>11.0</string>
+        </dict>
+      </array>
+      <key>names</key><array/>
+    </dict>
+  </dict>
+  <key>reexports</key><array/>
+  <key>weak-definitions</key><dict>
+    <key>targets</key><array>
+      <dict>
+        <key>architecture</key><string>arm64</string>
+        <key>platform</key><string>macos</string>
+        <key>version</key><string>11.0</string>
+      </dict>
+    </array>
+    <key>names</key><array/>
+  </dict>
+  <key>install-name</key><string>/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics</string>
+  <key>current-version</key><string>1.0.0</string>
+</dict>
+</plist>

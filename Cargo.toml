@@ -68,3 +68,7 @@ gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd1
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+[patch."https://github.com/zed-industries/zed.git"]
+media = { path = "scripts/stub-media" }
+gpui_apple = { path = "scripts/stub-gpui_apple" }
