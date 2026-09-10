@@ -18,10 +18,10 @@ pub mod terminal;
 pub mod ui;
 pub mod workspace;
 
-/// Set the visible process name (comm) for unambiguous ps/pkill targeting.
-/// Dev builds use `water-dev` / `water-server-dev` to avoid killing the
-/// production server by accident.
-#[cfg(unix)]
+/// Set the visible process name (comm / progname) for unambiguous
+/// ps/pkill targeting. Dev builds use `water-dev` / `water-srv-dev`
+/// to avoid killing the production server by accident.
+#[cfg(target_os = "linux")]
 pub fn set_process_name(name: &str) {
     unsafe {
         let mut bytes = name.as_bytes().to_vec();
@@ -34,7 +34,18 @@ pub fn set_process_name(name: &str) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(target_os = "macos")]
+pub fn set_process_name(name: &str) {
+    unsafe extern "C" {
+        fn setprogname(name: *const libc::c_char);
+    }
+    let c_name = std::ffi::CString::new(name).unwrap_or_default();
+    unsafe {
+        setprogname(c_name.as_ptr());
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn set_process_name(_name: &str) {}
 
 pub use agent::{AgentKind, DetectedAgent, detect_agent};

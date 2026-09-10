@@ -5,9 +5,16 @@ fn main() {
     macos_build::run();
     #[cfg(not(target_os = "macos"))]
     {
-        // Cross-compile fallback: create empty metallib so include_bytes! works.
+        // Cross-compile fallback: use prebuilt metallib if available,
+        // otherwise create empty file so include_bytes! works.
         let out = std::env::var("OUT_DIR").unwrap();
-        std::fs::write(format!("{out}/shaders.metallib"), []).ok();
+        let prebuilt = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("../../scripts/prebuilt/shaders.metallib");
+        if prebuilt.is_file() {
+            std::fs::copy(&prebuilt, format!("{out}/shaders.metallib")).ok();
+        } else {
+            std::fs::write(format!("{out}/shaders.metallib"), []).ok();
+        }
     }
 }
 
