@@ -125,7 +125,7 @@ mod macos_build {
         });
         let checkouts = Path::new(&cargo_home).join("git/checkouts");
         if let Ok(mut entries) = std::fs::read_dir(&checkouts) {
-            while let Ok(Some(entry)) = entries.next() {
+            while let Some(Ok(entry)) = entries.next() {
                 let name = entry.file_name();
                 if !name.to_str().unwrap_or("").starts_with("zed-") {
                     continue;
@@ -134,7 +134,7 @@ mod macos_build {
                 let base = entry.path();
                 let rev_dirs = std::fs::read_dir(&base).ok();
                 if let Some(mut revs) = rev_dirs {
-                    while let Ok(Some(rev)) = revs.next() {
+                    while let Some(Ok(rev)) = revs.next() {
                         let candidate = rev.path().join("crates/gpui");
                         if candidate.join("src/scene.rs").is_file() {
                             return candidate;
