@@ -20,8 +20,8 @@ variant="${WATER_APP_VARIANT:-release}"
 if [[ "$variant" == "dev" ]]; then
   app_name="Water Dev"
   bundle_id="dev.water.terminal.dev"
-  profile_flag=""
-  cargo_profile="debug"
+  profile_flag="--profile dev-opt"
+  cargo_profile="dev-opt"
 else
   app_name="Water"
   bundle_id="dev.water.terminal"
