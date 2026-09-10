@@ -2267,9 +2267,9 @@ impl WorkspaceView {
         }
     }
 
-    /// Viewport moves are GUI-local in the raw-stream architecture: apply
-    /// them to the local emulator immediately (the server-side command is a
-    /// wire-compatibility no-op), then refresh the local snapshot.
+    /// Viewport moves are GUI-local in the raw-stream architecture. They are
+    /// queued to the emulator worker; the visual accumulator covers the short
+    /// delay until its next snapshot acknowledges the new viewport.
     fn apply_local_viewport(
         &mut self,
         terminal_id: TerminalId,
@@ -2286,19 +2286,6 @@ impl WorkspaceView {
         }
         if let Some(delta) = delta {
             application.terminal_scroll_by(connection_id, terminal_id, delta);
-        }
-        if let Some(previous) = self.terminal_snapshots.get(&terminal_id).cloned()
-            && let Some(snapshot) =
-                application.terminal_snapshot(connection_id, terminal_id, Some(&previous))
-        {
-            reconcile_local_viewport_snapshot(
-                &mut self.selection,
-                &mut self.scroll_accumulators,
-                terminal_id,
-                &previous,
-                &snapshot,
-            );
-            self.terminal_snapshots.insert(terminal_id, snapshot);
         }
     }
 
@@ -2333,8 +2320,9 @@ impl WorkspaceView {
             let snapshot = application.terminal_snapshot(connection_id, terminal_id, previous_ref);
             match (previous, snapshot) {
                 (Some(previous), Some(snapshot)) => {
-                    shift_selection_for_viewport(
+                    reconcile_local_viewport_snapshot(
                         &mut self.selection,
+                        &mut self.scroll_accumulators,
                         terminal_id,
                         &previous,
                         &snapshot,
