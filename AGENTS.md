@@ -114,3 +114,4 @@ kill $TEST_PID       # 按 PID 杀，不用 pkill
   ```
   截图工具：`xwd -root -silent | convert xwd:- out.png`（ImageMagick）。
 - macOS 上无 X，用 `screencapture` 或 GPUI 自带截图。
+- **GUI 交互测试必须使用 Water 提供的操作接口**（`waterctl` / control socket API），如点击、滚动、按键等。不要用 `xdotool`、`xte` 等系统工具直接操作窗口。如果现有接口不支持某个操作（如滚动到指定位置、双击、拖拽），应该先在 Water 的 control/automation 层添加对应接口，再用新接口测试。这保证测试走的是和真实用户一致的状态变更路径（`AppCommand` → `CommandDispatcher` → model），而不是绕过应用直接发 X 事件。
