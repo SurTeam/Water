@@ -457,6 +457,9 @@ impl TerminalConfig {
 pub struct UiConfig {
     /// Base font size for Water chrome, workspace labels, and settings text.
     pub font_size: f32,
+    /// Font family for Water chrome (dialogs, settings, sidebar labels).
+    /// Empty string means use the platform default.
+    pub font_family: String,
     pub sidebar_visible: bool,
     /// Whether workspace rows show a count of currently running agents.
     pub sidebar_show_agent_count: bool,
@@ -480,6 +483,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             font_size: DEFAULT_UI_FONT_SIZE,
+            font_family: String::new(),
             sidebar_visible: true,
             sidebar_show_agent_count: true,
             tab_bar_vertical_wheel_scroll: false,
@@ -651,6 +655,10 @@ pub struct ThemeConfig {
     /// Accent color used for active pane borders and active tabs.
     pub active_pane_border: String,
     pub inactive_pane_border: String,
+    /// Accent color for interactive elements (buttons, focus rings, links).
+    pub accent: String,
+    /// Text color for interactive elements when active (on accent background).
+    pub accent_foreground: String,
     pub chrome_background: String,
     pub tab_active_background: String,
     pub tab_inactive_background: String,
@@ -692,6 +700,8 @@ impl Default for ThemeConfig {
             pane_background: "#2c2c2c".to_owned(),
             active_pane_border: "#339966".to_owned(),
             inactive_pane_border: "#555555".to_owned(),
+            accent: "#339966".to_owned(),
+            accent_foreground: "#000000".to_owned(),
             chrome_background: "#000000".to_owned(),
             tab_active_background: "#339966".to_owned(),
             tab_inactive_background: "#000000".to_owned(),
@@ -735,6 +745,8 @@ pub struct ThemeColors {
     pub pane_background: u32,
     pub active_pane_border: u32,
     pub inactive_pane_border: u32,
+    pub accent: u32,
+    pub accent_foreground: u32,
     pub chrome_background: u32,
     pub tab_active_background: u32,
     pub tab_inactive_background: u32,
@@ -773,6 +785,8 @@ impl ThemeConfig {
             pane_background: parse_color(&self.pane_background, 0x2c2c2c),
             active_pane_border: parse_color(&self.active_pane_border, 0x339966),
             inactive_pane_border: parse_color(&self.inactive_pane_border, 0x555555),
+            accent: parse_color(&self.accent, 0x339966),
+            accent_foreground: parse_color(&self.accent_foreground, 0x000000),
             chrome_background: parse_color(&self.chrome_background, 0x000000),
             tab_active_background: parse_color(&self.tab_active_background, 0x339966),
             tab_inactive_background: parse_color(&self.tab_inactive_background, 0x000000),
@@ -977,6 +991,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.font_size {
                 config.ui.font_size = value;
             }
+            if let Some(value) = &ui.font_family {
+                config.ui.font_family = value.trim().to_owned();
+            }
             if let Some(value) = ui.sidebar_visible {
                 config.ui.sidebar_visible = value;
             }
@@ -1071,6 +1088,8 @@ pub struct ThemeConfigOverrides {
     pub pane_background: Option<String>,
     pub active_pane_border: Option<String>,
     pub inactive_pane_border: Option<String>,
+    pub accent: Option<String>,
+    pub accent_foreground: Option<String>,
     pub chrome_background: Option<String>,
     pub tab_active_background: Option<String>,
     pub tab_inactive_background: Option<String>,
@@ -1107,6 +1126,8 @@ impl ThemeConfigOverrides {
         apply!(pane_background);
         apply!(active_pane_border);
         apply!(inactive_pane_border);
+        apply!(accent);
+        apply!(accent_foreground);
         apply!(chrome_background);
         apply!(tab_active_background);
         apply!(tab_inactive_background);
@@ -1147,6 +1168,7 @@ pub struct TerminalConfigOverrides {
 #[serde(default)]
 pub struct UiConfigOverrides {
     pub font_size: Option<f32>,
+    pub font_family: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_show_agent_count: Option<bool>,
     pub tab_bar_vertical_wheel_scroll: Option<bool>,

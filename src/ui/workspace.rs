@@ -4441,6 +4441,11 @@ impl WorkspaceView {
             .border_1()
             .border_color(rgb(theme.active_pane_border))
             .text_color(rgb(theme.ui_foreground))
+            .text_size(px(self.config.ui.font_size));
+        if !self.config.ui.font_family.is_empty() {
+            dialog = dialog.font(font(self.config.ui.font_family.clone()));
+        }
+        dialog = dialog
             .child(
                 div()
                     .text_size(px(self.config.ui.font_size * 1.125))
@@ -4455,7 +4460,11 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
+        let mut button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4469,8 +4478,16 @@ impl WorkspaceView {
             );
         }
         button_row = button_row
-            .child(cancel)
-            .child(self.render_dialog_confirm_button(connect_label, theme, cx));
+            .child(
+                div()
+                    .flex_none()
+                    .child(cancel),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
+            );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -4498,7 +4515,7 @@ impl WorkspaceView {
     }
 
     /// The bordered, editable row shared by the text-input dialogs. The
-    /// placeholder and typed text are always centered within the input box.
+    /// placeholder and typed text are always left-aligned within the input box.
     fn render_text_input_row(&self, placeholder: &str, theme: ThemeColors) -> AnyElement {
         let value = &self.dialog_input;
         let empty = value.is_empty();
@@ -4509,24 +4526,33 @@ impl WorkspaceView {
         } else {
             format!("{}{caret_glyph}{}", &value[..caret], &value[caret..])
         };
-        div()
+        let mut row = div()
             .debug_selector(|| "dialog-text-input".into())
             .id("dialog-text-input")
             .h(px(34.))
             .w_full()
             .px(px(10.))
             .items_center()
-            .justify_center()
             .flex()
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .text_size(px(self.config.ui.font_size))
             .text_color(rgb(if empty {
                 theme.inactive_pane_border
             } else {
                 theme.ui_foreground
-            }))
-            .child(SharedString::from(display))
-            .into_any_element()
+            }));
+        if !self.config.ui.font_family.is_empty() {
+            row = row.font(font(self.config.ui.font_family.clone()));
+        }
+        row.child(
+            div()
+                .w_full()
+                .overflow_hidden()
+                .truncate()
+                .child(SharedString::from(display)),
+        )
+        .into_any_element()
     }
 
     /// Confirm button of a text-input dialog: highlighted while the input is
@@ -4618,6 +4644,11 @@ impl WorkspaceView {
             .border_1()
             .border_color(rgb(theme.active_pane_border))
             .text_color(rgb(theme.ui_foreground))
+            .text_size(px(self.config.ui.font_size));
+        if !self.config.ui.font_family.is_empty() {
+            dialog = dialog.font(font(self.config.ui.font_family.clone()));
+        }
+        dialog = dialog
             .child(
                 div()
                     .text_size(px(self.config.ui.font_size * 1.125))
@@ -4630,7 +4661,11 @@ impl WorkspaceView {
                     .child(SharedString::from(format!("Current name: {title}"))),
             )
             .child(self.render_text_input_row("Workspace name", theme));
-        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
+        let mut button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4644,8 +4679,16 @@ impl WorkspaceView {
             );
         }
         button_row = button_row
-            .child(cancel)
-            .child(self.render_dialog_confirm_button("Rename", theme, cx));
+            .child(
+                div()
+                    .flex_none()
+                    .child(cancel),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .child(self.render_dialog_confirm_button("Rename", theme, cx)),
+            );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -8909,6 +8952,8 @@ mod tests {
                 pane_background: 8,
                 active_pane_border: 9,
                 inactive_pane_border: 10,
+                accent: 9,
+                accent_foreground: 11,
                 chrome_background: 11,
                 tab_active_background: 12,
                 tab_inactive_background: 13,

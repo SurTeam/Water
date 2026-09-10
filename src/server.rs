@@ -213,19 +213,26 @@ fn dispatch_checked(client: &dyn CommandTransport, command: AppCommand) {
 }
 
 fn set_server_process_name() {
+    let name: &str = if env!("WATER_BUILD_PROFILE") != "release" {
+        "water-srv-dev"
+    } else {
+        "water-server"
+    };
     #[cfg(target_os = "macos")]
     unsafe {
         unsafe extern "C" {
             fn setprogname(name: *const libc::c_char);
             fn pthread_setname_np(name: *const libc::c_char) -> libc::c_int;
         }
-        setprogname(c"water-server".as_ptr());
-        let _ = pthread_setname_np(c"water-server".as_ptr());
+        let c_name = std::ffi::CString::new(name).unwrap();
+        setprogname(c_name.as_ptr());
+        let _ = pthread_setname_np(c_name.as_ptr());
     }
 
     #[cfg(target_os = "linux")]
     unsafe {
-        let _ = libc::prctl(libc::PR_SET_NAME, c"water-server".as_ptr(), 0, 0, 0);
+        let c_name = std::ffi::CString::new(name).unwrap();
+        let _ = libc::prctl(libc::PR_SET_NAME, c_name.as_ptr() as libc::c_ulong, 0, 0, 0);
     }
 }
 

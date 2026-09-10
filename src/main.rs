@@ -16,11 +16,20 @@ use water::remote::SshTunnel;
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
+    // Distinguish dev builds in ps/kill so tooling never targets the
+    // production water-server by accident.
+    let is_release = env!("WATER_BUILD_PROFILE") == "release";
+    if !is_release {
+        water::set_process_name("water-dev");
+    }
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let explicit_server_mode = arguments
         .first()
         .is_some_and(|argument| argument == "server" || argument == "--server");
     if explicit_server_mode {
+        if !is_release {
+            water::set_process_name("water-server-dev");
+        }
         run_server_via_dedicated_binary(&arguments[1..])
     } else {
         init_tracing();

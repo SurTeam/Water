@@ -18,6 +18,25 @@ pub mod terminal;
 pub mod ui;
 pub mod workspace;
 
+/// Set the visible process name (comm) for unambiguous ps/pkill targeting.
+/// Dev builds use `water-dev` / `water-server-dev` to avoid killing the
+/// production server by accident.
+#[cfg(unix)]
+pub fn set_process_name(name: &str) {
+    unsafe {
+        let mut bytes = name.as_bytes().to_vec();
+        bytes.push(0);
+        if bytes.len() > 16 {
+            bytes.truncate(15);
+            bytes.push(0);
+        }
+        let _ = libc::prctl(15, bytes.as_ptr() as libc::c_ulong, 0, 0, 0);
+    }
+}
+
+#[cfg(not(unix))]
+pub fn set_process_name(_name: &str) {}
+
 pub use agent::{AgentKind, DetectedAgent, detect_agent};
 pub use app::{
     ApplicationModel, CommandClient, CommandTransport, MemoryStats, ModelHost, ModelSnapshot,

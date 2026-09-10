@@ -8,6 +8,10 @@ const TARGETS: [&str; 4] = [
 ];
 
 fn main() {
+    // Bake the build profile into the binary so it can rename itself
+    // (water-dev vs water) for unambiguous ps/kill targeting.
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "dev".to_owned());
+    println!("cargo:rustc-env=WATER_BUILD_PROFILE={profile}");
     println!("cargo:rerun-if-env-changed=WATER_SERVER_BUNDLE_DIR");
     println!("cargo:rerun-if-env-changed=WATER_REQUIRE_EMBEDDED_SERVERS");
     println!("cargo:rerun-if-env-changed=WATER_BUILDING_PORTABLE_SERVER");

@@ -49,6 +49,7 @@ enum SettingField {
     BracketedPaste,
     Selection,
     UiFontSize,
+    UiFontFamily,
     SidebarVisible,
     SidebarShowAgentCount,
     TabBarVerticalWheelScroll,
@@ -72,6 +73,8 @@ enum SettingField {
     ThemePaneBackground,
     ThemeActivePaneBorder,
     ThemeInactivePaneBorder,
+    ThemeAccent,
+    ThemeAccentForeground,
     ThemeChromeBackground,
     ThemeTabActiveBackground,
     ThemeTabInactiveBackground,
@@ -140,6 +143,7 @@ impl SettingField {
             Self::BracketedPaste => "bracketed-paste",
             Self::Selection => "selection",
             Self::UiFontSize => "ui-font-size",
+            Self::UiFontFamily => "ui-font-family",
             Self::SidebarVisible => "sidebar-visible",
             Self::SidebarShowAgentCount => "sidebar-show-agent-count",
             Self::TabBarVerticalWheelScroll => "tab-bar-vertical-wheel-scroll",
@@ -163,6 +167,8 @@ impl SettingField {
             Self::ThemePaneBackground => "theme-pane-background",
             Self::ThemeActivePaneBorder => "theme-active-pane-border",
             Self::ThemeInactivePaneBorder => "theme-inactive-pane-border",
+            Self::ThemeAccent => "theme-accent",
+            Self::ThemeAccentForeground => "theme-accent-foreground",
             Self::ThemeChromeBackground => "theme-chrome-background",
             Self::ThemeTabActiveBackground => "theme-tab-active-background",
             Self::ThemeTabInactiveBackground => "theme-tab-inactive-background",
@@ -240,6 +246,8 @@ impl SettingField {
                 | Self::ThemePaneBackground
                 | Self::ThemeActivePaneBorder
                 | Self::ThemeInactivePaneBorder
+                | Self::ThemeAccent
+                | Self::ThemeAccentForeground
                 | Self::ThemeChromeBackground
                 | Self::ThemeTabActiveBackground
                 | Self::ThemeTabInactiveBackground
@@ -591,6 +599,7 @@ impl SettingsView {
             SettingField::BracketedPaste => self.config.features.bracketed_paste.to_string(),
             SettingField::Selection => self.config.features.selection.to_string(),
             SettingField::UiFontSize => format_float(self.config.ui.font_size),
+            SettingField::UiFontFamily => self.config.ui.font_family.clone(),
             SettingField::SidebarVisible => self.config.ui.sidebar_visible.to_string(),
             SettingField::SidebarShowAgentCount => {
                 self.config.ui.sidebar_show_agent_count.to_string()
@@ -622,6 +631,8 @@ impl SettingsView {
             SettingField::ThemePaneBackground => self.config.theme.pane_background.clone(),
             SettingField::ThemeActivePaneBorder => self.config.theme.active_pane_border.clone(),
             SettingField::ThemeInactivePaneBorder => self.config.theme.inactive_pane_border.clone(),
+            SettingField::ThemeAccent => self.config.theme.accent.clone(),
+            SettingField::ThemeAccentForeground => self.config.theme.accent_foreground.clone(),
             SettingField::ThemeChromeBackground => self.config.theme.chrome_background.clone(),
             SettingField::ThemeTabActiveBackground => {
                 self.config.theme.tab_active_background.clone()
@@ -760,6 +771,9 @@ impl SettingsView {
             }
             SettingField::UiFontSize => {
                 self.config.ui.font_size = parse_float(&value, "界面字体大小")?
+            }
+            SettingField::UiFontFamily => {
+                self.config.ui.font_family = value.trim().to_owned()
             }
             SettingField::SidebarWidth => {
                 self.config.ui.sidebar_width = parse_float(&value, "侧边栏宽度")?
@@ -1063,11 +1077,11 @@ impl SettingsView {
                     .py(px(6.))
                     .cursor_pointer()
                     .bg(rgb(if self.dirty {
-                        theme.active_pane_border
+                        theme.accent
                     } else {
                         theme.inactive_pane_border
                     }))
-                    .text_color(rgb(theme.terminal_background))
+                    .text_color(rgb(theme.accent_foreground))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -1347,6 +1361,14 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
+                SettingField::UiFontFamily,
+                "界面字体",
+                "UI 文本字体族（对话框、设置、侧边栏）。留空使用系统默认",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
                 SettingField::SidebarVisible,
                 "默认显示侧边栏",
                 "打开新窗口时侧边栏是否可见",
@@ -1457,6 +1479,8 @@ impl Render for SettingsView {
             (SettingField::ThemePaneBackground, "面板背景色"),
             (SettingField::ThemeActivePaneBorder, "活动面板边框色"),
             (SettingField::ThemeInactivePaneBorder, "非活动面板边框色"),
+            (SettingField::ThemeAccent, "强调色（按钮/焦点）"),
+            (SettingField::ThemeAccentForeground, "强调色前景（按钮文字）"),
             (SettingField::ThemeChromeBackground, "窗口 chrome 背景色"),
             (SettingField::ThemeTabActiveBackground, "活动标签背景色"),
             (SettingField::ThemeTabInactiveBackground, "非活动标签背景色"),
@@ -1774,6 +1798,8 @@ fn set_theme_field(
         SettingField::ThemePaneBackground => theme.pane_background = value,
         SettingField::ThemeActivePaneBorder => theme.active_pane_border = value,
         SettingField::ThemeInactivePaneBorder => theme.inactive_pane_border = value,
+        SettingField::ThemeAccent => theme.accent = value,
+        SettingField::ThemeAccentForeground => theme.accent_foreground = value,
         SettingField::ThemeChromeBackground => theme.chrome_background = value,
         SettingField::ThemeTabActiveBackground => theme.tab_active_background = value,
         SettingField::ThemeTabInactiveBackground => theme.tab_inactive_background = value,
@@ -1860,6 +1886,8 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         SettingField::ThemePaneBackground => colors.pane_background,
         SettingField::ThemeActivePaneBorder => colors.active_pane_border,
         SettingField::ThemeInactivePaneBorder => colors.inactive_pane_border,
+        SettingField::ThemeAccent => colors.accent,
+        SettingField::ThemeAccentForeground => colors.accent_foreground,
         SettingField::ThemeChromeBackground => colors.chrome_background,
         SettingField::ThemeTabActiveBackground => colors.tab_active_background,
         SettingField::ThemeTabInactiveBackground => colors.tab_inactive_background,
