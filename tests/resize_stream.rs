@@ -7,7 +7,7 @@ use water::command::{
     AppCommand, CommandDispatcher, OperationResult, OperationStatus, TabCommand, TerminalCommand,
     WorkspaceCommand,
 };
-use water::terminal::{snapshot_from_replay, TerminalSize, TerminalStreamEvent};
+use water::terminal::{TerminalSize, TerminalStreamEvent, snapshot_from_replay};
 
 fn dispatch_ok(dispatcher: &mut CommandDispatcher, command: AppCommand) -> OperationResult {
     let operation_id = dispatcher.dispatch(command);
@@ -42,10 +42,7 @@ fn terminal_of(dispatcher: &CommandDispatcher) -> water::ids::TerminalId {
     find(&tab.tree).expect("terminal leaf")
 }
 
-fn replay(
-    dispatcher: &CommandDispatcher,
-    id: water::ids::TerminalId,
-) -> Vec<TerminalStreamEvent> {
+fn replay(dispatcher: &CommandDispatcher, id: water::ids::TerminalId) -> Vec<TerminalStreamEvent> {
     let replay = dispatcher.terminal_replay(id).unwrap();
     let mut size = replay.size;
     let mut events = Vec::new();
@@ -118,8 +115,7 @@ fn resize_event_is_emitted_into_the_ordered_stream() {
     );
 
     // A replaying GUI local term must observe the new geometry.
-    let snapshot =
-        snapshot_from_replay(&dispatcher.terminal_replay(terminal_id).unwrap(), 200);
+    let snapshot = snapshot_from_replay(&dispatcher.terminal_replay(terminal_id).unwrap(), 200);
     assert_eq!(snapshot.size, TerminalSize::new(120, 30));
 }
 
@@ -169,13 +165,19 @@ fn resize_drains_pending_output_before_the_resize_event() {
     // Every Output before the Resize was produced at the old geometry.
     for event in &events[..resize_pos] {
         if let TerminalStreamEvent::Output { size, .. } = event {
-            assert_eq!(size.columns, 80, "old-geometry output after the Resize event");
+            assert_eq!(
+                size.columns, 80,
+                "old-geometry output after the Resize event"
+            );
         }
     }
     // Every Output after the Resize was produced at the new geometry.
     for event in &events[resize_pos + 1..] {
         if let TerminalStreamEvent::Output { size, .. } = event {
-            assert_eq!(size.columns, 100, "new-geometry output before the Resize event");
+            assert_eq!(
+                size.columns, 100,
+                "new-geometry output before the Resize event"
+            );
         }
     }
 }
@@ -185,8 +187,8 @@ fn resize_drains_pending_output_before_the_resize_event() {
 fn detach_then_reattach_replays_history_and_resumes_live() {
     use water::app::ModelHost;
     use water::control::{ControlServer, connect_water_session};
-    use water::terminal::decode_base64;
     use water::terminal::WireTerminalEvent;
+    use water::terminal::decode_base64;
     use water::ui::ui_control_channel;
 
     let dir = std::env::temp_dir().join(format!("water-reattach-{}", std::process::id()));
@@ -204,14 +206,8 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
     )
     .unwrap();
 
-    let created = dispatch_client(
-        &client,
-        AppCommand::Workspace(WorkspaceCommand::New),
-    );
-    let water::command::OperationResult::WorkspaceCreated {
-        workspace_id,
-    } = created
-    else {
+    let created = dispatch_client(&client, AppCommand::Workspace(WorkspaceCommand::New));
+    let water::command::OperationResult::WorkspaceCreated { workspace_id } = created else {
         panic!("unexpected workspace result {created:?}");
     };
     let state = client.state_dump().unwrap();
@@ -222,10 +218,7 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
         .unwrap();
     let mut pane_id = None;
     for tab in &workspace.tabs {
-        if matches!(
-            &tab.tree,
-            water::app::model::PaneTreeDump::Leaf { .. }
-        ) {
+        if matches!(&tab.tree, water::app::model::PaneTreeDump::Leaf { .. }) {
             pane_id = match &tab.tree {
                 water::app::model::PaneTreeDump::Leaf { pane_id, .. } => Some(*pane_id),
                 _ => None,
@@ -260,12 +253,10 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
     let mut seen_a = false;
     while !seen_a {
         let event = stream.recv_timeout(Duration::from_secs(5)).unwrap();
-        if let WireTerminalEvent::Output { bytes, .. } = &event
-            && let Some(data) = decode_base64(&bytes)
+        if let TerminalStreamEvent::Output { bytes, .. } = &event
+            && String::from_utf8_lossy(bytes).contains("WATER_MARKER_A")
         {
-            if String::from_utf8_lossy(&data).contains("WATER_MARKER_A") {
-                seen_a = true;
-            }
+            seen_a = true;
         }
     }
     session.detach(terminal_id);
@@ -287,8 +278,9 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
         .replay
         .iter()
         .filter_map(|wire| match wire {
-            WireTerminalEvent::Output { bytes, .. } => decode_base64(&bytes)
-                .map(|data| String::from_utf8_lossy(&data).into_owned()),
+            WireTerminalEvent::Output { bytes, .. } => {
+                decode_base64(bytes).map(|data| String::from_utf8_lossy(&data).into_owned())
+            }
             _ => None,
         })
         .collect::<String>();
@@ -318,10 +310,8 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
         let Some(event) = stream.recv_timeout(Duration::from_millis(500)).ok() else {
             continue;
         };
-        if let WireTerminalEvent::Output { bytes, .. } = &event
-            && let Some(data) = decode_base64(&bytes)
-        {
-            live_text.push_str(&String::from_utf8_lossy(&data));
+        if let TerminalStreamEvent::Output { bytes, .. } = &event {
+            live_text.push_str(&String::from_utf8_lossy(bytes));
         }
     }
     assert!(

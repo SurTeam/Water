@@ -28,6 +28,8 @@ const MAX_RETIRED_TERMINALS: usize = 16;
 const RETIRED_RECENT_OUTPUT_BYTES: usize = 8 * 1024;
 /// Raw replay bytes kept when a terminal is retired.
 const RETIRED_REPLAY_BYTES: usize = 1024 * 1024;
+/// Bounded handoff between the PTY worker and one attached stream consumer.
+const TERMINAL_ATTACHMENT_QUEUE_EVENTS: usize = 64;
 pub(crate) type WakeupCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 pub(crate) type WakeupSlot = Arc<Mutex<Option<WakeupCallback>>>;
 
@@ -252,7 +254,7 @@ impl TerminalRegistry {
     /// client never misses an event (overlaps are deduplicated by sequence).
     pub fn attach(&self, terminal_id: TerminalId) -> Result<TerminalAttachment, TerminalError> {
         let entry = self.entry(terminal_id)?;
-        let (sender, events) = mpsc::sync_channel(256);
+        let (sender, events) = mpsc::sync_channel(TERMINAL_ATTACHMENT_QUEUE_EVENTS);
         let (reply_tx, reply_rx) = mpsc::channel();
         {
             let state = entry.state.lock().expect("terminal entry poisoned");

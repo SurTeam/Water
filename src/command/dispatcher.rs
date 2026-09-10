@@ -1445,7 +1445,7 @@ fn default_process_name(program: &str) -> String {
         .to_owned()
 }
 
-fn terminal_dispatch_error(error: TerminalError) -> DispatchError {
+pub(crate) fn terminal_dispatch_error(error: TerminalError) -> DispatchError {
     DispatchError::Command(terminal_command_error(error))
 }
 

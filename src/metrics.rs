@@ -65,6 +65,70 @@ pub fn replay_bytes_received() -> &'static AtomicU64 {
     &REPLAY_BYTES_RECEIVED
 }
 
+pub fn terminal_server_queue_add(bytes: usize) {
+    terminal_queue_add(
+        &TERMINAL_SERVER_QUEUE_EVENTS,
+        &TERMINAL_SERVER_QUEUE_BYTES,
+        &TERMINAL_SERVER_QUEUE_MAX_EVENTS,
+        &TERMINAL_SERVER_QUEUE_MAX_BYTES,
+        bytes,
+    );
+}
+
+pub fn terminal_server_queue_remove(bytes: usize) {
+    terminal_queue_remove(
+        &TERMINAL_SERVER_QUEUE_EVENTS,
+        &TERMINAL_SERVER_QUEUE_BYTES,
+        bytes,
+    );
+}
+
+pub fn terminal_client_queue_add(bytes: usize) {
+    terminal_queue_add(
+        &TERMINAL_CLIENT_QUEUE_EVENTS,
+        &TERMINAL_CLIENT_QUEUE_BYTES,
+        &TERMINAL_CLIENT_QUEUE_MAX_EVENTS,
+        &TERMINAL_CLIENT_QUEUE_MAX_BYTES,
+        bytes,
+    );
+}
+
+pub fn terminal_client_queue_remove(bytes: usize) {
+    terminal_queue_remove(
+        &TERMINAL_CLIENT_QUEUE_EVENTS,
+        &TERMINAL_CLIENT_QUEUE_BYTES,
+        bytes,
+    );
+}
+
+fn terminal_queue_add(
+    events: &AtomicU64,
+    bytes: &AtomicU64,
+    max_events: &AtomicU64,
+    max_bytes: &AtomicU64,
+    byte_count: usize,
+) {
+    let events = events.fetch_add(1, Ordering::Relaxed) + 1;
+    let bytes = bytes.fetch_add(byte_count as u64, Ordering::Relaxed) + byte_count as u64;
+    max_events.fetch_max(events, Ordering::Relaxed);
+    max_bytes.fetch_max(bytes, Ordering::Relaxed);
+}
+
+fn terminal_queue_remove(events: &AtomicU64, bytes: &AtomicU64, byte_count: usize) {
+    events.fetch_sub(1, Ordering::Relaxed);
+    bytes.fetch_sub(byte_count as u64, Ordering::Relaxed);
+}
+
+/// Clears queue high-water marks between isolated benchmark phases. Current
+/// gauges are deliberately untouched and must already be zero at a phase
+/// boundary.
+pub fn reset_terminal_queue_peaks() {
+    TERMINAL_SERVER_QUEUE_MAX_EVENTS.store(0, Ordering::Relaxed);
+    TERMINAL_SERVER_QUEUE_MAX_BYTES.store(0, Ordering::Relaxed);
+    TERMINAL_CLIENT_QUEUE_MAX_EVENTS.store(0, Ordering::Relaxed);
+    TERMINAL_CLIENT_QUEUE_MAX_BYTES.store(0, Ordering::Relaxed);
+}
+
 /// Gauge: total bytes currently held in all server replay rings.
 pub fn add_replay_ring_bytes(delta: isize) {
     if delta >= 0 {
@@ -93,6 +157,14 @@ static TERMINAL_RENDERS: AtomicU64 = AtomicU64::new(0);
 static HIDDEN_TERMINAL_UPDATES: AtomicU64 = AtomicU64::new(0);
 static REPLAY_BYTES_RECEIVED: AtomicU64 = AtomicU64::new(0);
 static REPLAY_RING_BYTES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SERVER_QUEUE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SERVER_QUEUE_BYTES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SERVER_QUEUE_MAX_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_SERVER_QUEUE_MAX_BYTES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_CLIENT_QUEUE_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_CLIENT_QUEUE_BYTES: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_CLIENT_QUEUE_MAX_EVENTS: AtomicU64 = AtomicU64::new(0);
+static TERMINAL_CLIENT_QUEUE_MAX_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn inc(counter: &AtomicU64) {
     counter.fetch_add(1, Ordering::Relaxed);
@@ -189,6 +261,39 @@ pub fn snapshot() -> serde_json::Value {
         "replay_bytes_received".to_owned(),
         serde_json::json!(replay_bytes_received().load(Ordering::Relaxed)),
     );
+    for (name, counter) in [
+        (
+            "terminal_server_queue_events",
+            &TERMINAL_SERVER_QUEUE_EVENTS,
+        ),
+        ("terminal_server_queue_bytes", &TERMINAL_SERVER_QUEUE_BYTES),
+        (
+            "terminal_server_queue_max_events",
+            &TERMINAL_SERVER_QUEUE_MAX_EVENTS,
+        ),
+        (
+            "terminal_server_queue_max_bytes",
+            &TERMINAL_SERVER_QUEUE_MAX_BYTES,
+        ),
+        (
+            "terminal_client_queue_events",
+            &TERMINAL_CLIENT_QUEUE_EVENTS,
+        ),
+        ("terminal_client_queue_bytes", &TERMINAL_CLIENT_QUEUE_BYTES),
+        (
+            "terminal_client_queue_max_events",
+            &TERMINAL_CLIENT_QUEUE_MAX_EVENTS,
+        ),
+        (
+            "terminal_client_queue_max_bytes",
+            &TERMINAL_CLIENT_QUEUE_MAX_BYTES,
+        ),
+    ] {
+        value.insert(
+            name.to_owned(),
+            serde_json::json!(counter.load(Ordering::Relaxed)),
+        );
+    }
     serde_json::Value::Object(value)
 }
 

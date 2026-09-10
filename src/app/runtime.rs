@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::app::model::{MemoryStats, ModelSnapshot, StateDump};
 use crate::command::{
     AppCommand, CommandDispatcher, DispatchError, OperationRegistry, OperationSnapshot,
+    terminal_dispatch_error,
 };
 use crate::config::AppConfig;
 use crate::event::AppEvent;
@@ -596,14 +597,26 @@ fn run_model_thread(
                 timeout,
                 reply,
             } => {
-                let _ = reply.send(dispatcher.wait_terminal_contains(terminal_id, &text, timeout));
+                let registry = dispatcher.terminal_registry();
+                std::thread::spawn(move || {
+                    let result = registry
+                        .contains_text(terminal_id, &text, timeout)
+                        .map_err(terminal_dispatch_error);
+                    let _ = reply.send(result);
+                });
             }
             ModelRequest::TerminalExit {
                 terminal_id,
                 timeout,
                 reply,
             } => {
-                let _ = reply.send(dispatcher.wait_terminal_exit(terminal_id, timeout));
+                let registry = dispatcher.terminal_registry();
+                std::thread::spawn(move || {
+                    let result = registry
+                        .wait_process_exit(terminal_id, timeout)
+                        .map_err(terminal_dispatch_error);
+                    let _ = reply.send(result);
+                });
             }
             ModelRequest::TerminalReplay { terminal_id, reply } => {
                 let _ = reply.send(dispatcher.terminal_replay(terminal_id));

@@ -31,13 +31,13 @@ use polling::{Event as PollEvent, Events, PollMode, Poller};
 use crate::ids::TerminalId;
 use crate::metrics;
 
+use super::MAX_OUTPUT_EVENT_BYTES;
 use super::model::{
     TerminalManagerEvent, TerminalRegistry, TerminalWorkerCommand, WakeupCallback, WakeupSlot,
 };
 use super::replay::ReplayRing;
 use super::snapshot::TerminalSize;
 use super::stream::TerminalStreamEvent;
-use super::MAX_OUTPUT_EVENT_BYTES;
 
 const PTY_READ_WRITE_KEY: usize = 0;
 const PTY_CHILD_EVENT_KEY: usize = 1;

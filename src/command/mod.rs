@@ -8,6 +8,7 @@ use crate::ids::{PaneId, SurfaceId, TabId, TerminalId, WorkspaceId};
 use crate::surface::SurfaceKind;
 
 pub use dispatcher::CommandDispatcher;
+pub(crate) use dispatcher::terminal_dispatch_error;
 pub(crate) use operation::OperationRegistry;
 pub use operation::{OperationSnapshot, OperationStatus};
 

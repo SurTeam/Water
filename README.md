@@ -59,8 +59,9 @@ the gzip payload to the remote host and atomically installs it beneath
 reuse that cached executable. Remote control sockets are isolated by client and
 protocol version: a compatible client resumes the existing server, while a
 different version starts its own server without disturbing the old one.
-Terminal snapshots still use the latest-only stream, so transport delay cannot
-accumulate obsolete render frames.
+Live terminal output crosses the forwarded socket as ordered binary raw-byte
+frames; model snapshots remain latest-only, so transport delay cannot
+accumulate obsolete model projections.
 
 SSH authentication is non-interactive and follows the user's OpenSSH config
 and agent. The remote host needs a POSIX shell and `gzip`; it does not need a

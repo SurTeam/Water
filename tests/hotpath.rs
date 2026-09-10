@@ -8,7 +8,7 @@ use std::time::Duration;
 use water::app::ModelHost;
 use water::command::{AppCommand, OperationStatus, TerminalCommand};
 use water::control::{ControlClient, ControlServer, connect_water_session};
-use water::terminal::WireTerminalEvent;
+use water::terminal::TerminalStreamEvent;
 use water::ui::ui_control_channel;
 
 #[test]
@@ -82,9 +82,8 @@ fn sustained_output_does_not_trigger_state_dumps_or_snapshot_pushes() {
         let Some(event) = stream.recv_timeout(Duration::from_millis(500)).ok() else {
             continue;
         };
-        match &event {
-            WireTerminalEvent::Output { .. } => terminal_events += 1,
-            _ => {}
+        if let TerminalStreamEvent::Output { .. } = &event {
+            terminal_events += 1;
         }
     }
     let after = control.metrics().unwrap();

@@ -766,10 +766,7 @@ impl TerminalSnapshot {
         let display_offset = term.grid().display_offset();
         // Total retained history rows above the viewport: the authoritative
         // scrollback bound (rows_before is only a bounded overscan window).
-        let history_len = term
-            .grid()
-            .total_lines()
-            .saturating_sub(size.lines) as i64;
+        let history_len = term.grid().total_lines().saturating_sub(size.lines) as i64;
         let history_bottom = viewport_position.saturating_sub(history_len);
         let mut materialized_cells = 0;
         let rows = (0..size.lines)
@@ -795,16 +792,14 @@ impl TerminalSnapshot {
             if line < topmost {
                 break;
             }
-            rows_before.push(
-                Self::row_from_alacritty(
-                    term,
-                    Line(line),
-                    size.columns,
-                    previous,
-                    (-(distance as i64)).saturating_sub(viewport_position),
-                    &mut materialized_cells,
-                ),
-            );
+            rows_before.push(Self::row_from_alacritty(
+                term,
+                Line(line),
+                size.columns,
+                previous,
+                (-(distance as i64)).saturating_sub(viewport_position),
+                &mut materialized_cells,
+            ));
         }
         let rows_after = (1..=VIEWPORT_OVERSCAN_ROWS)
             .map_while(|distance| {

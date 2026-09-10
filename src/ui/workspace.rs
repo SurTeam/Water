@@ -2641,10 +2641,7 @@ impl WorkspaceView {
             .max(-(snapshot.history_len) as i32)
             .min(snapshot.size.lines as i32 - 1);
         Some(TerminalSelectionEndpoint {
-            position: TerminalCellPosition {
-                row,
-                column,
-            },
+            position: TerminalCellPosition { row, column },
             side,
         })
     }
@@ -6547,7 +6544,10 @@ fn selection_bounds(
         (selection.head, selection.anchor)
     };
     let first_row = -(snapshot.rows_before.len() as i64);
-    let end_row = snapshot.size.lines.saturating_add(snapshot.rows_after.len()) as i64;
+    let end_row = snapshot
+        .size
+        .lines
+        .saturating_add(snapshot.rows_after.len()) as i64;
     let first_cell = first_row.saturating_mul(columns as i64);
     let end_cell = end_row.saturating_mul(columns as i64);
     let mut start = selection_boundary_index(start_endpoint, columns).clamp(first_cell, end_cell);
@@ -6607,10 +6607,7 @@ fn selection_bounds(
     ))
 }
 
-fn terminal_cell_at_linear_index(
-    snapshot: &TerminalSnapshot,
-    index: i64,
-) -> Option<&TerminalCell> {
+fn terminal_cell_at_linear_index(snapshot: &TerminalSnapshot, index: i64) -> Option<&TerminalCell> {
     let columns = snapshot.size.columns as i64;
     let row = i32::try_from(index.div_euclid(columns)).ok()?;
     let column = usize::try_from(index.rem_euclid(columns)).ok()?;
@@ -7940,11 +7937,7 @@ mod tests {
         }
     }
 
-    fn endpoint(
-        row: i32,
-        column: usize,
-        side: TerminalSelectionSide,
-    ) -> TerminalSelectionEndpoint {
+    fn endpoint(row: i32, column: usize, side: TerminalSelectionSide) -> TerminalSelectionEndpoint {
         TerminalSelectionEndpoint {
             position: TerminalCellPosition { row, column },
             side,
@@ -9416,7 +9409,11 @@ mod tests {
             ))
             .unwrap();
         client
-            .terminal_contains(terminal_id, "SCROLL_SEL_40", std::time::Duration::from_secs(5))
+            .terminal_contains(
+                terminal_id,
+                "SCROLL_SEL_40",
+                std::time::Duration::from_secs(5),
+            )
             .unwrap();
         let mut snapshot = crate::terminal::snapshot_from_replay(
             &client.terminal_replay(terminal_id).unwrap(),
@@ -9467,12 +9464,14 @@ mod tests {
                 .visual_unacked_rows = 0.0;
             view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), cx);
             assert_eq!(
-                view.selection.unwrap().anchor.position.row, 2,
+                view.selection.unwrap().anchor.position.row,
+                2,
                 "the mapping is viewport-relative without an unacked offset"
             );
             view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
             assert_eq!(
-                view.selection.unwrap().anchor.position.row, 1,
+                view.selection.unwrap().anchor.position.row,
+                1,
                 "pixel row 1 maps to the viewport top row"
             );
             // Scrolled up again to a whole row: pixel row 1 addresses a

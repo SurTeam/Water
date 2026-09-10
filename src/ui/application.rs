@@ -103,8 +103,10 @@ struct ManagedConnection {
 /// GPUI sends viewport commands and consumes immutable snapshots.
 struct TerminalConnection {
     session: Arc<WaterSession>,
-    emulator_commands:
-        std::collections::BTreeMap<TerminalId, std::sync::mpsc::SyncSender<TerminalEmulatorCommand>>,
+    emulator_commands: std::collections::BTreeMap<
+        TerminalId,
+        std::sync::mpsc::SyncSender<TerminalEmulatorCommand>,
+    >,
     snapshots: std::collections::BTreeMap<TerminalId, Arc<crate::terminal::TerminalSnapshot>>,
     pending_attachments: std::collections::BTreeSet<TerminalId>,
     attachments: std::collections::BTreeMap<TerminalId, Arc<TerminalAttachmentState>>,
@@ -172,9 +174,7 @@ enum TerminalEventMsg {
 const MAX_TERMINAL_BYTES_PER_UI_TURN: usize = MAX_OUTPUT_EVENT_BYTES;
 const MAX_TERMINAL_MESSAGES_PER_UI_TURN: usize = 64;
 const TERMINAL_UI_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
-const TERMINAL_SNAPSHOT_MIN_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(16);
-const MAX_BACKLOGGED_UI_TURNS_BEFORE_RESYNC: usize = 32;
+const TERMINAL_SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
 impl TerminalEventMsg {
     fn terminal_id(&self) -> TerminalId {
@@ -1005,9 +1005,7 @@ impl WaterApplication {
                             ..
                         } => {
                             latest_snapshot = Some(snapshot);
-                            pty_writes.extend(
-                                writes.into_iter().map(|bytes| (terminal_id, bytes)),
-                            );
+                            pty_writes.extend(writes.into_iter().map(|bytes| (terminal_id, bytes)));
                         }
                         TerminalEventMsg::ReplayProgress { snapshot, .. } => {
                             latest_snapshot = Some(snapshot);
@@ -1118,11 +1116,8 @@ impl WaterApplication {
                 return;
             }
             let attachment = Arc::new(TerminalAttachmentState::new());
-            let (emulator_commands_tx, emulator_commands) =
-                std::sync::mpsc::sync_channel(64);
-            terminal
-                .attachments
-                .insert(terminal_id, attachment.clone());
+            let (emulator_commands_tx, emulator_commands) = std::sync::mpsc::sync_channel(64);
+            terminal.attachments.insert(terminal_id, attachment.clone());
             terminal
                 .emulator_commands
                 .insert(terminal_id, emulator_commands_tx);
@@ -1213,18 +1208,17 @@ impl WaterApplication {
                         return;
                     }
                     let mut stream = stream;
-                    let mut pending_wire = None;
-                    let mut backlogged_turns = 0usize;
+                    let mut pending_event = None;
                     let mut last_live_snapshot = std::time::Instant::now();
                     while attachment.is_active() {
                         let commands_changed =
                             apply_emulator_commands(&emulator_commands, &mut emulator);
-                        let received = match pending_wire.take() {
-                            Some(wire) => Ok(wire),
+                        let received = match pending_event.take() {
+                            Some(event) => Ok(event),
                             None => stream.recv_timeout(std::time::Duration::from_millis(8)),
                         };
-                        let wire = match received {
-                            Ok(wire) => wire,
+                        let event = match received {
+                            Ok(event) => event,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                                 if commands_changed {
                                     if !publish_live_snapshot(
@@ -1244,12 +1238,6 @@ impl WaterApplication {
                         if !attachment.is_active() {
                             break;
                         }
-                        let Some(event) = TerminalStreamEvent::from_wire(&wire, tracked_size) else {
-                            continue;
-                        };
-                        if let TerminalStreamEvent::Resize { size, .. } = &event {
-                            tracked_size = *size;
-                        }
                         crate::metrics::add(
                             crate::metrics::terminal_bytes_received(),
                             event.output_bytes(),
@@ -1265,43 +1253,13 @@ impl WaterApplication {
                             return;
                         }
                         let stream_backlogged = match stream.try_recv() {
-                            Ok(wire) => {
-                                pending_wire = Some(wire);
-                                backlogged_turns += 1;
+                            Ok(event) => {
+                                pending_event = Some(event);
                                 true
                             }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                                backlogged_turns = 0;
-                                false
-                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => false,
                             Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
                         };
-                        if backlogged_turns >= MAX_BACKLOGGED_UI_TURNS_BEFORE_RESYNC
-                            && emulator.at_bottom()
-                            && !emulator.alternate_screen()
-                        {
-                            if !publish_live_snapshot(
-                                &events_tx,
-                                terminal_id,
-                                &attachment,
-                                &mut emulator,
-                            ) {
-                                return;
-                            }
-                            tracing::debug!(
-                                target: "water::workspace",
-                                %terminal_id,
-                                "terminal parser backlog exceeded budget; rebuilding from latest replay"
-                            );
-                            let _ = events_tx.send(TerminalEventMsg::Restart {
-                                terminal_id,
-                                attachment: attachment.clone(),
-                            });
-                            return;
-                        }
-                        if backlogged_turns >= MAX_BACKLOGGED_UI_TURNS_BEFORE_RESYNC {
-                            backlogged_turns = 0;
-                        }
                         let publish_snapshot = commands_changed
                             || !stream_backlogged
                             || last_live_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;

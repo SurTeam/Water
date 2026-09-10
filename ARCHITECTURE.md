@@ -189,7 +189,13 @@ Phase 1 uses a Unix domain socket on macOS/Linux:
 water --control-socket /tmp/water.sock
 ```
 
-Messages are one length-prefixed JSON frame per request/response. Every request and response includes `protocol_version: 1` and `request_id`. The method surface is small and versionable:
+Protocol version 3 uses one length-prefixed stream for both planes. Requests,
+responses, model snapshots, and UI automation remain JSON and include
+`protocol_version` plus `request_id`. Ordered live terminal events use compact
+binary frames on the same stream (terminal id, sequence, geometry/event state,
+and raw PTY bytes), avoiding Base64 expansion and JSON parsing in the sustained
+output hot path. The bounded attach replay remains JSON for inspection and
+resynchronization. The method surface is small and versionable:
 
 - `command.dispatch`
 - `operation.get`

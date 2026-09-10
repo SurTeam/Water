@@ -13,16 +13,20 @@ use crate::command::{AppCommand, DispatchError, OperationSnapshot, TerminalComma
 use crate::event::AppEvent;
 use crate::ids::{OperationId, TerminalId};
 use crate::terminal::{
-    DEFAULT_SCROLLBACK_LINES, TerminalReplay, TerminalSnapshot, WireTerminalEvent,
-    snapshot_from_replay,
+    DEFAULT_SCROLLBACK_LINES, TerminalReplay, TerminalSnapshot, TerminalStreamEvent,
+    WireTerminalEvent, snapshot_from_replay,
 };
 use crate::ui::{UiControlClient, UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
 use super::protocol::{
     PROTOCOL_VERSION, PUSH_SNAPSHOT_METHOD, PUSH_TERMINAL_METHOD, PUSH_UI_METHOD, RpcError,
-    RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse, SessionOpenResponse,
-    TerminalAttachResponse, TerminalPush, WireMessage, read_frame, write_frame,
+    RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse, SessionOpenResponse, SessionWireFrame,
+    TerminalAttachResponse, TerminalPush, WireMessage, read_frame, read_session_frame, write_frame,
 };
+
+/// At the shared 64 KiB event limit this bounds decoded client backlog to
+/// roughly 4 MiB while leaving enough runway for ordinary scheduler jitter.
+const TERMINAL_CLIENT_QUEUE_EVENTS: usize = 64;
 
 #[derive(Debug, Error)]
 pub enum ControlClientError {
@@ -439,7 +443,10 @@ pub struct WaterSession {
     /// A missing entry means the GUI is not consuming that terminal.
     terminal_channels: std::sync::Arc<
         std::sync::Mutex<
-            std::collections::HashMap<TerminalId, std::sync::mpsc::SyncSender<WireTerminalEvent>>,
+            std::collections::HashMap<
+                TerminalId,
+                std::sync::mpsc::SyncSender<QueuedLiveTerminalEvent>,
+            >,
         >,
     >,
     snapshot_rx: crate::app::SnapshotStream,
@@ -468,8 +475,44 @@ impl std::fmt::Debug for WaterSession {
 /// even before the attach call returns, without losing anything.
 #[cfg(unix)]
 pub struct TerminalEventStream {
-    prefix: std::collections::VecDeque<WireTerminalEvent>,
-    rx: std::sync::mpsc::Receiver<WireTerminalEvent>,
+    prefix: std::collections::VecDeque<QueuedLiveTerminalEvent>,
+    rx: std::sync::mpsc::Receiver<QueuedLiveTerminalEvent>,
+    tracked_size: crate::terminal::TerminalSize,
+}
+
+enum LiveTerminalEvent {
+    Raw(TerminalStreamEvent),
+    Wire(WireTerminalEvent),
+}
+
+struct QueuedLiveTerminalEvent {
+    event: Option<LiveTerminalEvent>,
+    bytes: usize,
+}
+
+impl QueuedLiveTerminalEvent {
+    fn new(event: LiveTerminalEvent) -> Self {
+        let bytes = match &event {
+            LiveTerminalEvent::Raw(event) => event.output_bytes(),
+            LiveTerminalEvent::Wire(WireTerminalEvent::Output { bytes, .. }) => bytes.len(),
+            LiveTerminalEvent::Wire(_) => 0,
+        };
+        crate::metrics::terminal_client_queue_add(bytes);
+        Self {
+            event: Some(event),
+            bytes,
+        }
+    }
+
+    fn into_inner(mut self) -> LiveTerminalEvent {
+        self.event.take().unwrap()
+    }
+}
+
+impl Drop for QueuedLiveTerminalEvent {
+    fn drop(&mut self) {
+        crate::metrics::terminal_client_queue_remove(self.bytes);
+    }
 }
 
 #[cfg(unix)]
@@ -477,30 +520,63 @@ impl TerminalEventStream {
     /// Blocks until the next ordered event; `Err` when the session ended or
     /// the terminal was detached. Callers treat `Err` as a resync signal
     /// (re-attach: the server replay ring still holds the history).
-    pub fn recv(&mut self) -> Result<WireTerminalEvent, std::sync::mpsc::RecvError> {
-        if let Some(event) = self.prefix.pop_front() {
-            return Ok(event);
+    pub fn recv(&mut self) -> Result<TerminalStreamEvent, std::sync::mpsc::RecvError> {
+        loop {
+            let event = match self.prefix.pop_front() {
+                Some(event) => event,
+                None => self.rx.recv()?,
+            };
+            if let Some(event) = self.decode(event) {
+                return Ok(event);
+            }
         }
-        self.rx.recv()
     }
 
     /// Non-blocking drain used to batch all terminal events already decoded
     /// from one socket burst before advancing the local emulator.
-    pub fn try_recv(&mut self) -> Result<WireTerminalEvent, std::sync::mpsc::TryRecvError> {
-        if let Some(event) = self.prefix.pop_front() {
-            return Ok(event);
+    pub fn try_recv(&mut self) -> Result<TerminalStreamEvent, std::sync::mpsc::TryRecvError> {
+        loop {
+            let event = match self.prefix.pop_front() {
+                Some(event) => event,
+                None => self.rx.try_recv()?,
+            };
+            if let Some(event) = self.decode(event) {
+                return Ok(event);
+            }
         }
-        self.rx.try_recv()
     }
 
     pub fn recv_timeout(
         &mut self,
         timeout: std::time::Duration,
-    ) -> Result<WireTerminalEvent, std::sync::mpsc::RecvTimeoutError> {
-        if let Some(event) = self.prefix.pop_front() {
-            return Ok(event);
+    ) -> Result<TerminalStreamEvent, std::sync::mpsc::RecvTimeoutError> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let event = match self.prefix.pop_front() {
+                Some(event) => event,
+                None => self
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))?,
+            };
+            if let Some(event) = self.decode(event) {
+                return Ok(event);
+            }
         }
-        self.rx.recv_timeout(timeout)
+    }
+
+    fn decode(&mut self, event: QueuedLiveTerminalEvent) -> Option<TerminalStreamEvent> {
+        let event = match event.into_inner() {
+            LiveTerminalEvent::Raw(event) => event,
+            LiveTerminalEvent::Wire(event) => {
+                TerminalStreamEvent::from_wire(&event, self.tracked_size)?
+            }
+        };
+        if let TerminalStreamEvent::Resize { size, .. } | TerminalStreamEvent::Output { size, .. } =
+            &event
+        {
+            self.tracked_size = *size;
+        }
+        Some(event)
     }
 }
 
@@ -539,7 +615,8 @@ impl WaterSession {
         // registers its subscriber before taking the ring snapshot, so every
         // event from this point on is either in the replay (deduplicated by
         // sequence) or buffered here while the reply is in flight.
-        let (events_tx, events_rx) = std::sync::mpsc::sync_channel::<WireTerminalEvent>(1024);
+        let (events_tx, events_rx) =
+            std::sync::mpsc::sync_channel::<QueuedLiveTerminalEvent>(TERMINAL_CLIENT_QUEUE_EVENTS);
         self.terminal_channels
             .lock()
             .expect("terminal channels poisoned")
@@ -599,13 +676,17 @@ impl WaterSession {
             }
         };
         match response {
-            AttachReply::Response(response) => Ok((
-                response,
-                TerminalEventStream {
-                    prefix,
-                    rx: events_rx,
-                },
-            )),
+            AttachReply::Response(response) => {
+                let tracked_size = response.size;
+                Ok((
+                    response,
+                    TerminalEventStream {
+                        prefix,
+                        rx: events_rx,
+                        tracked_size,
+                    },
+                ))
+            }
             AttachReply::Failed(error) => {
                 self.terminal_channels
                     .lock()
@@ -724,7 +805,10 @@ fn session_reader_loop(
     attach_rx: std::sync::mpsc::Receiver<AttachRequest>,
     terminal_channels: std::sync::Arc<
         std::sync::Mutex<
-            std::collections::HashMap<TerminalId, std::sync::mpsc::SyncSender<WireTerminalEvent>>,
+            std::collections::HashMap<
+                TerminalId,
+                std::sync::mpsc::SyncSender<QueuedLiveTerminalEvent>,
+            >,
         >,
     >,
 ) {
@@ -771,8 +855,8 @@ fn session_reader_loop(
             }
         }
 
-        let message: SessionFrame = match read_frame(&mut stream) {
-            Ok(message) => message,
+        let frame = match read_session_frame(&mut stream) {
+            Ok(frame) => frame,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
             Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(error) => {
@@ -783,6 +867,31 @@ fn session_reader_loop(
                 );
                 break;
             }
+        };
+        let message: SessionFrame = match frame {
+            SessionWireFrame::Terminal { terminal_id, event } => {
+                let sender = terminal_channels
+                    .lock()
+                    .expect("terminal channels poisoned")
+                    .get(&terminal_id)
+                    .cloned();
+                if let Some(sender) = sender {
+                    let _ =
+                        sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Raw(event)));
+                }
+                continue;
+            }
+            SessionWireFrame::Json(payload) => match serde_json::from_slice(&payload) {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "water::automation",
+                        ?error,
+                        "invalid JSON frame on water session"
+                    );
+                    break;
+                }
+            },
         };
 
         // Attach responses and stray RPC replies: route to pending replies.
@@ -828,7 +937,9 @@ fn session_reader_loop(
                 let Some(sender) = sender else {
                     continue;
                 };
-                let _ = sender.send(push.event);
+                let _ = sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Wire(
+                    push.event,
+                )));
             }
             Some(PUSH_SNAPSHOT_METHOD) => {
                 let Some(params) = message.params.as_deref() else {

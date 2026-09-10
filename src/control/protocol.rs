@@ -8,12 +8,17 @@ use crate::app::model::{AgentDump, MemoryStats, StateDump, WorkspaceDump};
 use crate::command::{AppCommand, CommandError, OperationSnapshot};
 use crate::event::AppEvent;
 use crate::ids::{OperationId, PaneId, TerminalId, WorkspaceId};
-use crate::terminal::{TerminalReplay, WireTerminalEvent};
+use crate::terminal::{TerminalReplay, TerminalSize, TerminalStreamEvent, WireTerminalEvent};
 use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
-/// Version 2 replaces rendered terminal snapshots with ordered raw PTY events.
-pub const PROTOCOL_VERSION: u32 = 2;
+/// Version 3 carries live terminal events in binary frames. Control messages
+/// and bounded attach replay remain JSON for compatibility and debuggability.
+pub const PROTOCOL_VERSION: u32 = 3;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const TERMINAL_FRAME_PREFIX: &[u8; 4] = b"\0WT3";
+const TERMINAL_FRAME_OUTPUT: u8 = 1;
+const TERMINAL_FRAME_RESIZE: u8 = 2;
+const TERMINAL_FRAME_EXIT: u8 = 3;
 
 /// Push frames the server sends on a GUI session connection.
 ///
@@ -357,6 +362,16 @@ pub struct TerminalPush {
     pub event: WireTerminalEvent,
 }
 
+/// A frame read from the long-lived GUI session. JSON remains the control
+/// plane; terminal events use a compact binary data plane without Base64.
+pub(crate) enum SessionWireFrame {
+    Json(Vec<u8>),
+    Terminal {
+        terminal_id: TerminalId,
+        event: TerminalStreamEvent,
+    },
+}
+
 pub fn write_frame<W, T>(writer: &mut W, message: &T) -> io::Result<()>
 where
     W: Write,
@@ -436,10 +451,154 @@ where
     writer.flush()
 }
 
-pub fn read_frame<R, T>(reader: &mut R) -> io::Result<T>
+/// Writes one terminal event without JSON serialization or Base64 expansion.
+/// The existing outer length prefix is retained so terminal and control
+/// frames can share one ordered Unix stream.
+pub(crate) fn write_terminal_frame<W>(
+    writer: &mut W,
+    terminal_id: TerminalId,
+    event: &TerminalStreamEvent,
+) -> io::Result<()>
+where
+    W: Write,
+{
+    let output_len = event.output_bytes();
+    let payload_len = match event {
+        TerminalStreamEvent::Output { .. } | TerminalStreamEvent::Resize { .. } => {
+            TERMINAL_FRAME_PREFIX.len() + 1 + 8 + 8 + 2 + 2 + output_len
+        }
+        TerminalStreamEvent::Exit { .. } => TERMINAL_FRAME_PREFIX.len() + 1 + 8 + 8 + 1 + 4,
+    };
+    if payload_len > MAX_FRAME_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "terminal frame exceeds maximum frame size",
+        ));
+    }
+    let mut payload = Vec::with_capacity(payload_len);
+    payload.extend_from_slice(TERMINAL_FRAME_PREFIX);
+    match event {
+        TerminalStreamEvent::Output {
+            seq, size, bytes, ..
+        } => {
+            payload.push(TERMINAL_FRAME_OUTPUT);
+            payload.extend_from_slice(&terminal_id.get().to_be_bytes());
+            payload.extend_from_slice(&seq.to_be_bytes());
+            payload.extend_from_slice(&(size.columns as u16).to_be_bytes());
+            payload.extend_from_slice(&(size.lines as u16).to_be_bytes());
+            payload.extend_from_slice(bytes);
+        }
+        TerminalStreamEvent::Resize { seq, size } => {
+            payload.push(TERMINAL_FRAME_RESIZE);
+            payload.extend_from_slice(&terminal_id.get().to_be_bytes());
+            payload.extend_from_slice(&seq.to_be_bytes());
+            payload.extend_from_slice(&(size.columns as u16).to_be_bytes());
+            payload.extend_from_slice(&(size.lines as u16).to_be_bytes());
+        }
+        TerminalStreamEvent::Exit { seq, code } => {
+            payload.push(TERMINAL_FRAME_EXIT);
+            payload.extend_from_slice(&terminal_id.get().to_be_bytes());
+            payload.extend_from_slice(&seq.to_be_bytes());
+            payload.push(u8::from(code.is_some()));
+            payload.extend_from_slice(&code.unwrap_or_default().to_be_bytes());
+        }
+    }
+    write_frame_payload(writer, &payload)
+}
+
+pub(crate) fn read_session_frame<R>(reader: &mut R) -> io::Result<SessionWireFrame>
 where
     R: Read,
-    T: DeserializeOwned,
+{
+    let length = read_frame_length(reader)?;
+    if length < TERMINAL_FRAME_PREFIX.len() {
+        let mut payload = vec![0_u8; length];
+        reader.read_exact(&mut payload)?;
+        return Ok(SessionWireFrame::Json(payload));
+    }
+
+    let mut prefix = [0_u8; 4];
+    reader.read_exact(&mut prefix)?;
+    if &prefix != TERMINAL_FRAME_PREFIX {
+        let mut payload = vec![0_u8; length];
+        payload[..4].copy_from_slice(&prefix);
+        reader.read_exact(&mut payload[4..])?;
+        return Ok(SessionWireFrame::Json(payload));
+    }
+
+    if length < 21 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "terminal frame header is truncated",
+        ));
+    }
+    let mut header = [0_u8; 17];
+    reader.read_exact(&mut header)?;
+    let kind = header[0];
+    let terminal_id = TerminalId::new(u64::from_be_bytes(header[1..9].try_into().unwrap()));
+    let seq = u64::from_be_bytes(header[9..17].try_into().unwrap());
+    let remaining = length - 21;
+    let event = match kind {
+        TERMINAL_FRAME_OUTPUT | TERMINAL_FRAME_RESIZE => {
+            if remaining < 4 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "terminal geometry is truncated",
+                ));
+            }
+            let mut geometry = [0_u8; 4];
+            reader.read_exact(&mut geometry)?;
+            let size = TerminalSize::new(
+                u16::from_be_bytes(geometry[..2].try_into().unwrap()) as usize,
+                u16::from_be_bytes(geometry[2..].try_into().unwrap()) as usize,
+            );
+            if kind == TERMINAL_FRAME_RESIZE {
+                if remaining != 4 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "terminal resize frame has trailing bytes",
+                    ));
+                }
+                TerminalStreamEvent::Resize { seq, size }
+            } else {
+                let mut bytes = vec![0_u8; remaining - 4];
+                reader.read_exact(&mut bytes)?;
+                TerminalStreamEvent::Output {
+                    seq,
+                    size,
+                    bytes: std::sync::Arc::from(bytes),
+                }
+            }
+        }
+        TERMINAL_FRAME_EXIT => {
+            if remaining != 5 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid terminal exit frame length",
+                ));
+            }
+            let mut exit = [0_u8; 5];
+            reader.read_exact(&mut exit)?;
+            let code = if exit[0] == 0 {
+                None
+            } else {
+                Some(i32::from_be_bytes(exit[1..].try_into().unwrap()))
+            };
+            TerminalStreamEvent::Exit { seq, code }
+        }
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unknown terminal frame kind",
+            ));
+        }
+    };
+    Ok(SessionWireFrame::Terminal { terminal_id, event })
+}
+
+fn read_frame_length<R>(reader: &mut R) -> io::Result<usize>
+where
+    R: Read,
 {
     let mut length_bytes = [0_u8; 4];
     reader.read_exact(&mut length_bytes)?;
@@ -450,6 +609,15 @@ where
             "invalid control message frame length",
         ));
     }
+    Ok(length)
+}
+
+pub fn read_frame<R, T>(reader: &mut R) -> io::Result<T>
+where
+    R: Read,
+    T: DeserializeOwned,
+{
+    let length = read_frame_length(reader)?;
     let mut payload = vec![0_u8; length];
     reader.read_exact(&mut payload)?;
     serde_json::from_slice(&payload).map_err(io::Error::other)
@@ -483,5 +651,52 @@ mod tests {
                 .state_revision,
             7
         );
+    }
+
+    #[test]
+    fn binary_terminal_frames_round_trip_without_base64() {
+        let terminal_id = TerminalId::new(9);
+        let size = TerminalSize::new(132, 43);
+        let events = [
+            TerminalStreamEvent::Output {
+                seq: 17,
+                size,
+                bytes: std::sync::Arc::from(&b"\0raw\xffterminal"[..]),
+            },
+            TerminalStreamEvent::Resize { seq: 18, size },
+            TerminalStreamEvent::Exit {
+                seq: 19,
+                code: Some(7),
+            },
+        ];
+        let mut bytes = Vec::new();
+        for event in &events {
+            write_terminal_frame(&mut bytes, terminal_id, event).unwrap();
+        }
+        let mut reader = bytes.as_slice();
+        for expected in events {
+            let SessionWireFrame::Terminal {
+                terminal_id: actual_id,
+                event,
+            } = read_session_frame(&mut reader).unwrap()
+            else {
+                panic!("expected binary terminal frame");
+            };
+            assert_eq!(actual_id, terminal_id);
+            assert_eq!(event, expected);
+        }
+    }
+
+    #[test]
+    fn session_reader_still_accepts_json_frames() {
+        let message = WireMessage::reply(42, Ok(serde_json::json!({ "ok": true })));
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &message).unwrap();
+        let SessionWireFrame::Json(payload) = read_session_frame(&mut bytes.as_slice()).unwrap()
+        else {
+            panic!("expected JSON frame");
+        };
+        let decoded: WireMessage = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(decoded.request_id, 42);
     }
 }
