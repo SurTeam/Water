@@ -36,7 +36,7 @@ Agent 可能依附于正在运行的 Water server；不要终止承载当前会�
 
 ## 构建与仓库
 
-- 只分 dev 和 release：普通 `cargo build` 即优化后的 dev，产物在 `target/debug`；release 用 `--release`，产物在 `target/release`。指定 target 时多一层 `<triple>`。不再使用 dev-opt；打包默认 dev，显式 `WATER_APP_VARIANT=release` 才发布 release。
+- 只分 dev 和 release：普通 `cargo build` 即优化后的 dev，产物在 `target/debug`；release 用 `--release`，产物在 `target/release`。指定 target 时多一层 `<triple>`。打包默认 dev，显式 `WATER_APP_VARIANT=release` 才发布 release。
 - dev 版必须完全独立：socket `/tmp/water-dev.sock`；配置 `~/Library/Application Support/water-dev/config.json`；Bundle ID `dev.water.terminal.dev`；进程 `water-dev` / `water-srv-dev`。release 使用 `/tmp/water.sock`、`~/Library/Application Support/water/config.json`、`dev.water.terminal`、`water` / `water-server`。
 - 发布 dev 版前确认包内 GUI/server、远端 payload 和运行时身份均符合隔离要求；构建时必须校验 payload 变体，不能回退到任意已安装的 release server。使用以下构建命令和时间戳 tag；创建 release 后按发布任务上传本次产物，不能把空 release 当成已交付安装包。
 
@@ -47,5 +47,5 @@ Agent 可能依附于正在运行的 Water server；不要终止承载当前会�
   ```
 
 - Linux → macOS 构建沿用现有 zig linker、framework stubs 和平台 patch；Metal shader 在 Mac 预编译并维护仓库产物。入口见架构文档，交叉构建成功不等于 macOS 运行验证。
-- 新增路径先查 `git ls-files` 的大小写冲突；只保留一个 `AGENTS.md`，不要再创建 `Agents.md`。本地 `.pi/` 会话目录应被忽略，不提交会话数据。
+- 新增路径先查 `git ls-files` 的大小写冲突；只保留一个 `AGENTS.md`，不要再创建 `Agents.md`。
 - Python 优先 `~/.venv/bin/python` / `~/.venv/bin/pip`；Node 工具先加载 fnm 环境并遵循项目指定版本。
