@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +35,6 @@ pub struct OperationSnapshot {
 #[derive(Debug, Clone)]
 pub(crate) struct OperationRegistry {
     entries: Arc<Mutex<std::collections::BTreeMap<OperationId, Arc<OperationCell>>>>,
-    next_id: Arc<AtomicU64>,
 }
 
 #[derive(Debug)]
@@ -55,13 +53,13 @@ impl OperationRegistry {
     pub(crate) fn new() -> Self {
         Self {
             entries: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
-            next_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
     pub(crate) fn begin(&self, command: AppCommand) -> OperationId {
-        let raw_id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let id = OperationId::new(raw_id);
+        // Random allocation keeps operation IDs unique across servers, the
+        // same way IdAllocator does for model entities.
+        let id = OperationId::from((uuid::Uuid::new_v4().as_u128() >> 64) as u64);
         let snapshot = OperationSnapshot {
             id,
             command,

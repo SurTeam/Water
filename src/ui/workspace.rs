@@ -1277,7 +1277,12 @@ impl WorkspaceView {
         let workspace_count = workspaces.len() as isize;
         let next_index = (current_index as isize + direction).rem_euclid(workspace_count) as usize;
         let workspace_id = workspaces[next_index].id;
-        self.select_workspace_locally(workspace_id, cx);
+        // Apply the activation locally first: the command is idempotent and
+        // its pushed snapshot confirms, but waiting for the round trip made
+        // the switch feel dead on remote connections.
+        if self.apply_workspace_activated_locally(workspace_id) {
+            cx.notify();
+        }
         self.dispatch(
             AppCommand::Workspace(WorkspaceCommand::Activate {
                 workspace_id: Some(workspace_id),
@@ -2252,8 +2257,17 @@ impl WorkspaceView {
         }
     }
 
+    /// Routes a terminal command through the transport of the connection
+    /// that owns the terminal. The window's `self.client` is the
+    /// active connection's transport, so sending by terminal ID through it
+    /// after a connection switch would reach the wrong server (local vs
+    /// remote) and be dropped as an unknown terminal.
     fn enqueue_terminal_command(&self, terminal_id: TerminalId, command: TerminalCommand) -> bool {
-        match self.client.enqueue(AppCommand::Terminal(command)) {
+        let client = self
+            .connection_by_id(self.active_connection)
+            .map(|connection| connection.client.clone())
+            .unwrap_or_else(|| self.client.clone());
+        match client.enqueue(AppCommand::Terminal(command)) {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(
@@ -2434,6 +2448,28 @@ impl WorkspaceView {
             .tabs
             .iter()
             .find_map(|tab| terminal_id_for_pane(&tab.tree, pane_id))
+    }
+
+    /// Pane IDs are not unique across connections: the local and every
+    /// remote server allocate IDs from their own counters, so a pane ID
+    /// must never be resolved without its owning connection. This lookup is
+    /// scoped to the window's active connection.
+    fn terminal_id_for_pane_in_active_connection(&self, pane_id: PaneId) -> Option<TerminalId> {
+        let snapshot = self
+            .connection_by_id(self.active_connection)?
+            .snapshot
+            .clone();
+        let workspaces = if snapshot.workspaces.is_empty() {
+            snapshot.workspace.into_iter().collect::<Vec<_>>()
+        } else {
+            snapshot.workspaces
+        };
+        workspaces.iter().find_map(|workspace| {
+            workspace
+                .tabs
+                .iter()
+                .find_map(|tab| terminal_id_for_pane(&tab.tree, pane_id))
+        })
     }
 
     fn terminal_bounds_for(&self, terminal_id: TerminalId) -> Option<Bounds<gpui::Pixels>> {
@@ -2910,7 +2946,13 @@ impl WorkspaceView {
         metrics: TerminalMetrics,
         window_active: bool,
     ) -> AnyElement {
-        let client = self.client.clone();
+        // Capture the owning connection's transport at render time: the
+        // window's active connection can change after this pane was drawn,
+        // and a resize must always reach the server that owns the pane.
+        let client = self
+            .connection_by_id(connection_id)
+            .map(|connection| connection.client.clone())
+            .unwrap_or_else(|| self.client.clone());
         let resize_requests = self.resize_requests.clone();
         canvas(
             move |bounds, _, _| {
@@ -2939,12 +2981,21 @@ impl WorkspaceView {
                     )
                 };
                 if should_enqueue {
-                    let _ = client.enqueue(AppCommand::Terminal(TerminalCommand::Resize {
-                        terminal_id: None,
-                        pane_id: Some(pane_id),
-                        columns: size.columns,
-                        lines: size.lines,
-                    }));
+                    // The command must reach the server that owns this
+                    // connection: dispatching through the window's
+                    // active-connection client sent remote panes' resizes to
+                    // the local model, which could not resolve the pane and
+                    // dropped them.
+                    if let Ok(operation_id) =
+                        client.dispatch(AppCommand::Terminal(TerminalCommand::Resize {
+                            terminal_id: None,
+                            pane_id: Some(pane_id),
+                            columns: size.columns,
+                            lines: size.lines,
+                        }))
+                    {
+                        let _ = client.wait_operation(operation_id);
+                    }
                 }
             },
             |_bounds, _, _, _| {},
@@ -3116,7 +3167,10 @@ impl WorkspaceView {
         bracketed_paste: bool,
         cx: &mut Context<Self>,
     ) {
-        let client = self.client.clone();
+        let client = self
+            .connection_by_id(self.active_connection)
+            .map(|connection| connection.client.clone())
+            .unwrap_or_else(|| self.client.clone());
         let clipboard = cx.read_from_clipboard_async();
         cx.spawn(async move |_entity, _cx| {
             let Ok(Some(item)) = clipboard.await else {
@@ -3155,10 +3209,14 @@ impl WorkspaceView {
         {
             self.selection = None;
         }
+        let previous_selection = self.selected_workspace;
+        let previous_focused_pane = self.focused_pane;
         self.selected_workspace =
             workspace_selection_after_snapshot(self.selected_workspace, &snapshot);
         self.focused_pane =
             focused_pane_for_workspace(&snapshot, self.selected_workspace, self.focused_pane);
+        let selection_moved = self.selected_workspace != previous_selection
+            || self.focused_pane != previous_focused_pane;
         let active_connection = self.active_connection;
         self.collapsed_workspaces
             .retain(|(connection_id, workspace_id)| {
@@ -3180,7 +3238,7 @@ impl WorkspaceView {
             self.selected_workspace_dump()
                 .map_or(0, |workspace| workspace.tabs.len()),
         );
-        if tab_strip_signature != self.last_tab_strip_signature {
+        if tab_strip_signature != self.last_tab_strip_signature || selection_moved {
             // The overflow state of the tab strip is only known after the
             // layout that follows this render; one follow-up render keeps
             // the edge indicators honest when tabs are added or removed.
@@ -3390,8 +3448,12 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
-            OperationResult::WorkspaceActivated { .. }
-            | OperationResult::WorkspaceClosed { .. }
+            OperationResult::WorkspaceActivated { workspace_id } => {
+                if self.apply_workspace_activated_locally(workspace_id) {
+                    cx.notify();
+                }
+            }
+            OperationResult::WorkspaceClosed { .. }
             | OperationResult::WorkspaceCreated { .. }
             | OperationResult::WorkspaceRenamed { .. }
             | OperationResult::PaneResized { .. }
@@ -3409,6 +3471,32 @@ impl WorkspaceView {
 
     fn dispatch(&mut self, command: AppCommand, cx: &mut Context<Self>) {
         self.dispatch_on(self.active_connection, command, cx);
+    }
+
+    /// Optimistically applies the `workspace.activate` effect locally.
+    /// Activation is idempotent, so this is safe whether or not the
+    /// dispatched command changes anything on the server; it also makes the
+    /// switch instant on remote transports where the round trip takes longer
+    /// than the user's next click. Only touches state this window owns.
+    fn apply_workspace_activated_locally(&mut self, workspace_id: WorkspaceId) -> bool {
+        if self
+            .selected_workspace
+            .is_some_and(|selected| selected == workspace_id)
+        {
+            return false;
+        }
+        let Some(workspace) = self.workspace_by_id(workspace_id) else {
+            return false;
+        };
+        let focused_pane = workspace_active_pane(workspace);
+        let changed = self.focused_pane != focused_pane;
+        self.selected_workspace = Some(workspace_id);
+        self.focused_pane = focused_pane;
+        self.pending_tab = None;
+        self.split_drag = None;
+        self.selection = None;
+        self.clear_ime();
+        changed
     }
 
     /// Runs a command through the transport of `connection_id`. Used for
@@ -3459,10 +3547,10 @@ impl WorkspaceView {
                 let _ = entity.update(cx, |view, cx| {
                     if view.active_connection == connection_id {
                         view.install_snapshot(snapshot, cx);
+                        view.apply_operation_result(operation_result, cx);
                     } else {
                         view.install_connection_snapshot(connection_id, snapshot, cx);
                     }
-                    view.apply_operation_result(operation_result, cx);
                 });
             } else if let Err(error) = result {
                 tracing::warn!(
@@ -4922,10 +5010,9 @@ impl WorkspaceView {
                     crate::surface::SurfaceKind::MarkdownPreview => "MarkdownPreviewSurface",
                     crate::surface::SurfaceKind::Diff => "DiffSurface",
                 };
-                let terminal_id = match surface_state {
-                    SurfaceState::Terminal(terminal) => Some(terminal.terminal_id),
-                    SurfaceState::Empty(_) => None,
-                };
+                let terminal_id = terminal
+                    .as_ref()
+                    .map(|projection| projection.summary.terminal_id);
                 let terminal_grid = terminal
                     .as_ref()
                     .map(|projection| {
@@ -4989,7 +5076,7 @@ impl WorkspaceView {
                         .child(self.terminal_resize_observer(
                             self.active_connection,
                             pane_id,
-                            terminal.terminal_id,
+                            terminal_id.expect("terminal surface carries a projection"),
                             TerminalSize::new(terminal.columns, terminal.lines),
                             metrics,
                             window_active,
@@ -5015,6 +5102,11 @@ impl WorkspaceView {
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             this.focus_handle.focus(window, cx);
                             this.focused_pane = Some(pane_id);
+                            // Resolve the terminal through the pane's own
+                            // connection: pane IDs are not unique across
+                            // local/remote servers.
+                            let terminal_id =
+                                this.terminal_id_for_pane_in_active_connection(pane_id);
                             if let Some(terminal_id) = terminal_id {
                                 if this.begin_reported_mouse(terminal_id, event, cx) {
                                     cx.stop_propagation();

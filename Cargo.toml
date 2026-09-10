@@ -1,6 +1,6 @@
 [package]
 name = "water"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 default-run = "water"
 description = "A native Rust desktop development workbench."
@@ -54,6 +54,10 @@ smallvec = { version = "1.15", features = ["serde"] }
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[dependencies.uuid]
+version = "1.26.1"
+features = ["v4"]
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "test-support"] }

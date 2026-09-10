@@ -27,7 +27,7 @@ macro_rules! define_id {
         }
 
         impl From<$name> for u64 {
-            fn from(value: $name) -> Self {
+            fn from(value: $name) -> u64 {
                 value.get()
             }
         }
@@ -49,29 +49,30 @@ define_id!(SessionId);
 define_id!(ConnectionId);
 define_id!(OperationId);
 
-/// Allocates monotonically increasing values and converts them into a typed ID.
+/// Allocates globally unique random values (UUIDv4, truncated to 64 bits)
+/// and converts them into a typed ID.
 ///
-/// The allocator is owned by the model/dispatcher, so IDs remain stable for the
-/// lifetime of an application without making a vector position part of identity.
+/// Random allocation (instead of a per-process counter) makes IDs unique
+/// across independent servers: a local GUI process and each remote water
+/// server draw from the same 122-bit v4 space, so IDs from different
+/// connections never collide. The allocator is still owned by the
+/// model/dispatcher so IDs remain stable for the lifetime of the
+/// application without making a vector position part of identity.
 #[derive(Debug, Default, Clone)]
-pub struct IdAllocator {
-    next: u64,
-}
+pub struct IdAllocator;
 
 impl IdAllocator {
     pub fn new() -> Self {
-        Self { next: 1 }
+        Self
     }
 
     pub fn alloc<T>(&mut self) -> T
     where
         T: From<u64>,
     {
-        let value = self.next;
-        self.next = self
-            .next
-            .checked_add(1)
-            .expect("water ID allocator exhausted");
-        T::from(value)
+        // The upper 64 bits of a v4 UUID carry the 48-bit timestamp plus the
+        // version/variant-random content; using them instead of either half
+        // keeps the draw as random as possible.
+        T::from((uuid::Uuid::new_v4().as_u128() >> 64) as u64)
     }
 }
