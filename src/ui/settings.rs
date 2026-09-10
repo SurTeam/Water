@@ -772,9 +772,7 @@ impl SettingsView {
             SettingField::UiFontSize => {
                 self.config.ui.font_size = parse_float(&value, "界面字体大小")?
             }
-            SettingField::UiFontFamily => {
-                self.config.ui.font_family = value.trim().to_owned()
-            }
+            SettingField::UiFontFamily => self.config.ui.font_family = value.trim().to_owned(),
             SettingField::SidebarWidth => {
                 self.config.ui.sidebar_width = parse_float(&value, "侧边栏宽度")?
             }
@@ -859,7 +857,7 @@ impl SettingsView {
                 .startup
                 .control_socket
                 .clone()
-                .unwrap_or_else(|| "(环境变量或 /tmp/water.sock)".to_owned()),
+                .unwrap_or_else(|| format!("(环境变量或 /tmp/{}.sock)", crate::APP_NAMESPACE)),
             _ => self.raw_value(field),
         }
     }
@@ -1480,7 +1478,10 @@ impl Render for SettingsView {
             (SettingField::ThemeActivePaneBorder, "活动面板边框色"),
             (SettingField::ThemeInactivePaneBorder, "非活动面板边框色"),
             (SettingField::ThemeAccent, "强调色（按钮/焦点）"),
-            (SettingField::ThemeAccentForeground, "强调色前景（按钮文字）"),
+            (
+                SettingField::ThemeAccentForeground,
+                "强调色前景（按钮文字）",
+            ),
             (SettingField::ThemeChromeBackground, "窗口 chrome 背景色"),
             (SettingField::ThemeTabActiveBackground, "活动标签背景色"),
             (SettingField::ThemeTabInactiveBackground, "非活动标签背景色"),

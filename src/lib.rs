@@ -1,3 +1,11 @@
+/// Runtime identity is derived from the two Cargo build modes, not optimization level.
+pub const BUILD_VARIANT: &str = env!("WATER_BUILD_PROFILE");
+pub const APP_NAMESPACE: &str = if matches!(BUILD_VARIANT.as_bytes(), b"release") {
+    "water"
+} else {
+    "water-dev"
+};
+
 pub mod agent;
 pub mod app;
 pub mod automation;

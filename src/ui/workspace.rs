@@ -4460,11 +4460,7 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        let mut button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .flex();
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4477,17 +4473,11 @@ impl WorkspaceView {
                     .child(hint),
             );
         }
-        button_row = button_row
-            .child(
-                div()
-                    .flex_none()
-                    .child(cancel),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
-            );
+        button_row = button_row.child(div().flex_none().child(cancel)).child(
+            div()
+                .flex_none()
+                .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
+        );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -4661,11 +4651,7 @@ impl WorkspaceView {
                     .child(SharedString::from(format!("Current name: {title}"))),
             )
             .child(self.render_text_input_row("Workspace name", theme));
-        let mut button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .flex();
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
         if let Some(hint) = hint {
             button_row = button_row.child(
                 div()
@@ -4678,17 +4664,11 @@ impl WorkspaceView {
                     .child(hint),
             );
         }
-        button_row = button_row
-            .child(
-                div()
-                    .flex_none()
-                    .child(cancel),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .child(self.render_dialog_confirm_button("Rename", theme, cx)),
-            );
+        button_row = button_row.child(div().flex_none().child(cancel)).child(
+            div()
+                .flex_none()
+                .child(self.render_dialog_confirm_button("Rename", theme, cx)),
+        );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -9770,8 +9750,8 @@ mod tests {
         }
     }
 
-    /// Two independent model hosts whose first workspaces share both ID and
-    /// default title — the exact local/remote "Workspace 1" collision.
+    /// Two independent model hosts whose first workspaces share the default
+    /// title. Their UUID identities must remain distinct across connections.
     fn two_hosts_with_colliding_workspaces() -> (
         crate::app::ModelHost,
         crate::app::ModelHost,
@@ -9809,7 +9789,10 @@ mod tests {
                 .expect("remote host creates a workspace");
             (workspace.id, workspace.title.clone())
         };
-        assert_eq!(local_id, remote_id, "test relies on an ID collision");
+        assert_ne!(
+            local_id, remote_id,
+            "independent hosts must use distinct UUIDs"
+        );
         assert_eq!(
             local_title, remote_title,
             "test relies on a title collision"

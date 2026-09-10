@@ -21,6 +21,9 @@ profiling = []
 
 
 [profile.dev]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
 debug = "line-tables-only"
 
 [profile.dev.package."*"]
@@ -57,24 +60,18 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dependencies.uuid]
 version = "1.26.1"
-features = ["v4"]
+features = ["v4", "serde"]
 
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "test-support"] }
 
-# use `cargo run --release` for performance-sensitive terminal work.
+# Both dev and release are optimized; their runtime identities remain isolated.
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 
-[profile.dev-opt]
-inherits = "release"
-opt-level = 3
-lto = "thin"
-codegen-units = 1
-debug = "line-tables-only"
 
 [patch."https://github.com/zed-industries/zed.git"]
 media = { path = "scripts/stub-media" }

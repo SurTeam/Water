@@ -28,7 +28,7 @@ fn main() -> Result<()> {
         .is_some_and(|argument| argument == "server" || argument == "--server");
     if explicit_server_mode {
         if !is_release {
-            water::set_process_name("water-server-dev");
+            water::set_process_name("water-srv-dev");
         }
         run_server_via_dedicated_binary(&arguments[1..])
     } else {
@@ -40,6 +40,22 @@ fn main() -> Result<()> {
 /// Preserve the compatibility `water server` spelling while replacing the
 /// process image with `water-server` whenever the sibling binary is present.
 /// This keeps Activity Monitor/ps labels unambiguous for manual starts too.
+fn validate_server_variant(path: &std::path::Path) -> Result<()> {
+    let output = std::process::Command::new(path)
+        .arg("--build-variant")
+        .output()
+        .context("could not inspect sibling water-server build variant")?;
+    if !output.status.success()
+        || String::from_utf8_lossy(&output.stdout).trim() != water::BUILD_VARIANT
+    {
+        bail!(
+            "sibling water-server must match the {} GUI build",
+            water::BUILD_VARIANT
+        );
+    }
+    Ok(())
+}
+
 fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
     let executable = std::env::current_exe().context("could not resolve water executable")?;
     let dedicated = executable.with_file_name(if cfg!(windows) {
@@ -51,6 +67,7 @@ fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
         return water::server::run(arguments.iter().cloned());
     }
 
+    validate_server_variant(&dedicated)?;
     let mut command = std::process::Command::new(dedicated);
     command.args(arguments);
     #[cfg(unix)]
@@ -108,6 +125,14 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
     let mut embedded: Option<EmbeddedServer> = None;
     let mut owns_server = false;
     if probe.ping().is_err() {
+        // Never auto-start over a reachable incompatible server.
+        #[cfg(unix)]
+        if std::os::unix::net::UnixStream::connect(&socket_path).is_ok() {
+            bail!(
+                "control socket belongs to an incompatible server: {}",
+                socket_path.display()
+            );
+        }
         if !config.server.auto_start {
             bail!(
                 "no water server is listening at {}; start one with `water server` \
@@ -244,6 +269,9 @@ fn spawn_detached_server(
         "water-server"
     });
     let use_dedicated_server = dedicated_server.is_file();
+    if use_dedicated_server {
+        validate_server_variant(&dedicated_server)?;
+    }
     let mut command = std::process::Command::new(if use_dedicated_server {
         dedicated_server
     } else {

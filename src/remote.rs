@@ -78,6 +78,13 @@ impl SshTunnel {
             forward_spec,
         };
         if !tunnel.server_is_compatible() {
+            if tunnel.client().server_info().is_ok() || tunnel.client().ping().is_ok() {
+                return Err(SshConnectionError::Command {
+                    action: "attach remote Water server",
+                    message: "socket belongs to an incompatible server; refusing to replace it"
+                        .to_owned(),
+                });
+            }
             start_remote_server(&tunnel.destination, &tunnel.control_socket, &remote_socket)?;
             tunnel.wait_until_ready()?;
         }
@@ -100,6 +107,7 @@ impl SshTunnel {
         self.client().server_info().is_ok_and(|info| {
             info.protocol_version == PROTOCOL_VERSION
                 && info.server_version == env!("CARGO_PKG_VERSION")
+                && info.build_variant == crate::BUILD_VARIANT
         })
     }
 
@@ -152,9 +160,11 @@ fn connection_paths(destination: &str, remote_socket: &Path) -> (PathBuf, PathBu
     let mut forward_hasher = std::collections::hash_map::DefaultHasher::new();
     destination.hash(&mut forward_hasher);
     remote_socket.hash(&mut forward_hasher);
+    crate::BUILD_VARIANT.hash(&mut forward_hasher);
     let forward_identity = forward_hasher.finish();
     let mut master_hasher = std::collections::hash_map::DefaultHasher::new();
     destination.hash(&mut master_hasher);
+    crate::BUILD_VARIANT.hash(&mut master_hasher);
     let master_identity = master_hasher.finish();
     #[cfg(unix)]
     let user = unsafe { libc::geteuid() };
@@ -220,6 +230,8 @@ fn start_remote_server(
     control_socket: &Path,
     remote_socket: &Path,
 ) -> Result<(), SshConnectionError> {
+    let namespace = crate::APP_NAMESPACE;
+    let variant = crate::BUILD_VARIANT;
     let remote_socket_quoted = shell_quote(&remote_socket.display().to_string());
     if let Ok(server_program) = std::env::var("WATER_REMOTE_SERVER_COMMAND") {
         let server_program = shell_quote(&server_program);
@@ -227,7 +239,7 @@ fn start_remote_server(
             destination,
             control_socket,
             &format!(
-                "rm -f -- {remote_socket_quoted}; command -v {server_program} >/dev/null 2>&1 || exit 127; {server_program} --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null"
+                "command -v {server_program} >/dev/null 2>&1 || exit 127; test \"$( {server_program} --build-variant )\" = {variant} || exit 1; {server_program} --daemonize --control-socket {remote_socket_quoted} >/tmp/{namespace}-server.log 2>&1 </dev/null"
             ),
             "start configured remote Water server",
         );
@@ -243,17 +255,12 @@ fn start_remote_server(
         );
     }
 
-    // Development builds intentionally contain empty placeholders so normal
-    // checks do not cross-compile four release binaries. Packaged builds make
-    // all payloads mandatory and never take this compatibility fallback.
-    run_remote_command(
-        destination,
-        control_socket,
-        &format!(
-            "rm -f -- {remote_socket_quoted}; if command -v water-server >/dev/null 2>&1; then water-server --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null; elif command -v water >/dev/null 2>&1; then water server --daemonize --control-socket {remote_socket_quoted} >/tmp/water-server.log 2>&1 </dev/null; else exit 127; fi"
-        ),
-        "start installed remote Water server",
-    )
+    // An arbitrary installed binary may belong to release. Never launch it
+    // as a fallback for a dev client without matching bundled payloads.
+    Err(SshConnectionError::Command {
+        action: "start remote Water server",
+        message: "matching embedded server payload is missing; build the app bundle or set WATER_REMOTE_SERVER_COMMAND explicitly".to_owned(),
+    })
 }
 
 fn detect_remote_target(
@@ -286,9 +293,12 @@ fn install_and_start_embedded_server(
     remote_socket: &Path,
     payload: crate::embedded_servers::EmbeddedServerPayload,
 ) -> Result<(), SshConnectionError> {
+    let namespace = crate::APP_NAMESPACE;
+    let variant = crate::BUILD_VARIANT;
     let payload_id = stable_payload_id(payload.gzip);
     let relative_directory = format!(
-        ".cache/water/server/{}-{payload_id:016x}/{}",
+        ".cache/{}/server/{}-{payload_id:016x}/{}",
+        crate::APP_NAMESPACE,
         env!("CARGO_PKG_VERSION"),
         payload.target
     );
@@ -332,7 +342,7 @@ fn install_and_start_embedded_server(
         destination,
         control_socket,
         &format!(
-            "rm -f -- {remote_socket}; {quoted_program} --daemonize --control-socket {remote_socket} >/tmp/water-server.log 2>&1 </dev/null"
+            "test \"$( {quoted_program} --build-variant )\" = {variant} || exit 1; {quoted_program} --daemonize --control-socket {remote_socket} >/tmp/{namespace}-server.log 2>&1 </dev/null"
         ),
         "start bundled remote Water server",
     )
@@ -365,7 +375,8 @@ fn versioned_remote_control_socket(
 ) -> PathBuf {
     let identity = stable_payload_id(destination.as_bytes());
     PathBuf::from(format!(
-        "/tmp/water-v{version}-p{protocol_version}-{identity:016x}.sock"
+        "/tmp/{}-v{version}-p{protocol_version}-{identity:016x}.sock",
+        crate::APP_NAMESPACE
     ))
 }
 

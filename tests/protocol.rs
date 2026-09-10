@@ -7,6 +7,65 @@ use water::command::{
 use water::control::protocol::{PROTOCOL_VERSION, RpcMethod, RpcRequest, read_frame, write_frame};
 use water::terminal::{default_shell_args, default_shell_program};
 
+#[cfg(unix)]
+#[test]
+fn server_rejects_other_variants_before_dispatch_or_session_open() {
+    use water::app::ModelHost;
+    use water::control::protocol::RpcResponse;
+    use water::control::{ControlClient, ControlServer};
+    let socket = std::path::PathBuf::from(format!(
+        "/tmp/water-isolation-{}.sock",
+        uuid::Uuid::new_v4()
+    ));
+    let mut host = ModelHost::start();
+    let (mut server, _) = ControlServer::start(socket.clone(), host.client(), None, None).unwrap();
+    let client = ControlClient::new(&socket);
+    let before = client.state_dump().unwrap();
+    for method in [
+        RpcMethod::CommandDispatch {
+            command: AppCommand::Workspace(WorkspaceCommand::Create),
+        },
+        RpcMethod::SessionOpen {
+            role: "gui".into(),
+            compact_snapshots: true,
+        },
+        RpcMethod::ServerShutdown,
+    ] {
+        let request = RpcRequest {
+            build_variant: if water::BUILD_VARIANT == "dev" {
+                "release"
+            } else {
+                "dev"
+            }
+            .into(),
+            protocol_version: PROTOCOL_VERSION,
+            request_id: 1,
+            method,
+        };
+        let mut stream = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        write_frame(&mut stream, &request).unwrap();
+        let response: RpcResponse = read_frame(&mut stream).unwrap();
+        assert!(!response.ok);
+        assert_eq!(response.error.unwrap().code, "INCOMPATIBLE_SERVER");
+    }
+    assert_eq!(
+        client.state_dump().unwrap().state_revision,
+        before.state_revision
+    );
+    assert_eq!(
+        client.server_info().unwrap().build_variant,
+        water::BUILD_VARIANT
+    );
+    let second = ControlServer::start(socket.clone(), host.client(), None, None);
+    assert!(matches!(second, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse));
+    client.ping().unwrap();
+    server.shutdown();
+    host.shutdown();
+}
+
 #[test]
 fn state_dump_deserialization_migrates_legacy_and_new_shapes() {
     let legacy: StateDump = serde_json::from_value(serde_json::json!({
@@ -59,7 +118,7 @@ fn pane_agent_rename_uses_a_stable_wire_type() {
     });
     let value = serde_json::to_value(&command).expect("agent rename serializes");
     assert_eq!(value["type"], "pane.agent_rename");
-    assert_eq!(value["pane_id"], 42);
+    assert_eq!(value["pane_id"], water::PaneId::new(42).to_string());
     assert_eq!(value["label"], "Build Bot");
     let decoded: AppCommand = serde_json::from_value(value).expect("agent rename decodes");
     assert_eq!(decoded, command);
@@ -74,7 +133,7 @@ fn pane_resize_split_uses_a_stable_wire_type() {
     });
     let value = serde_json::to_value(&command).expect("resize split serializes");
     assert_eq!(value["type"], "pane.resize_split");
-    assert_eq!(value["tab_id"], 7);
+    assert_eq!(value["tab_id"], water::TabId::new(7).to_string());
     assert_eq!(value["path"], serde_json::json!([false, true]));
     let decoded: AppCommand = serde_json::from_value(value).expect("resize split decodes");
     assert_eq!(decoded, command);
@@ -107,7 +166,10 @@ fn tab_new_in_workspace_uses_a_stable_wire_type() {
     });
     let value = serde_json::to_value(&command).expect("targeted tab command serializes");
     assert_eq!(value["type"], "tab.new_in_workspace");
-    assert_eq!(value["workspace_id"], 42);
+    assert_eq!(
+        value["workspace_id"],
+        water::WorkspaceId::new(42).to_string()
+    );
     let decoded: AppCommand = serde_json::from_value(value).expect("targeted tab command decodes");
     assert_eq!(decoded, command);
 }
@@ -120,7 +182,10 @@ fn workspace_reorder_uses_a_stable_wire_type() {
     });
     let value = serde_json::to_value(&command).expect("workspace reorder serializes");
     assert_eq!(value["type"], "workspace.reorder");
-    assert_eq!(value["workspace_id"], 42);
+    assert_eq!(
+        value["workspace_id"],
+        water::WorkspaceId::new(42).to_string()
+    );
     assert_eq!(value["index"], 3);
     let decoded: AppCommand = serde_json::from_value(value).expect("workspace reorder decodes");
     assert_eq!(decoded, command);
@@ -134,8 +199,11 @@ fn pane_move_to_workspace_uses_a_stable_wire_type() {
     });
     let value = serde_json::to_value(&command).expect("pane move serializes");
     assert_eq!(value["type"], "pane.move_to_workspace");
-    assert_eq!(value["pane_id"], 7);
-    assert_eq!(value["workspace_id"], 42);
+    assert_eq!(value["pane_id"], water::PaneId::new(7).to_string());
+    assert_eq!(
+        value["workspace_id"],
+        water::WorkspaceId::new(42).to_string()
+    );
     let decoded: AppCommand = serde_json::from_value(value).expect("pane move decodes");
     assert_eq!(decoded, command);
 }
@@ -195,6 +263,7 @@ fn terminal_spawn_defaults_to_the_detected_real_shell() {
 #[test]
 fn ui_automation_methods_use_stable_wire_names() {
     let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         request_id: 8,
         method: RpcMethod::UiKeystroke {
@@ -214,6 +283,7 @@ fn ui_automation_methods_use_stable_wire_names() {
 #[test]
 fn ui_screenshot_uses_a_stable_wire_name() {
     let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         request_id: 9,
         method: RpcMethod::UiScreenshot {
@@ -233,6 +303,7 @@ fn ui_screenshot_uses_a_stable_wire_name() {
 #[test]
 fn ui_wheel_uses_a_stable_wire_name() {
     let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         request_id: 10,
         method: RpcMethod::UiWheel {
@@ -255,6 +326,7 @@ fn ui_wheel_uses_a_stable_wire_name() {
 #[test]
 fn length_prefixed_protocol_round_trips() {
     let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         request_id: 7,
         method: RpcMethod::StateDump,

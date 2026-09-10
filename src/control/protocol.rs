@@ -11,11 +11,11 @@ use crate::ids::{OperationId, PaneId, TerminalId, WorkspaceId};
 use crate::terminal::{TerminalReplay, TerminalSize, TerminalStreamEvent, WireTerminalEvent};
 use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
-/// Version 3 carries live terminal events in binary frames. Control messages
+/// Version 4 carries full 128-bit terminal IDs in binary frames. Control messages
 /// and bounded attach replay remain JSON for compatibility and debuggability.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-const TERMINAL_FRAME_PREFIX: &[u8; 4] = b"\0WT3";
+const TERMINAL_FRAME_PREFIX: &[u8; 4] = b"\0WT4";
 const TERMINAL_FRAME_OUTPUT: u8 = 1;
 const TERMINAL_FRAME_RESIZE: u8 = 2;
 const TERMINAL_FRAME_EXIT: u8 = 3;
@@ -46,6 +46,8 @@ pub const PUSH_TERMINAL_METHOD: &str = "push.terminal";
 /// into `RpcRequest` directly, and old responses parse into `RpcResponse`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WireMessage {
+    #[serde(default)]
+    pub build_variant: String,
     pub protocol_version: u32,
     pub request_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,6 +65,7 @@ pub struct WireMessage {
 impl WireMessage {
     pub fn push_snapshot(state: &StateDump) -> Self {
         Self {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             request_id: 0,
             method: Some(PUSH_SNAPSHOT_METHOD.to_owned()),
@@ -76,6 +79,7 @@ impl WireMessage {
     /// A `push.terminal` frame carrying one ordered raw terminal event.
     pub fn push_terminal(terminal_id: TerminalId, event: &WireTerminalEvent) -> Self {
         Self {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             request_id: 0,
             method: Some(PUSH_TERMINAL_METHOD.to_owned()),
@@ -94,6 +98,7 @@ impl WireMessage {
     /// dispatch the request and mirror the params in its reply.
     pub fn push_ui(request_id: u64, inner: &Value) -> Self {
         Self {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             request_id,
             method: Some(PUSH_UI_METHOD.to_owned()),
@@ -107,6 +112,7 @@ impl WireMessage {
     pub fn reply(request_id: u64, result: Result<Value, RpcError>) -> Self {
         match result {
             Ok(value) => Self {
+                build_variant: crate::BUILD_VARIANT.to_owned(),
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
                 method: None,
@@ -116,6 +122,7 @@ impl WireMessage {
                 error: None,
             },
             Err(error) => Self {
+                build_variant: crate::BUILD_VARIANT.to_owned(),
                 protocol_version: PROTOCOL_VERSION,
                 request_id,
                 method: None,
@@ -153,6 +160,7 @@ impl WireMessage {
 impl From<&RpcResponse> for WireMessage {
     fn from(response: &RpcResponse) -> Self {
         Self {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
             protocol_version: response.protocol_version,
             request_id: response.request_id,
             method: None,
@@ -166,6 +174,8 @@ impl From<&RpcResponse> for WireMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest {
+    #[serde(default)]
+    pub build_variant: String,
     pub protocol_version: u32,
     pub request_id: u64,
     #[serde(flatten)]
@@ -347,6 +357,8 @@ pub struct SessionOpenResponse {
 /// Result of `server.info`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfoResponse {
+    #[serde(default)]
+    pub build_variant: String,
     pub server_pid: u32,
     pub protocol_version: u32,
     #[serde(default)]
@@ -465,9 +477,9 @@ where
     let output_len = event.output_bytes();
     let payload_len = match event {
         TerminalStreamEvent::Output { .. } | TerminalStreamEvent::Resize { .. } => {
-            TERMINAL_FRAME_PREFIX.len() + 1 + 8 + 8 + 2 + 2 + output_len
+            TERMINAL_FRAME_PREFIX.len() + 1 + 16 + 8 + 2 + 2 + output_len
         }
-        TerminalStreamEvent::Exit { .. } => TERMINAL_FRAME_PREFIX.len() + 1 + 8 + 8 + 1 + 4,
+        TerminalStreamEvent::Exit { .. } => TERMINAL_FRAME_PREFIX.len() + 1 + 16 + 8 + 1 + 4,
     };
     if payload_len > MAX_FRAME_BYTES {
         return Err(io::Error::new(
@@ -526,18 +538,18 @@ where
         return Ok(SessionWireFrame::Json(payload));
     }
 
-    if length < 21 {
+    if length < 29 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "terminal frame header is truncated",
         ));
     }
-    let mut header = [0_u8; 17];
+    let mut header = [0_u8; 25];
     reader.read_exact(&mut header)?;
     let kind = header[0];
-    let terminal_id = TerminalId::new(u64::from_be_bytes(header[1..9].try_into().unwrap()));
-    let seq = u64::from_be_bytes(header[9..17].try_into().unwrap());
-    let remaining = length - 21;
+    let terminal_id = TerminalId::from_u128(u128::from_be_bytes(header[1..17].try_into().unwrap()));
+    let seq = u64::from_be_bytes(header[17..25].try_into().unwrap());
+    let remaining = length - 29;
     let event = match kind {
         TERMINAL_FRAME_OUTPUT | TERMINAL_FRAME_RESIZE => {
             if remaining < 4 {
@@ -655,7 +667,7 @@ mod tests {
 
     #[test]
     fn binary_terminal_frames_round_trip_without_base64() {
-        let terminal_id = TerminalId::new(9);
+        let terminal_id = TerminalId::from_u128(0xfedcba98765443218abcdef012345678);
         let size = TerminalSize::new(132, 43);
         let events = [
             TerminalStreamEvent::Output {

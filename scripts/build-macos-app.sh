@@ -10,18 +10,19 @@ set -euo pipefail
 # Environment:
 #   CODESIGN_IDENTITY     codesign identity (default: "-" ad-hoc)
 #   WATER_RUST_TOOLCHAIN  rustup toolchain (default: stable)
-#   WATER_APP_VARIANT     "release" (default) or "dev"
-#                         dev: debug profile, bundle ID *.dev, app name "Water Dev"
+#   WATER_APP_VARIANT     "dev" (default) or "release"
+#                         dev: optimized dev profile, bundle ID *.dev, app name "Water Dev"
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
-variant="${WATER_APP_VARIANT:-release}"
+variant="${WATER_APP_VARIANT:-dev}"
+case "$variant" in dev|release) ;; *) echo "error: WATER_APP_VARIANT must be dev or release" >&2; exit 1 ;; esac
 if [[ "$variant" == "dev" ]]; then
   app_name="Water Dev"
   bundle_id="dev.water.terminal.dev"
-  profile_flag="--profile dev-opt"
-  cargo_profile="dev-opt"
+  profile_flag="--profile dev"
+  cargo_profile="debug"
 else
   app_name="Water"
   bundle_id="dev.water.terminal"
@@ -35,18 +36,18 @@ contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
 resources_dir="$contents_dir/Resources"
 version="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
-server_bundle_dir="$root_dir/target/embedded-servers"
+server_bundle_dir="$root_dir/target/embedded-servers/$variant"
 rust_toolchain="${WATER_RUST_TOOLCHAIN:-stable}"
 target="aarch64-apple-darwin"
 
 # Build embedded servers (needed for both variants)
-WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" "$root_dir/scripts/build-embedded-servers.sh"
+WATER_APP_VARIANT="$variant" WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" bash "$root_dir/scripts/build-embedded-servers.sh"
 
 if [[ "$variant" == "dev" ]]; then
-  # Dev: debug profile for faster builds and smaller binaries
+  # Dev: optimized, independently branded binaries
   if [[ "$(uname -s)" == "Darwin" ]]; then
     build_dir="$root_dir/target/$cargo_profile"
-    WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" \
+    WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
       cargo build $profile_flag --bin "$binary_name" --bin water-server
   else
     if ! command -v zig >/dev/null; then
@@ -64,7 +65,7 @@ else
   if [[ "$(uname -s)" == "Darwin" ]]; then
     build_dir="$root_dir/target/release"
     WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
-      cargo build --release --bin "$binary_name"
+      cargo build --release --bin "$binary_name" --bin water-server
   else
     if ! command -v zig >/dev/null; then
       echo "error: zig is required to cross-compile macOS on Linux" >&2
@@ -74,7 +75,7 @@ else
     export PATH="$root_dir/scripts/stub:$PATH"
     WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
       RUSTFLAGS="-C strip=symbols -C linker=$root_dir/scripts/zig-cc-mac" \
-      rustup run "$rust_toolchain" cargo build --release --bin "$binary_name" --target "$target"
+      rustup run "$rust_toolchain" cargo build --release --bin "$binary_name" --bin water-server --target "$target"
   fi
 fi
 
@@ -84,7 +85,7 @@ mkdir -p "$macos_dir" "$resources_dir"
 install -m 755 "$build_dir/$binary_name" "$macos_dir/$binary_name"
 
 # Install water-server from the matching target triple + profile
-server_build_dir="$root_dir/target/$target/$cargo_profile"
+server_build_dir="$build_dir"
 if [[ -f "$server_build_dir/water-server" ]]; then
   install -m 755 "$server_build_dir/water-server" "$macos_dir/water-server"
 else

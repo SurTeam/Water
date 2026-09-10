@@ -90,7 +90,9 @@ impl AppConfig {
 
     fn standard_path_with_dir(dir_name: &str) -> PathBuf {
         if let Some(config_home) = std::env::var_os("XDG_CONFIG_HOME") {
-            return PathBuf::from(config_home).join(dir_name).join("config.json");
+            return PathBuf::from(config_home)
+                .join(dir_name)
+                .join("config.json");
         }
         if let Some(home) = std::env::var_os("HOME") {
             return PathBuf::from(home)

@@ -1,117 +1,51 @@
-# AGENTS
+# Water · Agent 工作约定
 
-## 项目规则
+本文件规定如何修改和验证 Water；模块入口和当前实现见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
-- Phase order is strict: finish and validate one phase before starting the next. Phases 1 and 2 are accepted; the current target is Phase 3 terminal UX/performance. Normal GUI startup opens one real-shell terminal; new tabs and split panes must also open real-shell terminals. GUI shortcuts are `Cmd-\\` for a right-side split, `Cmd--` for a downward split, and `Cmd-T` for a new terminal tab. Use `--no-initial-terminal` for a workspace-without-terminal baseline or `--empty-workspace` for workspace-creation smoke scenarios. Do not add file browser or image behavior. Coding-agent work is limited to read-only detection and the sidebar Agents section (the binding contract in `ARCHITECTURE.md`); do not add structured Agent Surfaces until Phase 5.
-- State mutation has one path: `AppCommand` -> `CommandDispatcher` -> model. UI, `waterctl`, and scenarios use that path; they must not mutate model fields directly.
-- IDs are typed, stable newtypes. Never use a `Vec` index as identity.
-- `CommandDispatcher` owns the model on the model thread. Control requests cross a channel; do not introduce a global `Mutex<ApplicationModel>`.
-- Operations are observable and waitable. Tests and scenarios synchronize with operation completion or explicit wait primitives, never fixed sleeps.
-- Keep GPUI pinned to the revision recorded in `ARCHITECTURE.md` and `Cargo.toml`; do not upgrade it mid-phase.
-- UI is a projection of revisioned snapshots. Keep blocking I/O and model mutation off the GPUI thread; UI command handlers dispatch through a detached GPUI task and background executor.
-- Terminal mutable state belongs to a dedicated PTY worker. The model stores terminal metadata and revisioned visible snapshots; `TerminalRegistry` is a narrow synchronized query/wait surface, not application-state ownership.
-- Real-shell validation uses the detected zsh, preferring `/opt/homebrew/bin/zsh`; `tests/scenarios/terminal_zsh.json` runs zsh interactively with `-f` and waits on output/process state.
-- Application defaults live separately in `AppConfig` and are loaded from `~/Library/Application Support/water/config.json` on macOS, or from `WATER_CONFIG`/`--config`. Keep feature toggles, theme colors, font metrics, and terminal scrollback limits out of hard-coded UI/worker paths.
-- Default logs are structured and quiet. Use `RUST_LOG=water::pty=debug` (or another module) for focused diagnostics; never add per-cell/per-frame logs by default.
-- Testing should definitely not take a long time. Aside from the compilation process, all other tests should be completed within one minute. If they take longer than that, we need to investigate the cause and fix the issue.
+## 工作范围
 
-## 进程管理（重要）
+- 按用户当前任务推进，不自行扩展文件浏览器、图片预览或结构化 Agent Surface。现有 coding-agent 功能包括进程检测、绑定及侧栏交互，不受旧 Phase 门禁限制。
+- 修改前核对相关实现和当前基线；用户限制读取范围时遵守范围，并明确未经验证的结论。
+- 保持 Cargo.toml 中的 GPUI pin；仅在任务涉及依赖升级时调整。
 
-Agent 运行在 water-server 进程内部。**永远不要 `pkill water`、`pkill -9 water`、`killall water`**——这会把你自己也杀了。
+## 架构约束
 
-### 进程命名规则
+- 外部应用模型命令走 `AppCommand → CommandDispatcher → model`，PTY 元数据和退出事件也由 dispatcher 在模型线程应用。UI、控制接口和场景通过 transport/channel 调用，不直接改模型，不引入全局 `Mutex<ApplicationModel>`。
+- 区分服务端模型与客户端局部状态：窗口选择、拖拽预览、终端模拟和滚动不等于应用模型变更。GPUI 主线程不做阻塞 I/O、ANSI 解析或重型滚动历史处理。
+- 服务端 PTY 输出走有界 replay 和有序事件流，客户端负责终端模拟；不能恢复服务端逐屏解析或逐输出推送模型快照。保持 Output/Resize/Exit 顺序及 replay 到 live 的完整衔接。
+- 保持 typed ID 的稳定身份和随机分配，不用集合下标或进程内计数替代；运行时 ID 使用完整 UUIDv4，JSON/CLI 使用 UUID 字符串；不得截取或经浮点数转换。命令发往对象所属 connection，不能仅凭当前选中的连接路由。
+- 默认 GUI、新 tab 和 split 都启动配置的真实 shell，保留空工作区测试入口。功能开关、主题、字体、快捷键及容量限制集中在 `AppConfig`。
+- 新配置项贯通默认值、可选 overrides、合并/解析及运行时投影；设置面板同步读取、编辑、校验、渲染和生效方式。按改动验证整条链路。
+- 默认日志保持结构化、安静；按模块开启诊断（如 `RUST_LOG=water::pty=debug`），不默认打印逐 cell/逐 frame 日志。
 
-| 构建 | 进程 | comm 名称 |
-|------|------|-----------|
-| debug / dev-opt | GUI | `water-dev` |
-| debug / dev-opt | Server | `water-srv-dev` |
-| release | GUI | `water` |
-| release | Server | `water-server` |
+## 验证
 
-### 杀 dev/test 进程
+- 运行与改动匹配的检查。除编译外，测试执行应在一分钟内完成；超时先排查等待、死锁或测试设计，不靠加 sleep/放宽超时掩盖问题。
+- 用 operation 完成、事件、revision、输出或进程退出等有界等待同步，不用固定 sleep。历史“已通过”或“预存失败”需当前基线佐证，不能直接豁免失败。
+- GUI 交互验证使用 `waterctl` / Water control API，不用 `xdotool`、`xte` 等系统注入工具。缺少必要交互时，在任务范围内补 control/automation 接口并走真实交互处理及应用命令路径。
+- shell 场景使用检测到的 zsh，优先 `/opt/homebrew/bin/zsh`；隔离启动文件的交互测试用 `-f`。`--no-initial-terminal` 保留 workspace 但不建终端，`--empty-workspace` 从无 workspace 开始。
+- headless 测试不能替代 GUI 验证；按实际机器检查显示环境，不假定 Linux 没有 X/GPU，也不硬编码 `DISPLAY` / `XAUTHORITY`。
 
-```bash
-# 杀 dev GUI
-pkill -x water-dev
+## 测试实例与进程安全
 
-# 杀 dev server
-pkill -x water-srv-dev
+Agent 可能依附于正在运行的 Water server；不要终止承载当前会话或用户终端的进程。
 
-# 杀 release GUI（注意：不会匹配 water-server）
-pkill -x water
+- 测试使用独立 `WATER_CONTROL_SOCKET` 和临时配置（`WATER_CONFIG` / `--config`），记录本次启动的 GUI/server PID。dev 默认隔离不能替代测试实例隔离。
+- 清理只针对已确认属于本次测试的 PID，server 也需单独确认归属。禁止 `pkill water`、`pkill -9 water`、`killall water`；`pkill -x` 也不能隔离同名实例。
+- 进程名仅用于辨认：dev GUI/server 为 `water-dev` / `water-srv-dev`，release 为 `water` / `water-server`，不能仅凭名字判断可安全终止。
 
-# 绝对不要
-pkill water          # ❌ 会匹配 water-server
-pkill -9 water       # ❌ 同上
-killall water        # ❌ 同上
-```
+## 构建与仓库
 
-### 启动测试实例
+- 只分 dev 和 release：普通 `cargo build` 即优化后的 dev，产物在 `target/debug`；release 用 `--release`，产物在 `target/release`。指定 target 时多一层 `<triple>`。不再使用 dev-opt；打包默认 dev，显式 `WATER_APP_VARIANT=release` 才发布 release。
+- dev 版必须完全独立：socket `/tmp/water-dev.sock`；配置 `~/Library/Application Support/water-dev/config.json`；Bundle ID `dev.water.terminal.dev`；进程 `water-dev` / `water-srv-dev`。release 使用 `/tmp/water.sock`、`~/Library/Application Support/water/config.json`、`dev.water.terminal`、`water` / `water-server`。
+- 发布 dev 版前确认包内 GUI/server、远端 payload 和运行时身份均符合隔离要求；构建时必须校验 payload 变体，不能回退到任意已安装的 release server。使用以下构建命令和时间戳 tag；创建 release 后按发布任务上传本次产物，不能把空 release 当成已交付安装包。
 
-```bash
-# 始终用独立的 socket 路径，避免碰到生产 server
-WATER_CONTROL_SOCKET=/tmp/water-test-$RANDOM.sock ./target/debug/water &
-TEST_PID=$!
-# ... 测试 ...
-kill $TEST_PID       # GUI
-pkill -x water-srv-dev  # 如果启动了 embedded server
-```
-
-### 测试 release
-
-```bash
-# 同样用独立 socket
-WATER_CONTROL_SOCKET=/tmp/water-test-$RANDOM.sock ./target/release/water &
-TEST_PID=$!
-# ... 测试 ...
-kill $TEST_PID       # 按 PID 杀，不用 pkill
-# 如果有 embedded server，按 PID 杀或 pkill -x water-server
-# 但要先确认生产 server 不在跑，或用 pgrep 确认
-```
-
-### 绝对禁止
-
-- `pkill -9 water`
-- `killall water`
-- `pkill water`（不带 `-x`）
-- 任何可能匹配到 `water-server` 的 kill 命令
-
-### 安全做法
-
-- `pkill -x water-dev`（debug/dev-opt GUI）
-- `pkill -x water-srv-dev`（debug/dev-opt server）
-- 按 PID kill（`kill $PID`）
-- `pgrep -x water` 先确认目标再 kill
-
-## 跨平台构建（Linux → macOS）
-
-- macOS arm64 交叉编译依赖 zig cc 作为 linker（`scripts/zig-cc-mac`），系统 `ld64.lld` 有 tbd 解析 bug。
-- Framework stub（`scripts/stub/macos-sdk/`）用 `symbols: ['*']` 通配符，所有 ObjC/framework 符号留 undefined，靠 `-Wl,-undefined -Wl,dynamic_lookup` 在运行时解析。
-- `shaders.metallib` 必须在 Mac 上预编译（`scripts/build-metallib.sh`），产物提交到 `scripts/prebuilt/`。Linux 上无法编译 Metal shader。
-- `gpui_apple` 和 `media` crate 通过 `[patch]` 指向 `scripts/stub-gpui_apple/` 和 `scripts/stub-media/`，在 macOS host 上行为与上游一致，在非 macOS host 上提供 fallback（空 metallib / stub bindings）。
-- 新增 macOS-only 的 framework 依赖时，需要在 `scripts/stub/macos-sdk/` 加对应的 `.tbd` stub。
-- dev 变体用 `--profile dev-opt`（opt-level 3，inherits release），不是 `debug`。`WATER_BUILD_PROFILE` 由 build.rs 从 cargo `PROFILE` 环境变量烘焙，所有 dev/release 判断都用 `!= "release"`。
-
-## 文件系统与 Git
-
-- **文件名大小写敏感**：macOS 默认文件系统不区分大小写，Linux 区分。不要在仓库里同时存在 `Agents.md` 和 `AGENTS.md`（已发生过）。新增文件前 `git ls-files | grep -i <name>` 检查。
-- `.gitignore` 里加 `.pi/`（pi agent 会话目录）。
-
-## 配置与主题
-
-- 新增 `ThemeColors` 字段时，必须同步更新：`ThemeConfig` 结构体 + `Default` impl + `ThemeConfigOverrides` + `apply_to` + `colors()` 方法 + 测试里的 `ThemeColors` 构造。
-- 新增 `UiConfig` / `TerminalConfig` 字段时，同步更新对应的 `Overrides` 结构体和 config 解析（`apply_to`）。
-- 设置面板新增字段需要：`SettingField` 枚举 + `id()` + `is_color()`（如适用）+ `raw_value()` + `apply_edit()` + `color_value()`（如适用）+ render 列表。
-
-## 测试
-
-- 3 个 dialog 测试（`dialog_input_caret_editing`、`rename_dialog_scopes`、`text_input_dialog_confirm`）是预存失败（workspace ID collision），不是回归。判断是否引入新失败时先看 baseline。
-- `cargo test` 在 Linux 上跑的是 headless 测试（无 GPU），但 **X 服务器是有的**（X11，LXQt 桌面）。需要 GUI 验证时：
   ```bash
-  export DISPLAY=:0
-  export XAUTHORITY=$(ls -t /tmp/xauth_* | head -1)  # 每次 SDDM 登录会变
-  ./target/debug/water &
+  WATER_APP_VARIANT=dev bash scripts/build-macos-app.sh
+  TAG="dev-$(date +%Y%m%d-%H%M)"
+  gh release create "$TAG"
   ```
-  截图工具：`xwd -root -silent | convert xwd:- out.png`（ImageMagick）。
-- macOS 上无 X，用 `screencapture` 或 GPUI 自带截图。
-- **GUI 交互测试必须使用 Water 提供的操作接口**（`waterctl` / control socket API），如点击、滚动、按键等。不要用 `xdotool`、`xte` 等系统工具直接操作窗口。如果现有接口不支持某个操作（如滚动到指定位置、双击、拖拽），应该先在 Water 的 control/automation 层添加对应接口，再用新接口测试。这保证测试走的是和真实用户一致的状态变更路径（`AppCommand` → `CommandDispatcher` → model），而不是绕过应用直接发 X 事件。
+
+- Linux → macOS 构建沿用现有 zig linker、framework stubs 和平台 patch；Metal shader 在 Mac 预编译并维护仓库产物。入口见架构文档，交叉构建成功不等于 macOS 运行验证。
+- 新增路径先查 `git ls-files` 的大小写冲突；只保留一个 `AGENTS.md`，不要再创建 `Agents.md`。本地 `.pi/` 会话目录应被忽略，不提交会话数据。
+- Python 优先 `~/.venv/bin/python` / `~/.venv/bin/pip`；Node 工具先加载 fnm 环境并遵循项目指定版本。

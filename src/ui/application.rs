@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,7 +73,6 @@ pub struct WaterApplication {
 
 struct WaterApplicationState {
     connections: RefCell<Vec<ManagedConnection>>,
-    next_connection_id: Cell<u64>,
     ui_control_client: RefCell<Option<UiControlClient>>,
     config: RefCell<AppConfig>,
     config_path: PathBuf,
@@ -349,7 +348,6 @@ impl WaterApplication {
                     last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
                     terminal: None,
                 }]),
-                next_connection_id: Cell::new(2),
                 ui_control_client: RefCell::new(None),
                 config: RefCell::new(config),
                 config_path,
@@ -492,10 +490,7 @@ impl WaterApplication {
         {
             return existing;
         }
-        let connection_id = ConnectionId::new(self.state.next_connection_id.get());
-        self.state
-            .next_connection_id
-            .set(self.state.next_connection_id.get().saturating_add(1));
+        let connection_id = ConnectionId::from(uuid::Uuid::new_v4());
         let projection = WorkspaceConnection {
             id: connection_id,
             title: setup.destination,

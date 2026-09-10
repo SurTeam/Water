@@ -644,8 +644,7 @@ fn run_operation(client: &ControlClient, arguments: &[String]) -> Result<()> {
     let operation_id = arguments
         .get(1)
         .context("operation ID is required")?
-        .parse::<u64>()
-        .map(water::ids::OperationId::new)
+        .parse::<water::ids::OperationId>()
         .context("invalid operation ID")?;
     let operation = match command {
         "get" => client
@@ -730,7 +729,8 @@ fn optional_value(arguments: &[String], flag: &str) -> Result<Option<String>> {
 
 fn optional_id<T>(arguments: &[String], flag: &str) -> Result<Option<T>>
 where
-    T: From<u64>,
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     let Some(index) = arguments.iter().position(|argument| argument == flag) else {
         return Ok(None);
@@ -738,9 +738,9 @@ where
     let value = arguments
         .get(index + 1)
         .with_context(|| format!("{flag} requires an ID"))?
-        .parse::<u64>()
+        .parse::<T>()
         .with_context(|| format!("invalid ID for {flag}"))?;
-    Ok(Some(T::from(value)))
+    Ok(Some(value))
 }
 
 fn optional_usize(arguments: &[String], flag: &str) -> Result<Option<usize>> {
@@ -765,15 +765,16 @@ fn required_f32(arguments: &[String], flag: &str) -> Result<f32> {
 
 fn bare_id<T>(arguments: &[String]) -> Result<T>
 where
-    T: From<u64>,
+    T: std::str::FromStr,
+    T::Err: std::error::Error + Send + Sync + 'static,
 {
     let value = arguments
         .iter()
         .find(|argument| !argument.starts_with('-'))
         .context("ID is required")?
-        .parse::<u64>()
+        .parse::<T>()
         .context("invalid ID")?;
-    Ok(T::from(value))
+    Ok(value)
 }
 
 fn parse_split_direction(arguments: &[String]) -> Result<SplitDirection> {

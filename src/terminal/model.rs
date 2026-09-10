@@ -717,7 +717,8 @@ impl TerminalManager {
             cell_width: 0,
             cell_height: 0,
         };
-        let pty = alacritty_terminal::tty::new(&options, window_size, terminal_id.get())
+        // Alacritty's window_id is an X11 embedding hint, not a terminal ID.
+        let pty = alacritty_terminal::tty::new(&options, window_size, 0)
             .map_err(|error| TerminalError::SpawnFailed(error.to_string()))?;
         // The replay ring exists from spawn: its first event (sequence 1) is
         // the initial geometry anchor.

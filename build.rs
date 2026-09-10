@@ -10,7 +10,11 @@ const TARGETS: [&str; 4] = [
 fn main() {
     // Bake the build profile into the binary so it can rename itself
     // (water-dev vs water) for unambiguous ps/kill targeting.
-    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "dev".to_owned());
+    let profile = if std::env::var("PROFILE").as_deref() == Ok("release") {
+        "release"
+    } else {
+        "dev"
+    };
     println!("cargo:rustc-env=WATER_BUILD_PROFILE={profile}");
     println!("cargo:rerun-if-env-changed=WATER_SERVER_BUNDLE_DIR");
     println!("cargo:rerun-if-env-changed=WATER_REQUIRE_EMBEDDED_SERVERS");
@@ -22,6 +26,18 @@ fn main() {
         .flatten();
     let require_payloads =
         !building_portable_server && std::env::var_os("WATER_REQUIRE_EMBEDDED_SERVERS").is_some();
+
+    if let Some(directory) = &bundle_dir {
+        let marker = directory.join("variant");
+        println!("cargo:rerun-if-changed={}", marker.display());
+        let variant = std::fs::read_to_string(&marker)
+            .expect("embedded server bundle is missing its variant marker");
+        assert_eq!(
+            variant.trim(),
+            profile,
+            "embedded server variant must match the GUI"
+        );
+    }
 
     for target in TARGETS {
         let file_name = format!("water-server-{target}.gz");

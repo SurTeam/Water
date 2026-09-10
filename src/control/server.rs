@@ -45,8 +45,8 @@ impl ControlServerHandle {
                 let _ = std::os::unix::net::UnixStream::connect(&self.socket_path);
             }
             let _ = join_handle.join();
+            let _ = std::fs::remove_file(&self.socket_path);
         }
-        let _ = std::fs::remove_file(&self.socket_path);
     }
 }
 
@@ -164,7 +164,28 @@ impl ControlServer {
         snapshot_rx: Option<ModelSnapshotReceiver>,
     ) -> io::Result<(ControlServerHandle, Receiver<()>)> {
         if socket_path.exists() {
-            std::fs::remove_file(&socket_path)?;
+            use std::os::unix::fs::FileTypeExt;
+            if !std::fs::symlink_metadata(&socket_path)?
+                .file_type()
+                .is_socket()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "socket path is not a Unix socket",
+                ));
+            }
+            match std::os::unix::net::UnixStream::connect(&socket_path) {
+                Ok(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "a server already owns this socket",
+                    ));
+                }
+                Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(&socket_path)?;
+                }
+                Err(error) => return Err(error),
+            }
         }
         if let Some(parent) = socket_path.parent()
             && !parent.as_os_str().is_empty()
@@ -421,6 +442,20 @@ fn handle_request(
     Option<PendingSession>,
     Option<PendingTerminalPump>,
 ) {
+    if request.protocol_version != PROTOCOL_VERSION || request.build_variant != crate::BUILD_VARIANT
+    {
+        return (
+            RpcResponse::failure(
+                request.request_id,
+                RpcError::new(
+                    "INCOMPATIBLE_SERVER",
+                    "protocol version and dev/release variant must match",
+                ),
+            ),
+            None,
+            None,
+        );
+    }
     if let RpcMethod::SessionOpen {
         compact_snapshots, ..
     } = request.method
@@ -605,6 +640,7 @@ fn handle_regular(
         RpcMethod::ServerInfo => RpcResponse::success(
             request.request_id,
             &ServerInfoResponse {
+                build_variant: crate::BUILD_VARIANT.to_owned(),
                 server_pid: std::process::id(),
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_owned(),

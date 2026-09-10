@@ -105,6 +105,9 @@ fn parse_server_options(mut args: impl Iterator<Item = String>) -> Result<Server
             initial_terminal = Some(false);
         } else if argument == "--daemonize" {
             daemonize = true;
+        } else if argument == "--build-variant" {
+            println!("{}", crate::BUILD_VARIANT);
+            std::process::exit(0);
         } else if argument == "--version" || argument == "-V" {
             println!("water-server {}", env!("CARGO_PKG_VERSION"));
             std::process::exit(0);

@@ -66,7 +66,7 @@ fn integration_directory() -> Option<PathBuf> {
             let directory = home
                 .join("Library")
                 .join("Application Support")
-                .join("water")
+                .join(crate::APP_NAMESPACE)
                 .join("zsh-integration");
             fs::create_dir_all(&directory).ok()?;
             fs::write(directory.join(".zshenv"), ZSHENV).ok()?;

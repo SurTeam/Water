@@ -223,6 +223,7 @@ impl ControlClient {
     fn call<T: DeserializeOwned>(&self, method: RpcMethod) -> Result<T, ControlClientError> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         let request = RpcRequest {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
             protocol_version: PROTOCOL_VERSION,
             request_id,
             method,
@@ -283,6 +284,7 @@ impl RemoteCommandClient {
                     coalesce_queued_viewport_commands(&mut command, &enqueue_rx, &mut deferred);
                     let request_id = next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let request = RpcRequest {
+                        build_variant: crate::BUILD_VARIANT.to_owned(),
                         protocol_version: PROTOCOL_VERSION,
                         request_id,
                         method: RpcMethod::CommandDispatch { command },
@@ -705,6 +707,7 @@ pub fn connect_water_session(
 ) -> Result<WaterSession, ControlClientError> {
     let mut stream = std::os::unix::net::UnixStream::connect(socket_path.into())?;
     let request = RpcRequest {
+        build_variant: crate::BUILD_VARIANT.to_owned(),
         protocol_version: PROTOCOL_VERSION,
         request_id: 0,
         method: RpcMethod::SessionOpen {
@@ -840,6 +843,7 @@ fn session_reader_loop(
         while let Ok(request) = attach_rx.try_recv() {
             pending_attach.insert(request.request_id, request.reply);
             let frame = WireMessage {
+                build_variant: crate::BUILD_VARIANT.to_owned(),
                 protocol_version: PROTOCOL_VERSION,
                 request_id: request.request_id,
                 method: Some("terminal.attach".to_owned()),
