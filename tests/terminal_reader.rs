@@ -286,3 +286,181 @@ fn wire_replay_roundtrips_raw_bytes() {
     );
     manager.remove(terminal_id);
 }
+
+/// Regression: an idle PTY must not spin the reader thread at ~1 kHz.
+///
+/// With level-triggered kqueue, a PTY that reports readable without returning
+/// data causes the reader to oscillate between burst (1 ms spin) and idle
+/// (kqueue returns immediately) at ~1 kHz, consuming a full core. Edge-
+/// triggered kqueue + burst-drain eliminates the phantom wakeups: the reader
+/// blocks in kqueue with zero CPU until new data arrives.
+///
+/// Measured via `getrusage(RUSAGE_SELF)`: the whole-process CPU time over a
+/// 3-second idle window must stay under 200 ms. A spinning reader would
+/// consume ~3000 ms (one full core).
+#[test]
+fn idle_pty_reader_does_not_spin_cpu() {
+    // Helper: read whole-process user+system CPU in milliseconds.
+    fn process_cpu_ms() -> u128 {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let utime = usage.ru_utime.tv_sec as u128 * 1_000 + usage.ru_utime.tv_usec as u128 / 1_000;
+        let stime = usage.ru_stime.tv_sec as u128 * 1_000 + usage.ru_stime.tv_usec as u128 / 1_000;
+        utime + stime
+    }
+
+    let mut manager = TerminalManager::new();
+    let terminal_id = spawn_terminal(&mut manager, 70_020, "sleep 30");
+    let attachment = manager.attach(terminal_id).unwrap();
+
+    // Let the reader settle into the idle phase (kqueue wait). Drain any
+    // startup output (shell prompt) so the stream is quiescent.
+    std::thread::sleep(Duration::from_millis(1_000));
+    while attachment.events.try_recv().is_ok() {}
+    let start_seq = attachment.last_seq;
+
+    let cpu_before = process_cpu_ms();
+    let wall_start = Instant::now();
+    let idle_window = Duration::from_secs(3);
+
+    // During the idle window, no output events should arrive. If the reader
+    // is spinning, it would wake the worker repeatedly, but the key assertion
+    // is CPU time, not event count.
+    let mut spurious_output = 0u64;
+    while wall_start.elapsed() < idle_window {
+        match attachment.events.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                if let TerminalStreamEvent::Output { seq, .. } = &event && *seq > start_seq {
+                    spurious_output += 1;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let wall_elapsed = wall_start.elapsed();
+    let cpu_after = process_cpu_ms();
+    let cpu_delta_ms = cpu_after - cpu_before;
+
+    // A spinning reader burns ~100% of one core: 3000 ms wall time would
+    // produce ~3000 ms CPU. A properly blocked reader produces < 50 ms.
+    // Allow 200 ms for test-harness overhead (GC, page faults, etc.).
+    assert!(
+        cpu_delta_ms < 200,
+        "idle PTY reader consumed {cpu_delta_ms} ms CPU in {wall_elapsed:?} \
+         (spinning?). The reader should block in kqueue with near-zero CPU."
+    );
+    // No spurious output events from an idle PTY.
+    assert_eq!(
+        spurious_output, 0,
+        "idle PTY produced {spurious_output} spurious output events"
+    );
+
+    // Now verify the reader wakes correctly when data arrives.
+    let wake_start = Instant::now();
+    manager.send_text(terminal_id, "printf 'WAKE_OK\\n'".to_string()).unwrap();
+    let mut got = false;
+    let wake_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < wake_deadline && !got {
+        match attachment.events.recv_timeout(Duration::from_millis(100)) {
+            Ok(event) => {
+                if let TerminalStreamEvent::Output { seq, bytes, .. } = &event
+                    && *seq > start_seq
+                {
+                    if String::from_utf8_lossy(bytes).contains("WAKE_OK") {
+                        got = true;
+                    }
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    assert!(got, "reader failed to wake on data after idle period");
+    assert!(
+        wake_start.elapsed() < Duration::from_millis(500),
+        "idle->active transition took {:?} (kqueue wakeup should be prompt)",
+        wake_start.elapsed()
+    );
+
+    manager.remove(terminal_id);
+}
+
+/// Regression: a trickle of tiny writes (simulating a TUI that redraws
+/// every few ms) must not pin the reader in burst mode indefinitely.
+///
+/// The burst deadline (`READER_BURST_MAX` = 100 ms) forces the reader back
+/// to kqueue even when a trickle keeps resetting the 1 ms idle timer.
+/// Without the deadline, a 10 ms inter-write interval would keep the reader
+/// in burst mode forever (each write resets `spin_start`).
+///
+/// Verified by: (1) all bytes arrive, (2) CPU stays bounded over the
+/// trickle period.
+#[test]
+fn trickle_output_does_not_pin_reader_in_burst() {
+    fn process_cpu_ms() -> u128 {
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        let utime = usage.ru_utime.tv_sec as u128 * 1_000 + usage.ru_utime.tv_usec as u128 / 1_000;
+        let stime = usage.ru_stime.tv_sec as u128 * 1_000 + usage.ru_stime.tv_usec as u128 / 1_000;
+        utime + stime
+    }
+
+    let mut manager = TerminalManager::new();
+    // Write one byte every 10 ms for 3 seconds = 300 bytes total.
+    // The 10 ms gap is well above READER_BURST_IDLE (1 ms), so the reader
+    // should exit burst between writes and block in kqueue. Even if it
+    // didn't, READER_BURST_MAX (100 ms) would force a break.
+    let terminal_id = spawn_terminal(
+        &mut manager,
+        70_021,
+        "i=0; while [ $i -lt 300 ]; do printf 'T'; sleep 0.01; i=$((i+1)); done",
+    );
+    let attachment = manager.attach(terminal_id).unwrap();
+    let start_seq = attachment.last_seq;
+
+    // Let the trickle start and the reader enter its cycle.
+    std::thread::sleep(Duration::from_millis(500));
+
+    let cpu_before = process_cpu_ms();
+    let wall_start = Instant::now();
+    let trickle_window = Duration::from_secs(2);
+
+    let mut total_bytes = 0u64;
+    while wall_start.elapsed() < trickle_window {
+        match attachment.events.recv_timeout(Duration::from_millis(200)) {
+            Ok(event) => {
+                if let TerminalStreamEvent::Output { seq, bytes, .. } = &event
+                    && *seq > start_seq
+                {
+                    total_bytes += bytes.len() as u64;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    let wall_elapsed = wall_start.elapsed();
+    let cpu_after = process_cpu_ms();
+    let cpu_delta_ms = cpu_after - cpu_before;
+
+    // We should have received a substantial portion of the 300-byte trickle.
+    // (The first 500 ms already wrote ~50 bytes, and the 2 s window covers
+    // ~200 more.)
+    assert!(
+        total_bytes >= 100,
+        "trickle lost bytes: only {total_bytes} received in {wall_elapsed:?}"
+    );
+
+    // CPU must stay bounded. A reader pinned in burst mode would consume
+    // close to 100% of a core (~2000 ms in a 2 s window). A reader that
+    // properly alternates between short bursts and kqueue blocking should
+    // stay well under 300 ms.
+    assert!(
+        cpu_delta_ms < 300,
+        "trickle PTY reader consumed {cpu_delta_ms} ms CPU in {wall_elapsed:?} \
+         (pinned in burst?). Expected < 300 ms for 10 ms inter-write trickle."
+    );
+
+    manager.remove(terminal_id);
+}

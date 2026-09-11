@@ -62,6 +62,10 @@ const READER_IDLE_POLL: Duration = Duration::from_millis(50);
 /// stream has not paused (protects slow-but-continuous output, which
 /// would otherwise wait for the 128KB push threshold).
 const READER_MAX_BATCH_AGE: Duration = Duration::from_millis(5);
+/// Safety cap on total burst duration: prevents indefinite spin when a
+/// trickle of data keeps resetting the idle timer. After this elapsed time
+/// in the burst loop, the reader forces a break to the kqueue idle phase.
+const READER_BURST_MAX: Duration = Duration::from_millis(100);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 /// PTY output within this window marks the foreground process as active for
 /// agent-status purposes. The flip to quiet is observed on the regular
@@ -856,8 +860,14 @@ fn drain_data(
 /// a reader that does work while reading makes the writer wait once per 1KB.
 /// This thread owns the master reads: it spin-reads while a burst is flowing
 /// (catches the microsecond-scale refills without a kqueue round trip),
-/// blocks on kqueue once the writer goes quiet (zero idle CPU), and pushes
-/// byte blocks into a bounded channel the worker coalesces.
+/// blocks on edge-triggered kqueue once the writer goes quiet (zero idle
+/// CPU), and pushes byte blocks into a bounded channel the worker coalesces.
+///
+/// Edge-triggered mode matches the standard epoll-ET / kqueue-ET pattern
+/// used by high-performance network servers: the poll fires once when
+/// readability transitions, and the burst loop drains to EAGAIN so no
+/// event is missed. Level-triggered mode caused phantom wakeups on PTYs
+/// that report readable without returning data, spinning at ~1 kHz.
 struct PtyReader {
     filled_rx: Receiver<Vec<u8>>,
     free_tx: SyncSender<Vec<u8>>,
@@ -874,7 +884,7 @@ fn spawn_pty_reader(
     let mut reader_file = pty.file().try_clone()?;
     let reader_poller = Poller::new()?;
     unsafe {
-        reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Level)?;
+        reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Edge)?;
     }
     let (filled_tx, filled_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
     let (free_tx, free_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
@@ -912,7 +922,11 @@ fn spawn_pty_reader(
 
             loop {
                 // Burst phase: spin-read everything the writer has produced.
+                // With edge-triggered kqueue the poll fires once when data
+                // first becomes available; this loop drains to EAGAIN so no
+                // event is missed (same pattern as epoll-ET network readers).
                 let mut spin_start: Option<Instant> = None;
+                let burst_entered = Instant::now();
                 loop {
                     match reader_file.read(&mut buf) {
                         Ok(0) => {
@@ -945,10 +959,13 @@ fn spawn_pty_reader(
                             // 128KB threshold (slow-but-continuous streams).
                             let batch_stale = batch_started
                                 .is_some_and(|at| at.elapsed() >= READER_MAX_BATCH_AGE);
+                            let burst_expired = burst_entered.elapsed() >= READER_BURST_MAX;
                             match spin_start {
                                 None => spin_start = Some(Instant::now()),
                                 Some(start)
-                                    if start.elapsed() < READER_BURST_IDLE && !batch_stale => {}
+                                    if start.elapsed() < READER_BURST_IDLE
+                                        && !batch_stale
+                                        && !burst_expired => {}
                                 _ => break,
                             }
                         }
