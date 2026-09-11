@@ -117,6 +117,7 @@ struct TerminalConnection {
 enum TerminalEmulatorCommand {
     ScrollBy(i64),
     ScrollTo(i64),
+    SetPinned(bool),
 }
 
 struct TerminalAttachmentState {
@@ -276,6 +277,9 @@ fn apply_emulator_commands(
         match command {
             TerminalEmulatorCommand::ScrollBy(delta) => emulator.scroll_by(delta),
             TerminalEmulatorCommand::ScrollTo(target) => emulator.scroll_to(target),
+            TerminalEmulatorCommand::SetPinned(pinned) => {
+                emulator.set_viewport_pinned(pinned)
+            },
         }
         changed = true;
     }
@@ -287,6 +291,7 @@ fn publish_live_snapshot(
     terminal_id: TerminalId,
     attachment: &Arc<TerminalAttachmentState>,
     emulator: &mut TerminalEmulator,
+    previous: Option<&crate::terminal::TerminalSnapshot>,
 ) -> bool {
     let _ = emulator.take_dirty();
     if !attachment.is_active() {
@@ -296,7 +301,7 @@ fn publish_live_snapshot(
         .send(TerminalEventMsg::LiveSnapshot {
             terminal_id,
             attachment: attachment.clone(),
-            snapshot: Arc::new(emulator.snapshot(None)),
+            snapshot: Arc::new(emulator.snapshot(previous)),
             pty_writes: emulator.pty_writes(),
         })
         .is_ok()
@@ -1205,6 +1210,8 @@ impl WaterApplication {
                     let mut stream = stream;
                     let mut pending_event = None;
                     let mut last_live_snapshot = std::time::Instant::now();
+                    let mut last_snapshot: Option<crate::terminal::TerminalSnapshot> =
+                        Some(emulator.snapshot(None));
                     while attachment.is_active() {
                         let commands_changed =
                             apply_emulator_commands(&emulator_commands, &mut emulator);
@@ -1216,11 +1223,13 @@ impl WaterApplication {
                             Ok(event) => event,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                                 if commands_changed {
+                                    let prev = last_snapshot.as_ref();
                                     if !publish_live_snapshot(
                                         &events_tx,
                                         terminal_id,
                                         &attachment,
                                         &mut emulator,
+                                        prev,
                                     ) {
                                         return;
                                     }
@@ -1259,14 +1268,19 @@ impl WaterApplication {
                             || !stream_backlogged
                             || last_live_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;
                         if publish_snapshot {
+                            let prev = last_snapshot.as_ref();
                             if !publish_live_snapshot(
                                 &events_tx,
                                 terminal_id,
                                 &attachment,
                                 &mut emulator,
+                                prev,
                             ) {
                                 return;
                             }
+                            last_snapshot = Some(
+                                emulator.snapshot(prev),
+                            );
                             last_live_snapshot = std::time::Instant::now();
                         }
                     }
@@ -1372,6 +1386,32 @@ impl WaterApplication {
             .is_some_and(|commands| {
                 commands
                     .try_send(TerminalEmulatorCommand::ScrollTo(target))
+                    .is_ok()
+            })
+    }
+
+    pub(crate) fn terminal_set_viewport_pinned(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        pinned: bool,
+    ) -> bool {
+        let connections = self.state.connections.borrow();
+        let Some(connection) = connections
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_ref() else {
+            return false;
+        };
+        terminal
+            .emulator_commands
+            .get(&terminal_id)
+            .is_some_and(|commands| {
+                commands
+                    .try_send(TerminalEmulatorCommand::SetPinned(pinned))
                     .is_ok()
             })
     }

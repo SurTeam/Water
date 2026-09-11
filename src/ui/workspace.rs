@@ -2284,6 +2284,11 @@ impl WorkspaceView {
     /// Viewport moves are GUI-local in the raw-stream architecture. They are
     /// queued to the emulator worker; the visual accumulator covers the short
     /// delay until its next snapshot acknowledges the new viewport.
+    ///
+    /// When the viewport moves away from the bottom, the emulator's pin flag
+    /// is set so that subsequent PTY output does not advance `display_offset`
+    /// (the user's reading position). Scrolling back to the bottom clears
+    /// the pin via `ScrollTo(0)` / `scroll_to_bottom`.
     fn apply_local_viewport(
         &mut self,
         terminal_id: TerminalId,
@@ -2296,9 +2301,22 @@ impl WorkspaceView {
         };
         let connection_id = self.active_connection;
         if let Some(target) = target {
+            // Pin when scrolling to a non-zero target; unpinned at 0.
+            application
+                .terminal_set_viewport_pinned(connection_id, terminal_id, target != 0);
             application.terminal_scroll_to(connection_id, terminal_id, target);
         }
         if let Some(delta) = delta {
+            // For delta scrolls, compute the expected target from the
+            // current snapshot to decide whether to pin.
+            let current = self
+                .terminal_snapshot_for(terminal_id)
+                .map(|s| s.viewport_position)
+                .unwrap_or(0);
+            let expected = (current + delta).max(0);
+            if expected != 0 {
+                application.terminal_set_viewport_pinned(connection_id, terminal_id, true);
+            }
             application.terminal_scroll_by(connection_id, terminal_id, delta);
         }
     }
@@ -2789,6 +2807,7 @@ impl WorkspaceView {
         &mut self,
         terminal_id: TerminalId,
         position: Point<gpui::Pixels>,
+        shift_held: bool,
         cx: &mut Context<Self>,
     ) {
         if !self.config.features.selection {
@@ -2797,6 +2816,20 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        // Shift-click extends the previous selection: the old anchor becomes
+        // the new anchor and the click position becomes the head.
+        if shift_held
+            && let Some(prev) = self.selection.as_ref().filter(|s| s.terminal_id == terminal_id)
+        {
+            self.selection = Some(TerminalSelection {
+                terminal_id,
+                anchor: prev.anchor,
+                head: endpoint,
+            });
+            self.dragging_terminal = Some(terminal_id);
+            cx.notify();
+            return;
+        }
         self.clear_ime();
         self.selection = Some(TerminalSelection {
             terminal_id,
@@ -2817,6 +2850,21 @@ impl WorkspaceView {
         };
         if event.pressed_button != Some(MouseButton::Left) {
             return;
+        }
+        // Auto-scroll when the pointer is near the bottom or top edge during
+        // a selection drag, enabling long selections across the scrollback.
+        if let Some(bounds) = self.terminal_bounds_for(terminal_id) {
+            let pane_height = f32::from(bounds.size.height);
+            let y_in_pane = f32::from(event.position.y) - f32::from(bounds.origin.y);
+            const AUTO_SCROLL_MARGIN: f32 = 24.0;
+            const AUTO_SCROLL_SPEED: f32 = 3.0;
+            if pane_height > 0.0 {
+                if y_in_pane > pane_height - AUTO_SCROLL_MARGIN {
+                    self.apply_local_viewport(terminal_id, None, Some(-AUTO_SCROLL_SPEED as i64), cx);
+                } else if y_in_pane < AUTO_SCROLL_MARGIN {
+                    self.apply_local_viewport(terminal_id, None, Some(AUTO_SCROLL_SPEED as i64), cx);
+                }
+            }
         }
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, event.position)
         else {
@@ -5134,7 +5182,7 @@ impl WorkspaceView {
                                 if this.begin_reported_mouse(terminal_id, event, cx) {
                                     cx.stop_propagation();
                                 } else {
-                                    this.begin_terminal_selection(terminal_id, event.position, cx);
+                                    this.begin_terminal_selection(terminal_id, event.position, event.modifiers.shift, cx);
                                 }
                             } else {
                                 this.selection = None;
@@ -7264,6 +7312,10 @@ impl gpui::Element for TerminalRenderElement {
                 .cell(row, column)
                 .map(|cell| if cell.flags.wide() { 2 } else { 1 })
                 .unwrap_or(1);
+            // Draw the unfocused cursor as a hollow rectangle (outline only),
+            // matching the behavior of most terminal emulators. The focused
+            // cursor is already baked into the cell colors above, so this
+            // block only applies to the non-focused pane.
             window.paint_quad(outline(
                 terminal_cell_bounds_for_row(
                     bounds,
@@ -9565,7 +9617,7 @@ mod tests {
                     terminal_id,
                     Bounds::new(point(px(0.0), px(0.0)), size(px(640.0), px(384.0))),
                 );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -9666,7 +9718,7 @@ mod tests {
                 .entry(terminal_id)
                 .or_insert_with(|| TerminalScrollState::new(0))
                 .visual_unacked_rows = 2.5;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -9674,7 +9726,7 @@ mod tests {
                 selection.anchor.position.row, -2,
                 "a pixel in the shifted grid must map to the painted source row"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), false, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 -1,
@@ -9686,13 +9738,13 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 0.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), false, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 2,
                 "the mapping is viewport-relative without an unacked offset"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 1,
@@ -9705,7 +9757,7 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 2.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
             assert!(
                 view.selection.unwrap().anchor.position.row < 0,
                 "a whole-row unacked offset must shift the mapping into history"

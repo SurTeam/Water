@@ -120,6 +120,13 @@ pub struct TerminalEmulator {
     process: TerminalProcessState,
     /// Local visual state changed since the GUI last consumed it.
     dirty: bool,
+    /// Viewport pinned for browsing scrollback. While true, new output grows
+    /// the grid but does not advance `display_offset`, so the user's reading
+    /// position is stable. Cleared by `ScrollTo(0)` / `scroll_to_bottom`.
+    viewport_pinned: bool,
+    /// Saved `display_offset` from the last pinned advance. Used to restore
+    /// the viewport position after the grid grew from new output.
+    pinned_viewport: i32,
     pty_write_rx: std::sync::mpsc::Receiver<Vec<u8>>,
 }
 
@@ -162,6 +169,8 @@ impl TerminalEmulator {
             last_seq: 0,
             process: TerminalProcessState::Running,
             dirty: false,
+            viewport_pinned: false,
+            pinned_viewport: 0,
             pty_write_rx,
         }
     }
@@ -224,7 +233,8 @@ impl TerminalEmulator {
     }
 
     /// Runs raw PTY bytes through the persistent vte parser against the
-    /// local term.
+    /// local term. When the viewport is pinned, compensates the grid growth
+    /// so the user's reading position stays stable.
     pub fn advance(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.dirty = true;
@@ -232,6 +242,7 @@ impl TerminalEmulator {
         metrics::inc(metrics::processor_advances());
         metrics::add(metrics::terminal_bytes_advanced(), bytes.len());
         self.processor.advance(&mut self.term, bytes);
+        self.compensate_pinned_viewport();
     }
 
     /// Switches from replay to live: from now on, emulator query responses
@@ -310,6 +321,9 @@ impl TerminalEmulator {
         }
         let clamped = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         self.term.scroll_display(Scroll::Delta(clamped));
+        if self.viewport_pinned {
+            self.pinned_viewport = self.term.grid().display_offset() as i32;
+        }
         self.dirty = true;
     }
 
@@ -317,13 +331,25 @@ impl TerminalEmulator {
     /// positive = up). Clamped to the available history.
     pub fn scroll_to(&mut self, target: i64) {
         let target = target.max(0).min(self.history_len());
+        if target == 0 {
+            self.viewport_pinned = false;
+        } else if self.viewport_pinned {
+            // Update the pinned position to the new target so subsequent
+            // output compensation restores to the right row.
+            self.pinned_viewport = target as i32;
+        }
         let delta = target - self.viewport_position();
         if delta != 0 {
             self.scroll_by(delta);
         }
+        if self.viewport_pinned {
+            self.pinned_viewport = self.term.grid().display_offset() as i32;
+        }
     }
 
     pub fn scroll_to_bottom(&mut self) {
+        self.viewport_pinned = false;
+        self.pinned_viewport = 0;
         self.term.scroll_display(Scroll::Bottom);
         self.dirty = true;
     }
@@ -378,6 +404,30 @@ impl TerminalEmulator {
     /// True when the viewport is pinned to the bottom (output auto-scrolls).
     pub fn at_bottom(&self) -> bool {
         self.term.grid().display_offset() == 0
+    }
+
+    /// Sets the viewport pin. While pinned, `advance` keeps `display_offset`
+    /// stable so new output does not shift the user's reading position.
+    pub fn set_viewport_pinned(&mut self, pinned: bool) {
+        self.viewport_pinned = pinned;
+        if pinned {
+            self.pinned_viewport = self.term.grid().display_offset() as i32;
+        }
+    }
+
+    /// When the viewport is pinned and new output advanced the grid, restore
+    /// `display_offset` to the saved reading position. Call after `advance`.
+    fn compensate_pinned_viewport(&mut self) {
+        if !self.viewport_pinned {
+            return;
+        }
+        let offset = self.term.grid().display_offset() as i32;
+        if offset != self.pinned_viewport {
+            self.term
+                .scroll_display(Scroll::Delta(self.pinned_viewport - offset));
+        }
+        // Keep the pinned position for the next output batch.
+        self.pinned_viewport = self.term.grid().display_offset() as i32;
     }
 }
 
@@ -477,6 +527,8 @@ mod tests {
         emulator.scroll_by(2);
         let position_before = emulator.viewport_position();
         assert!(position_before > 0);
+        // Explicitly pin the viewport for browsing.
+        emulator.set_viewport_pinned(true);
         // More output while scrolled up: the viewport stays pinned.
         for i in 30..60u32 {
             emulator.apply(&output(
@@ -485,10 +537,75 @@ mod tests {
                 size,
             ));
         }
-        assert!(emulator.viewport_position() >= position_before);
+        assert_eq!(
+            emulator.viewport_position(),
+            position_before,
+            "pinned viewport must not move when new output arrives"
+        );
         emulator.scroll_to_bottom();
         assert!(emulator.at_bottom());
         assert_eq!(emulator.viewport_position(), 0);
+    }
+
+    #[test]
+    fn pinned_viewport_scrolling_down_follows_content() {
+        let size = TerminalSize::new(10, 3);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(5), size, 100);
+        for i in 0..30u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("row {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(5);
+        emulator.set_viewport_pinned(true);
+        let pos = emulator.viewport_position();
+        // Scroll down 2 rows (toward live): viewport should move down and
+        // the pin position should update to the new offset.
+        emulator.scroll_by(-2);
+        assert_eq!(emulator.viewport_position(), pos - 2);
+        // New output while still pinned at the new position: viewport stays.
+        emulator.apply(&output(
+            31,
+            &b"new row 1\r\nnew row 2\r\n".to_vec()[..],
+            size,
+        ));
+        assert_eq!(
+            emulator.viewport_position(),
+            pos - 2,
+            "pinned viewport must stay after user scrolled down"
+        );
+        emulator.scroll_to_bottom();
+        assert!(emulator.at_bottom());
+    }
+
+    #[test]
+    fn pinned_viewport_scroll_to_unpins() {
+        let size = TerminalSize::new(10, 3);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(6), size, 100);
+        for i in 0..30u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("row {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(3);
+        emulator.set_viewport_pinned(true);
+        let pos = emulator.viewport_position();
+        // Scroll to a non-zero position: stays pinned.
+        emulator.scroll_to(pos);
+        // New output: viewport stays.
+        emulator.apply(&output(
+            31,
+            b"a\r\nb\r\nc\r\n".to_vec().as_slice(),
+            size,
+        ));
+        assert_eq!(emulator.viewport_position(), pos);
+        // Scroll to bottom: unpins.
+        emulator.scroll_to(0);
+        assert!(emulator.at_bottom());
     }
 
     #[test]
