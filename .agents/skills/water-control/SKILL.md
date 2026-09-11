@@ -1,6 +1,6 @@
 ---
 name: water-control
-description: Drive a running Water terminal GUI/server from the CLI via `water ctl`. Use when verifying GUI interactions, automating workspaces/tabs/panes/terminals, taking screenshots, or running scenario tests against Water. Triggers: "verify in Water GUI", "take a Water screenshot", "split a pane in the running Water", "run a Water scenario", "check terminal output in Water".
+description: 'Drive a running Water terminal GUI/server from the CLI via `water ctl`. Use when verifying GUI interactions, automating workspaces/tabs/panes/terminals, taking screenshots, or running scenario tests against Water. Triggers: verify in Water GUI, take a Water screenshot, split a pane in the running Water, run a Water scenario, check terminal output in Water.'
 ---
 
 # Water Control Interface
