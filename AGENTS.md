@@ -41,10 +41,19 @@ Agent 可能依附于正在运行的 Water server；不要终止承载当前会�
 - 发布 dev 版前确认包内 GUI/server、远端 payload 和运行时身份均符合隔离要求；构建时必须校验 payload 变体，不能回退到任意已安装的 release server。使用以下构建命令和时间戳 tag；创建 release 后按发布任务上传本次产物，不能把空 release 当成已交付安装包。
 
   ```bash
+  # dev（时间戳 tag，pre-release）
   WATER_APP_VARIANT=dev bash scripts/build-macos-app.sh
   TAG="dev-$(date +%Y%m%d-%H%M)"
-  gh release create "$TAG"
+  gh release create "$TAG" --title "Dev Build $(date '+%Y-%m-%d %H:%M')" \
+    --prerelease "dist/Water Dev-${VERSION}-macOS-arm64.zip"
+
+  # release（版本 tag，latest）
+  WATER_APP_VARIANT=release bash scripts/build-macos-app.sh
+  gh release create "v${VERSION}" --title "Water ${VERSION}" --latest \
+    --notes "$RELEASE_NOTES" "dist/Water-${VERSION}-macOS-arm64.zip"
   ```
+
+  `VERSION` 取 `Cargo.toml` 当前版本；资产文件名含空格（`Water Dev-x.y.z-macOS-arm64.zip`），命令行必须加引号；发布前用 `unzip -l` 确认资产非空。
 
 - Linux → macOS 构建沿用现有 zig linker、framework stubs 和平台 patch；Metal shader 在 Mac 预编译并维护仓库产物。入口见架构文档，交叉构建成功不等于 macOS 运行验证。
 - 新增路径先查 `git ls-files` 的大小写冲突；只保留一个 `AGENTS.md`，不要再创建 `Agents.md`。
