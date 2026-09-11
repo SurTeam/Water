@@ -256,7 +256,7 @@ struct PingResponse {
 /// `enqueue` (high-frequency terminal input) rides a persistent background
 /// writer so the GPUI main thread never blocks on the model; every other
 /// method is a one-shot request/response on its own connection, exactly like
-/// `waterctl`. The server handles connections concurrently, so an in-flight
+/// `water ctl`. The server handles connections concurrently, so an in-flight
 /// `operation.wait` never blocks input.
 #[cfg(unix)]
 #[derive(Clone, Debug)]
@@ -429,7 +429,7 @@ fn into_dispatch_error(error: ControlClientError) -> DispatchError {
 ///
 /// The server pushes revisioned `ModelSnapshot` frames (coalesced to the
 /// latest per flush) and forwards UI automation requests from other clients
-/// (`waterctl ui.*`). The session owns two background threads: a reader that
+/// (`water ctl ui.*`). The session owns two background threads: a reader that
 /// decodes push frames and feeds the snapshot channel / UI control channel /
 /// terminal stream channels, and a writer that serializes reply frames.
 ///

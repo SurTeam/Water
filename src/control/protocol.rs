@@ -24,7 +24,7 @@ const TERMINAL_FRAME_EXIT: u8 = 3;
 ///
 /// `push.snapshot` carries the next revisioned model state (at most one per
 /// flush, intermediates coalesced). `push.ui` forwards a UI automation
-/// request (from `waterctl`) to the connected GUI; the GUI answers with a
+/// request (from `water ctl`) to the connected GUI; the GUI answers with a
 /// plain reply frame carrying the same request id.
 pub const PUSH_SNAPSHOT_METHOD: &str = "push.snapshot";
 pub const PUSH_UI_METHOD: &str = "push.ui";

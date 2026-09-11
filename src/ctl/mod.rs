@@ -1,46 +1,92 @@
+//! The `ctl` control interface, built into the `water` binary (it used to
+//! ship as the standalone `waterctl` binary). The CLI is
+//! `water ctl <subcommand>` (identical to the old `waterctl <subcommand>`),
+//! and it resolves the socket from WATER_CONTROL_SOCKET, config, or the
+//! platform default so GUI-less test environments stay isolated.
+
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
-use water::app::model::{PaneTreeDump, StateDump};
-use water::automation::{ControlBackend, Scenario, ScenarioRunner};
-use water::command::{
+use crate::app::model::{PaneTreeDump, StateDump};
+use crate::automation::{ControlBackend, Scenario, ScenarioRunner};
+use crate::command::{
     AppCommand, FocusDirection, OperationStatus, PaneCommand, SplitDirection, SurfaceCommand,
     TabCommand, TerminalCommand, WorkspaceCommand,
 };
-use water::control::{ControlClient, default_socket_path};
-use water::ids::{PaneId, TabId, TerminalId, WorkspaceId};
-use water::surface::{SurfaceKind, SurfaceState};
-use water::terminal::{default_shell_args, default_shell_program};
+use crate::control::{ControlClient, default_socket_path};
+use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
+use crate::surface::{SurfaceKind, SurfaceState};
+use crate::terminal::{default_shell_args, default_shell_program};
 
-fn main() -> Result<()> {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+/// The control subcommands; `water main` intercepts these before GUI
+/// startup. A future `ctl2` prefix can extend this list without touching
+/// `main`.
+pub const SUBCOMMANDS: &[&str] = &[
+    "state",
+    "ui",
+    "server",
+    "debug",
+    "workspace",
+    "tab",
+    "pane",
+    "surface",
+    "terminal",
+    "operation",
+    "scenario",
+];
+
+/// Whether the first program argument selects the control interface.
+pub fn is_control_subcommand(argument: &str) -> bool {
+    matches!(argument, "ctl") || SUBCOMMANDS.contains(&argument)
+}
+
+/// Whether the first program argument selects the control interface; the
+/// `water` binary calls this before deciding between server, control, and GUI.
+pub fn is_control_argument(argument: &str) -> bool {
+    is_control_subcommand(argument)
+}
+
+pub fn run(arguments: &[String]) -> Result<()> {
     let (socket_path, arguments) = extract_socket(arguments)?;
     let client = ControlClient::new(socket_path);
     if arguments.is_empty() {
         print_usage();
-        bail!("a command is required");
+        std::process::exit(0);
     }
 
     match arguments[0].as_str() {
+        "ctl" => {
+            if arguments.len() == 1 {
+                print_usage();
+                std::process::exit(0);
+            }
+            dispatch(&client, &arguments[1..])
+        }
+        _ => dispatch(&client, &arguments),
+    }
+}
+
+fn dispatch(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    match arguments[0].as_str() {
+        "state" => print_json(&client.state_dump().context("state request failed")?)?,
+        "ui" => run_ui(client, &arguments[1..])?,
+        "server" => run_server(client, &arguments[1..])?,
+        "debug" => run_debug(client, &arguments[1..])?,
+        "workspace" => run_workspace(client, &arguments[1..])?,
+        "tab" => run_tab(client, &arguments[1..])?,
+        "pane" => run_pane(client, &arguments[1..])?,
+        "surface" => run_surface(client, &arguments[1..])?,
+        "terminal" => run_terminal(client, &arguments[1..])?,
+        "operation" => run_operation(client, &arguments[1..])?,
+        "scenario" => run_scenario(client, &arguments[1..])?,
         "ping" => {
             client.ping().context("ping failed")?;
             println!("pong");
         }
-        "state" => print_json(&client.state_dump().context("state request failed")?)?,
-        "ui" => run_ui(&client, &arguments[1..])?,
-        "server" => run_server(&client, &arguments[1..])?,
-        "debug" => run_debug(&client, &arguments[1..])?,
-        "workspace" => run_workspace(&client, &arguments[1..])?,
-        "tab" => run_tab(&client, &arguments[1..])?,
-        "pane" => run_pane(&client, &arguments[1..])?,
-        "surface" => run_surface(&client, &arguments[1..])?,
-        "terminal" => run_terminal(&client, &arguments[1..])?,
-        "operation" => run_operation(&client, &arguments[1..])?,
-        "scenario" => run_scenario(&client, &arguments[1..])?,
         "--help" | "-h" => print_usage(),
-        command => bail!("unknown command: {command}"),
+        command => bail!("unknown control command: {command} (see `water ctl --help`)"),
     }
     Ok(())
 }
@@ -644,7 +690,7 @@ fn run_operation(client: &ControlClient, arguments: &[String]) -> Result<()> {
     let operation_id = arguments
         .get(1)
         .context("operation ID is required")?
-        .parse::<water::ids::OperationId>()
+        .parse::<crate::ids::OperationId>()
         .context("invalid operation ID")?;
     let operation = match command {
         "get" => client
@@ -690,7 +736,7 @@ fn dispatch_and_print(client: &ControlClient, command: AppCommand) -> Result<()>
     print_json(&operation)
 }
 
-fn extract_socket(arguments: Vec<String>) -> Result<(PathBuf, Vec<String>)> {
+fn extract_socket(arguments: &[String]) -> Result<(PathBuf, Vec<String>)> {
     let mut socket_path = default_socket_path();
     let mut filtered = Vec::with_capacity(arguments.len());
     let mut index = 0;
@@ -836,26 +882,29 @@ fn print_json<T: Serialize>(value: &T) -> Result<()> {
 
 fn print_usage() {
     println!(
-        "waterctl [--socket PATH] <state|ui|workspace|tab|pane|surface|terminal|operation|scenario|debug> ...\n\n\
+        "water ctl [--socket PATH] <command> ...\n\n\
+         The `ctl` prefix groups the control interface (a future `ctl2` prefix can\n\
+         extend it). Every command also works without the prefix: `water state`,\n\
+         `water ui key cmd-t`, ...\n\n\
          Examples:\n\
-           waterctl state\n\
-           waterctl ui key cmd-t\n\
-           waterctl ui state\n\
-           waterctl ui screenshot --output target/water.png\
-           waterctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
-           waterctl workspace new\n\
-           waterctl workspace rename --workspace 1 --title Dev\n\
-           waterctl workspace reorder --workspace 1 --index 0\n\
-           waterctl tab new --title Main\n\
-           waterctl tab rename --tab 2 --title Shell\n\
-           waterctl pane split --right\n\
-           waterctl pane focus 3\n\
-           waterctl pane rename-agent --pane 3 --label BuildBot\n\
-           waterctl pane move-to-workspace --pane 3 --workspace 2\n\
-           waterctl pane input --pane 3 --text 'printf hello\\n'\n\
-           waterctl pane content --pane 3 --row 0 --rows 4 --column 0 --columns 80\n\
-           waterctl operation wait 7\n\
-           waterctl scenario run tests/scenarios/workspace_basic.json"
+           water ctl state\n\
+           water ctl ui key cmd-t\n\
+           water ctl ui state\n\
+           water ctl ui screenshot --output target/water.png\n\
+           water ctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
+           water ctl workspace new\n\
+           water ctl workspace rename --workspace 1 --title Dev\n\
+           water ctl workspace reorder --workspace 1 --index 0\n\
+           water ctl tab new --title Main\n\
+           water ctl tab rename --tab 2 --title Shell\n\
+           water ctl pane split --right\n\
+           water ctl pane focus 3\n\
+           water ctl pane rename-agent --pane 3 --label BuildBot\n\
+           water ctl pane move-to-workspace --pane 3 --workspace 2\n\
+           water ctl pane input --pane 3 --text 'printf hello\\n'\n\
+           water ctl pane content --pane 3 --row 0 --rows 4 --column 0 --columns 80\n\
+           water ctl operation wait 7\n\
+           water ctl scenario run tests/scenarios/workspace_basic.json"
     );
 }
 

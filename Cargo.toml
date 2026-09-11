@@ -35,9 +35,6 @@ name = "water"
 path = "src/main.rs"
 required-features = ["gui"]
 
-[[bin]]
-name = "waterctl"
-path = "src/bin/waterctl.rs"
 
 [[bin]]
 name = "water-server"

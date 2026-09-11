@@ -3153,7 +3153,7 @@ impl WorkspaceView {
             },
         );
         if special_name {
-            // Synthesized keystrokes (waterctl / scenario control) carry the
+            // Synthesized keystrokes (water ctl / scenario control) carry the
             // key name itself in `key_char`. The mapping above already sent
             // the real byte sequence; without stopping propagation GPUI's
             // dispatch fallback would also insert the literal word.

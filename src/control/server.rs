@@ -219,7 +219,7 @@ impl ControlServer {
                 );
                 let state = state;
                 // One handler thread per connection: a long-lived GUI session
-                // must never starve short waterctl RPCs (the legacy serial
+                // must never starve short ctl RPCs (the legacy serial
                 // accept loop blocked every other client for the lifetime of
                 // a single connection).
                 while !server_stop.load(Ordering::Acquire) {
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn wire_message_is_a_superset_of_the_legacy_frame_shapes() {
-        // Legacy request frame (old waterctl / GUI).
+        // Legacy request frame (standalone-CLI era / GUI).
         let legacy_request: Value = serde_json::json!({
             "protocol_version": 1,
             "request_id": 7,

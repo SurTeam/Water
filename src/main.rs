@@ -15,13 +15,20 @@ use water::control::{
 use water::remote::SshTunnel;
 use water::ui::{WaterApplication, ui_control_channel};
 
+/// `water server` execs the sibling server binary; `water ctl <cmd>` (and its
+/// bare aliases such as `water state`, `water ui key cmd-t`) dispatch against
+/// the control socket; anything else starts the GUI. The `ctl` prefix groups
+/// the control namespace so a future `ctl2` can extend it.
 fn main() -> Result<()> {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let explicit_server_mode = arguments
-        .first()
-        .is_some_and(|argument| argument == "server" || argument == "--server");
-    if explicit_server_mode {
+    let Some(first) = arguments.first() else {
+        init_tracing();
+        return run_gui(std::iter::empty());
+    };
+    if matches!(first.as_str(), "server" | "--server") {
         run_server_via_dedicated_binary(&arguments[1..])
+    } else if water::ctl::is_control_argument(first.as_str()) {
+        water::ctl::run(&arguments)
     } else {
         init_tracing();
         run_gui(arguments.into_iter())
@@ -420,7 +427,14 @@ fn parse_startup_options(mut args: impl Iterator<Item = String>) -> Result<Start
             initial_terminal = Some(false);
         } else if argument == "--help" || argument == "-h" {
             println!(
-                "water [--ssh HOST] [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [server ...]"
+                "water [--ssh HOST] [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [server ...]\n\n\
+                 Control interface (see `water ctl --help` for the full list):\n\
+                   water ctl state | water state\n\
+                   water ui key cmd-t | water ui screenshot --output FILE\n\
+                   water workspace new | water pane split --right | water scenario run PATH\n\
+                 Control commands accept --socket PATH; the socket otherwise resolves\n\
+                 from WATER_CONTROL_SOCKET, server.socket_path, startup.control_socket,\n\
+                 then the platform default (dev: /tmp/water-dev.sock, release: /tmp/water.sock)."
             );
             std::process::exit(0);
         } else {

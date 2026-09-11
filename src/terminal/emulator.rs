@@ -382,7 +382,7 @@ impl TerminalEmulator {
 }
 
 /// Rebuilds a renderable screen in the caller from a server-provided raw
-/// replay. This is used by `waterctl` and other inspection clients; it never
+/// replay. This is used by `water ctl` and other inspection clients; it never
 /// installs an emulator in the server or feeds replay-generated side effects
 /// back to the PTY.
 pub fn snapshot_from_replay(replay: &TerminalReplay, scrollback_lines: usize) -> TerminalSnapshot {

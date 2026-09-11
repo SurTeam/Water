@@ -378,7 +378,7 @@ impl CommandClient {
 ///   by the GUI client in the split client/server architecture. Every method
 ///   crosses the control socket as a length-prefixed JSON frame.
 ///
-/// The mutation path is unchanged: UI handlers, `waterctl`, and scenarios
+/// The mutation path is unchanged: UI handlers, `water ctl`, and scenarios
 /// all funnel into `AppCommand -> CommandDispatcher` on the model thread.
 pub trait CommandTransport: Send + Sync {
     /// Dispatches a command and returns its operation id (blocks until the

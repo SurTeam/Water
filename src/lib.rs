@@ -12,6 +12,7 @@ pub mod automation;
 pub mod command;
 pub mod config;
 pub mod control;
+pub mod ctl;
 #[cfg(feature = "gui")]
 mod embedded_servers;
 pub mod event;

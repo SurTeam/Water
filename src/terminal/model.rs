@@ -75,7 +75,7 @@ impl TerminalLimits {
 }
 
 /// The bounded raw replay history of one terminal, as returned by
-/// `waterctl terminal snapshot` and `terminal.attach`. The caller replays
+/// `water ctl terminal snapshot` and `terminal.attach`. The caller replays
 /// the events through a temporary local Alacritty terminal to inspect the
 /// screen; the server itself keeps no long-running emulator.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -465,7 +465,7 @@ impl TerminalRegistry {
     }
 
     /// Raw bytes pinned by replay rings and recent-output buffers.
-    /// Exposed through `waterctl debug memory`.
+    /// Exposed through `water ctl debug memory`.
     pub fn retained_replay_bytes(&self) -> usize {
         let entries: Vec<_> = self
             .entries

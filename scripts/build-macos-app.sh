@@ -106,6 +106,11 @@ fi
 
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
 
+# Bundle the water-control skill as a resource for agent tooling.
+install -d -m 755 "$resources_dir/skills/water-control"
+install -m 644 "$root_dir/.agents/skills/water-control/SKILL.md" \
+  "$resources_dir/skills/water-control/SKILL.md"
+
 # Generate Info.plist with the correct bundle ID and executable name
 sed -e "s/__WATER_VERSION__/$version/g" \
     -e "s/__BUNDLE_ID__/$bundle_id/g" \

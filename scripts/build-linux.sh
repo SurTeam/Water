@@ -22,7 +22,7 @@ server_bundle_dir="$root_dir/target/embedded-servers/$variant"
 
 WATER_APP_VARIANT="$variant" WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" bash "$root_dir/scripts/build-embedded-servers.sh"
 WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
-  cargo build "${profile_args[@]}" --bin water --bin water-server --bin waterctl
+  cargo build "${profile_args[@]}" --bin water --bin water-server
 
 # Rename the GUI + server so ps/kill show water-dev / water-srv-dev for dev
 # builds without relying on prctl (which is not safe Rust).
@@ -32,7 +32,7 @@ cp -f "$root_dir/target/$profile/water-server" "$root_dir/target/$profile/$serve
 chmod 755 "$root_dir/target/$profile/$server_name"
 
 mkdir -p "$dist_dir"
-tar -C "$root_dir/target/$profile" -czf "$dist_dir/$package_name-${version}-${arch}-linux.tar.gz" "$binary_name" "$server_name" waterctl
+tar -C "$root_dir/target/$profile" -czf "$dist_dir/$package_name-${version}-${arch}-linux.tar.gz" "$binary_name" "$server_name"
 
 echo "Built $dist_dir/$package_name-${version}-${arch}-linux.tar.gz"
 echo "Run with: tar xzf $dist_dir/$package_name-${version}-${arch}-linux.tar.gz && ./$binary_name"

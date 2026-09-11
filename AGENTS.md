@@ -22,7 +22,7 @@
 
 - 运行与改动匹配的检查。除编译外，测试执行应在一分钟内完成；超时先排查等待、死锁或测试设计，不靠加 sleep/放宽超时掩盖问题。
 - 用 operation 完成、事件、revision、输出或进程退出等有界等待同步，不用固定 sleep。历史“已通过”或“预存失败”需当前基线佐证，不能直接豁免失败。
-- GUI 交互验证使用 `waterctl` / Water control API，不用 `xdotool`、`xte` 等系统注入工具。缺少必要交互时，在任务范围内补 control/automation 接口并走真实交互处理及应用命令路径。
+- GUI 交互验证使用 `water ctl`（Water control API），不用 `xdotool`、`xte` 等系统注入工具。缺少必要交互时，在任务范围内补 control/automation 接口并走真实交互处理及应用命令路径。
 - shell 场景使用检测到的 zsh，优先 `/opt/homebrew/bin/zsh`；隔离启动文件的交互测试用 `-f`。`--no-initial-terminal` 保留 workspace 但不建终端，`--empty-workspace` 从无 workspace 开始。
 - headless 测试不能替代 GUI 验证；按实际机器检查显示环境，不假定 Linux 没有 X/GPU，也不硬编码 `DISPLAY` / `XAUTHORITY`。
 

@@ -168,7 +168,7 @@ case "${0##*/}" in
     done
     directory="target/$target$profile"
     mkdir -p "$directory"
-    for binary in water water-server waterctl; do
+    for binary in water water-server; do
       printf '%s\n' "$variant" > "$directory/$binary"
     done ;;
 esac

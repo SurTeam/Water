@@ -80,7 +80,7 @@ Configurable defaults are kept outside the model in a JSON file and loaded at st
 
 The conventional XDG path `~/.config/water/config.json` (or `$XDG_CONFIG_HOME/water/config.json`) is also supported and is selected when it already exists. `WATER_CONFIG=/path/to/config.json` or `--config /path/to/config.json` selects another file. The file is an override layer: omitted fields keep Water's built-in defaults (both the flat schema and an optional `{ "overrides": { ... } }` wrapper are accepted), while the Settings page writes a complete, readable JSON document. [`config.example.json`](config.example.json) contains the complete schema.
 
-Open Settings with `Cmd-,` or the Water menu. It exposes startup defaults (cwd, control socket, initial workspace/terminal, window size and window minimum width/height), shell program and ordered arguments, terminal dimensions/scrollback/font metrics, terminal features, UI base font size, every current theme color, sidebar/layout metrics, and all current Water shortcuts. Sidebar settings include the panel background (`theme.sidebar_background`), unselected and selected host (connection) header backgrounds (`theme.sidebar_connection_background` and `theme.sidebar_connection_active_background`, both defaulting to the panel background), unselected workspace and agent row backgrounds (`theme.sidebar_workspace_background` and `theme.sidebar_agent_background`), selected workspace and focused agent row backgrounds (`theme.sidebar_workspace_active_background` and `theme.sidebar_agent_active_background`, both defaulting to the green accent), the drag-and-drop preview line color (`theme.sidebar_drag_indicator_color`, defaulting to the green accent), per-agent accent colors, the optional running-agent count badge (`ui.sidebar_show_agent_count`), and an opt-in vertical-wheel scroll for the tab strip (`ui.tab_bar_vertical_wheel_scroll`, default off; trackpad horizontal swipes always scroll it; overflow arrows mark hidden content and the `+` button rides after the last tab). `theme.agent_colors` uses the keys `claude_code`, `codex`, `opencode`, `gemini_cli`, `aider`, `cursor_agent`, `amp`, `crush`, `goose`, `qwen_code`, `droid`, `grok`, and `pi`. The tab shortcuts include a `switch_tab` template (`cmd-#`, where `#` becomes 1–9 or 0 for tabs 1–10), `next_tab`/`previous_tab`, and cyclic workspace navigation with `next_workspace`/`previous_workspace`. Each row declares whether it takes effect immediately, for a new window, or after restarting Water. UI/theme/font/feature/shortcut changes are applied to existing workspace windows after a successful save; shell, startup, terminal history, and default-terminal-size changes are marked for restart so existing PTY workers are never silently reconfigured. The Settings page has a Restart Water button; when there are unsaved changes it saves them first and only restarts after persistence succeeds. The built-in dark theme mirrors the Kitty `kitty_normal.conf` base colors (`#2c2c2c` background and `#e4e4e4` foreground) and uses Kitty green `#339966` for the active pane/tab UI accent (`theme.active_pane_border` and `theme.tab_active_background`). These remain Water-owned AppConfig defaults; Kitty is not read at runtime. When the focused terminal is scrolled away from live output, it borrows unused aggregate byte budget to keep the visible rows pinned; returning to the live end or typing releases that temporary capacity. A terminal that loses focus is trimmed to `terminal.inactive_scrollback_lines` (default 500 rows) and its scrollback reservation is released back to the shared `terminal.max_total_scrollback_bytes` budget, so opening many long tabs keeps memory bounded. When the system has no `alacritty` terminfo entry, Water's shells use the bundled `assets/terminfo` database (override location with `WATER_TERMINFO_DIR`), and Water also injects a lightweight zsh integration so the `clear` command additionally erases scrollback while Ctrl-L keeps its classic "push the prompt to the top, keep history" behavior (opt out with `WATER_NO_SHELL_INTEGRATION=1`). `waterctl debug memory` reports the live scrollback/registry byte accounting. Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
+Open Settings with `Cmd-,` or the Water menu. It exposes startup defaults (cwd, control socket, initial workspace/terminal, window size and window minimum width/height), shell program and ordered arguments, terminal dimensions/scrollback/font metrics, terminal features, UI base font size, every current theme color, sidebar/layout metrics, and all current Water shortcuts. Sidebar settings include the panel background (`theme.sidebar_background`), unselected and selected host (connection) header backgrounds (`theme.sidebar_connection_background` and `theme.sidebar_connection_active_background`, both defaulting to the panel background), unselected workspace and agent row backgrounds (`theme.sidebar_workspace_background` and `theme.sidebar_agent_background`), selected workspace and focused agent row backgrounds (`theme.sidebar_workspace_active_background` and `theme.sidebar_agent_active_background`, both defaulting to the green accent), the drag-and-drop preview line color (`theme.sidebar_drag_indicator_color`, defaulting to the green accent), per-agent accent colors, the optional running-agent count badge (`ui.sidebar_show_agent_count`), and an opt-in vertical-wheel scroll for the tab strip (`ui.tab_bar_vertical_wheel_scroll`, default off; trackpad horizontal swipes always scroll it; overflow arrows mark hidden content and the `+` button rides after the last tab). `theme.agent_colors` uses the keys `claude_code`, `codex`, `opencode`, `gemini_cli`, `aider`, `cursor_agent`, `amp`, `crush`, `goose`, `qwen_code`, `droid`, `grok`, and `pi`. The tab shortcuts include a `switch_tab` template (`cmd-#`, where `#` becomes 1–9 or 0 for tabs 1–10), `next_tab`/`previous_tab`, and cyclic workspace navigation with `next_workspace`/`previous_workspace`. Each row declares whether it takes effect immediately, for a new window, or after restarting Water. UI/theme/font/feature/shortcut changes are applied to existing workspace windows after a successful save; shell, startup, terminal history, and default-terminal-size changes are marked for restart so existing PTY workers are never silently reconfigured. The Settings page has a Restart Water button; when there are unsaved changes it saves them first and only restarts after persistence succeeds. The built-in dark theme mirrors the Kitty `kitty_normal.conf` base colors (`#2c2c2c` background and `#e4e4e4` foreground) and uses Kitty green `#339966` for the active pane/tab UI accent (`theme.active_pane_border` and `theme.tab_active_background`). These remain Water-owned AppConfig defaults; Kitty is not read at runtime. When the focused terminal is scrolled away from live output, it borrows unused aggregate byte budget to keep the visible rows pinned; returning to the live end or typing releases that temporary capacity. A terminal that loses focus is trimmed to `terminal.inactive_scrollback_lines` (default 500 rows) and its scrollback reservation is released back to the shared `terminal.max_total_scrollback_bytes` budget, so opening many long tabs keeps memory bounded. When the system has no `alacritty` terminfo entry, Water's shells use the bundled `assets/terminfo` database (override location with `WATER_TERMINFO_DIR`), and Water also injects a lightweight zsh integration so the `clear` command additionally erases scrollback while Ctrl-L keeps its classic "push the prompt to the top, keep history" behavior (opt out with `WATER_NO_SHELL_INTEGRATION=1`). `water ctl debug memory` reports the live scrollback/registry byte accounting. Missing files use built-in defaults; malformed files fail startup instead of being silently ignored.
 
 ```sh
 mkdir -p "$HOME/Library/Application Support/water"
@@ -96,23 +96,32 @@ Windows resize freely down to `startup.window_min_width`/`window_min_height` (ne
 
 ## Control
 
+`water ctl` is the control interface built into the `water` binary (it replaced
+the old standalone `waterctl` binary).
+The `ctl` prefix groups the commands so a future `ctl2` namespace can extend
+them without touching the GUI surface; every command also works bare
+(`water state`, `water ui key cmd-t`, ...). The socket resolves from
+`--socket PATH` (or `WATER_CONTROL_SOCKET`), then `server.socket_path`,
+`startup.control_socket`, then the platform default
+(`/tmp/water-dev.sock` for dev, `/tmp/water.sock` for release).
+
 ```sh
-cargo run --bin waterctl -- --socket /tmp/water.sock state
+cargo run -- --socket /tmp/water.sock state
 # Dispatch a real GPUI keystroke through the focused native window/action tree.
-cargo run --bin waterctl -- --socket /tmp/water.sock ui key cmd-t
-cargo run --bin waterctl -- --socket /tmp/water.sock ui state
+cargo run -- --socket /tmp/water.sock ui key cmd-t
+cargo run -- --socket /tmp/water.sock ui state
 # Capture only the active Water window (not the full desktop).
-cargo run --bin waterctl -- --socket /tmp/water.sock ui screenshot --output /tmp/water.png
-cargo run --bin waterctl -- --socket /tmp/water.sock tab new       # creates a terminal tab
-cargo run --bin waterctl -- --socket /tmp/water.sock pane split --right  # creates a terminal pane
+cargo run -- --socket /tmp/water.sock ui screenshot --output /tmp/water.png
+cargo run -- --socket /tmp/water.sock tab new       # creates a terminal tab
+cargo run -- --socket /tmp/water.sock pane split --right  # creates a terminal pane
 # Pane-targeted input still mutates through AppCommand -> CommandDispatcher.
-cargo run --bin waterctl -- --socket /tmp/water.sock pane input --pane PANE_ID --text $'printf "__PANE__\\n"\n'
+cargo run -- --socket /tmp/water.sock pane input --pane PANE_ID --text $'printf "__PANE__\\n"\n'
 # Query an exact viewport cell range without dumping the entire terminal.
-cargo run --bin waterctl -- --socket /tmp/water.sock pane content --pane PANE_ID --row 0 --rows 4 --column 0 --columns 80
-cargo run --bin waterctl -- --socket /tmp/water.sock debug memory
-cargo run --bin waterctl -- --socket /tmp/water.sock terminal spawn /bin/sh -c 'printf "__READY__\\n"'
+cargo run -- --socket /tmp/water.sock pane content --pane PANE_ID --row 0 --rows 4 --column 0 --columns 80
+cargo run -- --socket /tmp/water.sock debug memory
+cargo run -- --socket /tmp/water.sock terminal spawn /bin/sh -c 'printf "__READY__\\n"'
 # Use the returned terminal ID for direct inspection or waits.
-cargo run --bin waterctl -- --socket /tmp/water.sock terminal snapshot --terminal TERMINAL_ID
+cargo run -- --socket /tmp/water.sock terminal snapshot --terminal TERMINAL_ID
 # In the GUI, click-drag selects terminal text; Cmd-C copies a selection, otherwise it sends Ctrl-C.
 ```
 
@@ -124,18 +133,19 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ./scripts/build-macos-app.sh
 # Real-app smoke setup: start the bundled executable on a dedicated socket, then
-# drive Cmd-N/W/M/Q, terminal shortcuts, pane input, and pane range queries via waterctl.
+# drive Cmd-N/W/M/Q, terminal shortcuts, pane input, and pane range queries via `water ctl`.
 dist/Water.app/Contents/MacOS/water --control-socket /tmp/water-e2e.sock
-cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-n
-cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-m
-cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-w
-cargo run --bin waterctl -- --socket /tmp/water-e2e.sock ui key cmd-q
+# The same binary drives the control interface:
+dist/Water.app/Contents/MacOS/water --socket /tmp/water-e2e.sock ui key cmd-n
+dist/Water.app/Contents/MacOS/water --socket /tmp/water-e2e.sock ui key cmd-m
+dist/Water.app/Contents/MacOS/water --socket /tmp/water-e2e.sock ui key cmd-w
+dist/Water.app/Contents/MacOS/water --socket /tmp/water-e2e.sock ui key cmd-q
 # Start this in a separate terminal with --empty-workspace for the scenario baseline.
-cargo run --bin water -- --control-socket /tmp/water.sock --empty-workspace
-cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/workspace_basic.json
+cargo run -- --control-socket /tmp/water.sock --empty-workspace
+cargo run -- --socket /tmp/water.sock scenario run tests/scenarios/workspace_basic.json
 # terminal_zsh validates explicit Homebrew zsh; terminal_basic remains the portable shell fixture.
-cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_basic.json
-cargo run --bin waterctl -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_zsh.json
+cargo run -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_basic.json
+cargo run -- --socket /tmp/water.sock scenario run tests/scenarios/terminal_zsh.json
 ```
 
 `ui key` is a running-application test interface: the control thread hands the keystroke to the GPUI thread, which calls `Window::dispatch_keystroke` against the active/frontmost Water window. It therefore exercises the actual keymap and focused element action handlers instead of directly invoking model commands. `ui screenshot` asks GPUI to render that same active Water window to a PNG; it does not invoke the system full-screen screenshot tool. `pane input` targets a pane through `TerminalCommand::SendText`, and `pane content` returns the requested viewport row/column range.

@@ -10,7 +10,7 @@
 | workspace/tab/pane 拓扑与身份 | [app/model.rs](src/app/model.rs)、[pane/model.rs](src/pane/model.rs)、[ids.rs](src/ids.rs) |
 | PTY、回放及订阅 | [terminal/worker.rs](src/terminal/worker.rs)、[terminal/model.rs](src/terminal/model.rs)、[terminal/replay.rs](src/terminal/replay.rs)、[terminal/stream.rs](src/terminal/stream.rs) |
 | 客户端终端模拟与窗口交互 | [terminal/emulator.rs](src/terminal/emulator.rs)、[ui/application.rs](src/ui/application.rs)、[ui/workspace.rs](src/ui/workspace.rs) |
-| 协议、CLI 与 GUI 自动化 | [control/protocol.rs](src/control/protocol.rs)、[control/server.rs](src/control/server.rs)、[control/client.rs](src/control/client.rs)、[bin/waterctl.rs](src/bin/waterctl.rs)、[ui/control.rs](src/ui/control.rs) |
+| 协议、CLI 与 GUI 自动化 | [control/protocol.rs](src/control/protocol.rs)、[control/server.rs](src/control/server.rs)、[control/client.rs](src/control/client.rs)、[ctl/](src/ctl/)（`water ctl`）、[ui/control.rs](src/ui/control.rs) |
 | 启动、配置、Agent 检测 | [main.rs](src/main.rs)、[server.rs](src/server.rs)、[config.rs](src/config.rs)、[agent/model.rs](src/agent/model.rs) |
 | 打包与 SSH 部署 | [build-macos-app.sh](scripts/build-macos-app.sh)、[build-embedded-servers.sh](scripts/build-embedded-servers.sh)、[build.rs](build.rs)、[remote.rs](src/remote.rs) |
 
@@ -29,7 +29,7 @@ GUI 先连接已有 server；没有可用 server 时，根据配置启动 detach
 外部命令与终端数据分成两条路径：
 
 ```text
-UI / waterctl / scenario
+UI / water ctl / scenario
   → 对象所属 connection 的 CommandTransport
   → CommandDispatcher → ApplicationModel
   → operation / event / revisioned metadata snapshot

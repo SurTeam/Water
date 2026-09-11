@@ -308,7 +308,7 @@ impl ReplayRing {
     }
 
     /// O(n) byte search over the retained raw output events. Used by the
-    /// `waterctl terminal contains` fast path; a single pass over owned
+    /// `water ctl terminal contains` fast path; a single pass over owned
     /// bytes, cheap at ring budget scale.
     pub fn raw_contains(&self, needle: &str) -> bool {
         let needle = needle.as_bytes();

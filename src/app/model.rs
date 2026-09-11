@@ -24,7 +24,7 @@ pub struct StateDump {
     pub focused_pane: Option<PaneId>,
     /// Flattened pane<->agent bindings for every workspace and tab, ordered
     /// by workspace, tab, then pane-tree position. This is the stable data
-    /// contract for the sidebar Agents section, `waterctl state.dump`, and
+    /// contract for the sidebar Agents section, `water ctl state`, and
     /// future agent surfaces; consumers never re-walk the pane tree to find
     /// agents themselves.
     #[serde(default)]
