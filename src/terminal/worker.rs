@@ -40,7 +40,6 @@ use super::snapshot::TerminalSize;
 use super::stream::TerminalStreamEvent;
 
 const PTY_READ_WRITE_KEY: usize = 0;
-const PTY_CHILD_EVENT_KEY: usize = 1;
 const READER_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
@@ -342,10 +341,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
     };
     let mut pty_reader_handle = Some(handle);
-    // The reader thread owns master reads; drop the master from the worker's
-    // poller so a level-triggered readable event cannot race the reader and
-    // spin the worker while the channel is being filled.
-    let _ = poller.delete(pty.file());
+    // The reader thread owns master reads; deregister both the master and
+    // the SIGCHLD signal pipe from the worker's poller. Leaving the signal
+    // pipe registered in level-triggered mode makes epoll_wait return
+    // immediately on every iteration (the pipe is always readable), busy-
+    // spinning the worker at 100% CPU.
+    let _ = pty.deregister(&poller);
     let reader_eof = Arc::new(AtomicBool::new(false));
     // Set when a drain hit the tick byte budget mid-burst; the next poll
     // must not sleep before the channel is drained again.
@@ -575,15 +576,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             }
 
             let mut child_exited = None;
-            let mut child_event = None;
-            for event in events.iter() {
-                if event.key == PTY_CHILD_EVENT_KEY {
-                    child_event = pty.next_child_event();
-                }
-            }
-            if let Some(ChildEvent::Exited(status)) = child_event {
-                child_exited = Some(status.and_then(|status| status.code()));
-            } else if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
+            if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
                 child_exited = Some(status.and_then(|status| status.code()));
             }
 
