@@ -5989,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "water"
-version = "0.2.1"
+version = "0.2.3"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
