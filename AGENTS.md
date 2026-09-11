@@ -33,6 +33,7 @@ Agent 可能依附于正在运行的 Water server；不要终止承载当前会�
 - 测试使用独立 `WATER_CONTROL_SOCKET` 和临时配置（`WATER_CONFIG` / `--config`），记录本次启动的 GUI/server PID。dev 默认隔离不能替代测试实例隔离。
 - 清理只针对已确认属于本次测试的 PID，server 也需单独确认归属。禁止 `pkill water`、`pkill -9 water`、`killall water`；`pkill -x` 也不能隔离同名实例。
 - 进程名仅用于辨认：dev GUI/server 为 `water-dev` / `water-srv-dev`，release 为 `water` / `water-server`，不能仅凭名字判断可安全终止。
+- 测试结束后，需要及时关闭测试使用的socket、server，避免僵尸进程
 
 ## 构建与仓库
 
