@@ -295,6 +295,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     });
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = Some(worker_wakeup.clone());
 
+    let poller_for_reader_shutdown = poller.clone();
+    let reader_shutdown_wake: WakeupCallback = Arc::new(move || {
+        let _ = poller_for_reader_shutdown.notify();
+    });
+
     // Dedicated PTY reader thread: the macOS slave->master queue holds only
     // ~1KB ahead of the reader, so a reader that works while reading makes
     // the writer wait once per 1KB. The reader drains the master at PTY
@@ -306,7 +311,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         free_tx: pty_free_tx,
         wakeup_pending: parser_wakeup_pending,
         handle,
-    } = match spawn_pty_reader(&pty, worker_wakeup.clone(), pty_reader_stopped.clone()) {
+    } = match spawn_pty_reader(
+        &pty,
+        worker_wakeup.clone(),
+        pty_reader_stopped.clone(),
+        Some(reader_shutdown_wake.clone()),
+    ) {
         Ok(reader) => reader,
         Err(error) => {
             tracing::error!(
@@ -506,6 +516,49 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 poll_timeout = poll_timeout
                     .min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
             }
+            {
+                let mut had_output = false;
+                if !reader_eof.load(std::sync::atomic::Ordering::Relaxed) {
+                    let drain_result = drain_data(
+                        &pty_data_rx,
+                        &pty_free_tx,
+                        &parser_wakeup_pending,
+                        &mut batch,
+                        MAX_PTY_BYTES_PER_TICK,
+                    );
+                    match drain_result {
+                        Ok(ReadEffect::BudgetExhausted) => pty_data_pending = true,
+                        Ok(ReadEffect::Continue) => pty_data_pending = false,
+                        Ok(ReadEffect::Eof) => {
+                            pty_data_pending = false;
+                            reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(_error) => {
+                            pty_data_pending = false;
+                            reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                if !batch.is_empty() {
+                    had_output = true;
+                    publish_raw_output(
+                        terminal_id,
+                        current_size,
+                        &batch,
+                        &replay,
+                        &mut subscribers,
+                        &registry,
+                        &mut title_scanner,
+                        &mut last_title,
+                        &event_tx,
+                        event_wakeup.as_ref(),
+                    );
+                    batch.clear();
+                }
+                if had_output {
+                    last_output_at = Instant::now();
+                }
+            }
             let poll_result = poller.wait(&mut events, Some(poll_timeout));
             if let Err(error) = poll_result {
                 tracing::warn!(
@@ -525,6 +578,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
             }
             if let Some(ChildEvent::Exited(status)) = child_event {
+                child_exited = Some(status.and_then(|status| status.code()));
+            } else if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
                 child_exited = Some(status.and_then(|status| status.code()));
             }
 
@@ -635,7 +690,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     &pty_free_tx,
                     &parser_wakeup_pending,
                     &mut final_batch,
-                    MAX_PTY_BYTES_PER_TICK,
+                    usize::MAX,
                 );
                 if !final_batch.is_empty() {
                     publish_raw_output(
@@ -784,15 +839,11 @@ fn drain_data(
                 break;
             }
         };
-        if batch.len() + chunk.len() > byte_budget {
-            effect = ReadEffect::BudgetExhausted;
-            let _ = free_tx.try_send(chunk);
-            break;
-        }
         batch.extend_from_slice(&chunk);
         chunk.clear();
         let _ = free_tx.try_send(chunk);
-        if effect != ReadEffect::Continue {
+        if batch.len() > byte_budget {
+            effect = ReadEffect::BudgetExhausted;
             break;
         }
     }
@@ -818,6 +869,7 @@ fn spawn_pty_reader(
     pty: &Pty,
     wakeup: WakeupCallback,
     stopped: Arc<AtomicBool>,
+    #[allow(unused_variables)] shutdown_wake: Option<WakeupCallback>,
 ) -> io::Result<PtyReader> {
     let mut reader_file = pty.file().try_clone()?;
     let reader_poller = Poller::new()?;
@@ -840,23 +892,18 @@ fn spawn_pty_reader(
             // Filled blocks move to the worker and return over `free_rx` for
             // reuse. Only the false->true wake transition notifies the worker.
             let push = |batch: &mut Vec<u8>| -> bool {
+                // Blocking send = true backpressure (no yield_now spin).
+                let filled = std::mem::take(batch);
+                match filled_tx.send(filled) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::SendError(_)) => return false,
+                }
+                // Take a reusable block back (nonblocking; fresh if none).
                 let replacement = free_rx
                     .try_recv()
+                    .map(|mut b: Vec<u8>| { b.clear(); b })
                     .unwrap_or_else(|_| Vec::with_capacity(READER_BLOCK_BYTES));
-                let mut filled = std::mem::replace(batch, replacement);
-                loop {
-                    match filled_tx.try_send(filled) {
-                        Ok(()) => break,
-                        Err(TrySendError::Full(returned)) => {
-                            if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                                return false;
-                            }
-                            filled = returned;
-                            std::thread::yield_now();
-                        }
-                        Err(TrySendError::Disconnected(_)) => return false,
-                    }
-                }
+                *batch = replacement;
                 if !reader_wakeup_pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
                     wakeup();
                 }
@@ -1464,8 +1511,13 @@ mod tests {
         let effect =
             drain_data(&rx, &free_tx, &parser_wakeup_pending, &mut batch, 64 * 1024).unwrap();
         assert_eq!(effect, ReadEffect::BudgetExhausted);
-        assert_eq!(batch.len(), 64 * 1024);
-        // The unconsumed block goes back to the free pool.
+        // Both blocks are consumed (the second overshoots the budget but is
+        // appended before the budget stops further reads). Batch may
+        // overshoot by at most one block.
+        assert_eq!(batch.len(), 128 * 1024);
+        // Both consumed blocks returned to the pool, cleared.
         assert_eq!(free_rx.try_recv().unwrap().len(), 0);
+        assert_eq!(free_rx.try_recv().unwrap().len(), 0);
+        assert!(free_rx.try_recv().is_err());
     }
 }

@@ -222,14 +222,30 @@ fn set_server_process_name() {
         "water-server"
     };
     #[cfg(target_os = "macos")]
-    unsafe {
+    {
+        // setprogname lives in libdispatch (a private symbol, always present
+        // on macOS because every process links libSystem). The water-server
+        // binary does not reference it at link time, so resolve it at runtime
+        // via dlsym(RTLD_DEFAULT, ...).
         unsafe extern "C" {
-            fn setprogname(name: *const libc::c_char);
+            fn dlopen(file: *const libc::c_char, flags: libc::c_int) -> *mut libc::c_void;
+            fn dlsym(handle: *mut libc::c_void, symbol: *const libc::c_char) -> *mut libc::c_void;
             fn pthread_setname_np(name: *const libc::c_char) -> libc::c_int;
         }
+        type SetPrognameFn = unsafe extern "C" fn(*const libc::c_char);
+        const RTLD_DEFAULT: libc::c_int = -2;
         let c_name = std::ffi::CString::new(name).unwrap();
-        setprogname(c_name.as_ptr());
-        let _ = pthread_setname_np(c_name.as_ptr());
+        let c_sym = std::ffi::CString::new("setprogname").unwrap();
+        unsafe {
+            let handle = dlopen(std::ptr::null(), RTLD_DEFAULT);
+            let sym = dlsym(handle, c_sym.as_ptr());
+            if !sym.is_null() {
+                let set_progname: SetPrognameFn =
+                    std::mem::transmute::<*mut libc::c_void, SetPrognameFn>(sym);
+                set_progname(c_name.as_ptr());
+            }
+            let _ = pthread_setname_np(c_name.as_ptr());
+        }
     }
 
     #[cfg(target_os = "linux")]

@@ -44,12 +44,23 @@ pub fn set_process_name(name: &str) {
 
 #[cfg(target_os = "macos")]
 pub fn set_process_name(name: &str) {
+    // setprogname is a private libdispatch symbol; resolve at runtime.
     unsafe extern "C" {
-        fn setprogname(name: *const libc::c_char);
+        fn dlopen(file: *const libc::c_char, flags: libc::c_int) -> *mut libc::c_void;
+        fn dlsym(handle: *mut libc::c_void, symbol: *const libc::c_char) -> *mut libc::c_void;
     }
+    type SetPrognameFn = unsafe extern "C" fn(*const libc::c_char);
+    const RTLD_DEFAULT: libc::c_int = -2;
     let c_name = std::ffi::CString::new(name).unwrap_or_default();
+    let c_sym = std::ffi::CString::new("setprogname").unwrap();
     unsafe {
-        setprogname(c_name.as_ptr());
+        let handle = dlopen(std::ptr::null(), RTLD_DEFAULT);
+        let sym = dlsym(handle, c_sym.as_ptr());
+        if !sym.is_null() {
+            let set_progname: SetPrognameFn =
+                std::mem::transmute::<*mut libc::c_void, SetPrognameFn>(sym);
+            set_progname(c_name.as_ptr());
+        }
     }
 }
 

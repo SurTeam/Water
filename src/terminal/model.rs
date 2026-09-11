@@ -190,7 +190,7 @@ struct TerminalEntryState {
     /// attach/capture paths read ordered snapshots of it.
     replay: Arc<ReplayRing>,
     /// Trailing raw output used by `contains` fast paths.
-    recent_output: String,
+    recent_output: Vec<u8>,
 }
 
 impl Default for TerminalRegistry {
@@ -217,7 +217,7 @@ impl TerminalRegistry {
             state: Mutex::new(TerminalEntryState {
                 process: TerminalProcessState::Running,
                 replay,
-                recent_output: String::new(),
+                recent_output: Vec::new(),
             }),
             changed: Condvar::new(),
             command_tx,
@@ -315,7 +315,11 @@ impl TerminalRegistry {
         let deadline = Instant::now() + timeout;
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         loop {
-            if state.recent_output.contains(needle) || state.replay.raw_contains(needle) {
+            if state
+                .recent_output
+                .windows(needle.len())
+                .any(|w| w == needle.as_bytes())
+                || state.replay.raw_contains(needle) {
                 return Ok(state.replay(terminal_id));
             }
             if matches!(state.process, TerminalProcessState::Exited { .. }) {
@@ -408,11 +412,14 @@ impl TerminalRegistry {
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         if !output.is_empty() {
-            let tail_start = output.len().saturating_sub(64 * 1024);
-            state
-                .recent_output
-                .push_str(&String::from_utf8_lossy(&output[tail_start..]));
-            trim_recent_output(&mut state.recent_output, 64 * 1024);
+            // Keep the last 64KB as a byte-level ring: append, then
+            // truncate from the front. No UTF-8 conversion, no allocation.
+            let max = 64 * 1024;
+            state.recent_output.extend_from_slice(output);
+            if state.recent_output.len() > max {
+                let remove = state.recent_output.len() - max;
+                state.recent_output.drain(..remove);
+            }
         }
         entry.changed.notify_all();
     }
@@ -508,14 +515,11 @@ impl TerminalEntryState {
     }
 }
 
-fn trim_recent_output(output: &mut String, max_bytes: usize) {
+fn trim_recent_output(output: &mut Vec<u8>, max_bytes: usize) {
     if output.len() <= max_bytes {
         return;
     }
-    let mut remove = output.len() - max_bytes;
-    while remove < output.len() && !output.is_char_boundary(remove) {
-        remove += 1;
-    }
+    let remove = output.len() - max_bytes;
     output.drain(..remove);
 }
 

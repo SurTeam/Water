@@ -128,26 +128,42 @@ pub enum WireTerminalEvent {
 const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn encode_base64(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        out.push(B64_ALPHABET[(triple >> 18) as usize & 63] as char);
-        out.push(B64_ALPHABET[(triple >> 12) as usize & 63] as char);
-        if chunk.len() > 1 {
-            out.push(B64_ALPHABET[(triple >> 6) as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(B64_ALPHABET[triple as usize & 63] as char);
-        } else {
-            out.push('=');
-        }
+    let out_len = bytes.len().div_ceil(3) * 4;
+    let mut out = vec![0u8; out_len];
+    let alpha = B64_ALPHABET;
+    let mut i = 0;
+    let mut o = 0;
+    // Process 3-byte chunks in a tight loop (avoids per-char push overhead)
+    while i + 3 <= bytes.len() {
+        let triple =
+            (bytes[i] as u32) << 16 | (bytes[i + 1] as u32) << 8 | bytes[i + 2] as u32;
+        out[o] = alpha[(triple >> 18) as usize & 63];
+        out[o + 1] = alpha[(triple >> 12) as usize & 63];
+        out[o + 2] = alpha[(triple >> 6) as usize & 63];
+        out[o + 3] = alpha[triple as usize & 63];
+        i += 3;
+        o += 4;
     }
-    out
+    // Handle remaining 1-2 bytes
+    match bytes.len() - i {
+        1 => {
+            let triple = (bytes[i] as u32) << 16;
+            out[o] = alpha[(triple >> 18) as usize & 63];
+            out[o + 1] = alpha[(triple >> 12) as usize & 63];
+            out[o + 2] = b'=';
+            out[o + 3] = b'=';
+        }
+        2 => {
+            let triple = (bytes[i] as u32) << 16 | (bytes[i + 1] as u32) << 8;
+            out[o] = alpha[(triple >> 18) as usize & 63];
+            out[o + 1] = alpha[(triple >> 12) as usize & 63];
+            out[o + 2] = alpha[(triple >> 6) as usize & 63];
+            out[o + 3] = b'=';
+        }
+        _ => {}
+    }
+    // Base64 output is always valid ASCII/UTF-8
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 fn b64_value(byte: u8) -> Option<u32> {
