@@ -82,12 +82,23 @@ fi
 # Assemble .app bundle
 rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir"
-install -m 755 "$build_dir/$binary_name" "$macos_dir/$binary_name"
+
+# Process names come from the executable file names so ps / Activity Monitor
+# show water-dev / water-srv-dev (dev) or water / water-server (release)
+# without relying on setprogname. The GUI locates the sibling by this name.
+if [[ "$variant" == "dev" ]]; then
+  gui_installed_name="water-dev"
+  server_installed_name="water-srv-dev"
+else
+  gui_installed_name="water"
+  server_installed_name="water-server"
+fi
+install -m 755 "$build_dir/$binary_name" "$macos_dir/$gui_installed_name"
 
 # Install water-server from the matching target triple + profile
 server_build_dir="$build_dir"
 if [[ -f "$server_build_dir/water-server" ]]; then
-  install -m 755 "$server_build_dir/water-server" "$macos_dir/water-server"
+  install -m 755 "$server_build_dir/water-server" "$macos_dir/$server_installed_name"
 else
   echo "error: water-server not found at $server_build_dir/water-server" >&2
   exit 1
@@ -95,10 +106,11 @@ fi
 
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
 
-# Generate Info.plist with the correct bundle ID
+# Generate Info.plist with the correct bundle ID and executable name
 sed -e "s/__WATER_VERSION__/$version/g" \
     -e "s/__BUNDLE_ID__/$bundle_id/g" \
     -e "s/__APP_NAME__/$app_name/g" \
+    -e "s/__EXECUTABLE__/$gui_installed_name/g" \
     "$root_dir/assets/macos/Info.plist.template" > "$contents_dir/Info.plist"
 
 # Fallback: if no template, use the original with sed

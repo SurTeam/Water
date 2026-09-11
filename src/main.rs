@@ -16,20 +16,11 @@ use water::remote::SshTunnel;
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn main() -> Result<()> {
-    // Distinguish dev builds in ps/kill so tooling never targets the
-    // production water-server by accident.
-    let is_release = env!("WATER_BUILD_PROFILE") == "release";
-    if !is_release {
-        water::set_process_name("water-dev");
-    }
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let explicit_server_mode = arguments
         .first()
         .is_some_and(|argument| argument == "server" || argument == "--server");
     if explicit_server_mode {
-        if !is_release {
-            water::set_process_name("water-srv-dev");
-        }
         run_server_via_dedicated_binary(&arguments[1..])
     } else {
         init_tracing();
@@ -38,8 +29,9 @@ fn main() -> Result<()> {
 }
 
 /// Preserve the compatibility `water server` spelling while replacing the
-/// process image with `water-server` whenever the sibling binary is present.
-/// This keeps Activity Monitor/ps labels unambiguous for manual starts too.
+/// process image with the sibling server binary whenever it is present.
+/// The dev build names the sibling `water-srv-dev` so ps/Activity Monitor
+/// labels are unambiguous without setprogname.
 fn validate_server_variant(path: &std::path::Path) -> Result<()> {
     let output = std::process::Command::new(path)
         .arg("--build-variant")
@@ -56,13 +48,21 @@ fn validate_server_variant(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// File name of the dedicated server binary next to the GUI executable. The
+/// dev build ships `water-srv-dev` so ps/Activity Monitor are unambiguous
+/// without setprogname; release ships `water-server` for compatibility.
+fn dedicated_server_file_name() -> &'static str {
+    let is_release = env!("WATER_BUILD_PROFILE") == "release";
+    if is_release {
+        if cfg!(windows) { "water-server.exe" } else { "water-server" }
+    } else {
+        if cfg!(windows) { "water-srv-dev.exe" } else { "water-srv-dev" }
+    }
+}
+
 fn run_server_via_dedicated_binary(arguments: &[String]) -> Result<()> {
     let executable = std::env::current_exe().context("could not resolve water executable")?;
-    let dedicated = executable.with_file_name(if cfg!(windows) {
-        "water-server.exe"
-    } else {
-        "water-server"
-    });
+    let dedicated = executable.with_file_name(dedicated_server_file_name());
     if !dedicated.is_file() {
         return water::server::run(arguments.iter().cloned());
     }
@@ -263,11 +263,7 @@ fn spawn_detached_server(
     initial_terminal: bool,
 ) -> Result<std::process::Child> {
     let exe = std::env::current_exe().context("could not resolve water executable")?;
-    let dedicated_server = exe.with_file_name(if cfg!(windows) {
-        "water-server.exe"
-    } else {
-        "water-server"
-    });
+    let dedicated_server = exe.with_file_name(dedicated_server_file_name());
     let use_dedicated_server = dedicated_server.is_file();
     if use_dedicated_server {
         validate_server_variant(&dedicated_server)?;

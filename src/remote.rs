@@ -302,8 +302,11 @@ fn install_and_start_embedded_server(
         env!("CARGO_PKG_VERSION"),
         payload.target
     );
+    // The on-disk program name carries the dev identity so ps/Activity
+    // Monitor shows water-srv-dev without relying on setprogname.
+    let program_name = if variant == "dev" { "water-srv-dev" } else { "water-server" };
     let quoted_directory = format!("\"$HOME/{relative_directory}\"");
-    let quoted_program = format!("\"$HOME/{relative_directory}/water-server\"");
+    let quoted_program = format!("\"$HOME/{relative_directory}/{program_name}\"");
 
     let present_command =
         format!("test -x {quoted_program} && {quoted_program} --version >/dev/null 2>&1");

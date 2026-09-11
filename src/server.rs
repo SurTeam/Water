@@ -30,7 +30,6 @@ pub fn run(arguments: impl Iterator<Item = String>) -> Result<()> {
         daemonize().context("could not detach water-server")?;
     }
     init_tracing();
-    set_server_process_name();
     let config = AppConfig::load_from_path(&startup.config_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let socket_path = resolve_socket_path(&startup, &config);
@@ -212,46 +211,6 @@ fn dispatch_checked(client: &dyn CommandTransport, command: AppCommand) {
             .map(|error| format!("{}: {}", error.code, error.message))
             .unwrap_or_else(|| "unknown command failure".to_owned());
         tracing::error!(target: "water::workspace", error, "initial command failed");
-    }
-}
-
-fn set_server_process_name() {
-    let name: &str = if env!("WATER_BUILD_PROFILE") != "release" {
-        "water-srv-dev"
-    } else {
-        "water-server"
-    };
-    #[cfg(target_os = "macos")]
-    {
-        // setprogname lives in libdispatch (a private symbol, always present
-        // on macOS because every process links libSystem). The water-server
-        // binary does not reference it at link time, so resolve it at runtime
-        // via dlsym(RTLD_DEFAULT, ...).
-        unsafe extern "C" {
-            fn dlopen(file: *const libc::c_char, flags: libc::c_int) -> *mut libc::c_void;
-            fn dlsym(handle: *mut libc::c_void, symbol: *const libc::c_char) -> *mut libc::c_void;
-            fn pthread_setname_np(name: *const libc::c_char) -> libc::c_int;
-        }
-        type SetPrognameFn = unsafe extern "C" fn(*const libc::c_char);
-        const RTLD_DEFAULT: libc::c_int = -2;
-        let c_name = std::ffi::CString::new(name).unwrap();
-        let c_sym = std::ffi::CString::new("setprogname").unwrap();
-        unsafe {
-            let handle = dlopen(std::ptr::null(), RTLD_DEFAULT);
-            let sym = dlsym(handle, c_sym.as_ptr());
-            if !sym.is_null() {
-                let set_progname: SetPrognameFn =
-                    std::mem::transmute::<*mut libc::c_void, SetPrognameFn>(sym);
-                set_progname(c_name.as_ptr());
-            }
-            let _ = pthread_setname_np(c_name.as_ptr());
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    unsafe {
-        let c_name = std::ffi::CString::new(name).unwrap();
-        let _ = libc::prctl(libc::PR_SET_NAME, c_name.as_ptr() as libc::c_ulong, 0, 0, 0);
     }
 }
 

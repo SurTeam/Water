@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>__APP_NAME__</string>
     <key>CFBundleExecutable</key>
-    <string>water</string>
+    <string>__EXECUTABLE__</string>
     <key>CFBundleIconFile</key>
     <string>Water.icns</string>
     <key>CFBundleIdentifier</key>
