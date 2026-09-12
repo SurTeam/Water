@@ -17,6 +17,34 @@ pub fn pty_read_calls() -> &'static AtomicU64 {
     &PTY_READ_CALLS
 }
 
+pub fn pty_read_would_block() -> &'static AtomicU64 {
+    &PTY_READ_WOULD_BLOCK
+}
+
+pub fn pty_reader_poll_wakeups() -> &'static AtomicU64 {
+    &PTY_READER_POLL_WAKEUPS
+}
+
+pub fn pty_reader_zero_event_wakeups() -> &'static AtomicU64 {
+    &PTY_READER_ZERO_EVENT_WAKEUPS
+}
+
+pub fn pty_reader_spurious_wakeups() -> &'static AtomicU64 {
+    &PTY_READER_SPURIOUS_WAKEUPS
+}
+
+pub fn pty_reader_pty_ready_wakeups() -> &'static AtomicU64 {
+    &PTY_READER_PTY_READY_WAKEUPS
+}
+
+pub fn pty_reader_empty_readiness() -> &'static AtomicU64 {
+    &PTY_READER_EMPTY_READINESS
+}
+
+pub fn pty_reader_empty_wake_backoffs() -> &'static AtomicU64 {
+    &PTY_READER_EMPTY_WAKE_BACKOFFS
+}
+
 pub fn terminal_output_bytes_sent() -> &'static AtomicU64 {
     &TERMINAL_OUTPUT_BYTES_SENT
 }
@@ -144,6 +172,13 @@ pub fn replay_ring_bytes() -> u64 {
 
 static PTY_BYTES_READ: AtomicU64 = AtomicU64::new(0);
 static PTY_READ_CALLS: AtomicU64 = AtomicU64::new(0);
+static PTY_READ_WOULD_BLOCK: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_POLL_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_ZERO_EVENT_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_SPURIOUS_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_PTY_READY_WAKEUPS: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_EMPTY_READINESS: AtomicU64 = AtomicU64::new(0);
+static PTY_READER_EMPTY_WAKE_BACKOFFS: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_OUTPUT_BYTES_SENT: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_STREAM_EVENTS: AtomicU64 = AtomicU64::new(0);
 static TERMINAL_RESIZE_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -174,9 +209,16 @@ pub fn add(counter: &AtomicU64, value: usize) {
     counter.fetch_add(value as u64, Ordering::Relaxed);
 }
 
-const RATE_COUNTERS: [&str; 14] = [
+const RATE_COUNTERS: [&str; 21] = [
     "pty_bytes_read",
     "pty_read_calls",
+    "pty_read_would_block",
+    "pty_reader_poll_wakeups",
+    "pty_reader_zero_event_wakeups",
+    "pty_reader_spurious_wakeups",
+    "pty_reader_pty_ready_wakeups",
+    "pty_reader_empty_readiness",
+    "pty_reader_empty_wake_backoffs",
     "terminal_output_bytes_sent",
     "terminal_stream_events",
     "terminal_resize_events",
@@ -204,6 +246,29 @@ pub fn snapshot() -> serde_json::Value {
         "pty_read_calls".to_owned(),
         serde_json::json!(pty_read_calls().load(Ordering::Relaxed)),
     );
+    for (name, counter) in [
+        ("pty_read_would_block", pty_read_would_block()),
+        ("pty_reader_poll_wakeups", pty_reader_poll_wakeups()),
+        (
+            "pty_reader_zero_event_wakeups",
+            pty_reader_zero_event_wakeups(),
+        ),
+        ("pty_reader_spurious_wakeups", pty_reader_spurious_wakeups()),
+        (
+            "pty_reader_pty_ready_wakeups",
+            pty_reader_pty_ready_wakeups(),
+        ),
+        ("pty_reader_empty_readiness", pty_reader_empty_readiness()),
+        (
+            "pty_reader_empty_wake_backoffs",
+            pty_reader_empty_wake_backoffs(),
+        ),
+    ] {
+        value.insert(
+            name.to_owned(),
+            serde_json::json!(counter.load(Ordering::Relaxed)),
+        );
+    }
     value.insert(
         "terminal_output_bytes_sent".to_owned(),
         serde_json::json!(terminal_output_bytes_sent().load(Ordering::Relaxed)),
@@ -344,6 +409,17 @@ mod tests {
         let value = snapshot();
         assert!(value["pty_read_calls"].as_u64().unwrap() >= 1);
         assert!(value["pty_bytes_read"].as_u64().unwrap() >= 42);
+        for key in [
+            "pty_read_would_block",
+            "pty_reader_poll_wakeups",
+            "pty_reader_zero_event_wakeups",
+            "pty_reader_spurious_wakeups",
+            "pty_reader_pty_ready_wakeups",
+            "pty_reader_empty_readiness",
+            "pty_reader_empty_wake_backoffs",
+        ] {
+            assert!(value[key].is_u64(), "missing counter {key}");
+        }
         assert!(value["replay_ring_bytes"].is_u64());
     }
 }

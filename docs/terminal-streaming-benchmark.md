@@ -67,13 +67,55 @@ event client peak.
 - Blocking terminal contains/exit waits now run outside the model thread, so
   they cannot prevent input or resize commands from reaching the PTY worker.
 
-## Validation
+## Validation (2026-09-10 historical run)
 
-- `cargo test --all-targets`: passed.
+- `cargo test --all-targets`: passed in the historical run recorded here.
 - `cargo clippy --all-targets`: passed with existing warnings only.
 - `cargo build --release`: passed.
 - Binary output, resize, exit, mixed JSON/session framing, detach/reattach,
   replay, scrollback, selection, and real-shell tests passed.
+
+## PTY reader idle regression — 2026-09-12
+
+The reader regression tests run the production PTY reader and expose these
+diagnostic counters through `debug.metrics`: poll wakeups, zero-event and
+spurious wakes, PTY-ready wakes, empty readiness, `WouldBlock` reads, and
+empty-wake backoff activations. The reader starts in an IDLE blocking wait,
+clears `Events` before each wait, enters DRAIN only for an actual PTY event,
+and treats a first-read `WouldBlock` as the end of that drain. A successful
+read resets the empty-wake streak; repeated empty readiness backs off from
+1 ms to an 8 ms cap. The successful-data micro-burst remains bounded by both
+1 ms and 64 `WouldBlock` probes.
+
+The following measurements were taken on Darwin 25 / arm64 with the current
+debug test binary. The Linux path was not runnable in this environment.
+
+| Workload | CPU time | empty readiness | `WouldBlock` reads |
+|---|---:|---:|---:|
+| 1 idle PTY / 3 s | 4 ms | 0 | 0 |
+| 1 / 4 / 8 idle PTYs / 1 s each | 3 / 5 / 4 ms | 0 / 0 / 0 | 99 / 132 / 128 |
+| 10 ms trickle / 2.5 s | 13 ms | 0 | 8,293 |
+
+The measured idle → active wake latency was 0.422 ms.
+
+`sample` during the idle test found both `water-terminal-reader` and its
+worker blocked in `polling::Poller::wait_impl -> kevent`; no stable phantom
+readiness storm was reproducible on this macOS host. A pre-cap local trickle
+run recorded about 139,450 `WouldBlock` probes; the 64-probe cap reduced that
+to 8,293 in the latest run without changing the byte-delivery result. The
+deterministic reader state tests cover zero-event gating and repeated
+empty-readiness backoff on all platforms; Linux profiling and runtime PTY
+validation remain pending.
+
+The current targeted run passed all 10 reader tests in 11.81 s. The current
+`cargo test --all-targets` run passed the library tests (149 passed, 1 ignored)
+but remains blocked by the unrelated `build_variants` fixture, which does not
+copy `.agents/skills/water-control/SKILL.md` into its temporary package.
+
+```sh
+# Fast reader regression suite (the test binary is already compiled)
+./target/debug/deps/terminal_reader-* --test-threads=1 --nocapture
+```
 
 ## SSH status
 

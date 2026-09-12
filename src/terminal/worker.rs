@@ -17,7 +17,7 @@ use std::path::PathBuf;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 use std::process::Command;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -39,8 +39,6 @@ use super::replay::ReplayRing;
 use super::snapshot::TerminalSize;
 use super::stream::TerminalStreamEvent;
 
-const PTY_READ_WRITE_KEY: usize = 0;
-const PTY_CHILD_EVENT_KEY: usize = 1;
 const READER_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
@@ -51,21 +49,33 @@ const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;
 /// backpressure the writer down to our fanout rate, while keeping allocation
 /// bounded and every consumed block reusable by the reader.
 const READER_CHANNEL_CAPACITY: usize = 512;
-/// The reader keeps spin-reading while data has been seen within this
-/// window; afterwards it blocks on kqueue until the next chunk (zero idle
-/// CPU). macOS refills land within tens of microseconds of a drain, so the
-/// spin catches them without a kqueue round trip.
+/// After a successful read, the reader keeps spin-reading for this bounded
+/// window to catch a microsecond-scale refill without another poller round
+/// trip. An empty readiness wake never enters this path.
 const READER_BURST_IDLE: Duration = Duration::from_millis(1);
-/// Idle poll timeout; also bounds the reader thread's shutdown latency.
-const READER_IDLE_POLL: Duration = Duration::from_millis(50);
+/// Keep the successful-data micro-burst bounded by both time and syscall
+/// count. The count cap prevents a tiny write from turning every drain into
+/// hundreds of EAGAIN probes while retaining a short refill window.
+const READER_BURST_MAX_WOULDBLOCKS: u32 = 64;
 /// A partially filled batch older than this is flushed even though the
 /// stream has not paused (protects slow-but-continuous output, which
 /// would otherwise wait for the 128KB push threshold).
 const READER_MAX_BATCH_AGE: Duration = Duration::from_millis(5);
 /// Safety cap on total burst duration: prevents indefinite spin when a
 /// trickle of data keeps resetting the idle timer. After this elapsed time
-/// in the burst loop, the reader forces a break to the kqueue idle phase.
+/// in the burst loop, the reader forces a break back to the blocking poll
+/// phase.
 const READER_BURST_MAX: Duration = Duration::from_millis(100);
+/// Repeated readiness without a byte is a backend/PTY anomaly. Back off only
+/// on that path, starting at 1 ms and capping at 8 ms so normal output stays
+/// event-driven and shutdown remains prompt.
+const READER_EMPTY_BACKOFF_MAX: Duration = Duration::from_millis(8);
+const READER_EMPTY_BACKOFF_START: Duration = Duration::from_millis(1);
+const READER_EMPTY_BACKOFF_AFTER_WAKE: u32 = 2;
+/// A full reader channel is a backpressure boundary, not an idle path. This
+/// short timed receive lets shutdown observe `stopped` without leaving the
+/// reader blocked forever in `SyncSender::send`.
+const READER_BACKPRESSURE_WAIT: Duration = Duration::from_millis(1);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 /// PTY output within this window marks the foreground process as active for
 /// agent-status purposes. The flip to quiet is observed on the regular
@@ -268,41 +278,16 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
     };
 
-    if let Err(error) = unsafe {
-        pty.register(
-            &poller,
-            PollEvent::readable(PTY_READ_WRITE_KEY),
-            PollMode::Level,
-        )
-    } {
-        tracing::error!(
-            target: "water::pty",
-            terminal_id = %terminal_id,
-            ?error,
-            "failed to register PTY"
-        );
-        emit_manager_event(
-            &event_tx,
-            event_wakeup.as_ref(),
-            TerminalManagerEvent::Exited {
-                terminal_id,
-                code: None,
-            },
-        );
-        registry.mark_exited(terminal_id, None);
-        return;
-    }
-
+    // The dedicated reader owns the PTY master. Keep the worker poller as a
+    // notification-only reactor: EventedPty::register would also add
+    // Alacritty's level-triggered SIGCHLD self-pipe, which can wake a Linux
+    // epoll waiter forever after the signal byte has already been consumed.
+    // The worker still calls next_child_event after reader/command wakes.
     let poller_for_wakeup = poller.clone();
     let worker_wakeup: WakeupCallback = Arc::new(move || {
         let _ = poller_for_wakeup.notify();
     });
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = Some(worker_wakeup.clone());
-
-    let poller_for_reader_shutdown = poller.clone();
-    let reader_shutdown_wake: WakeupCallback = Arc::new(move || {
-        let _ = poller_for_reader_shutdown.notify();
-    });
 
     // Dedicated PTY reader thread: the macOS slave->master queue holds only
     // ~1KB ahead of the reader, so a reader that works while reading makes
@@ -314,13 +299,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         filled_rx: pty_data_rx,
         free_tx: pty_free_tx,
         wakeup_pending: parser_wakeup_pending,
+        shutdown: pty_reader_shutdown,
         handle,
-    } = match spawn_pty_reader(
-        &pty,
-        worker_wakeup.clone(),
-        pty_reader_stopped.clone(),
-        Some(reader_shutdown_wake.clone()),
-    ) {
+    } = match spawn_pty_reader(&pty, worker_wakeup.clone(), pty_reader_stopped.clone()) {
         Ok(reader) => reader,
         Err(error) => {
             tracing::error!(
@@ -342,10 +323,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
     };
     let mut pty_reader_handle = Some(handle);
-    // The reader thread owns master reads; drop the master from the worker's
-    // poller so a level-triggered readable event cannot race the reader and
-    // spin the worker while the channel is being filled.
-    let _ = poller.delete(pty.file());
     let reader_eof = Arc::new(AtomicBool::new(false));
     // Set when a drain hit the tick byte budget mid-burst; the next poll
     // must not sleep before the channel is drained again.
@@ -575,15 +552,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             }
 
             let mut child_exited = None;
-            let mut child_event = None;
-            for event in events.iter() {
-                if event.key == PTY_CHILD_EVENT_KEY {
-                    child_event = pty.next_child_event();
-                }
-            }
-            if let Some(ChildEvent::Exited(status)) = child_event {
-                child_exited = Some(status.and_then(|status| status.code()));
-            } else if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
+            if let Some(ChildEvent::Exited(status)) = pty.next_child_event() {
                 child_exited = Some(status.and_then(|status| status.code()));
             }
 
@@ -683,8 +652,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 // Stop the reader first so its in-flight batch is flushed
                 // into the channel; the final drain below picks it up.
                 if let Some(reader_handle) = pty_reader_handle.take() {
-                    pty_reader_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
-                    let _ = reader_handle.join();
+                    stop_pty_reader(&pty_reader_stopped, &pty_reader_shutdown, reader_handle);
                 }
                 // A final non-blocking drain avoids losing bytes that were
                 // already queued in the PTY when SIGCHLD arrived.
@@ -726,10 +694,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     }
 
     if let Some(reader_handle) = pty_reader_handle.take() {
-        pty_reader_stopped.store(true, std::sync::atomic::Ordering::Relaxed);
-        let _ = reader_handle.join();
+        stop_pty_reader(&pty_reader_stopped, &pty_reader_shutdown, reader_handle);
     }
-    let _ = pty.deregister(&poller);
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = None;
 }
 
@@ -854,24 +820,78 @@ fn drain_data(
     Ok(effect)
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ReaderDrainState {
+    read_any_since_wake: bool,
+}
+
+impl ReaderDrainState {
+    fn record_successful_read(&mut self) {
+        self.read_any_since_wake = true;
+    }
+
+    fn hit_empty_readiness(&self) -> bool {
+        !self.read_any_since_wake
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ReaderEmptyWakeState {
+    consecutive_empty_wakes: u32,
+}
+
+impl ReaderEmptyWakeState {
+    fn record_successful_read(&mut self) {
+        self.consecutive_empty_wakes = 0;
+    }
+
+    fn backoff_after_empty_wake(&mut self) -> Option<Duration> {
+        self.consecutive_empty_wakes = self.consecutive_empty_wakes.saturating_add(1);
+        if self.consecutive_empty_wakes < READER_EMPTY_BACKOFF_AFTER_WAKE {
+            return None;
+        }
+
+        let shift = (self.consecutive_empty_wakes - READER_EMPTY_BACKOFF_AFTER_WAKE).min(3);
+        let multiplier = 1_u32 << shift;
+        Some(
+            READER_EMPTY_BACKOFF_START
+                .saturating_mul(multiplier)
+                .min(READER_EMPTY_BACKOFF_MAX),
+        )
+    }
+}
+
+#[inline]
+fn reader_should_drain(event_count: usize, pty_ready: bool) -> bool {
+    event_count != 0 && pty_ready
+}
+
+fn stop_pty_reader(
+    stopped: &AtomicBool,
+    shutdown_wake: &WakeupCallback,
+    handle: std::thread::JoinHandle<()>,
+) {
+    stopped.store(true, Ordering::Release);
+    shutdown_wake();
+    let _ = handle.join();
+}
+
 /// Dedicated PTY reader thread.
 ///
-/// The macOS slave->master PTY queue holds only ~1KB ahead of the reader, so
-/// a reader that does work while reading makes the writer wait once per 1KB.
-/// This thread owns the master reads: it spin-reads while a burst is flowing
-/// (catches the microsecond-scale refills without a kqueue round trip),
-/// blocks on edge-triggered kqueue once the writer goes quiet (zero idle
-/// CPU), and pushes byte blocks into a bounded channel the worker coalesces.
+/// The PTY queue can be small, so a reader that works while reading makes the
+/// writer wait once per small refill. This thread owns the master reads,
+/// drains an actual readiness wake to EAGAIN, and pushes reusable blocks for
+/// the worker to coalesce.
 ///
-/// Edge-triggered mode matches the standard epoll-ET / kqueue-ET pattern
-/// used by high-performance network servers: the poll fires once when
-/// readability transitions, and the burst loop drains to EAGAIN so no
-/// event is missed. Level-triggered mode caused phantom wakeups on PTYs
-/// that report readable without returning data, spinning at ~1 kHz.
+/// The poll mode is edge-triggered on both supported Unix platforms, but the
+/// state machine deliberately treats readiness as a hint. A timeout, notify,
+/// or spurious wake never starts a read. An empty readiness wake is a drain
+/// boundary, not permission to poll-read for a grace period.
 struct PtyReader {
     filled_rx: Receiver<Vec<u8>>,
     free_tx: SyncSender<Vec<u8>>,
     wakeup_pending: Arc<AtomicBool>,
+    shutdown: WakeupCallback,
     handle: std::thread::JoinHandle<()>,
 }
 
@@ -879,13 +899,16 @@ fn spawn_pty_reader(
     pty: &Pty,
     wakeup: WakeupCallback,
     stopped: Arc<AtomicBool>,
-    #[allow(unused_variables)] shutdown_wake: Option<WakeupCallback>,
 ) -> io::Result<PtyReader> {
     let mut reader_file = pty.file().try_clone()?;
-    let reader_poller = Poller::new()?;
+    let reader_poller = Arc::new(Poller::new()?);
     unsafe {
         reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Edge)?;
     }
+    let reader_poller_for_shutdown = reader_poller.clone();
+    let shutdown = Arc::new(move || {
+        let _ = reader_poller_for_shutdown.notify();
+    });
     let (filled_tx, filled_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
     let (free_tx, free_rx) = mpsc::sync_channel(READER_CHANNEL_CAPACITY);
     let parser_wakeup_pending = Arc::new(AtomicBool::new(false));
@@ -899,44 +922,113 @@ fn spawn_pty_reader(
             let mut batch = Vec::with_capacity(READER_BLOCK_BYTES);
             let mut events = Events::new();
             let mut batch_started: Option<Instant> = None;
+            let mut empty_wake_state = ReaderEmptyWakeState::default();
             // Filled blocks move to the worker and return over `free_rx` for
             // reuse. Only the false->true wake transition notifies the worker.
+            let push_stopped = stopped.clone();
             let push = |batch: &mut Vec<u8>| -> bool {
-                // Blocking send = true backpressure (no yield_now spin).
-                let filled = std::mem::take(batch);
-                match filled_tx.send(filled) {
-                    Ok(()) => {}
-                    Err(std::sync::mpsc::SendError(_)) => return false,
+                // Preserve blocking backpressure without making shutdown
+                // depend on a receiver draining the channel. A free block is
+                // returned after the worker consumes one filled block, so it
+                // also acts as the normal wait condition here.
+                let mut filled = std::mem::take(batch);
+                let mut replacement = None;
+                loop {
+                    match filled_tx.try_send(filled) {
+                        Ok(()) => break,
+                        Err(TrySendError::Full(returned)) => {
+                            filled = returned;
+                            if push_stopped.load(Ordering::Acquire) {
+                                return false;
+                            }
+                            match free_rx.recv_timeout(READER_BACKPRESSURE_WAIT) {
+                                Ok(block) => replacement = Some(block),
+                                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(mpsc::RecvTimeoutError::Disconnected) => return false,
+                            }
+                        }
+                        Err(TrySendError::Disconnected(_)) => return false,
+                    }
                 }
                 // Take a reusable block back (nonblocking; fresh if none).
-                let replacement = free_rx
-                    .try_recv()
-                    .map(|mut b: Vec<u8>| { b.clear(); b })
-                    .unwrap_or_else(|_| Vec::with_capacity(READER_BLOCK_BYTES));
+                let replacement = replacement
+                    .or_else(|| free_rx.try_recv().ok())
+                    .map(|mut b: Vec<u8>| {
+                        b.clear();
+                        b
+                    })
+                    .unwrap_or_else(|| Vec::with_capacity(READER_BLOCK_BYTES));
                 *batch = replacement;
-                if !reader_wakeup_pending.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                if !reader_wakeup_pending.swap(true, Ordering::AcqRel) {
                     wakeup();
                 }
                 true
             };
 
             loop {
-                // Burst phase: spin-read everything the writer has produced.
-                // With edge-triggered kqueue the poll fires once when data
-                // first becomes available; this loop drains to EAGAIN so no
-                // event is missed (same pattern as epoll-ET network readers).
+                if stopped.load(Ordering::Acquire) {
+                    let _ = batch.is_empty() || push(&mut batch);
+                    return;
+                }
+
+                // IDLE: clear the previous result before every wait. `wait`
+                // may return zero for notify, timeout, or a spurious wake;
+                // none of those outcomes authorizes a PTY read.
+                events.clear();
+                let event_count = match reader_poller.wait(&mut events, None) {
+                    Ok(count) => count,
+                    Err(_) => return,
+                };
+                metrics::inc(metrics::pty_reader_poll_wakeups());
+                if stopped.load(Ordering::Acquire) {
+                    let _ = batch.is_empty() || push(&mut batch);
+                    return;
+                }
+                if event_count == 0 {
+                    metrics::inc(metrics::pty_reader_zero_event_wakeups());
+                    continue;
+                }
+                let pty_ready = events.iter().any(|event| event.key == 0);
+                if !reader_should_drain(event_count, pty_ready) {
+                    metrics::inc(metrics::pty_reader_spurious_wakeups());
+                    continue;
+                }
+                metrics::inc(metrics::pty_reader_pty_ready_wakeups());
+
+                // DRAIN: only a real PTY event can enter this loop. The
+                // per-wake state distinguishes a useful EAGAIN boundary from
+                // readiness that never yielded a byte.
+                let mut drain_state = ReaderDrainState::default();
                 let mut spin_start: Option<Instant> = None;
+                let mut spin_would_block = 0_u32;
                 let burst_entered = Instant::now();
+                let mut empty_wake_backoff = None;
                 loop {
+                    if stopped.load(Ordering::Acquire) {
+                        let _ = batch.is_empty() || push(&mut batch);
+                        return;
+                    }
                     match reader_file.read(&mut buf) {
                         Ok(0) => {
-                            let _ = batch.is_empty() || push(&mut batch);
+                            let had_batch = !batch.is_empty();
+                            if had_batch && !push(&mut batch) {
+                                return;
+                            }
+                            if !had_batch {
+                                // Wake the worker even when EOF carries no
+                                // bytes, so it can observe the child event
+                                // without relying on a polling timeout.
+                                wakeup();
+                            }
                             return;
                         }
                         Ok(bytes_read) => {
                             metrics::inc(metrics::pty_read_calls());
                             metrics::add(metrics::pty_bytes_read(), bytes_read);
+                            drain_state.record_successful_read();
+                            empty_wake_state.record_successful_read();
                             spin_start = None;
+                            spin_would_block = 0;
                             let mut offset = 0;
                             while offset < bytes_read {
                                 if batch.is_empty() {
@@ -955,8 +1047,19 @@ fn spawn_pty_reader(
                             }
                         }
                         Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                            metrics::inc(metrics::pty_read_would_block());
+                            if drain_state.hit_empty_readiness() {
+                                metrics::inc(metrics::pty_reader_empty_readiness());
+                                empty_wake_backoff = empty_wake_state.backoff_after_empty_wake();
+                                // Readiness followed by EAGAIN without a byte
+                                // is an empty/spurious wake. It is a hard
+                                // drain boundary: never enter the 1 ms
+                                // successful-data micro-burst below.
+                                break;
+                            }
                             // A stale partial batch must not wait for the
                             // 128KB threshold (slow-but-continuous streams).
+                            spin_would_block = spin_would_block.saturating_add(1);
                             let batch_stale = batch_started
                                 .is_some_and(|at| at.elapsed() >= READER_MAX_BATCH_AGE);
                             let burst_expired = burst_entered.elapsed() >= READER_BURST_MAX;
@@ -964,6 +1067,7 @@ fn spawn_pty_reader(
                                 None => spin_start = Some(Instant::now()),
                                 Some(start)
                                     if start.elapsed() < READER_BURST_IDLE
+                                        && spin_would_block < READER_BURST_MAX_WOULDBLOCKS
                                         && !batch_stale
                                         && !burst_expired => {}
                                 _ => break,
@@ -971,25 +1075,31 @@ fn spawn_pty_reader(
                         }
                         Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                         Err(_) => {
-                            let _ = batch.is_empty() || push(&mut batch);
+                            let had_batch = !batch.is_empty();
+                            if had_batch && !push(&mut batch) {
+                                return;
+                            }
+                            if !had_batch {
+                                wakeup();
+                            }
                             return;
                         }
                     }
                 }
-                // Idle phase: the writer has been quiet - flush what we have
-                // and block on kqueue until the next chunk (the bounded poll
-                // also lets the thread notice the worker dropping the
-                // channel on shutdown).
+
+                // End of DRAIN: flush the useful bytes before waiting again.
                 if !batch.is_empty() {
                     if !push(&mut batch) {
                         return;
                     }
                     batch_started = None;
                 }
-                let _ = reader_poller.wait(&mut events, Some(READER_IDLE_POLL));
-                if stopped.load(std::sync::atomic::Ordering::Relaxed) {
-                    let _ = batch.is_empty() || push(&mut batch);
-                    return;
+                if let Some(backoff) = empty_wake_backoff {
+                    if stopped.load(Ordering::Acquire) {
+                        return;
+                    }
+                    metrics::inc(metrics::pty_reader_empty_wake_backoffs());
+                    std::thread::sleep(backoff);
                 }
             }
         })?;
@@ -997,6 +1107,7 @@ fn spawn_pty_reader(
         filled_rx,
         free_tx,
         wakeup_pending: parser_wakeup_pending,
+        shutdown,
         handle,
     })
 }
@@ -1496,6 +1607,55 @@ mod tests {
         let long: Vec<u8> = [b'x'; MAX_TITLE_BYTES + 10].to_vec();
         scanner.feed(&long, |t| titles.push(t.to_owned()));
         assert_eq!(titles.len(), 2);
+    }
+
+    #[test]
+    fn reader_wait_gates_reads_on_a_real_pty_event() {
+        let waits = [(0, false), (0, true), (1, false), (1, true)];
+        let mut read_calls = 0;
+        for (event_count, pty_ready) in waits {
+            if reader_should_drain(event_count, pty_ready) {
+                read_calls += 1;
+            }
+        }
+        assert_eq!(read_calls, 1);
+    }
+
+    #[test]
+    fn reader_empty_readiness_backoff_is_bounded_and_data_resets_it() {
+        let mut empty_wakes = ReaderEmptyWakeState::default();
+        assert_eq!(empty_wakes.backoff_after_empty_wake(), None);
+        assert_eq!(
+            empty_wakes.backoff_after_empty_wake(),
+            Some(Duration::from_millis(1))
+        );
+        assert_eq!(
+            empty_wakes.backoff_after_empty_wake(),
+            Some(Duration::from_millis(2))
+        );
+        assert_eq!(
+            empty_wakes.backoff_after_empty_wake(),
+            Some(Duration::from_millis(4))
+        );
+        assert_eq!(
+            empty_wakes.backoff_after_empty_wake(),
+            Some(Duration::from_millis(8))
+        );
+        assert_eq!(
+            empty_wakes.backoff_after_empty_wake(),
+            Some(READER_EMPTY_BACKOFF_MAX)
+        );
+
+        empty_wakes.record_successful_read();
+        assert_eq!(empty_wakes.backoff_after_empty_wake(), None);
+    }
+
+    #[test]
+    fn reader_drain_eagain_after_data_is_not_empty_readiness() {
+        let mut drain = ReaderDrainState::default();
+        assert!(drain.hit_empty_readiness());
+        drain.record_successful_read();
+        assert!(!drain.hit_empty_readiness());
     }
 
     #[test]
