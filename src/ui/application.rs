@@ -11,6 +11,7 @@ use gpui::{
     WindowOptions, actions, point, px, size,
 };
 
+use crate::agent::AgentKind;
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
 use crate::control::{
@@ -117,6 +118,8 @@ struct TerminalConnection {
 enum TerminalEmulatorCommand {
     ScrollBy(i64),
     ScrollTo(i64),
+    SetPinned(bool),
+    SetScrollbackProtected(bool),
 }
 
 struct TerminalAttachmentState {
@@ -276,10 +279,22 @@ fn apply_emulator_commands(
         match command {
             TerminalEmulatorCommand::ScrollBy(delta) => emulator.scroll_by(delta),
             TerminalEmulatorCommand::ScrollTo(target) => emulator.scroll_to(target),
+            TerminalEmulatorCommand::SetPinned(pinned) => emulator.set_viewport_pinned(pinned),
+            TerminalEmulatorCommand::SetScrollbackProtected(protected) => {
+                emulator.set_scrollback_protected(protected)
+            }
         }
         changed = true;
     }
     changed
+}
+
+fn terminal_scrollback_protected(snapshot: &ModelSnapshot, terminal_id: TerminalId) -> bool {
+    snapshot.agents.iter().any(|agent| {
+        agent.terminal_id == terminal_id
+            && agent.kind == AgentKind::Pi
+            && matches!(agent.status, crate::surface::TerminalStatus::Running)
+    })
 }
 
 fn publish_live_snapshot(
@@ -287,6 +302,7 @@ fn publish_live_snapshot(
     terminal_id: TerminalId,
     attachment: &Arc<TerminalAttachmentState>,
     emulator: &mut TerminalEmulator,
+    previous: Option<&crate::terminal::TerminalSnapshot>,
 ) -> bool {
     let _ = emulator.take_dirty();
     if !attachment.is_active() {
@@ -296,7 +312,7 @@ fn publish_live_snapshot(
         .send(TerminalEventMsg::LiveSnapshot {
             terminal_id,
             attachment: attachment.clone(),
-            snapshot: Arc::new(emulator.snapshot(None)),
+            snapshot: Arc::new(emulator.snapshot(previous)),
             pty_writes: emulator.pty_writes(),
         })
         .is_ok()
@@ -862,6 +878,7 @@ impl WaterApplication {
                 if !installed {
                     continue;
                 }
+                application.sync_terminal_scrollback_protection(connection_id, &snapshot);
                 for terminal_id in terminal_ids_in_snapshot(&snapshot) {
                     application.ensure_terminal_attached(connection_id, terminal_id);
                 }
@@ -1094,7 +1111,15 @@ impl WaterApplication {
         if !terminal_exists {
             return;
         }
-        let (session, events_tx, scrollback_lines, theme, attachment, emulator_commands) = {
+        let (
+            session,
+            events_tx,
+            scrollback_lines,
+            theme,
+            scrollback_protected,
+            attachment,
+            emulator_commands,
+        ) = {
             let mut connections = self.state.connections.borrow_mut();
             let Some(connection) = connections
                 .iter_mut()
@@ -1102,6 +1127,8 @@ impl WaterApplication {
             else {
                 return;
             };
+            let scrollback_protected =
+                terminal_scrollback_protected(&connection.projection.snapshot, terminal_id);
             let Some(terminal) = connection.terminal.as_mut() else {
                 return;
             };
@@ -1121,6 +1148,7 @@ impl WaterApplication {
                 terminal.events_tx.clone(),
                 terminal.scrollback_lines,
                 terminal.theme,
+                scrollback_protected,
                 attachment,
                 emulator_commands,
             )
@@ -1132,11 +1160,12 @@ impl WaterApplication {
                     if !attachment.is_active() {
                         return;
                     }
-                    let mut emulator = TerminalEmulator::with_theme(
+                    let mut emulator = TerminalEmulator::with_theme_and_scrollback_protection(
                         terminal_id,
                         response.size,
                         scrollback_lines,
                         theme,
+                        scrollback_protected,
                     );
                     let mut tracked_size = response.size;
                     let mut replay_events = Vec::new();
@@ -1205,6 +1234,8 @@ impl WaterApplication {
                     let mut stream = stream;
                     let mut pending_event = None;
                     let mut last_live_snapshot = std::time::Instant::now();
+                    let mut last_snapshot: Option<crate::terminal::TerminalSnapshot> =
+                        Some(emulator.snapshot(None));
                     while attachment.is_active() {
                         let commands_changed =
                             apply_emulator_commands(&emulator_commands, &mut emulator);
@@ -1216,11 +1247,13 @@ impl WaterApplication {
                             Ok(event) => event,
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                                 if commands_changed {
+                                    let prev = last_snapshot.as_ref();
                                     if !publish_live_snapshot(
                                         &events_tx,
                                         terminal_id,
                                         &attachment,
                                         &mut emulator,
+                                        prev,
                                     ) {
                                         return;
                                     }
@@ -1259,14 +1292,17 @@ impl WaterApplication {
                             || !stream_backlogged
                             || last_live_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;
                         if publish_snapshot {
+                            let prev = last_snapshot.as_ref();
                             if !publish_live_snapshot(
                                 &events_tx,
                                 terminal_id,
                                 &attachment,
                                 &mut emulator,
+                                prev,
                             ) {
                                 return;
                             }
+                            last_snapshot = Some(emulator.snapshot(prev));
                             last_live_snapshot = std::time::Instant::now();
                         }
                     }
@@ -1374,6 +1410,53 @@ impl WaterApplication {
                     .try_send(TerminalEmulatorCommand::ScrollTo(target))
                     .is_ok()
             })
+    }
+
+    pub(crate) fn terminal_set_viewport_pinned(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        pinned: bool,
+    ) -> bool {
+        let connections = self.state.connections.borrow();
+        let Some(connection) = connections
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_ref() else {
+            return false;
+        };
+        terminal
+            .emulator_commands
+            .get(&terminal_id)
+            .is_some_and(|commands| {
+                commands
+                    .try_send(TerminalEmulatorCommand::SetPinned(pinned))
+                    .is_ok()
+            })
+    }
+
+    pub(crate) fn sync_terminal_scrollback_protection(
+        &self,
+        connection_id: ConnectionId,
+        snapshot: &ModelSnapshot,
+    ) {
+        let connections = self.state.connections.borrow();
+        let Some(connection) = connections
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return;
+        };
+        let Some(terminal) = connection.terminal.as_ref() else {
+            return;
+        };
+        for (&terminal_id, commands) in &terminal.emulator_commands {
+            let protected = terminal_scrollback_protected(snapshot, terminal_id);
+            let _ = commands.try_send(TerminalEmulatorCommand::SetScrollbackProtected(protected));
+        }
     }
 
     fn spawn_ui_control_listener(&self, cx: &mut App, receiver: UiControlReceiver) -> Task<()> {

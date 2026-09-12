@@ -359,7 +359,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
     'worker: loop {
         let mut command_batch_full = false;
-        let mut input_activity = false;
         for command_index in 0..MAX_COMMANDS_PER_TICK {
             let command = match command_rx.try_recv() {
                 Ok(command) => command,
@@ -382,7 +381,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                             now.saturating_duration_since(at) <= INPUT_COALESCE_GAP
                         });
                     last_input_at = Some(now);
-                    input_activity = true;
                     if coalescing {
                         if pending_input.is_empty() {
                             pending_started = now;
@@ -622,16 +620,20 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             let metadata_due =
                 last_process_metadata_request.elapsed() >= PROCESS_METADATA_REFRESH_INTERVAL;
             if metadata_due {
-                if !had_output && !input_activity {
-                    let _ = request_process_metadata_refresh(
-                        &metadata_executor,
-                        &pty,
-                        metadata_fallback.clone(),
-                        &metadata_result_tx,
-                        &worker_wakeup,
-                        &mut metadata_probe_in_flight,
-                    );
-                }
+                // The probe runs on the shared metadata thread and does not
+                // read or parse PTY bytes. Keep it periodic even during a
+                // dense output burst: an agent can redraw and clear the
+                // screen before the next quiet interval, so waiting for
+                // `!had_output` would detect it too late to protect the
+                // existing scrollback.
+                let _ = request_process_metadata_refresh(
+                    &metadata_executor,
+                    &pty,
+                    metadata_fallback.clone(),
+                    &metadata_result_tx,
+                    &worker_wakeup,
+                    &mut metadata_probe_in_flight,
+                );
                 last_process_metadata_request = Instant::now();
             }
             if metadata_changed {
