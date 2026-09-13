@@ -3752,6 +3752,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
+            .rounded(px(6.))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title))
             .on_mouse_down(
@@ -4384,7 +4385,8 @@ impl WorkspaceView {
             .gap(px(2.))
             .bg(rgb(theme.chrome_background))
             .border_1()
-            .border_color(rgb(theme.inactive_pane_border));
+            .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(12.));
         if let Some(rename) = rename {
             menu = menu.child(rename);
         }
@@ -4478,6 +4480,7 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4493,6 +4496,7 @@ impl WorkspaceView {
             .justify_center()
             .flex()
             .bg(rgb(theme.tab_add_background))
+            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4512,6 +4516,7 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
+            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .child(
                 div()
@@ -4937,6 +4942,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
+            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5280,6 +5286,7 @@ impl WorkspaceView {
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
+                    .rounded(px(12.))
                     .bg(rgb(theme.pane_background))
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
