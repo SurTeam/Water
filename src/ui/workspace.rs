@@ -4557,6 +4557,7 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4570,10 +4571,10 @@ impl WorkspaceView {
         } else {
             "Connect"
         };
-        let hint = if self.dialog_input.trim().is_empty() && !self.remote_connection_pending {
-            Some("Enter an SSH host or config alias to continue")
+        let hint_text = if self.dialog_input.trim().is_empty() && !self.remote_connection_pending {
+            "Enter an SSH host or config alias to continue"
         } else {
-            None
+            ""
         };
         let mut dialog = div()
             .id("connect-remote-dialog")
@@ -4585,6 +4586,7 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
+            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .text_size(px(self.config.ui.font_size));
         if !self.config.ui.font_family.is_empty() {
@@ -4597,7 +4599,14 @@ impl WorkspaceView {
                     .child("Connect to remote Water"),
             )
             .child("Uses your OpenSSH config and agent. The authenticated connection is reused.")
-            .child(self.render_text_input_row("SSH host or config alias…", theme));
+            .child(self.render_text_input_row(theme))
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(self.config.ui.font_size * 0.875))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(SharedString::from(hint_text.to_owned())),
+            );
         if let Some(error) = &self.remote_connection_error {
             dialog = dialog.child(
                 div()
@@ -4605,24 +4614,18 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
-        if let Some(hint) = hint {
-            button_row = button_row.child(
+        let button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .justify_end()
+            .flex()
+            .child(div().flex_none().child(cancel))
+            .child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_right()
-                    .text_size(px(self.config.ui.font_size * 0.875))
-                    .text_color(rgb(theme.inactive_pane_border))
-                    .child(hint),
+                    .flex_none()
+                    .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
             );
-        }
-        button_row = button_row.child(div().flex_none().child(cancel)).child(
-            div()
-                .flex_none()
-                .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
-        );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -4650,17 +4653,14 @@ impl WorkspaceView {
     }
 
     /// The bordered, editable row shared by the text-input dialogs. The
-    /// placeholder and typed text are always left-aligned within the input box.
-    fn render_text_input_row(&self, placeholder: &str, theme: ThemeColors) -> AnyElement {
+    /// caret is rendered as a separate opacity-toggled element so that
+    /// blinking does not shift the text layout.
+    fn render_text_input_row(&self, theme: ThemeColors) -> AnyElement {
         let value = &self.dialog_input;
-        let empty = value.is_empty();
         let caret = self.dialog_caret.clamp(0, value.len());
-        let caret_glyph = if self.dialog_caret_visible { "▌" } else { "" };
-        let display = if empty {
-            format!("{caret_glyph}{placeholder}")
-        } else {
-            format!("{}{caret_glyph}{}", &value[..caret], &value[caret..])
-        };
+        let before = SharedString::from(value[..caret].to_owned());
+        let after = SharedString::from(value[caret..].to_owned());
+        let caret_opacity = if self.dialog_caret_visible { 1.0 } else { 0.0 };
         let mut row = div()
             .debug_selector(|| "dialog-text-input".into())
             .id("dialog-text-input")
@@ -4671,12 +4671,9 @@ impl WorkspaceView {
             .flex()
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(6.))
             .text_size(px(self.config.ui.font_size))
-            .text_color(rgb(if empty {
-                theme.inactive_pane_border
-            } else {
-                theme.ui_foreground
-            }));
+            .text_color(rgb(theme.ui_foreground));
         if !self.config.ui.font_family.is_empty() {
             row = row.font(font(self.config.ui.font_family.clone()));
         }
@@ -4684,8 +4681,10 @@ impl WorkspaceView {
             div()
                 .w_full()
                 .overflow_hidden()
-                .truncate()
-                .child(SharedString::from(display)),
+                .flex()
+                .child(before)
+                .child(div().opacity(caret_opacity).child("▌"))
+                .child(after),
         )
         .into_any_element()
     }
@@ -4705,6 +4704,7 @@ impl WorkspaceView {
             .items_center()
             .justify_center()
             .flex()
+            .rounded(px(6.))
             .bg(rgb(if enabled {
                 theme.tab_add_background
             } else {
@@ -4755,6 +4755,7 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4763,10 +4764,10 @@ impl WorkspaceView {
                 }),
             )
             .child("Cancel");
-        let hint = if self.dialog_input.trim().is_empty() {
-            Some("Enter a name to rename this workspace")
+        let hint_text = if self.dialog_input.trim().is_empty() {
+            "Enter a name to rename this workspace"
         } else {
-            None
+            ""
         };
         let mut dialog = div()
             .id("rename-workspace-dialog")
@@ -4778,6 +4779,7 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
+            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .text_size(px(self.config.ui.font_size));
         if !self.config.ui.font_family.is_empty() {
@@ -4795,25 +4797,26 @@ impl WorkspaceView {
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(SharedString::from(format!("Current name: {title}"))),
             )
-            .child(self.render_text_input_row("Workspace name", theme));
-        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
-        if let Some(hint) = hint {
-            button_row = button_row.child(
+            .child(self.render_text_input_row(theme))
+            .child(
                 div()
-                    .flex_1()
-                    .min_w(px(0.))
-                    .truncate()
-                    .text_right()
+                    .w_full()
                     .text_size(px(self.config.ui.font_size * 0.875))
                     .text_color(rgb(theme.inactive_pane_border))
-                    .child(hint),
+                    .child(SharedString::from(hint_text.to_owned())),
             );
-        }
-        button_row = button_row.child(div().flex_none().child(cancel)).child(
-            div()
-                .flex_none()
-                .child(self.render_dialog_confirm_button("Rename", theme, cx)),
-        );
+        let button_row = div()
+            .w_full()
+            .gap(px(8.))
+            .items_center()
+            .justify_end()
+            .flex()
+            .child(div().flex_none().child(cancel))
+            .child(
+                div()
+                    .flex_none()
+                    .child(self.render_dialog_confirm_button("Rename", theme, cx)),
+            );
         dialog = dialog.child(button_row);
         deferred(
             div()
