@@ -14,7 +14,6 @@ use gpui::{
     fill, font, outline, point, prelude::*, px, relative, rgb, rgba, size,
 };
 
-use crate::agent::AgentKind;
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::command::{
@@ -306,8 +305,6 @@ struct TerminalScrollState {
 const MOUSE_SCROLL_ANIMATION_DURATION: Duration = Duration::from_millis(72);
 const MOUSE_SCROLL_IMMEDIATE_FRACTION: f32 = 0.2;
 const PREPARED_ROW_LOOKAHEAD: i32 = 8;
-const TERMINAL_SELECTION_AUTOSCROLL_MARGIN_PX: f32 = 24.0;
-const TERMINAL_SELECTION_AUTOSCROLL_STEP_ROWS: i64 = 3;
 
 #[derive(Debug, Clone)]
 struct TerminalMouseScrollAnimation {
@@ -315,12 +312,6 @@ struct TerminalMouseScrollAnimation {
     start_position: f32,
     target_position: f32,
     started_at: Instant,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct TerminalSelectionAutoscroll {
-    terminal_id: TerminalId,
-    position: Point<gpui::Pixels>,
 }
 
 impl TerminalMouseScrollAnimation {
@@ -839,8 +830,6 @@ pub struct WorkspaceView {
     viewport_request_frame_pending: bool,
     mouse_scroll_animations: BTreeMap<TerminalId, TerminalMouseScrollAnimation>,
     mouse_scroll_frame_pending: bool,
-    selection_autoscroll: Option<TerminalSelectionAutoscroll>,
-    selection_autoscroll_frame_pending: bool,
     selection: Option<TerminalSelection>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
@@ -968,8 +957,6 @@ impl WorkspaceView {
             viewport_request_frame_pending: false,
             mouse_scroll_animations: BTreeMap::new(),
             mouse_scroll_frame_pending: false,
-            selection_autoscroll: None,
-            selection_autoscroll_frame_pending: false,
             selection: None,
             ime_terminal: None,
             ime_marked_text: String::new(),
@@ -1686,21 +1673,6 @@ impl WorkspaceView {
             .find(|agent| agent.pane_id == pane_id)
     }
 
-    fn pi_agent_running_for_pane(&self, pane_id: PaneId) -> bool {
-        self.agent_by_pane_id(pane_id).is_some_and(|agent| {
-            agent.kind == AgentKind::Pi
-                && matches!(agent.status, crate::surface::TerminalStatus::Running)
-        })
-    }
-
-    fn pi_agent_running_for_terminal(&self, terminal_id: TerminalId) -> bool {
-        self.snapshot.agents.iter().any(|agent| {
-            agent.terminal_id == terminal_id
-                && agent.kind == AgentKind::Pi
-                && matches!(agent.status, crate::surface::TerminalStatus::Running)
-        })
-    }
-
     fn workspace_contains_pane(&self, workspace_id: WorkspaceId, pane_id: PaneId) -> bool {
         self.workspace_by_id(workspace_id)
             .is_some_and(|workspace| workspace_active_tab_contains_pane(workspace, pane_id))
@@ -2314,10 +2286,9 @@ impl WorkspaceView {
     /// delay until its next snapshot acknowledges the new viewport.
     ///
     /// When the viewport moves away from the bottom, the emulator's pin flag
-    /// switches to a semantic user coordinate. Alacritty may advance its
-    /// physical `display_offset` as output grows, but the rendered rows stay
-    /// anchored to the user's reading position. Scrolling back to the bottom
-    /// clears the pin via `ScrollTo(0)` / `scroll_to_bottom`.
+    /// is set so that subsequent PTY output does not advance `display_offset`
+    /// (the user's reading position). Scrolling back to the bottom clears
+    /// the pin via `ScrollTo(0)` / `scroll_to_bottom`.
     fn apply_local_viewport(
         &mut self,
         terminal_id: TerminalId,
@@ -2331,7 +2302,8 @@ impl WorkspaceView {
         let connection_id = self.active_connection;
         if let Some(target) = target {
             // Pin when scrolling to a non-zero target; unpinned at 0.
-            application.terminal_set_viewport_pinned(connection_id, terminal_id, target != 0);
+            application
+                .terminal_set_viewport_pinned(connection_id, terminal_id, target != 0);
             application.terminal_scroll_to(connection_id, terminal_id, target);
         }
         if let Some(delta) = delta {
@@ -2355,7 +2327,6 @@ impl WorkspaceView {
     /// history after the input-triggered jump.
     fn focus_terminal_live_bottom(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
         self.selection = None;
-        self.selection_autoscroll = None;
         self.active_trackpad_scrolls.remove(&terminal_id);
         self.mouse_scroll_animations.remove(&terminal_id);
         let had_pending_request = self
@@ -2393,39 +2364,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// Like [`Self::focus_terminal_live_bottom`] but for output-driven jumps
-    /// while Pi's regular TUI is running and the user is browsing scrollback:
-    /// the live-bottom request is issued (so returning to the bottom is
-    /// immediate once the user asks for it) but the visual unacked offset is
-    /// not pre-painted, so the current reading position stays on screen until
-    /// the user explicitly returns to the bottom.
-    fn focus_terminal_live_bottom_guarded(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
-        self.selection = None;
-        self.selection_autoscroll = None;
-        self.active_trackpad_scrolls.remove(&terminal_id);
-        self.mouse_scroll_animations.remove(&terminal_id);
-        self.pending_viewport_requests.remove(&terminal_id);
-
-        let viewport_position = self
-            .terminal_snapshot_for(terminal_id)
-            .map(|snapshot| snapshot.viewport_position)
-            .unwrap_or_default();
-        let state = self
-            .scroll_accumulators
-            .entry(terminal_id)
-            .or_insert_with(|| TerminalScrollState::new(viewport_position));
-        if viewport_position == 0 {
-            return;
-        }
-        // Rebase without a visual jump: the observed viewport stays where the
-        // user is reading; the requested target is the live bottom.
-        state.visual_unacked_rows = 0.0;
-        state.requested_viewport_position = 0;
-        state.request_started_at = Some(Instant::now());
-        self.apply_local_viewport(terminal_id, Some(0), None, cx);
-        cx.notify();
-    }
-
     /// Refreshes the locally rendered snapshots for terminals whose raw
     /// stream advanced, then requests one repaint for the whole view.
     pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
@@ -2451,21 +2389,6 @@ impl WorkspaceView {
                 self.terminal_snapshots.remove(&terminal_id);
                 crate::metrics::inc(crate::metrics::hidden_terminal_updates());
                 continue;
-            }
-            // Pi's regular TUI redraws the whole screen on every output
-            // burst. While the user is browsing its scrollback (viewport
-            // above the live bottom) those redraws must not pull the viewport
-            // to the live bottom; the pinned viewport plus the disabled
-            // smooth-scroll paint offset keep the reading position stable.
-            let pi_output_guard = self
-                .pi_agent_running_for_terminal(terminal_id)
-                && self
-                    .terminal_snapshot_for(terminal_id)
-                    .is_some_and(|snapshot| snapshot.viewport_position > 0);
-            if pi_output_guard {
-                self.focus_terminal_live_bottom_guarded(terminal_id, cx);
-            } else {
-                self.focus_terminal_live_bottom(terminal_id, cx);
             }
             let previous = self.terminal_snapshots.get(&terminal_id).cloned();
             let previous_ref = previous.as_deref();
@@ -2616,14 +2539,7 @@ impl WorkspaceView {
         // resolve. Once the viewport ACK lands, the snapshot is rebuilt with
         // a new overscan window centered on the new viewport.
         let overscan = snapshot.rows_before.len() as f32;
-        // Downward (negative) movement is additionally bounded by the
-        // distance to the materialized live bottom (last_source_row).
-        // Without this clamp, an input-triggered jump to the live bottom
-        // (visual_unacked_rows = -viewport_position) is painted clamped to
-        // -rows_after.len(), shifting the window up for the frames before
-        // the ScrollTo(0) ACK lands.
-        let live_bottom_limit = snapshot.last_source_row.min(overscan as i64) as f32;
-        offset.clamp(-live_bottom_limit, overscan)
+        offset.clamp(-(snapshot.rows_after.len() as f32), overscan)
     }
 
     fn accumulate_terminal_scroll(
@@ -2900,99 +2816,32 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        // Shift-click extends the previous selection: the old anchor becomes
+        // the new anchor and the click position becomes the head.
+        if shift_held
+            && let Some(prev) = self.selection.as_ref().filter(|s| s.terminal_id == terminal_id)
+        {
+            self.selection = Some(TerminalSelection {
+                terminal_id,
+                anchor: prev.anchor,
+                head: endpoint,
+            });
+            self.dragging_terminal = Some(terminal_id);
+            cx.notify();
+            return;
+        }
         self.clear_ime();
-        self.selection = Some(terminal_selection_after_click(
-            self.selection,
+        self.selection = Some(TerminalSelection {
             terminal_id,
-            endpoint,
-            shift_held,
-        ));
-        self.selection_autoscroll = None;
+            anchor: endpoint,
+            head: endpoint,
+        });
         self.dragging_terminal = Some(terminal_id);
         cx.notify();
     }
 
-    fn terminal_selection_autoscroll_delta(
-        &self,
-        terminal_id: TerminalId,
-        position: Point<gpui::Pixels>,
-    ) -> Option<i64> {
-        if self.pi_agent_running_for_terminal(terminal_id) {
-            // A running Pi regular TUI owns the primary screen. Selection
-            // edge scrolling must not reveal the host scrollback until the
-            // foreground process returns to the shell.
-            return None;
-        }
-        let snapshot = self.terminal_snapshot_for(terminal_id)?;
-        let bounds = self.terminal_bounds_for(terminal_id)?;
-        let pane_height = f32::from(bounds.size.height);
-        if pane_height <= 0.0 {
-            return None;
-        }
-        let y_in_pane = f32::from(position.y) - f32::from(bounds.origin.y);
-        let delta = terminal_selection_autoscroll_direction(y_in_pane, pane_height)?;
-        let at_boundary = if delta > 0 {
-            snapshot.rows_before.is_empty()
-        } else {
-            snapshot.rows_after.is_empty()
-        };
-        (!at_boundary).then_some(delta)
-    }
-
-    fn update_terminal_selection_head_at(
-        &mut self,
-        terminal_id: TerminalId,
-        position: Point<gpui::Pixels>,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
-            return;
-        };
-        if let Some(selection) = self
-            .selection
-            .as_mut()
-            .filter(|selection| selection.terminal_id == terminal_id)
-            && selection.head != endpoint
-        {
-            selection.head = endpoint;
-            cx.notify();
-        }
-    }
-
-    fn request_selection_autoscroll_frame(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selection_autoscroll_frame_pending {
-            return;
-        }
-        self.selection_autoscroll_frame_pending = true;
-        cx.on_next_frame(window, |this, window, cx| {
-            this.selection_autoscroll_frame_pending = false;
-            let Some(autoscroll) = this.selection_autoscroll else {
-                return;
-            };
-            if this.dragging_terminal != Some(autoscroll.terminal_id) {
-                this.selection_autoscroll = None;
-                return;
-            }
-            let Some(delta) = this
-                .terminal_selection_autoscroll_delta(autoscroll.terminal_id, autoscroll.position)
-            else {
-                this.selection_autoscroll = None;
-                return;
-            };
-            this.apply_local_viewport(autoscroll.terminal_id, None, Some(delta), cx);
-            this.update_terminal_selection_head_at(autoscroll.terminal_id, autoscroll.position, cx);
-            this.request_selection_autoscroll_frame(window, cx);
-        });
-    }
-
-    fn update_terminal_selection(
-        &mut self,
-        event: &MouseMoveEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn update_terminal_selection(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
         if self.reported_mouse.is_some() {
-            self.selection_autoscroll = None;
             self.update_reported_mouse(event, cx);
             return;
         }
@@ -3000,22 +2849,33 @@ impl WorkspaceView {
             return;
         };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.selection_autoscroll = None;
             return;
         }
-        if let Some(delta) = self.terminal_selection_autoscroll_delta(terminal_id, event.position) {
-            self.selection_autoscroll = Some(TerminalSelectionAutoscroll {
-                terminal_id,
-                position: event.position,
-            });
-            // Give the first edge move immediate feedback, then continue at
-            // display cadence while the pointer remains in the edge band.
-            self.apply_local_viewport(terminal_id, None, Some(delta), cx);
-            self.request_selection_autoscroll_frame(window, cx);
-        } else {
-            self.selection_autoscroll = None;
+        // Auto-scroll when the pointer is near the bottom or top edge during
+        // a selection drag, enabling long selections across the scrollback.
+        if let Some(bounds) = self.terminal_bounds_for(terminal_id) {
+            let pane_height = f32::from(bounds.size.height);
+            let y_in_pane = f32::from(event.position.y) - f32::from(bounds.origin.y);
+            const AUTO_SCROLL_MARGIN: f32 = 24.0;
+            const AUTO_SCROLL_SPEED: f32 = 3.0;
+            if pane_height > 0.0 {
+                if y_in_pane > pane_height - AUTO_SCROLL_MARGIN {
+                    self.apply_local_viewport(terminal_id, None, Some(-AUTO_SCROLL_SPEED as i64), cx);
+                } else if y_in_pane < AUTO_SCROLL_MARGIN {
+                    self.apply_local_viewport(terminal_id, None, Some(AUTO_SCROLL_SPEED as i64), cx);
+                }
+            }
         }
-        self.update_terminal_selection_head_at(terminal_id, event.position, cx);
+        let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, event.position)
+        else {
+            return;
+        };
+        if let Some(selection) = self.selection.as_mut()
+            && selection.head != endpoint
+        {
+            selection.head = endpoint;
+            cx.notify();
+        }
     }
 
     fn update_reported_mouse(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -3060,7 +2920,6 @@ impl WorkspaceView {
     }
 
     fn finish_terminal_selection(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
-        self.selection_autoscroll = None;
         if let Some((terminal_id, button)) = self.reported_mouse.take() {
             if button == event.button
                 && let Some(snapshot) = self.terminal_snapshot_for(terminal_id)
@@ -3331,11 +3190,6 @@ impl WorkspaceView {
         let special_name =
             terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
                 .is_some();
-        // Like every other input path, a keystroke returns the viewport to
-        // the live bottom (focus_terminal_live_bottom below). While Pi's
-        // regular TUI is running, its output-driven redraws use the guarded
-        // variant in apply_terminal_events, so the user's browsing position
-        // is not moved by Pi's own output.
         self.focus_terminal_live_bottom(terminal_id, cx);
         self.clear_ime();
         self.enqueue_terminal_command(
@@ -3787,7 +3641,6 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
-            .rounded(px(6.))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title))
             .on_mouse_down(
@@ -4420,8 +4273,7 @@ impl WorkspaceView {
             .gap(px(2.))
             .bg(rgb(theme.chrome_background))
             .border_1()
-            .border_color(rgb(theme.inactive_pane_border))
-            .rounded(px(12.));
+            .border_color(rgb(theme.inactive_pane_border));
         if let Some(rename) = rename {
             menu = menu.child(rename);
         }
@@ -4515,7 +4367,6 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4531,7 +4382,6 @@ impl WorkspaceView {
             .justify_center()
             .flex()
             .bg(rgb(theme.tab_add_background))
-            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4551,7 +4401,6 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
-            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .child(
                 div()
@@ -4611,7 +4460,6 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4625,10 +4473,10 @@ impl WorkspaceView {
         } else {
             "Connect"
         };
-        let hint_text = if self.dialog_input.trim().is_empty() && !self.remote_connection_pending {
-            "Enter an SSH host or config alias to continue"
+        let hint = if self.dialog_input.trim().is_empty() && !self.remote_connection_pending {
+            Some("Enter an SSH host or config alias to continue")
         } else {
-            ""
+            None
         };
         let mut dialog = div()
             .id("connect-remote-dialog")
@@ -4640,7 +4488,6 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
-            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .text_size(px(self.config.ui.font_size));
         if !self.config.ui.font_family.is_empty() {
@@ -4653,14 +4500,7 @@ impl WorkspaceView {
                     .child("Connect to remote Water"),
             )
             .child("Uses your OpenSSH config and agent. The authenticated connection is reused.")
-            .child(self.render_text_input_row(theme))
-            .child(
-                div()
-                    .w_full()
-                    .text_size(px(self.config.ui.font_size * 0.875))
-                    .text_color(rgb(theme.inactive_pane_border))
-                    .child(SharedString::from(hint_text.to_owned())),
-            );
+            .child(self.render_text_input_row("SSH host or config alias…", theme));
         if let Some(error) = &self.remote_connection_error {
             dialog = dialog.child(
                 div()
@@ -4668,18 +4508,24 @@ impl WorkspaceView {
                     .child(SharedString::from(error.clone())),
             );
         }
-        let button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .justify_end()
-            .flex()
-            .child(div().flex_none().child(cancel))
-            .child(
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
+        if let Some(hint) = hint {
+            button_row = button_row.child(
                 div()
-                    .flex_none()
-                    .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_right()
+                    .text_size(px(self.config.ui.font_size * 0.875))
+                    .text_color(rgb(theme.inactive_pane_border))
+                    .child(hint),
             );
+        }
+        button_row = button_row.child(div().flex_none().child(cancel)).child(
+            div()
+                .flex_none()
+                .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
+        );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -4707,14 +4553,17 @@ impl WorkspaceView {
     }
 
     /// The bordered, editable row shared by the text-input dialogs. The
-    /// caret is rendered as a separate opacity-toggled element so that
-    /// blinking does not shift the text layout.
-    fn render_text_input_row(&self, theme: ThemeColors) -> AnyElement {
+    /// placeholder and typed text are always left-aligned within the input box.
+    fn render_text_input_row(&self, placeholder: &str, theme: ThemeColors) -> AnyElement {
         let value = &self.dialog_input;
+        let empty = value.is_empty();
         let caret = self.dialog_caret.clamp(0, value.len());
-        let before = SharedString::from(value[..caret].to_owned());
-        let after = SharedString::from(value[caret..].to_owned());
-        let caret_opacity = if self.dialog_caret_visible { 1.0 } else { 0.0 };
+        let caret_glyph = if self.dialog_caret_visible { "▌" } else { "" };
+        let display = if empty {
+            format!("{caret_glyph}{placeholder}")
+        } else {
+            format!("{}{caret_glyph}{}", &value[..caret], &value[caret..])
+        };
         let mut row = div()
             .debug_selector(|| "dialog-text-input".into())
             .id("dialog-text-input")
@@ -4725,9 +4574,12 @@ impl WorkspaceView {
             .flex()
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .rounded(px(6.))
             .text_size(px(self.config.ui.font_size))
-            .text_color(rgb(theme.ui_foreground));
+            .text_color(rgb(if empty {
+                theme.inactive_pane_border
+            } else {
+                theme.ui_foreground
+            }));
         if !self.config.ui.font_family.is_empty() {
             row = row.font(font(self.config.ui.font_family.clone()));
         }
@@ -4735,10 +4587,8 @@ impl WorkspaceView {
             div()
                 .w_full()
                 .overflow_hidden()
-                .flex()
-                .child(before)
-                .child(div().opacity(caret_opacity).child("▌"))
-                .child(after),
+                .truncate()
+                .child(SharedString::from(display)),
         )
         .into_any_element()
     }
@@ -4758,7 +4608,6 @@ impl WorkspaceView {
             .items_center()
             .justify_center()
             .flex()
-            .rounded(px(6.))
             .bg(rgb(if enabled {
                 theme.tab_add_background
             } else {
@@ -4809,7 +4658,6 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4818,10 +4666,10 @@ impl WorkspaceView {
                 }),
             )
             .child("Cancel");
-        let hint_text = if self.dialog_input.trim().is_empty() {
-            "Enter a name to rename this workspace"
+        let hint = if self.dialog_input.trim().is_empty() {
+            Some("Enter a name to rename this workspace")
         } else {
-            ""
+            None
         };
         let mut dialog = div()
             .id("rename-workspace-dialog")
@@ -4833,7 +4681,6 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
-            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .text_size(px(self.config.ui.font_size));
         if !self.config.ui.font_family.is_empty() {
@@ -4851,26 +4698,25 @@ impl WorkspaceView {
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(SharedString::from(format!("Current name: {title}"))),
             )
-            .child(self.render_text_input_row(theme))
-            .child(
+            .child(self.render_text_input_row("Workspace name", theme));
+        let mut button_row = div().w_full().gap(px(8.)).items_center().flex();
+        if let Some(hint) = hint {
+            button_row = button_row.child(
                 div()
-                    .w_full()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_right()
                     .text_size(px(self.config.ui.font_size * 0.875))
                     .text_color(rgb(theme.inactive_pane_border))
-                    .child(SharedString::from(hint_text.to_owned())),
+                    .child(hint),
             );
-        let button_row = div()
-            .w_full()
-            .gap(px(8.))
-            .items_center()
-            .justify_end()
-            .flex()
-            .child(div().flex_none().child(cancel))
-            .child(
-                div()
-                    .flex_none()
-                    .child(self.render_dialog_confirm_button("Rename", theme, cx)),
-            );
+        }
+        button_row = button_row.child(div().flex_none().child(cancel)).child(
+            div()
+                .flex_none()
+                .child(self.render_dialog_confirm_button("Rename", theme, cx)),
+        );
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -4977,7 +4823,6 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
-            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5249,10 +5094,9 @@ impl WorkspaceView {
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
-                let pi_agent_running = self.pi_agent_running_for_pane(pane_id);
-                let smooth_scroll = !(mouse_modes.mouse_reporting && self.config.features.mouse_reporting)
-                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll)
-                    && !pi_agent_running;
+                let smooth_scroll = !(mouse_modes.mouse_reporting
+                    && self.config.features.mouse_reporting)
+                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll);
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_grid
                         .map(|snapshot| {
@@ -5321,7 +5165,6 @@ impl WorkspaceView {
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
-                    .rounded(px(12.))
                     .bg(rgb(theme.pane_background))
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
@@ -5339,12 +5182,7 @@ impl WorkspaceView {
                                 if this.begin_reported_mouse(terminal_id, event, cx) {
                                     cx.stop_propagation();
                                 } else {
-                                    this.begin_terminal_selection(
-                                        terminal_id,
-                                        event.position,
-                                        event.modifiers.shift,
-                                        cx,
-                                    );
+                                    this.begin_terminal_selection(terminal_id, event.position, event.modifiers.shift, cx);
                                 }
                             } else {
                                 this.selection = None;
@@ -6346,7 +6184,7 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                         // crosses into a pane before the threshold.
                         (true, start_window_move)
                     } else {
-                        view.update_terminal_selection(event, window, cx);
+                        view.update_terminal_selection(event, cx);
                         (false, false)
                     }
                 });
@@ -6396,19 +6234,6 @@ fn terminal_scroll_delta_rows(event: &ScrollWheelEvent, metrics: TerminalMetrics
     match event.delta {
         ScrollDelta::Lines(delta) => delta.y,
         ScrollDelta::Pixels(delta) => f32::from(delta.y) / metrics.line_height.max(f32::EPSILON),
-    }
-}
-
-fn terminal_selection_autoscroll_direction(y_in_pane: f32, pane_height: f32) -> Option<i64> {
-    if pane_height <= 0.0 {
-        return None;
-    }
-    if y_in_pane < TERMINAL_SELECTION_AUTOSCROLL_MARGIN_PX {
-        Some(TERMINAL_SELECTION_AUTOSCROLL_STEP_ROWS)
-    } else if y_in_pane > pane_height - TERMINAL_SELECTION_AUTOSCROLL_MARGIN_PX {
-        Some(-TERMINAL_SELECTION_AUTOSCROLL_STEP_ROWS)
-    } else {
-        None
     }
 }
 
@@ -6925,28 +6750,6 @@ fn selection_boundary_index(endpoint: TerminalSelectionEndpoint, columns: usize)
     i64::from(endpoint.position.row) * columns as i64
         + endpoint.position.column as i64
         + i64::from(endpoint.side == TerminalSelectionSide::Right)
-}
-
-fn terminal_selection_after_click(
-    previous: Option<TerminalSelection>,
-    terminal_id: TerminalId,
-    endpoint: TerminalSelectionEndpoint,
-    shift_held: bool,
-) -> TerminalSelection {
-    if shift_held
-        && let Some(previous) = previous.filter(|selection| selection.terminal_id == terminal_id)
-    {
-        return TerminalSelection {
-            terminal_id,
-            anchor: previous.anchor,
-            head: endpoint,
-        };
-    }
-    TerminalSelection {
-        terminal_id,
-        anchor: endpoint,
-        head: endpoint,
-    }
 }
 
 fn selection_bounds(
@@ -8995,48 +8798,6 @@ mod tests {
     }
 
     #[test]
-    fn shift_click_extends_the_previous_selection_anchor() {
-        let terminal_id = TerminalId::new(1);
-        let other_terminal_id = TerminalId::new(2);
-        let previous = TerminalSelection {
-            terminal_id,
-            anchor: endpoint(1, 2, TerminalSelectionSide::Left),
-            head: endpoint(2, 3, TerminalSelectionSide::Right),
-        };
-        let extended = terminal_selection_after_click(
-            Some(previous),
-            terminal_id,
-            endpoint(5, 1, TerminalSelectionSide::Left),
-            true,
-        );
-        assert_eq!(extended.anchor, previous.anchor);
-        assert_eq!(
-            extended.head.position,
-            TerminalCellPosition { row: 5, column: 1 }
-        );
-
-        let new_selection = terminal_selection_after_click(
-            Some(previous),
-            other_terminal_id,
-            endpoint(4, 0, TerminalSelectionSide::Left),
-            true,
-        );
-        assert_eq!(new_selection.anchor, new_selection.head);
-        assert_eq!(new_selection.terminal_id, other_terminal_id);
-    }
-
-    #[test]
-    fn selection_autoscroll_direction_is_edge_triggered() {
-        assert_eq!(terminal_selection_autoscroll_direction(4.0, 200.0), Some(3));
-        assert_eq!(
-            terminal_selection_autoscroll_direction(198.0, 200.0),
-            Some(-3)
-        );
-        assert_eq!(terminal_selection_autoscroll_direction(100.0, 200.0), None);
-        assert_eq!(terminal_selection_autoscroll_direction(0.0, 0.0), None);
-    }
-
-    #[test]
     fn selection_sides_choose_only_fully_covered_cells() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 1));
@@ -9113,80 +8874,6 @@ mod tests {
 
         assert_eq!(selection.anchor.position.row, 1);
         assert_eq!(selection.head.position.row, 2);
-    }
-
-    #[test]
-    fn paint_downward_offset_is_bounded_by_the_semantic_live_bottom() {
-        // Regression: browsing history with the live tail inside the 32-row
-        // overscan, an input-triggered jump to the live bottom used to be
-        // painted clamped to -rows_after.len() (a visible upward jump) until
-        // the ScrollTo(0) ACK landed. The clamp mirrors
-        // terminal_scroll_offset_for_snapshot.
-        let terminal_id = TerminalId::new(9);
-        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 5));
-        snapshot.viewport_position = 2;
-        snapshot.display_offset = 2;
-        // Simulate a real from_term snapshot: last_source_row is the
-        // distance from the viewport bottom to the newest materialized
-        // row (the live tail when the overscan reaches it).
-        snapshot.last_source_row = 2;
-        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-
-        // The clamp (mirroring terminal_scroll_offset_for_snapshot) allows
-        // the full -viewport_position jump, not just -rows_after.len().
-        let clamp = |offset: f32, snap: &TerminalSnapshot| {
-            let overscan = snap.rows_before.len() as f32;
-            let limit = snap.last_source_row.min(overscan as i64) as f32;
-            offset.clamp(-limit, overscan)
-        };
-        let jump = -2.0;
-        // With the materialized window reaching the live tail (last_source_row=2),
-        // the full jump to the live bottom is allowed.
-        assert_eq!(clamp(jump, &snapshot), -2.0);
-
-        // If the materialized window stops one row short of the live tail
-        // while browsing deeper (viewport 3), the paint offset is capped
-        // at the materialized live bottom (-2) instead of pretending to
-        // address the tail row (-3).
-        let short = TerminalSnapshot {
-            last_source_row: 1,
-            viewport_position: 3,
-            ..snapshot.clone()
-        };
-        assert_eq!(clamp(-3.0, &short), -1.0);
-
-        // When the materialized window already stops at the live tail
-        // (no overscan below), the jump is still bounded by the
-        // materialized live bottom.
-        let bottom = TerminalSnapshot {
-            last_source_row: 2,
-            rows_after: Vec::new(),
-            ..snapshot.clone()
-        };
-        assert_eq!(clamp(jump, &bottom), -2.0);
-
-        // Deep browsing: the user is 10 rows above the live tail and the
-        // materialized window stops 2 rows short of it. The input-triggered
-        // jump must be capped at the materialized live bottom (-2), not
-        // pretend to address the tail row (-10).
-        let deep = TerminalSnapshot {
-            last_source_row: 2,
-            viewport_position: 10,
-            ..snapshot.clone()
-        };
-        assert_eq!(clamp(-10.0, &deep), -2.0);
-        // With a larger materialized window (overscan 4) the jump is
-        // capped at the materialized live bottom (-4), still short of the
-        // semantic tail (-10).
-        let deep_reached = TerminalSnapshot {
-            last_source_row: 4,
-            viewport_position: 10,
-            ..snapshot.clone()
-        };
-        assert_eq!(clamp(-10.0, &deep_reached), -2.0);
     }
 
     #[test]
