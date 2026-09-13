@@ -23,6 +23,8 @@ use super::model::TerminalReplay;
 use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 use super::stream::{TerminalSeq, TerminalStreamEvent};
 
+const CLEAR_SCROLLBACK_SEQUENCE: &[u8] = b"\x1b[3J";
+
 /// How the emulator reacts to an applied event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EmulatorEffect {
@@ -116,17 +118,28 @@ pub struct TerminalEmulator {
     /// Shared replay/live flag (owned by the term's proxy as well).
     live: Arc<AtomicBool>,
     terminal_id: TerminalId,
+    scrollback_lines: usize,
     last_seq: TerminalSeq,
     process: TerminalProcessState,
     /// Local visual state changed since the GUI last consumed it.
     dirty: bool,
-    /// Viewport pinned for browsing scrollback. While true, new output grows
-    /// the grid but does not advance `display_offset`, so the user's reading
-    /// position is stable. Cleared by `ScrollTo(0)` / `scroll_to_bottom`.
+    /// Viewport pinned for browsing scrollback. Alacritty's grid keeps a
+    /// non-bottom display anchored when output arrives by advancing its
+    /// physical `display_offset`; this flag tells us to keep a separate user
+    /// coordinate so that output-driven movement is not mistaken for a user
+    /// scroll.
     viewport_pinned: bool,
-    /// Saved `display_offset` from the last pinned advance. Used to restore
-    /// the viewport position after the grid grew from new output.
-    pinned_viewport: i32,
+    /// User-driven viewport coordinate. Unlike the grid's physical
+    /// `display_offset`, this value does not change when new output is
+    /// appended while the viewport is pinned.
+    pinned_viewport: i64,
+    /// Pi's regular TUI uses CSI 3 J to clear the host scrollback on a full
+    /// redraw. Keep that sequence local to the alternate-screen-like agent
+    /// session so the terminal's existing history remains available after it
+    /// exits. The filter is stateful because PTY chunks can split an escape
+    /// sequence at any byte boundary.
+    scrollback_protected: bool,
+    pending_scrollback_clear: Vec<u8>,
     pty_write_rx: std::sync::mpsc::Receiver<Vec<u8>>,
 }
 
@@ -145,6 +158,22 @@ impl TerminalEmulator {
         size: TerminalSize,
         scrollback_lines: usize,
         theme: TerminalTheme,
+    ) -> Self {
+        Self::with_theme_and_scrollback_protection(
+            terminal_id,
+            size,
+            scrollback_lines,
+            theme,
+            false,
+        )
+    }
+
+    pub fn with_theme_and_scrollback_protection(
+        terminal_id: TerminalId,
+        size: TerminalSize,
+        scrollback_lines: usize,
+        theme: TerminalTheme,
+        scrollback_protected: bool,
     ) -> Self {
         let (pty_write_tx, pty_write_rx) = std::sync::mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
@@ -166,11 +195,14 @@ impl TerminalEmulator {
             processor: Processor::new(),
             live,
             terminal_id,
+            scrollback_lines,
             last_seq: 0,
             process: TerminalProcessState::Running,
             dirty: false,
             viewport_pinned: false,
             pinned_viewport: 0,
+            scrollback_protected,
+            pending_scrollback_clear: Vec::new(),
             pty_write_rx,
         }
     }
@@ -233,16 +265,64 @@ impl TerminalEmulator {
     }
 
     /// Runs raw PTY bytes through the persistent vte parser against the
-    /// local term. When the viewport is pinned, compensates the grid growth
-    /// so the user's reading position stays stable.
+    /// local term. The grid itself preserves a non-bottom display while it
+    /// grows; do not restore `display_offset` here because doing so changes
+    /// the rows that are actually visible.
     pub fn advance(&mut self, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.dirty = true;
         }
         metrics::inc(metrics::processor_advances());
         metrics::add(metrics::terminal_bytes_advanced(), bytes.len());
-        self.processor.advance(&mut self.term, bytes);
-        self.compensate_pinned_viewport();
+        if self.viewport_pinned {
+            // Preserve the rows behind a browsing viewport even after the
+            // configured history limit is reached. The excess is deliberately
+            // temporary: the first downward scroll trims it back to the
+            // configured limit, so an idle live stream cannot permanently
+            // change the terminal's scrollback size.
+            self.term.grid_mut().update_history(usize::MAX);
+        }
+        if self.scrollback_protected {
+            let filtered = self.filter_scrollback_clear(bytes);
+            self.advance_unfiltered(&filtered);
+        } else {
+            if !self.pending_scrollback_clear.is_empty() {
+                let pending = std::mem::take(&mut self.pending_scrollback_clear);
+                self.advance_unfiltered(&pending);
+            }
+            self.advance_unfiltered(bytes);
+        }
+    }
+
+    fn advance_unfiltered(&mut self, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            self.processor.advance(&mut self.term, bytes);
+        }
+    }
+
+    fn filter_scrollback_clear(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut input = Vec::with_capacity(self.pending_scrollback_clear.len() + bytes.len());
+        input.append(&mut self.pending_scrollback_clear);
+        input.extend_from_slice(bytes);
+
+        let mut filtered = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            let remaining = &input[index..];
+            if remaining.len() < CLEAR_SCROLLBACK_SEQUENCE.len()
+                && CLEAR_SCROLLBACK_SEQUENCE.starts_with(remaining)
+            {
+                self.pending_scrollback_clear.extend_from_slice(remaining);
+                break;
+            }
+            if remaining.starts_with(CLEAR_SCROLLBACK_SEQUENCE) {
+                index += CLEAR_SCROLLBACK_SEQUENCE.len();
+            } else {
+                filtered.push(input[index]);
+                index += 1;
+            }
+        }
+        filtered
     }
 
     /// Switches from replay to live: from now on, emulator query responses
@@ -285,11 +365,16 @@ impl TerminalEmulator {
         }
     }
 
-    /// Current viewport position in the cumulative coordinate the render
-    /// code has always used: 0 = bottom, positive = rows up into history
-    /// (the grid's `display_offset`, the single source of truth).
+    /// Current viewport position in the user-facing coordinate: 0 = bottom,
+    /// positive = rows up into history. While browsing, this is deliberately
+    /// independent from the grid's physical `display_offset`, which may grow
+    /// as output is appended behind the pinned viewport.
     pub fn viewport_position(&self) -> i64 {
-        self.term.grid().display_offset() as i64
+        if self.viewport_pinned {
+            self.pinned_viewport
+        } else {
+            self.term.grid().display_offset() as i64
+        }
     }
 
     /// Debug: grid state for diagnosing scroll/overscan issues.
@@ -305,8 +390,8 @@ impl TerminalEmulator {
     }
 
     /// Rows of history currently retained above the viewport. The grid's
-    /// `display_offset` is exactly the number of history rows above the
-    /// viewport, so this equals [`TerminalEmulator::viewport_position`].
+    /// This is the number of retained rows in the grid, independent of the
+    /// user-facing viewport coordinate while output is growing behind a pin.
     pub fn history_len(&self) -> i64 {
         self.term
             .grid()
@@ -319,10 +404,32 @@ impl TerminalEmulator {
         if delta == 0 {
             return;
         }
+        if self.viewport_pinned && delta < 0 {
+            self.trim_scrollback_to_configured_limit();
+            self.pinned_viewport = self.term.grid().display_offset() as i64;
+        }
+        let previous_display_offset = self.term.grid().display_offset() as i64;
         let clamped = delta.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
         self.term.scroll_display(Scroll::Delta(clamped));
+        let display_offset = self.term.grid().display_offset() as i64;
+        let actual_delta = display_offset.saturating_sub(previous_display_offset);
         if self.viewport_pinned {
-            self.pinned_viewport = self.term.grid().display_offset() as i32;
+            self.pinned_viewport = self
+                .pinned_viewport
+                .saturating_add(actual_delta)
+                .clamp(0, self.history_len());
+        } else {
+            self.pinned_viewport = display_offset;
+            if display_offset > 0 {
+                self.viewport_pinned = true;
+            }
+        }
+        if self.viewport_pinned && self.pinned_viewport == 0 {
+            // A relative scroll can reach the semantic bottom while the
+            // physical grid is still offset by output that arrived during the
+            // browse. Jump to the real live bottom in that case.
+            self.scroll_to_bottom();
+            return;
         }
         self.dirty = true;
     }
@@ -332,18 +439,16 @@ impl TerminalEmulator {
     pub fn scroll_to(&mut self, target: i64) {
         let target = target.max(0).min(self.history_len());
         if target == 0 {
-            self.viewport_pinned = false;
-        } else if self.viewport_pinned {
-            // Update the pinned position to the new target so subsequent
-            // output compensation restores to the right row.
-            self.pinned_viewport = target as i32;
+            self.scroll_to_bottom();
+            return;
+        }
+        if !self.viewport_pinned {
+            self.viewport_pinned = true;
+            self.pinned_viewport = self.term.grid().display_offset() as i64;
         }
         let delta = target - self.viewport_position();
         if delta != 0 {
             self.scroll_by(delta);
-        }
-        if self.viewport_pinned {
-            self.pinned_viewport = self.term.grid().display_offset() as i32;
         }
     }
 
@@ -351,6 +456,10 @@ impl TerminalEmulator {
         self.viewport_pinned = false;
         self.pinned_viewport = 0;
         self.term.scroll_display(Scroll::Bottom);
+        // Trim only after the viewport has moved: the temporary history kept
+        // above the browsing viewport must still be present while the grid
+        // resolves its live bottom.
+        self.trim_scrollback_to_configured_limit();
         self.dirty = true;
     }
 
@@ -406,28 +515,41 @@ impl TerminalEmulator {
         self.term.grid().display_offset() == 0
     }
 
-    /// Sets the viewport pin. While pinned, `advance` keeps `display_offset`
-    /// stable so new output does not shift the user's reading position.
+    /// Sets the viewport pin. While pinned, output may advance the grid's
+    /// physical `display_offset`, but the semantic user position remains
+    /// unchanged until the user scrolls again.
     pub fn set_viewport_pinned(&mut self, pinned: bool) {
-        self.viewport_pinned = pinned;
         if pinned {
-            self.pinned_viewport = self.term.grid().display_offset() as i32;
+            if !self.viewport_pinned {
+                self.pinned_viewport = self.term.grid().display_offset() as i64;
+            }
+            self.viewport_pinned = true;
+            self.term.grid_mut().update_history(usize::MAX);
+        } else if self.viewport_pinned {
+            // Only a pin->unpin transition keeps temporary rows above the
+            // current (now released) viewport; a repeated SetPinned(false)
+            // must not trim history the UI is still browsing while an
+            // absolute ScrollTo target is about to land.
+            self.trim_scrollback_to_configured_limit();
+            self.viewport_pinned = false;
+            self.pinned_viewport = 0;
         }
     }
 
-    /// When the viewport is pinned and new output advanced the grid, restore
-    /// `display_offset` to the saved reading position. Call after `advance`.
-    fn compensate_pinned_viewport(&mut self) {
-        if !self.viewport_pinned {
+    fn trim_scrollback_to_configured_limit(&mut self) {
+        self.term.grid_mut().update_history(self.scrollback_lines);
+    }
+
+    pub fn set_scrollback_protected(&mut self, protected: bool) {
+        if self.scrollback_protected == protected {
             return;
         }
-        let offset = self.term.grid().display_offset() as i32;
-        if offset != self.pinned_viewport {
-            self.term
-                .scroll_display(Scroll::Delta(self.pinned_viewport - offset));
+        self.scrollback_protected = protected;
+        if !protected && !self.pending_scrollback_clear.is_empty() {
+            let pending = std::mem::take(&mut self.pending_scrollback_clear);
+            self.advance_unfiltered(&pending);
         }
-        // Keep the pinned position for the next output batch.
-        self.pinned_viewport = self.term.grid().display_offset() as i32;
+        self.dirty = true;
     }
 }
 
@@ -527,6 +649,7 @@ mod tests {
         emulator.scroll_by(2);
         let position_before = emulator.viewport_position();
         assert!(position_before > 0);
+        let visible_before = emulator.snapshot(None).visible_text();
         // Explicitly pin the viewport for browsing.
         emulator.set_viewport_pinned(true);
         // More output while scrolled up: the viewport stays pinned.
@@ -541,6 +664,11 @@ mod tests {
             emulator.viewport_position(),
             position_before,
             "pinned viewport must not move when new output arrives"
+        );
+        assert_eq!(
+            emulator.snapshot(None).visible_text(),
+            visible_before,
+            "output behind a pinned viewport must not move the visible rows"
         );
         emulator.scroll_to_bottom();
         assert!(emulator.at_bottom());
@@ -597,15 +725,124 @@ mod tests {
         // Scroll to a non-zero position: stays pinned.
         emulator.scroll_to(pos);
         // New output: viewport stays.
-        emulator.apply(&output(
-            31,
-            b"a\r\nb\r\nc\r\n".to_vec().as_slice(),
-            size,
-        ));
+        emulator.apply(&output(31, b"a\r\nb\r\nc\r\n".to_vec().as_slice(), size));
         assert_eq!(emulator.viewport_position(), pos);
         // Scroll to bottom: unpins.
         emulator.scroll_to(0);
         assert!(emulator.at_bottom());
+    }
+
+    #[test]
+    fn pinned_output_can_overflow_temporarily_then_restores_scrollback_limit() {
+        let size = TerminalSize::new(12, 3);
+        let configured_scrollback = 5;
+        let mut emulator = TerminalEmulator::new(TerminalId::new(10), size, configured_scrollback);
+        for i in 0..10u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("old {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(2);
+        let visible_before = emulator.snapshot(None).visible_text();
+        emulator.set_viewport_pinned(true);
+        for i in 10..30u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("new {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        assert_eq!(emulator.snapshot(None).visible_text(), visible_before);
+        assert!(emulator.history_len() > configured_scrollback as i64);
+
+        // Moving toward the live tail is the point at which temporary rows
+        // become disposable. The grid must return to the configured bound.
+        emulator.scroll_by(-1);
+        assert_eq!(emulator.history_len(), configured_scrollback as i64);
+    }
+
+    #[test]
+    fn repeated_unpin_does_not_trim_history_above_the_viewport() {
+        let size = TerminalSize::new(12, 4);
+        let configured_scrollback = 20;
+        let mut emulator = TerminalEmulator::new(TerminalId::new(11), size, configured_scrollback);
+        for i in 0..30u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("old {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(2);
+        // While pinned, browsing keeps temporary history rows above the
+        // configured limit; the first downward scroll trims them back.
+        emulator.set_viewport_pinned(true);
+        for i in 30..60u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("new {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        assert!(
+            emulator.history_len() > configured_scrollback as i64,
+            "pinned browsing must retain temporary history rows"
+        );
+        emulator.scroll_by(-1);
+        assert_eq!(emulator.history_len(), configured_scrollback as i64);
+        // Scrolling to the live bottom resolves the grid first and then
+        // trims back to the configured limit.
+        emulator.scroll_to_bottom();
+        assert!(emulator.at_bottom());
+        assert_eq!(emulator.history_len(), configured_scrollback as i64);
+    }
+
+    #[test]
+    fn protected_scrollback_ignores_split_clear_sequence() {
+        let size = TerminalSize::new(12, 3);
+        let mut emulator = TerminalEmulator::with_theme_and_scrollback_protection(
+            TerminalId::new(8),
+            size,
+            100,
+            TerminalTheme::default(),
+            true,
+        );
+        for i in 0..12u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("history {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(2);
+        let visible_before = emulator.snapshot(None).visible_text();
+        emulator.advance(b"\x1b[3");
+        emulator.advance(b"J");
+        let snapshot = emulator.snapshot(None);
+        assert_eq!(snapshot.visible_text(), visible_before);
+        assert!(
+            snapshot
+                .rows_before
+                .iter()
+                .any(|row| row.iter().any(|cell| cell.character != ' ')),
+            "protected CSI 3 J must not erase retained history"
+        );
+    }
+
+    #[test]
+    fn alternate_screen_restores_primary_scrollback() {
+        let size = TerminalSize::new(12, 3);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(9), size, 100);
+        emulator.apply(&output(1, b"primary one\r\nprimary two\r\n", size));
+        emulator.apply(&output(2, b"\x1b[?1049h\x1b[2J\x1b[Hagent screen", size));
+        assert!(emulator.alternate_screen());
+        emulator.apply(&output(3, b"\x1b[?1049l", size));
+        let snapshot = emulator.snapshot(None);
+        assert!(!emulator.alternate_screen());
+        assert!(snapshot.visible_text().contains("primary two"));
+        assert!(!snapshot.visible_text().contains("agent screen"));
     }
 
     #[test]
