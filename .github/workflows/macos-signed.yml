@@ -185,21 +185,24 @@ jobs:
             -s -k "$keychain_password" "$keychain_path" >/dev/null
           security list-keychains -d user -s "$keychain_path"
 
+          # `-v` excludes self-signed identities on some macOS runner images.
+          # The imported identity is still usable by codesign once its private
+          # key is unlocked and its partition list is configured.
+          identity_listing="$(security find-identity -p codesigning "$keychain_path")"
           if [[ -n "$SIGNING_IDENTITY_OVERRIDE" ]]; then
             signing_identity="$SIGNING_IDENTITY_OVERRIDE"
           else
-            signing_identity="$(security find-identity -v -p codesigning "$keychain_path" |
+            signing_identity="$(printf '%s\n' "$identity_listing" |
               awk -F '"' '/^[[:space:]]*[0-9]+\)/ { print $2; exit }')"
           fi
           [[ -n "$signing_identity" ]] || {
             echo "error: no valid codesigning identity found in SurTeamCode.p12" >&2
             exit 1
           }
-          security find-identity -v -p codesigning "$keychain_path" |
-            grep -Fq "\"$signing_identity\"" || {
-              echo "error: selected signing identity is not valid in the imported keychain" >&2
-              exit 1
-            }
+          printf '%s\n' "$identity_listing" | grep -Fq "\"$signing_identity\"" || {
+            echo "error: selected signing identity is not valid in the imported keychain" >&2
+            exit 1
+          }
           echo "Using signing identity: $signing_identity"
           {
             echo "CODESIGN_IDENTITY=$signing_identity"
