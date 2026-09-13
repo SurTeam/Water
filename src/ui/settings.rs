@@ -890,6 +890,7 @@ impl SettingsView {
             } else {
                 theme.inactive_pane_border
             }))
+            .rounded(px(6.))
             .bg(rgb(theme.pane_background))
             .text_color(rgb(theme.terminal_foreground));
         if field.is_color()
@@ -901,7 +902,8 @@ impl SettingsView {
                     .mr(px(8.))
                     .bg(rgb(color))
                     .border_1()
-                    .border_color(rgb(theme.inactive_pane_border)),
+                    .border_color(rgb(theme.inactive_pane_border))
+                    .rounded(px(4.)),
             );
         }
         if field.is_boolean() {
@@ -978,6 +980,7 @@ impl SettingsView {
             .mb(px(16.))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(12.))
             .bg(rgb(theme.chrome_background))
             .flex()
             .flex_col()
@@ -1060,6 +1063,7 @@ impl SettingsView {
                     .text_color(rgb(theme.ui_foreground))
                     .border_1()
                     .border_color(rgb(theme.inactive_pane_border))
+                    .rounded(px(6.))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -1079,6 +1083,7 @@ impl SettingsView {
                     } else {
                         theme.inactive_pane_border
                     }))
+                    .rounded(px(6.))
                     .text_color(rgb(theme.accent_foreground))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1099,6 +1104,7 @@ impl SettingsView {
                     } else {
                         theme.inactive_pane_border
                     }))
+                    .rounded(px(6.))
                     .text_color(rgb(theme.terminal_background))
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1117,6 +1123,7 @@ impl SettingsView {
                     .text_color(rgb(theme.ui_foreground))
                     .border_1()
                     .border_color(rgb(theme.inactive_pane_border))
+                    .rounded(px(6.))
                     .on_mouse_down(MouseButton::Left, |_event: &MouseDownEvent, window, cx| {
                         window.remove_window();
                         cx.stop_propagation();

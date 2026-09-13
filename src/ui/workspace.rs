@@ -3287,7 +3287,14 @@ impl WorkspaceView {
         let special_name =
             terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
                 .is_some();
-        self.focus_terminal_live_bottom(terminal_id, cx);
+        // The running Pi surface owns its screen; do not jump the viewport
+        // to the live bottom on every keystroke. The user's browsing
+        // position is preserved so Pi's full-screen redraw does not cause
+        // a visible jump. Scrollback protection (CSI 3J filter) keeps the
+        // host scrollback clean.
+        if !self.pi_agent_running_for_terminal(terminal_id) {
+            self.focus_terminal_live_bottom(terminal_id, cx);
+        }
         self.clear_ime();
         self.enqueue_terminal_command(
             terminal_id,
@@ -3738,6 +3745,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
+            .rounded(px(6.))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title))
             .on_mouse_down(
@@ -4370,7 +4378,8 @@ impl WorkspaceView {
             .gap(px(2.))
             .bg(rgb(theme.chrome_background))
             .border_1()
-            .border_color(rgb(theme.inactive_pane_border));
+            .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(12.));
         if let Some(rename) = rename {
             menu = menu.child(rename);
         }
@@ -4464,6 +4473,7 @@ impl WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .rounded(px(6.))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, _window, cx| {
@@ -4479,6 +4489,7 @@ impl WorkspaceView {
             .justify_center()
             .flex()
             .bg(rgb(theme.tab_add_background))
+            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4498,6 +4509,7 @@ impl WorkspaceView {
             .bg(rgb(theme.chrome_background))
             .border_1()
             .border_color(rgb(theme.active_pane_border))
+            .rounded(px(12.))
             .text_color(rgb(theme.ui_foreground))
             .child(
                 div()
@@ -4923,6 +4935,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
+            .rounded(px(6.))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5194,9 +5207,10 @@ impl WorkspaceView {
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
-                let smooth_scroll = !(mouse_modes.mouse_reporting
-                    && self.config.features.mouse_reporting)
-                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll);
+                let pi_agent_running = self.pi_agent_running_for_pane(pane_id);
+                let smooth_scroll = !(mouse_modes.mouse_reporting && self.config.features.mouse_reporting)
+                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll)
+                    && !pi_agent_running;
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_grid
                         .map(|snapshot| {
@@ -5265,6 +5279,7 @@ impl WorkspaceView {
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
+                    .rounded(px(12.))
                     .bg(rgb(theme.pane_background))
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
@@ -5381,15 +5396,6 @@ impl WorkspaceView {
                                         },
                                     );
                                 }
-                            } else if this.pi_agent_running_for_pane(pane_id) {
-                                // Pi's default regular TUI redraws the primary
-                                // screen. Keep that session from exposing the
-                                // host scrollback while it is alive; once the
-                                // foreground-process snapshot reports the
-                                // shell again, normal scrolling resumes.
-                                should_repaint =
-                                    this.scroll_accumulators.remove(&terminal_id).is_some();
-                                this.mouse_scroll_animations.remove(&terminal_id);
                             } else {
                                 if input_kind == TerminalScrollInputKind::MouseWheel
                                     && delta_rows.abs() > 1.0
