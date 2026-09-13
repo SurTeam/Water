@@ -1671,13 +1671,6 @@ impl WorkspaceView {
             .find(|agent| agent.pane_id == pane_id)
     }
 
-    fn pi_agent_running_for_pane(&self, pane_id: PaneId) -> bool {
-        self.agent_by_pane_id(pane_id).is_some_and(|agent| {
-            agent.kind == AgentKind::Pi
-                && matches!(agent.status, crate::surface::TerminalStatus::Running)
-        })
-    }
-
     fn pi_agent_running_for_terminal(&self, terminal_id: TerminalId) -> bool {
         self.snapshot.agents.iter().any(|agent| {
             agent.terminal_id == terminal_id
@@ -5148,10 +5141,12 @@ impl WorkspaceView {
                     .as_ref()
                     .map(|snapshot| snapshot.modes)
                     .unwrap_or_default();
-                let pi_agent_running = self.pi_agent_running_for_pane(pane_id);
-                let smooth_scroll = !(mouse_modes.mouse_reporting && self.config.features.mouse_reporting)
-                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll)
-                    && !pi_agent_running;
+                // Agent detection must not change local viewport rendering:
+                // Pi uses the same fractional wheel/trackpad path as every
+                // other terminal unless application-owned input is active.
+                let smooth_scroll = !(mouse_modes.mouse_reporting
+                    && self.config.features.mouse_reporting)
+                    && !(mouse_modes.alternate_screen && mouse_modes.alternate_scroll);
                 let content = if *surface_kind == crate::surface::SurfaceKind::Terminal {
                     terminal_grid
                         .map(|snapshot| {
