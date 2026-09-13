@@ -10,6 +10,7 @@ set -euo pipefail
 # Environment:
 #   CODESIGN_IDENTITY     codesign identity (default: "-" ad-hoc)
 #   CODESIGN_REQUIRED     fail unless a non-ad-hoc signature is produced (default: 0)
+#   CODESIGN_SKIP         skip all codesign calls and leave the app unsigned (default: 0)
 #   WATER_RUST_TOOLCHAIN  rustup toolchain (default: stable)
 #   WATER_APP_VARIANT     "dev" (default) or "release"
 #                         dev: optimized dev profile, bundle ID *.dev, app name "Water Dev"
@@ -134,7 +135,18 @@ fi
 
 codesign_identity="${CODESIGN_IDENTITY:--}"
 codesign_required="${CODESIGN_REQUIRED:-0}"
-if command -v codesign >/dev/null; then
+codesign_skip="${CODESIGN_SKIP:-0}"
+if [[ "$codesign_skip" != "0" && "$codesign_skip" != "1" ]]; then
+  echo "error: CODESIGN_SKIP must be 0 or 1" >&2
+  exit 1
+fi
+if [[ "$codesign_skip" == "1" ]]; then
+  if [[ "$codesign_required" != "0" ]]; then
+    echo "error: CODESIGN_REQUIRED cannot be used with CODESIGN_SKIP=1" >&2
+    exit 1
+  fi
+  echo "Skipping code signing; leaving $app_name.app unsigned"
+elif command -v codesign >/dev/null; then
   if [[ "$codesign_required" != "0" && "$codesign_identity" == "-" ]]; then
     echo "error: CODESIGN_REQUIRED is set but CODESIGN_IDENTITY is ad-hoc" >&2
     exit 1

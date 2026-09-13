@@ -1,10 +1,10 @@
-name: Signed macOS app
+name: Sign macOS app
 
 on:
   workflow_dispatch:
     inputs:
       variant:
-        description: App variant to build
+        description: App variant contained in the unsigned archive
         required: true
         type: choice
         options:
@@ -12,7 +12,7 @@ on:
           - dev
         default: release
       publication:
-        description: GitHub release mode (none only builds and uploads the artifact)
+        description: GitHub release mode after signing
         required: true
         type: choice
         options:
@@ -20,137 +20,143 @@ on:
           - prerelease
           - release
           - none
-        default: draft
+        default: release
       tag:
-        description: Optional tag; defaults to vVERSION for release or dev-TIMESTAMP for dev
-        required: false
+        description: Existing git tag and target release (for example v0.2.9)
+        required: true
         type: string
-  push:
-    tags:
-      - 'v*'
-      - 'dev-*'
+      source_release:
+        description: Draft release containing the unsigned archive (normally the same tag)
+        required: true
+        type: string
+      source_asset:
+        description: Exact unsigned zip asset name
+        required: true
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: signed-macos-${{ github.ref }}
+  group: signed-macos-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  build:
+  sign:
     runs-on: macos-14
     env:
-      EVENT_NAME: ${{ github.event_name }}
-      REF_NAME: ${{ github.ref_name }}
-      INPUT_VARIANT: ${{ inputs.variant }}
-      INPUT_PUBLICATION: ${{ inputs.publication }}
-      INPUT_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      TARGET_VARIANT: ${{ inputs.variant }}
+      RELEASE_PUBLICATION: ${{ inputs.publication }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_RELEASE: ${{ inputs.source_release }}
+      SOURCE_ASSET: ${{ inputs.source_asset }}
       CERTIFICATE_BASE64: ${{ secrets.SURTEAM_CODE_P12_BASE64 }}
       CERTIFICATE_PASSWORD: ${{ secrets.SURTEAM_SIGN_PASS }}
       SIGNING_IDENTITY_OVERRIDE: ${{ secrets.SURTEAM_SIGNING_IDENTITY }}
 
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Resolve build and publication
+      - name: Resolve signing inputs
         id: release
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            case "$REF_NAME" in
-              v*)
-                variant=release
-                publication=release
-                ;;
-              dev-*)
-                variant=dev
-                publication=prerelease
-                ;;
-              *)
-                echo "error: unsupported tag $REF_NAME" >&2
+          case "$TARGET_VARIANT" in
+            release)
+              app_name='Water'
+              gui_binary='water'
+              server_binary='water-server'
+              [[ "$RELEASE_TAG" == v* ]] || {
+                echo "error: release builds require a v* tag" >&2
                 exit 1
-                ;;
-            esac
-            tag="$REF_NAME"
-          elif [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
-            variant="$INPUT_VARIANT"
-            publication="$INPUT_PUBLICATION"
-            tag="$INPUT_TAG"
-          else
-            echo "error: unsupported event $EVENT_NAME" >&2
-            exit 1
-          fi
-
-          case "$variant" in
-            dev|release) ;;
-            *) echo "error: variant must be dev or release" >&2; exit 1 ;;
+              }
+              ;;
+            dev)
+              app_name='Water Dev'
+              gui_binary='water-dev'
+              server_binary='water-srv-dev'
+              [[ "$RELEASE_TAG" == dev-* ]] || {
+                echo "error: dev builds require a dev-* tag" >&2
+                exit 1
+              }
+              ;;
+            *)
+              echo "error: variant must be dev or release" >&2
+              exit 1
+              ;;
           esac
-          case "$publication" in
+
+          case "$RELEASE_PUBLICATION" in
             draft|none) ;;
             prerelease)
-              [[ "$variant" == dev ]] || {
+              [[ "$TARGET_VARIANT" == dev ]] || {
                 echo "error: prerelease is reserved for the dev variant" >&2
                 exit 1
               }
               ;;
             release)
-              [[ "$variant" == release ]] || {
+              [[ "$TARGET_VARIANT" == release ]] || {
                 echo "error: release is reserved for the release variant" >&2
                 exit 1
               }
               ;;
-            *) echo "error: invalid publication mode $publication" >&2; exit 1 ;;
+            *)
+              echo "error: invalid publication mode $RELEASE_PUBLICATION" >&2
+              exit 1
+              ;;
           esac
 
-          version="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
-          [[ -n "$version" ]] || { echo "error: Cargo.toml version is empty" >&2; exit 1; }
-          if [[ -z "$tag" ]]; then
-            if [[ "$variant" == release ]]; then
-              tag="v$version"
-            else
-              tag="dev-$(date -u +%Y%m%d-%H%M)"
-            fi
-          fi
-          [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || {
-            echo "error: tag contains unsupported characters" >&2
+          [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "error: target tag contains unsupported characters" >&2
+            exit 1
+          }
+          [[ "$SOURCE_RELEASE" =~ ^[A-Za-z0-9._-]+$ ]] || {
+            echo "error: source release contains unsupported characters" >&2
+            exit 1
+          }
+          [[ "$SOURCE_ASSET" != */* ]] || {
+            echo "error: source asset must be a filename, not a path" >&2
+            exit 1
+          }
+          case "$SOURCE_ASSET" in
+            "$app_name"-*-macOS-arm64.zip) ;;
+            *)
+              echo "error: source asset does not match the selected app variant" >&2
+              exit 1
+              ;;
+          esac
+          version="${SOURCE_ASSET#"$app_name-"}"
+          version="${version%-macOS-arm64.zip}"
+          [[ -n "$version" && "$version" != "$SOURCE_ASSET" ]] || {
+            echo "error: could not determine app version from source asset" >&2
             exit 1
           }
 
-          if [[ "$variant" == dev ]]; then
-            app_name='Water Dev'
-          else
-            app_name='Water'
-          fi
-          asset="dist/${app_name}-${version}-macOS-arm64.zip"
-          title="${app_name} ${version}"
-
           {
-            echo "variant=$variant"
-            echo "publication=$publication"
-            echo "tag=$tag"
-            echo "version=$version"
             echo "app_name=$app_name"
-            echo "asset=$asset"
-            echo "title=$title"
+            echo "gui_binary=$gui_binary"
+            echo "server_binary=$server_binary"
+            echo "version=$version"
+            echo "title=$app_name $version"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Install cross-build tools
+      - name: Download unsigned app
         shell: bash
+        env:
+          APP_NAME: ${{ steps.release.outputs.app_name }}
         run: |
           set -euo pipefail
-          if ! command -v zig >/dev/null 2>&1; then
-            brew install zig
-          fi
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          if ! command -v cargo-zigbuild >/dev/null 2>&1; then
-            cargo install cargo-zigbuild --locked
-          fi
-          command -v zig
-          command -v cargo-zigbuild
+          unsigned_dir="$RUNNER_TEMP/water-unsigned"
+          signing_dir="$RUNNER_TEMP/water-signing"
+          mkdir -p "$unsigned_dir" "$signing_dir"
+          gh release download "$SOURCE_RELEASE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$SOURCE_ASSET" \
+            --dir "$unsigned_dir"
+          test -s "$unsigned_dir/$SOURCE_ASSET"
+          unzip -q "$unsigned_dir/$SOURCE_ASSET" -d "$signing_dir"
+          test -d "$signing_dir/$APP_NAME.app"
 
       - name: Import SurTeam signing certificate
         shell: bash
@@ -169,10 +175,13 @@ jobs:
           certificate_path="$RUNNER_TEMP/water-signing.p12"
           keychain_path="$RUNNER_TEMP/water-signing.keychain-db"
           keychain_password="$(openssl rand -hex 32)"
+          echo "WATER_SIGNING_KEYCHAIN=$keychain_path" >> "$GITHUB_ENV"
+          echo "WATER_SIGNING_CERTIFICATE=$certificate_path" >> "$GITHUB_ENV"
 
           if ! printf '%s' "$CERTIFICATE_BASE64" | base64 --decode > "$certificate_path" 2>/dev/null; then
             printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
           fi
+          test -s "$certificate_path"
           security create-keychain -p "$keychain_password" "$keychain_path"
           security set-keychain-settings -lut 21600 "$keychain_path"
           security unlock-keychain -p "$keychain_password" "$keychain_path"
@@ -185,9 +194,8 @@ jobs:
             -s -k "$keychain_password" "$keychain_path" >/dev/null
           security list-keychains -d user -s "$keychain_path"
 
-          # `-v` excludes self-signed identities on some macOS runner images.
-          # The imported identity is still usable by codesign once its private
-          # key is unlocked and its partition list is configured.
+          # Do not use `-v` here: it excludes self-signed identities on some
+          # macOS runner images even though codesign can use the imported key.
           identity_listing="$(security find-identity -p codesigning "$keychain_path")"
           if [[ -n "$SIGNING_IDENTITY_OVERRIDE" ]]; then
             signing_identity="$SIGNING_IDENTITY_OVERRIDE"
@@ -196,69 +204,88 @@ jobs:
               awk -F '"' '/^[[:space:]]*[0-9]+\)/ { print $2; exit }')"
           fi
           [[ -n "$signing_identity" ]] || {
-            echo "error: no valid codesigning identity found in SurTeamCode.p12" >&2
+            echo "error: no Code Signing identity found in SurTeamCode.p12" >&2
             exit 1
           }
           printf '%s\n' "$identity_listing" | grep -Fq "\"$signing_identity\"" || {
-            echo "error: selected signing identity is not valid in the imported keychain" >&2
+            echo "error: selected signing identity is not present in the imported keychain" >&2
             exit 1
           }
-          echo "Using signing identity: $signing_identity"
-          {
-            echo "CODESIGN_IDENTITY=$signing_identity"
-            echo "CODESIGN_REQUIRED=1"
-            echo "WATER_SIGNING_KEYCHAIN=$keychain_path"
-            echo "WATER_SIGNING_CERTIFICATE=$certificate_path"
-          } >> "$GITHUB_ENV"
+          echo "CODESIGN_IDENTITY=$signing_identity" >> "$GITHUB_ENV"
 
-      - name: Build signed Water.app
-        shell: bash
-        env:
-          WATER_APP_VARIANT: ${{ steps.release.outputs.variant }}
-        run: bash scripts/build-macos-app.sh
-
-      - name: Verify signed bundle and archive
+      - name: Sign app
         shell: bash
         env:
           APP_NAME: ${{ steps.release.outputs.app_name }}
-          ASSET: ${{ steps.release.outputs.asset }}
+          GUI_BINARY: ${{ steps.release.outputs.gui_binary }}
+          SERVER_BINARY: ${{ steps.release.outputs.server_binary }}
         run: |
           set -euo pipefail
-          app_dir="dist/${APP_NAME}.app"
-          test -s "$ASSET"
-          codesign --verify --deep --strict --verbose=2 "$app_dir"
-          codesign --verify --strict "$app_dir/Contents/MacOS/water" 2>/dev/null ||
-            codesign --verify --strict "$app_dir/Contents/MacOS/water-dev"
-          codesign --display --verbose=2 "$app_dir" 2>&1
-          unzip -l "$ASSET" | grep -Fq "${APP_NAME}.app/"
+          app_dir="$RUNNER_TEMP/water-signing/$APP_NAME.app"
+          test -x "$app_dir/Contents/MacOS/$SERVER_BINARY"
+          test -x "$app_dir/Contents/MacOS/$GUI_BINARY"
 
-      - name: Upload signed artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.release.outputs.app_name }}-${{ steps.release.outputs.version }}-macOS-arm64
-          path: ${{ steps.release.outputs.asset }}
-          if-no-files-found: error
-          retention-days: 14
+          # Sign nested executables before the containing app bundle.
+          codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+            "$app_dir/Contents/MacOS/$SERVER_BINARY"
+          codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+            "$app_dir/Contents/MacOS/$GUI_BINARY"
+          codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+            "$app_dir"
 
-      - name: Publish GitHub release
-        if: steps.release.outputs.publication != 'none'
+      - name: Verify signed app and archive
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          RELEASE_TITLE: ${{ steps.release.outputs.title }}
-          RELEASE_PUBLICATION: ${{ steps.release.outputs.publication }}
-          ASSET: ${{ steps.release.outputs.asset }}
+          APP_NAME: ${{ steps.release.outputs.app_name }}
         run: |
           set -euo pipefail
-          args=(--title "$RELEASE_TITLE" --target "$GITHUB_SHA")
+          app_dir="$RUNNER_TEMP/water-signing/$APP_NAME.app"
+          signed_asset="$RUNNER_TEMP/$SOURCE_ASSET"
+          codesign --verify --deep --strict --verbose=2 "$app_dir"
+          codesign --display --verbose=2 "$app_dir" 2>&1
+          (cd "$RUNNER_TEMP/water-signing" && zip -r -X -q "$signed_asset" "$APP_NAME.app")
+          test -s "$signed_asset"
+          unzip -tq "$signed_asset"
+          echo "WATER_SIGNED_ASSET=$signed_asset" >> "$GITHUB_ENV"
+
+      - name: Upload signed asset and publish release
+        shell: bash
+        env:
+          RELEASE_TITLE: ${{ steps.release.outputs.title }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$WATER_SIGNED_ASSET" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            create_args=(--title "$RELEASE_TITLE" --generate-notes --verify-tag)
+            case "$RELEASE_PUBLICATION" in
+              release) create_args+=(--latest) ;;
+              prerelease) create_args+=(--prerelease) ;;
+              draft|none) create_args+=(--draft) ;;
+            esac
+            gh release create "$RELEASE_TAG" "$WATER_SIGNED_ASSET" \
+              --repo "$GITHUB_REPOSITORY" "${create_args[@]}"
+            exit 0
+          fi
+
           case "$RELEASE_PUBLICATION" in
-            release) args+=(--latest --generate-notes) ;;
-            prerelease) args+=(--prerelease --generate-notes) ;;
-            draft) args+=(--draft) ;;
-            *) echo "error: publication was not resolved" >&2; exit 1 ;;
+            release)
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --title "$RELEASE_TITLE" --draft=false --prerelease=false --latest
+              ;;
+            prerelease)
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --title "$RELEASE_TITLE" --draft=false --prerelease
+              ;;
+            draft)
+              gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --title "$RELEASE_TITLE" --draft
+              ;;
+            none)
+              echo "Signed asset uploaded; release remains unchanged"
+              ;;
           esac
-          gh release create "$RELEASE_TAG" "$ASSET" "${args[@]}"
 
       - name: Remove temporary signing keychain
         if: always()
@@ -268,4 +295,6 @@ jobs:
           if [[ -n "${WATER_SIGNING_KEYCHAIN:-}" ]]; then
             security delete-keychain "$WATER_SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
           fi
-          rm -f -- "${WATER_SIGNING_CERTIFICATE:-}"
+          if [[ -n "${WATER_SIGNING_CERTIFICATE:-}" ]]; then
+            rm -f -- "$WATER_SIGNING_CERTIFICATE"
+          fi
