@@ -9,6 +9,7 @@ set -euo pipefail
 #
 # Environment:
 #   CODESIGN_IDENTITY     codesign identity (default: "-" ad-hoc)
+#   CODESIGN_REQUIRED     fail unless a non-ad-hoc signature is produced (default: 0)
 #   WATER_RUST_TOOLCHAIN  rustup toolchain (default: stable)
 #   WATER_APP_VARIANT     "dev" (default) or "release"
 #                         dev: optimized dev profile, bundle ID *.dev, app name "Water Dev"
@@ -132,9 +133,29 @@ else
 fi
 
 codesign_identity="${CODESIGN_IDENTITY:--}"
+codesign_required="${CODESIGN_REQUIRED:-0}"
 if command -v codesign >/dev/null; then
-  codesign --force --deep --sign "$codesign_identity" "$app_dir" >/dev/null
+  if [[ "$codesign_required" != "0" && "$codesign_identity" == "-" ]]; then
+    echo "error: CODESIGN_REQUIRED is set but CODESIGN_IDENTITY is ad-hoc" >&2
+    exit 1
+  fi
+  if [[ "$codesign_identity" == "-" ]]; then
+    # Keep local/test builds compatible with the historical ad-hoc default.
+    codesign --force --deep --sign "$codesign_identity" "$app_dir" >/dev/null
+  else
+    # Sign nested code before the containing bundle. This avoids --deep
+    # silently selecting an unintended identity for the embedded server.
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" \
+      "$macos_dir/$server_installed_name" >/dev/null
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" \
+      "$macos_dir/$gui_installed_name" >/dev/null
+    codesign --force --options runtime --timestamp --sign "$codesign_identity" \
+      "$app_dir" >/dev/null
+  fi
   codesign --verify --deep --strict "$app_dir"
+elif [[ "$codesign_required" != "0" ]]; then
+  echo "error: CODESIGN_REQUIRED is set but codesign is unavailable" >&2
+  exit 1
 else
   echo "note: codesign not found; skipping signature steps"
 fi

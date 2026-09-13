@@ -26,10 +26,14 @@ WATER_SERVER_BUNDLE_DIR="$server_bundle_dir" WATER_REQUIRE_EMBEDDED_SERVERS=1 \
 
 # Rename the GUI + server so ps/kill show water-dev / water-srv-dev for dev
 # builds without relying on prctl (which is not safe Rust).
-cp -f "$root_dir/target/$profile/water" "$root_dir/target/$profile/$binary_name"
-chmod 755 "$root_dir/target/$profile/$binary_name"
-cp -f "$root_dir/target/$profile/water-server" "$root_dir/target/$profile/$server_name"
-chmod 755 "$root_dir/target/$profile/$server_name"
+if [[ "$binary_name" != "water" ]]; then
+  cp -f "$root_dir/target/$profile/water" "$root_dir/target/$profile/$binary_name"
+  chmod 755 "$root_dir/target/$profile/$binary_name"
+fi
+if [[ "$server_name" != "water-server" ]]; then
+  cp -f "$root_dir/target/$profile/water-server" "$root_dir/target/$profile/$server_name"
+  chmod 755 "$root_dir/target/$profile/$server_name"
+fi
 
 mkdir -p "$dist_dir"
 tar -C "$root_dir/target/$profile" -czf "$dist_dir/$package_name-${version}-${arch}-linux.tar.gz" "$binary_name" "$server_name"

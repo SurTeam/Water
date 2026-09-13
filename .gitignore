@@ -4,3 +4,7 @@
 .DS_Store
 *.sock
 .pi/
+.env
+.env.*
+!.env.example
+*.p12

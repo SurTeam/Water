@@ -24,7 +24,13 @@ fn dev_and_release_packages_keep_matching_servers_and_separate_outputs() {
         .as_nanos();
     let root =
         Fixture(std::env::temp_dir().join(format!("water-package-{}-{nonce}", std::process::id())));
-    for directory in ["scripts", "assets/macos", "bin", "dist"] {
+    for directory in [
+        "scripts",
+        "assets/macos",
+        "bin",
+        "dist",
+        ".agents/skills/water-control",
+    ] {
         fs::create_dir_all(root.0.join(directory)).unwrap();
     }
     for (name, content) in [
@@ -45,6 +51,10 @@ fn dev_and_release_packages_keep_matching_servers_and_separate_outputs() {
         (
             "assets/macos/Info.plist.template",
             "__BUNDLE_ID__ __APP_NAME__ __WATER_VERSION__",
+        ),
+        (
+            ".agents/skills/water-control/SKILL.md",
+            include_str!("../.agents/skills/water-control/SKILL.md"),
         ),
         ("bin/mock", MOCK),
     ] {
@@ -79,7 +89,12 @@ fn dev_and_release_packages_keep_matching_servers_and_separate_outputs() {
             } else {
                 "Water"
             };
-            for binary in ["water", "water-server"] {
+            let binaries = if variant == "dev" {
+                ["water-dev", "water-srv-dev"]
+            } else {
+                ["water", "water-server"]
+            };
+            for binary in binaries {
                 let actual = fs::read_to_string(
                     root.0
                         .join(format!("dist/{app}.app/Contents/MacOS/{binary}")),

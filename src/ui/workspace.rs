@@ -311,7 +311,6 @@ const TERMINAL_SELECTION_AUTOSCROLL_STEP_ROWS: i64 = 3;
 
 #[derive(Debug, Clone)]
 struct TerminalMouseScrollAnimation {
-    pane_id: PaneId,
     start_position: f32,
     target_position: f32,
     started_at: Instant,
@@ -420,15 +419,6 @@ fn reconcile_visual_scroll(state: &mut TerminalScrollState, snapshot: &TerminalS
         state.visual_unacked_rows = 0.0;
         state.requested_viewport_position = snapshot.viewport_position;
     }
-}
-
-fn record_latest_viewport_request(
-    pending: &mut BTreeMap<TerminalId, (PaneId, i64)>,
-    terminal_id: TerminalId,
-    pane_id: PaneId,
-    target: i64,
-) {
-    pending.insert(terminal_id, (pane_id, target));
 }
 
 static SCROLL_STATS_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -835,8 +825,6 @@ pub struct WorkspaceView {
     /// local emulators (the server projects control-plane metadata only).
     terminal_snapshots: BTreeMap<TerminalId, std::sync::Arc<TerminalSnapshot>>,
     active_trackpad_scrolls: BTreeSet<TerminalId>,
-    pending_viewport_requests: BTreeMap<TerminalId, (PaneId, i64)>,
-    viewport_request_frame_pending: bool,
     mouse_scroll_animations: BTreeMap<TerminalId, TerminalMouseScrollAnimation>,
     mouse_scroll_frame_pending: bool,
     selection_autoscroll: Option<TerminalSelectionAutoscroll>,
@@ -964,8 +952,6 @@ impl WorkspaceView {
             focused_pane,
             scroll_accumulators: BTreeMap::new(),
             active_trackpad_scrolls: BTreeSet::new(),
-            pending_viewport_requests: BTreeMap::new(),
-            viewport_request_frame_pending: false,
             mouse_scroll_animations: BTreeMap::new(),
             mouse_scroll_frame_pending: false,
             selection_autoscroll: None,
@@ -1037,7 +1023,6 @@ impl WorkspaceView {
         );
         self.scroll_accumulators.clear();
         self.active_trackpad_scrolls.clear();
-        self.pending_viewport_requests.clear();
         self.mouse_scroll_animations.clear();
         self.render_caches
             .lock()
@@ -2350,19 +2335,14 @@ impl WorkspaceView {
     }
 
     /// Returns a terminal to its live viewport before user input reaches the
-    /// shell. Cancel every UI-local scroll source first so a request already
-    /// scheduled for the next frame cannot pull the viewport back into
-    /// history after the input-triggered jump.
+    /// shell. Cancel every UI-local scroll source first so an in-flight
+    /// request cannot pull the viewport back into history after the
+    /// input-triggered jump.
     fn focus_terminal_live_bottom(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
         self.selection = None;
         self.selection_autoscroll = None;
         self.active_trackpad_scrolls.remove(&terminal_id);
         self.mouse_scroll_animations.remove(&terminal_id);
-        let had_pending_request = self
-            .pending_viewport_requests
-            .remove(&terminal_id)
-            .is_some();
-
         let viewport_position = self
             .terminal_snapshot_for(terminal_id)
             .map(|snapshot| snapshot.viewport_position)
@@ -2371,8 +2351,7 @@ impl WorkspaceView {
             .scroll_accumulators
             .entry(terminal_id)
             .or_insert_with(|| TerminalScrollState::new(viewport_position));
-        let was_scrolled = had_pending_request
-            || state.observed_viewport_position != 0
+        let was_scrolled = state.observed_viewport_position != 0
             || state.visual_unacked_rows != 0.0
             || state.requested_viewport_position != 0;
         if !was_scrolled {
@@ -2389,39 +2368,6 @@ impl WorkspaceView {
         scroll_stat_inc(&SCROLL_VIEWPORT_REQUESTS);
         scroll_stat_max_unacked(state.visual_unacked_rows);
 
-        self.apply_local_viewport(terminal_id, Some(0), None, cx);
-        cx.notify();
-    }
-
-    /// Like [`Self::focus_terminal_live_bottom`] but for output-driven jumps
-    /// while Pi's regular TUI is running and the user is browsing scrollback:
-    /// the live-bottom request is issued (so returning to the bottom is
-    /// immediate once the user asks for it) but the visual unacked offset is
-    /// not pre-painted, so the current reading position stays on screen until
-    /// the user explicitly returns to the bottom.
-    fn focus_terminal_live_bottom_guarded(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
-        self.selection = None;
-        self.selection_autoscroll = None;
-        self.active_trackpad_scrolls.remove(&terminal_id);
-        self.mouse_scroll_animations.remove(&terminal_id);
-        self.pending_viewport_requests.remove(&terminal_id);
-
-        let viewport_position = self
-            .terminal_snapshot_for(terminal_id)
-            .map(|snapshot| snapshot.viewport_position)
-            .unwrap_or_default();
-        let state = self
-            .scroll_accumulators
-            .entry(terminal_id)
-            .or_insert_with(|| TerminalScrollState::new(viewport_position));
-        if viewport_position == 0 {
-            return;
-        }
-        // Rebase without a visual jump: the observed viewport stays where the
-        // user is reading; the requested target is the live bottom.
-        state.visual_unacked_rows = 0.0;
-        state.requested_viewport_position = 0;
-        state.request_started_at = Some(Instant::now());
         self.apply_local_viewport(terminal_id, Some(0), None, cx);
         cx.notify();
     }
@@ -2452,22 +2398,10 @@ impl WorkspaceView {
                 crate::metrics::inc(crate::metrics::hidden_terminal_updates());
                 continue;
             }
-            // While the user is browsing scrollback (viewport above the
-            // live bottom), output must not pull the viewport to the live
-            // bottom. The pinned emulator viewport plus the disabled
-            // smooth-scroll paint offset keep the reading position stable
-            // while new output grows the grid behind it. Keystrokes
-            // (focus_terminal_live_bottom in the input handler) return the
-            // viewport to the live bottom, which also trims the scrollback
-            // back to the configured limit.
-            let is_browsing = self
-                .terminal_snapshot_for(terminal_id)
-                .is_some_and(|snapshot| snapshot.viewport_position > 0);
-            if is_browsing {
-                self.focus_terminal_live_bottom_guarded(terminal_id, cx);
-            }
-            // At the live bottom (viewport_position == 0) the emulator is
-            // already in live-follow mode — no action needed on output.
+            // Output only refreshes the local terminal projection. It must
+            // never issue a viewport command: while browsing, the emulator's
+            // pin keeps the reading position stable, and only an explicit
+            // user action is allowed to return to the live bottom.
             let previous = self.terminal_snapshots.get(&terminal_id).cloned();
             let previous_ref = previous.as_deref();
             let snapshot = application.terminal_snapshot(connection_id, terminal_id, previous_ref);
@@ -2647,34 +2581,16 @@ impl WorkspaceView {
             .accumulate_with_boundaries(delta_rows, at_history_start, at_live_bottom)
     }
 
-    fn queue_terminal_viewport_request(
+    fn apply_terminal_viewport_request(
         &mut self,
         terminal_id: TerminalId,
-        pane_id: PaneId,
         target: i64,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Input can arrive much faster than a display refresh. Preserve every
-        // fractional delta and commit the latest local target once per frame.
-        record_latest_viewport_request(
-            &mut self.pending_viewport_requests,
-            terminal_id,
-            pane_id,
-            target,
-        );
-        if self.viewport_request_frame_pending {
-            return;
-        }
-        self.viewport_request_frame_pending = true;
-        cx.on_next_frame(window, |this, _window, _cx| {
-            this.viewport_request_frame_pending = false;
-            for (terminal_id, (_pane_id, target)) in
-                std::mem::take(&mut this.pending_viewport_requests)
-            {
-                this.apply_local_viewport(terminal_id, Some(target), None, _cx);
-            }
-        });
+        // Commit the semantic viewport before the next PTY event can be
+        // applied. The local accumulator still keeps the paint smooth, while
+        // the worker receives the pin and absolute target in FIFO order.
+        self.apply_local_viewport(terminal_id, Some(target), None, cx);
     }
 
     fn visual_terminal_position(&self, terminal_id: TerminalId) -> f32 {
@@ -2705,7 +2621,6 @@ impl WorkspaceView {
     fn begin_mouse_scroll_animation(
         &mut self,
         terminal_id: TerminalId,
-        pane_id: PaneId,
         delta_rows: f32,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -2728,13 +2643,12 @@ impl WorkspaceView {
         let immediate_delta = (target_position - current) * MOUSE_SCROLL_IMMEDIATE_FRACTION;
         let (request, repaint) = self.accumulate_terminal_scroll(terminal_id, immediate_delta);
         if let Some(target) = request {
-            self.queue_terminal_viewport_request(terminal_id, pane_id, target, window, cx);
+            self.apply_terminal_viewport_request(terminal_id, target, cx);
         }
         let start_position = self.visual_terminal_position(terminal_id);
         self.mouse_scroll_animations.insert(
             terminal_id,
             TerminalMouseScrollAnimation {
-                pane_id,
                 start_position,
                 target_position,
                 started_at: Instant::now(),
@@ -2769,13 +2683,7 @@ impl WorkspaceView {
                 let (request, changed) = this.accumulate_terminal_scroll(terminal_id, delta_rows);
                 repaint |= changed;
                 if let Some(target) = request {
-                    this.queue_terminal_viewport_request(
-                        terminal_id,
-                        animation.pane_id,
-                        target,
-                        window,
-                        cx,
-                    );
+                    this.apply_terminal_viewport_request(terminal_id, target, cx);
                 }
                 if done {
                     finished.push(terminal_id);
@@ -3333,10 +3241,8 @@ impl WorkspaceView {
             terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
                 .is_some();
         // Like every other input path, a keystroke returns the viewport to
-        // the live bottom (focus_terminal_live_bottom below). While Pi's
-        // regular TUI is running, its output-driven redraws use the guarded
-        // variant in apply_terminal_events, so the user's browsing position
-        // is not moved by Pi's own output.
+        // the live bottom. Output-driven updates never issue a viewport
+        // command, so browsing remains at the user's reading position.
         self.focus_terminal_live_bottom(terminal_id, cx);
         self.clear_ime();
         self.enqueue_terminal_command(
@@ -3499,14 +3405,6 @@ impl WorkspaceView {
                 let base = snapshot.viewport_position as f32;
                 !((snapshot.rows_before.is_empty() && animation.target_position > base)
                     || (snapshot.rows_after.is_empty() && animation.target_position < base))
-            });
-        self.pending_viewport_requests
-            .retain(|terminal_id, (_, target)| {
-                let Some(snapshot) = self.terminal_snapshots.get(terminal_id) else {
-                    return false;
-                };
-                !((snapshot.rows_before.is_empty() && *target > snapshot.viewport_position)
-                    || (snapshot.rows_after.is_empty() && *target < snapshot.viewport_position))
             });
         if self
             .context_menu
@@ -5445,7 +5343,6 @@ impl WorkspaceView {
                                 {
                                     should_repaint = this.begin_mouse_scroll_animation(
                                         terminal_id,
-                                        pane_id,
                                         delta_rows,
                                         window,
                                         cx,
@@ -5460,13 +5357,7 @@ impl WorkspaceView {
                                         this.accumulate_terminal_scroll(terminal_id, delta_rows);
                                     should_repaint = repaint;
                                     if let Some(target) = target {
-                                        this.queue_terminal_viewport_request(
-                                            terminal_id,
-                                            pane_id,
-                                            target,
-                                            window,
-                                            cx,
-                                        );
+                                        this.apply_terminal_viewport_request(terminal_id, target, cx);
                                     }
                                 }
                             }
@@ -8696,7 +8587,6 @@ mod tests {
     fn mouse_scroll_animation_uses_elapsed_time_and_finishes_exactly() {
         let started_at = Instant::now();
         let animation = TerminalMouseScrollAnimation {
-            pane_id: PaneId::new(1),
             start_position: 10.6,
             target_position: 13.0,
             started_at,
@@ -8713,18 +8603,6 @@ mod tests {
         let (finished, done) = animation.position_at(started_at + MOUSE_SCROLL_ANIMATION_DURATION);
         assert!(done);
         assert!((finished - 13.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn ui_viewport_requests_are_latest_wins_within_a_frame() {
-        let terminal_id = TerminalId::new(1);
-        let pane_id = PaneId::new(2);
-        let mut pending = BTreeMap::new();
-        for target in 1..=20 {
-            record_latest_viewport_request(&mut pending, terminal_id, pane_id, target);
-        }
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[&terminal_id], (pane_id, 20));
     }
 
     #[test]
