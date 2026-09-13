@@ -150,6 +150,12 @@ jobs:
           unsigned_dir="$RUNNER_TEMP/water-unsigned"
           signing_dir="$RUNNER_TEMP/water-signing"
           mkdir -p "$unsigned_dir" "$signing_dir"
+          source_is_draft="$(gh release view "$SOURCE_RELEASE" \
+            --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')"
+          [[ "$source_is_draft" == true ]] || {
+            echo "error: source release must remain a draft until signing completes" >&2
+            exit 1
+          }
           gh release download "$SOURCE_RELEASE" \
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$SOURCE_ASSET" \

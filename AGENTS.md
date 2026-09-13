@@ -77,3 +77,20 @@ Agent 可能依附于正在运行的 Water server；不要终止承载当前会�
 - Linux → macOS 构建沿用现有 zig linker、framework stubs 和平台 patch；Metal shader 在 Mac 预编译并维护仓库产物。入口见架构文档，交叉构建成功不等于 macOS 运行验证。
 - 新增路径先查 `git ls-files` 的大小写冲突；只保留一个 `AGENTS.md`，不要再创建 `Agents.md`。
 - Python 优先 `~/.venv/bin/python` / `~/.venv/bin/pip`；Node 工具先加载 fnm 环境并遵循项目指定版本。
+
+## GitHub Actions 签名发布规则
+
+- `.github/workflows/macos-signed.yml` 是 signing-only workflow，唯一触发方式是 `workflow_dispatch`；tag push 不触发它。不得为了发布把 `cargo`、`cargo-zigbuild`、`zig`、Rust checkout 或完整构建重新放回该 workflow。
+- workflow 必须同时接收 `variant`、`publication`、`tag`、`source_release` 和 `source_asset`：`release` 只能使用 `v*` tag 并发布正式版，`dev` 只能使用 `dev-*` tag；`prerelease` 只用于 dev，`draft`/`none` 可用于两者。
+- `source_release` 必须是目标 tag 对应的 draft release，`source_asset` 必须是精确的 `Water-x.y.z-macOS-arm64.zip` 或 `Water Dev-x.y.z-macOS-arm64.zip` 文件名。Action 只下载该 zip、解压、导入临时 keychain、签 nested server/GUI 和 app、执行 `codesign --verify --deep --strict`，然后以同名 signed asset 替换 draft 中的 unsigned asset；校验失败时禁止发布。
+- 固定交接顺序是：本地 `CODESIGN_SKIP=1 WATER_APP_VARIANT=... bash scripts/build-macos-app.sh` → 确认 `test -s` 和 `unzip -t` → `scripts/publish-unsigned-macos.sh` 创建/更新 draft 并触发 Action。不要直接把本地 `.app` 提交进 Git；unsigned zip 只作为 draft release 的临时传输资产。
+- 手动触发时使用 `gh workflow run`，并从 `main` 读取最新 workflow；例如：
+
+  ```bash
+  gh workflow run macos-signed.yml --repo SurTeam/Water --ref main \
+    -f variant=release -f publication=release -f tag=v${VERSION} \
+    -f source_release=v${VERSION} \
+    -f source_asset="Water-${VERSION}-macOS-arm64.zip"
+  ```
+
+- 签名 Secret 只能使用 `SURTEAM_CODE_P12_BASE64`、`SURTEAM_SIGN_PASS` 和可选的 `SURTEAM_SIGNING_IDENTITY`；p12、密码和明文 identity 不得进入仓库、workflow 输出或 shell tracing。Action 必须使用临时 keychain，并在 `always()` 清理 keychain 和 p12 文件。自签名证书在 runner 上发现 identity 时不得恢复 `security find-identity -v`，最终以实际 `codesign` 验证为准。
