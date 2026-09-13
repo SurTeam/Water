@@ -453,10 +453,13 @@ impl TerminalEmulator {
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.trim_scrollback_to_configured_limit();
         self.viewport_pinned = false;
         self.pinned_viewport = 0;
         self.term.scroll_display(Scroll::Bottom);
+        // Trim only after the viewport has moved: the temporary history kept
+        // above the browsing viewport must still be present while the grid
+        // resolves its live bottom.
+        self.trim_scrollback_to_configured_limit();
         self.dirty = true;
     }
 
@@ -522,7 +525,11 @@ impl TerminalEmulator {
             }
             self.viewport_pinned = true;
             self.term.grid_mut().update_history(usize::MAX);
-        } else {
+        } else if self.viewport_pinned {
+            // Only a pin->unpin transition keeps temporary rows above the
+            // current (now released) viewport; a repeated SetPinned(false)
+            // must not trim history the UI is still browsing while an
+            // absolute ScrollTo target is about to land.
             self.trim_scrollback_to_configured_limit();
             self.viewport_pinned = false;
             self.pinned_viewport = 0;
@@ -753,6 +760,42 @@ mod tests {
         // Moving toward the live tail is the point at which temporary rows
         // become disposable. The grid must return to the configured bound.
         emulator.scroll_by(-1);
+        assert_eq!(emulator.history_len(), configured_scrollback as i64);
+    }
+
+    #[test]
+    fn repeated_unpin_does_not_trim_history_above_the_viewport() {
+        let size = TerminalSize::new(12, 4);
+        let configured_scrollback = 20;
+        let mut emulator = TerminalEmulator::new(TerminalId::new(11), size, configured_scrollback);
+        for i in 0..30u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("old {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        emulator.scroll_by(2);
+        // While pinned, browsing keeps temporary history rows above the
+        // configured limit; the first downward scroll trims them back.
+        emulator.set_viewport_pinned(true);
+        for i in 30..60u32 {
+            emulator.apply(&output(
+                i as TerminalSeq + 1,
+                &format!("new {i}\r\n").into_bytes(),
+                size,
+            ));
+        }
+        assert!(
+            emulator.history_len() > configured_scrollback as i64,
+            "pinned browsing must retain temporary history rows"
+        );
+        emulator.scroll_by(-1);
+        assert_eq!(emulator.history_len(), configured_scrollback as i64);
+        // Scrolling to the live bottom resolves the grid first and then
+        // trims back to the configured limit.
+        emulator.scroll_to_bottom();
+        assert!(emulator.at_bottom());
         assert_eq!(emulator.history_len(), configured_scrollback as i64);
     }
 

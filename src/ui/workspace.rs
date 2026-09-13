@@ -2573,7 +2573,14 @@ impl WorkspaceView {
         // resolve. Once the viewport ACK lands, the snapshot is rebuilt with
         // a new overscan window centered on the new viewport.
         let overscan = snapshot.rows_before.len() as f32;
-        offset.clamp(-(snapshot.rows_after.len() as f32), overscan)
+        // Downward (negative) movement is additionally bounded by the
+        // distance to the materialized live bottom (last_source_row).
+        // Without this clamp, an input-triggered jump to the live bottom
+        // (visual_unacked_rows = -viewport_position) is painted clamped to
+        // -rows_after.len(), shifting the window up for the frames before
+        // the ScrollTo(0) ACK lands.
+        let live_bottom_limit = snapshot.last_source_row.min(overscan as i64) as f32;
+        offset.clamp(-live_bottom_limit, overscan)
     }
 
     fn accumulate_terminal_scroll(
@@ -9062,6 +9069,80 @@ mod tests {
 
         assert_eq!(selection.anchor.position.row, 1);
         assert_eq!(selection.head.position.row, 2);
+    }
+
+    #[test]
+    fn paint_downward_offset_is_bounded_by_the_semantic_live_bottom() {
+        // Regression: browsing history with the live tail inside the 32-row
+        // overscan, an input-triggered jump to the live bottom used to be
+        // painted clamped to -rows_after.len() (a visible upward jump) until
+        // the ScrollTo(0) ACK landed. The clamp mirrors
+        // terminal_scroll_offset_for_snapshot.
+        let terminal_id = TerminalId::new(9);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 5));
+        snapshot.viewport_position = 2;
+        snapshot.display_offset = 2;
+        // Simulate a real from_term snapshot: last_source_row is the
+        // distance from the viewport bottom to the newest materialized
+        // row (the live tail when the overscan reaches it).
+        snapshot.last_source_row = 2;
+        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+
+        // The clamp (mirroring terminal_scroll_offset_for_snapshot) allows
+        // the full -viewport_position jump, not just -rows_after.len().
+        let clamp = |offset: f32, snap: &TerminalSnapshot| {
+            let overscan = snap.rows_before.len() as f32;
+            let limit = snap.last_source_row.min(overscan as i64) as f32;
+            offset.clamp(-limit, overscan)
+        };
+        let jump = -2.0;
+        // With the materialized window reaching the live tail (last_source_row=2),
+        // the full jump to the live bottom is allowed.
+        assert_eq!(clamp(jump, &snapshot), -2.0);
+
+        // If the materialized window stops one row short of the live tail
+        // while browsing deeper (viewport 3), the paint offset is capped
+        // at the materialized live bottom (-2) instead of pretending to
+        // address the tail row (-3).
+        let short = TerminalSnapshot {
+            last_source_row: 1,
+            viewport_position: 3,
+            ..snapshot.clone()
+        };
+        assert_eq!(clamp(-3.0, &short), -1.0);
+
+        // When the materialized window already stops at the live tail
+        // (no overscan below), the jump is still bounded by the
+        // materialized live bottom.
+        let bottom = TerminalSnapshot {
+            last_source_row: 2,
+            rows_after: Vec::new(),
+            ..snapshot.clone()
+        };
+        assert_eq!(clamp(jump, &bottom), -2.0);
+
+        // Deep browsing: the user is 10 rows above the live tail and the
+        // materialized window stops 2 rows short of it. The input-triggered
+        // jump must be capped at the materialized live bottom (-2), not
+        // pretend to address the tail row (-10).
+        let deep = TerminalSnapshot {
+            last_source_row: 2,
+            viewport_position: 10,
+            ..snapshot.clone()
+        };
+        assert_eq!(clamp(-10.0, &deep), -2.0);
+        // With a larger materialized window (overscan 4) the jump is
+        // capped at the materialized live bottom (-4), still short of the
+        // semantic tail (-10).
+        let deep_reached = TerminalSnapshot {
+            last_source_row: 4,
+            viewport_position: 10,
+            ..snapshot.clone()
+        };
+        assert_eq!(clamp(-10.0, &deep_reached), -2.0);
     }
 
     #[test]

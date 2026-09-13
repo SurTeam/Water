@@ -455,6 +455,11 @@ pub struct TerminalSnapshot {
     pub rows_before: Vec<TerminalRowSnapshot>,
     /// Available grid rows below the visible viewport, nearest first.
     pub rows_after: Vec<TerminalRowSnapshot>,
+    /// Distance in rows from the visible viewport's last row down to the
+    /// newest materialized row (the live tail when the `rows_after`
+    /// overscan reaches it). Paint consumers clamp the unacked downward
+    /// offset against this distance, not against `rows_after` alone.
+    pub last_source_row: i64,
 }
 
 #[derive(Serialize)]
@@ -472,6 +477,7 @@ struct TerminalSnapshotRef<'a> {
     cells: Vec<&'a TerminalCell>,
     rows_before: Vec<&'a [TerminalCell]>,
     rows_after: Vec<&'a [TerminalCell]>,
+    last_source_row: i64,
 }
 
 #[derive(Deserialize)]
@@ -495,6 +501,8 @@ struct TerminalSnapshotOwned {
     rows_before: Vec<Vec<TerminalCell>>,
     #[serde(default)]
     rows_after: Vec<Vec<TerminalCell>>,
+    #[serde(default)]
+    last_source_row: i64,
 }
 
 impl Serialize for TerminalSnapshot {
@@ -516,6 +524,7 @@ impl Serialize for TerminalSnapshot {
             cells: self.rows.iter().flat_map(|row| row.iter()).collect(),
             rows_before: self.rows_before.iter().map(AsRef::as_ref).collect(),
             rows_after: self.rows_after.iter().map(AsRef::as_ref).collect(),
+            last_source_row: self.last_source_row,
         }
         .serialize(serializer)
     }
@@ -554,6 +563,9 @@ impl<'de> Deserialize<'de> for TerminalSnapshot {
                 .into_iter()
                 .map(|row| Arc::from(row.into_boxed_slice()))
                 .collect(),
+            // Wire snapshots carry the semantic live bottom; the materialized
+            // window is not the clamp authority for them.
+            last_source_row: wire.last_source_row,
         })
     }
 }
@@ -590,6 +602,7 @@ impl TerminalSnapshot {
                 .collect(),
             rows_before: Vec::new(),
             rows_after: Vec::new(),
+            last_source_row: 0,
         }
     }
 
@@ -706,6 +719,7 @@ impl TerminalSnapshot {
             rows: visible_rows,
             rows_before: Vec::new(),
             rows_after: Vec::new(),
+            last_source_row: self.last_source_row.saturating_sub(removed as i64),
         }
     }
 
@@ -801,9 +815,9 @@ impl TerminalSnapshot {
                 &mut materialized_cells,
             ));
         }
-        let rows_after = (1..=VIEWPORT_OVERSCAN_ROWS)
+        let rows_after: Vec<_> = (1..=VIEWPORT_OVERSCAN_ROWS as i32)
             .map_while(|distance| {
-                let line = viewport_end.saturating_add(distance as i32);
+                let line = viewport_end + distance;
                 (line <= bottommost).then(|| {
                     Self::row_from_alacritty(
                         term,
@@ -818,6 +832,7 @@ impl TerminalSnapshot {
                 })
             })
             .collect();
+        let rows_after_count = rows_after.len() as i32;
 
         let point = term.grid().cursor.point;
         let viewport_row = point.line.0 + display_offset as i32;
@@ -859,6 +874,9 @@ impl TerminalSnapshot {
                 rows,
                 rows_before,
                 rows_after,
+                // Absolute source row (0 = live bottom) of the newest
+                // materialized row: the visible window plus rows_after.
+                last_source_row: rows_after_count as i64,
             },
             materialized_cells,
         )
@@ -1016,6 +1034,55 @@ mod tests {
             at_top.relative_row(size.lines as i32),
             Some(at_top.rows_after[0].as_ref())
         );
+        // Scroll::Top clamps the display to history_size. last_source_row
+        // is the distance to the newest materialized row and must equal
+        // the rows_after overscan (never beyond it).
+        assert_eq!(at_top.last_source_row, at_top.rows_after.len() as i64);
+    }
+
+    #[test]
+    fn last_source_row_tracks_the_live_tail_while_browsing() {
+        let terminal_id = TerminalId::new(7);
+        let size = TerminalSize::new(8, 2);
+        let mut term = test_term(size, 64);
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        for index in 0..40u32 {
+            processor
+                .advance(&mut term, format!("row {index}\r\n").as_bytes());
+        }
+        // Browse one row up: the live tail then sits below the viewport.
+        term.scroll_display(Scroll::Delta(1));
+        let browsing =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 1);
+        assert_eq!(browsing.display_offset, 1);
+        // History (40 rows) exceeds the 32-row overscan, so the live tail
+        // sits below the materialized window's bottom. last_source_row must
+        // address the newest MATERIALIZED row and never go beyond it.
+        assert!(browsing.rows_after.len() <= VIEWPORT_OVERSCAN_ROWS);
+        // last_source_row is the distance from the viewport bottom to the
+        // newest materialized row; it must equal the rows_after overscan
+        // and never exceed it.
+        assert_eq!(browsing.last_source_row, browsing.rows_after.len() as i64);
+        // Scroll::Top clamps the display to history_size; the tail then
+        // sits beyond the materialized window and stays resolvable at
+        // last_source_row only via the visible window when reachable.
+        term.scroll_display(Scroll::Top);
+        let at_top =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
+        assert!(
+            at_top.last_source_row <= (size.lines - 1) as i64
+                + at_top.rows_after.len() as i64
+        );
+        assert!(at_top.relative_row(at_top.last_source_row as i32).is_some());
+
+        // At the live bottom the newest materialized row IS the tail and
+        // rows_after is empty.
+        term.scroll_display(Scroll::Bottom);
+        let at_bottom =
+            TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
+        assert_eq!(at_bottom.display_offset, 0);
+        assert_eq!(at_bottom.rows_after.len(), 0);
+        assert_eq!(at_bottom.last_source_row, 0);
     }
 
     #[test]
