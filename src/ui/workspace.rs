@@ -2329,11 +2329,6 @@ impl WorkspaceView {
             return;
         };
         let connection_id = self.active_connection;
-        if self.pi_agent_running_for_terminal(terminal_id) {
-            // Keep every local scroll source consistent with the wheel and
-            // page-scroll guards while Pi is in its regular TUI.
-            return;
-        }
         if let Some(target) = target {
             // Pin when scrolling to a non-zero target; unpinned at 0.
             application.terminal_set_viewport_pinned(connection_id, terminal_id, target != 0);
@@ -2398,6 +2393,39 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    /// Like [`Self::focus_terminal_live_bottom`] but for output-driven jumps
+    /// while Pi's regular TUI is running and the user is browsing scrollback:
+    /// the live-bottom request is issued (so returning to the bottom is
+    /// immediate once the user asks for it) but the visual unacked offset is
+    /// not pre-painted, so the current reading position stays on screen until
+    /// the user explicitly returns to the bottom.
+    fn focus_terminal_live_bottom_guarded(&mut self, terminal_id: TerminalId, cx: &mut Context<Self>) {
+        self.selection = None;
+        self.selection_autoscroll = None;
+        self.active_trackpad_scrolls.remove(&terminal_id);
+        self.mouse_scroll_animations.remove(&terminal_id);
+        self.pending_viewport_requests.remove(&terminal_id);
+
+        let viewport_position = self
+            .terminal_snapshot_for(terminal_id)
+            .map(|snapshot| snapshot.viewport_position)
+            .unwrap_or_default();
+        let state = self
+            .scroll_accumulators
+            .entry(terminal_id)
+            .or_insert_with(|| TerminalScrollState::new(viewport_position));
+        if viewport_position == 0 {
+            return;
+        }
+        // Rebase without a visual jump: the observed viewport stays where the
+        // user is reading; the requested target is the live bottom.
+        state.visual_unacked_rows = 0.0;
+        state.requested_viewport_position = 0;
+        state.request_started_at = Some(Instant::now());
+        self.apply_local_viewport(terminal_id, Some(0), None, cx);
+        cx.notify();
+    }
+
     /// Refreshes the locally rendered snapshots for terminals whose raw
     /// stream advanced, then requests one repaint for the whole view.
     pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
@@ -2423,6 +2451,21 @@ impl WorkspaceView {
                 self.terminal_snapshots.remove(&terminal_id);
                 crate::metrics::inc(crate::metrics::hidden_terminal_updates());
                 continue;
+            }
+            // Pi's regular TUI redraws the whole screen on every output
+            // burst. While the user is browsing its scrollback (viewport
+            // above the live bottom) those redraws must not pull the viewport
+            // to the live bottom; the pinned viewport plus the disabled
+            // smooth-scroll paint offset keep the reading position stable.
+            let pi_output_guard = self
+                .pi_agent_running_for_terminal(terminal_id)
+                && self
+                    .terminal_snapshot_for(terminal_id)
+                    .is_some_and(|snapshot| snapshot.viewport_position > 0);
+            if pi_output_guard {
+                self.focus_terminal_live_bottom_guarded(terminal_id, cx);
+            } else {
+                self.focus_terminal_live_bottom(terminal_id, cx);
             }
             let previous = self.terminal_snapshots.get(&terminal_id).cloned();
             let previous_ref = previous.as_deref();
@@ -3262,12 +3305,6 @@ impl WorkspaceView {
         if shortcut_matches_or_default(&shortcuts.scroll_page_up, "shift-pageup", keystroke)
             || shortcut_matches_or_default(&shortcuts.scroll_page_down, "shift-pagedown", keystroke)
         {
-            if self.pi_agent_running_for_terminal(terminal_id) {
-                // The running Pi surface owns its screen until its foreground
-                // process returns to the shell. Do not expose Water's normal
-                // scrollback through a local page-scroll shortcut.
-                return;
-            }
             let lines = if shortcut_matches_or_default(
                 &shortcuts.scroll_page_up,
                 "shift-pageup",
@@ -3294,14 +3331,12 @@ impl WorkspaceView {
         let special_name =
             terminal_special_key_input_with_modes(&keystroke.key, keystroke.modifiers, modes)
                 .is_some();
-        // The running Pi surface owns its screen; do not jump the viewport
-        // to the live bottom on every keystroke. The user's browsing
-        // position is preserved so Pi's full-screen redraw does not cause
-        // a visible jump. Scrollback protection (CSI 3J filter) keeps the
-        // host scrollback clean.
-        if !self.pi_agent_running_for_terminal(terminal_id) {
-            self.focus_terminal_live_bottom(terminal_id, cx);
-        }
+        // Like every other input path, a keystroke returns the viewport to
+        // the live bottom (focus_terminal_live_bottom below). While Pi's
+        // regular TUI is running, its output-driven redraws use the guarded
+        // variant in apply_terminal_events, so the user's browsing position
+        // is not moved by Pi's own output.
+        self.focus_terminal_live_bottom(terminal_id, cx);
         self.clear_ime();
         self.enqueue_terminal_command(
             terminal_id,
