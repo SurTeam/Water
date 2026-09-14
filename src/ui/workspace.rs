@@ -3697,9 +3697,6 @@ impl WorkspaceView {
         } else {
             rgb(theme.tab_inactive_background)
         };
-        // The label is shaped once per render; when it overflows the fixed
-        // tab width it is repainted in a canvas with a smaller font instead
-        // of growing the tab (or truncating with `truncate()`).
         let label = self.fit_tab_label(window, &title, theme.terminal_foreground);
         let mut tab = div()
             .id(format!("tab-{tab_id}"))
@@ -3752,16 +3749,11 @@ impl WorkspaceView {
                     cx.notify();
                 }),
             );
-        // Active tab: a small "neck" in the tab's own background bridges the
-        // tab's bottom edge and the content background below it, visually
-        // merging the active tab with the terminal it selects (the "notch").
+        // Active tab: a small trapezoid "neck" in the tab's own background
+        // bridges the tab's bottom edge and the terminal area below it,
+        // visually merging the active tab with the terminal it selects.
         if active {
             let neck = canvas(|_bounds, _, _| {}, move |bounds, _, window, _cx| {
-                // Trapezoid in the tab's own background: top edge spans the
-                // tab width, bottom edge widens by `r` on each side so the
-                // "mouth" into the pane area is wider than the tab itself —
-                // the "notch" that visually merges the active tab with the
-                // terminal it selects.
                 let w = f32::from(bounds.size.width);
                 let h = f32::from(bounds.size.height);
                 let x0 = f32::from(bounds.origin.x);
@@ -3880,7 +3872,6 @@ impl WorkspaceView {
             .items_center()
             .flex()
             .cursor_pointer()
-            .rounded_t(px(self.config.ui.sidebar_workspace_radius))
             .hover(|style| style.bg(rgb(workspace_hover_background)))
             .bg(workspace_background)
             .text_color(rgb(theme.ui_foreground))
@@ -4064,7 +4055,6 @@ impl WorkspaceView {
 
     fn render_sidebar(
         &self,
-        window: &mut Window,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -4109,17 +4099,19 @@ impl WorkspaceView {
                 .h(px(2.0)),
             )
         });
+        // The Connect Remote button is fixed-size: its label shrinks to fit
+        // the available width instead of the button growing past the sidebar.
+        // The button never exceeds the sidebar width because the outer div
+        // has an explicit width constraint from the parent.
         let connect_remote = div()
             .id("connect-remote")
+            .flex_none()
             .mx(px(self.config.ui.sidebar_padding))
             .mb(px(self.config.ui.sidebar_padding))
             .h(px(32.))
-            .w_full()
-            .min_w(px(0.))
             .items_center()
             .gap(px(6.))
             .flex()
-            .flex_none()
             .cursor_pointer()
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
@@ -4134,12 +4126,11 @@ impl WorkspaceView {
                     .child("＋"),
             )
             .child(
-                // Fixed button: the label shrinks instead of the button
-                // growing past the sidebar.
                 div()
                     .flex_1()
                     .min_w(px(0.))
-                    .child(self.fit_connect_remote_label(window)),
+                    .truncate()
+                    .child("Connect Remote…"),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -4148,25 +4139,31 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
-        let mut sidebar_content = div()
-            .flex_1()
-            .min_w(px(0.))
+        // The sidebar is a fixed-width column: the outer div has an explicit
+        // width, the inner content fills it. The list scrolls vertically;
+        // the Connect Remote button is pinned at the bottom.
+        let sidebar_content = div()
+            .w_full()
             .h_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
             .relative()
             .bg(rgb(theme.sidebar_background))
             .rounded_bl(px(self.config.ui.window_corner_radius))
             .child(list)
             .child(connect_remote);
-        if let Some(indicator) = indicator {
-            sidebar_content = sidebar_content.child(indicator);
-        }
+        let sidebar_content = if let Some(indicator) = indicator {
+            sidebar_content.child(indicator)
+        } else {
+            sidebar_content
+        };
         div()
             .w(px(self.sidebar_width))
             .h_full()
             .flex()
             .flex_row()
+            .overflow_hidden()
             .text_color(rgb(theme.ui_foreground))
             .child(sidebar_content)
             .child(self.sidebar_resize_handle(theme, cx))
@@ -5113,19 +5110,20 @@ impl WorkspaceView {
                     .collect()
             })
             .unwrap_or_default();
+        // The tab bar sits at the top of the terminal column. Tabs hang from
+        // the top edge (rounded top, flat bottom) so the active tab's bottom
+        // edge meets the terminal area below it — the "notch" that visually
+        // merges the active tab with the terminal it selects.
         let mut tab_strip = div()
             .id("tab-bar-scroll")
             .h_full()
             .w_full()
-            // Tabs hang from the top edge and connect to the pane area below
-            // (bottom edge flat), so the strip left-aligns them and gives them
-            // a small bottom gap; the active tab's bottom edge touches the
-            // content background to paint the "notch" through the strip.
             .gap(px(6.))
             .items_start()
             .flex()
-            .px(px(8.))
-            .pb(px(6.))
+            .pl(px(self.config.ui.pane_margin))
+            .pr(px(self.config.ui.pane_margin))
+            .pt(px(self.config.ui.pane_margin))
             .overflow_x_scroll()
             .restrict_scroll_to_axis()
             .track_scroll(&self.tab_scroll)
@@ -5247,7 +5245,6 @@ impl WorkspaceView {
 
     fn render_titlebar(
         &self,
-        window: &mut Window,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -5366,7 +5363,6 @@ impl WorkspaceView {
             }))
             .child(controls)
             .child(sidebar_toggle)
-            .child(self.render_tab_bar(window, theme, cx))
             .child(right_sidebar_placeholder)
             .into_any_element()
     }
@@ -5436,61 +5432,6 @@ impl WorkspaceView {
     /// The Connect Remote button keeps its fixed size; its label is painted
     /// at the largest font that fits the remaining button width so it never
     /// grows the button past the sidebar edge.
-    fn fit_connect_remote_label(&self, window: &mut Window) -> AnyElement {
-        let title = "Connect Remote…";
-        let color = self.config.theme.colors().ui_foreground;
-        // The button is fixed-size; its label is capped to the space left of
-        // the "＋" icon and shrinks its font instead of growing the button.
-        let max_width = self.sidebar_width
-            - self.config.ui.sidebar_padding * 2.0
-            - 24.0;
-        let font_size = self.config.ui.font_size;
-        let runs = [TextRun {
-            len: title.len(),
-            font: font(self.config.ui.font_family.clone()),
-            color: Hsla::from(rgb(color)),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        }];
-        let shaped = window
-            .text_system()
-            .shape_line(SharedString::from(title.to_owned()), px(font_size), &runs, None);
-        let natural = f32::from(shaped.width());
-        if natural <= max_width {
-            return SharedString::from(title.to_owned()).into_any_element();
-        }
-        let scaled = (font_size * max_width / natural).max(9.0);
-        let family = self.config.ui.font_family.clone();
-        canvas(
-            |_bounds, _, _| {},
-            move |bounds, _, window, cx| {
-                let runs = [TextRun {
-                    len: title.len(),
-                    font: font(family.clone()),
-                    color: Hsla::from(rgb(color)),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }];
-                let line = window
-                    .text_system()
-                    .shape_line(SharedString::from(title.to_owned()), px(scaled), &runs, None);
-                let line_height = line_height_for_font(window, scaled);
-                let top = ((f32::from(bounds.size.height) - line_height) / 2.0).max(0.0);
-                let _ = line.paint(
-                    point(px(0.), px(top)),
-                    line_height.into(),
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-            },
-        )
-        .w_full()
-        .into_any_element()
-    }
 
 
 
@@ -8604,6 +8545,9 @@ impl Render for WorkspaceView {
             .min_h(px(0.))
             .overflow_hidden()
             .bg(rgb(theme.terminal_background))
+            // The tab bar sits at the top of the terminal column, aligned
+            // with the left edge of the terminal area (not the sidebar).
+            .child(self.render_tab_bar(window, theme, cx))
             .child(self.render_active_tab(window_active, metrics, theme, cx));
 
         let action_view = cx.entity();
@@ -8625,7 +8569,7 @@ impl Render for WorkspaceView {
                 }),
             );
         if !self.sidebar_collapsed {
-            main_content = main_content.child(self.render_sidebar(window, theme, cx));
+            main_content = main_content.child(self.render_sidebar(theme, cx));
         }
         let main_content = main_content.child(content);
         // The window background is a rounded rectangle: the canvas fills the
@@ -8905,7 +8849,7 @@ impl Render for WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .child(workspace_mouse_event_observer(cx.entity()))
             .child(window_background)
-            .child(self.render_titlebar(window, theme, cx))
+            .child(self.render_titlebar(theme, cx))
             .child(main_content);
         if let Some(overlay) = overlay {
             root = root.child(overlay);
