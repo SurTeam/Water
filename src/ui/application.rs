@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::{
     App, AppContext, Bounds, DispatchEventResult, Focusable, KeyBinding, Keystroke, Menu, MenuItem,
-    Modifiers, PlatformInput, QuitMode, ScrollDelta, ScrollWheelEvent, Size, SystemMenuType, Task,
-    TitlebarOptions, TouchPhase, WeakEntity, WindowBounds, WindowDecorations, WindowHandle,
-    WindowOptions, actions, point, px, size,
+    Modifiers, PlatformInput, QuitMode, ScrollDelta, ScrollWheelEvent, Size, SystemMenuType,
+    SystemNotification, Task, TitlebarOptions, TouchPhase, WeakEntity, WindowBounds,
+    WindowDecorations, WindowHandle, WindowOptions, actions, point, px, size,
 };
 
 use crate::agent::AgentKind;
+#[cfg(test)]
+use crate::app::model::AgentDump;
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
 use crate::control::{
@@ -87,6 +89,7 @@ struct WaterApplicationState {
     window_height: f32,
     window_min_width: f32,
     window_min_height: f32,
+    next_notification_id: Cell<u64>,
 }
 
 struct ManagedConnection {
@@ -370,6 +373,7 @@ impl WaterApplication {
                 views: RefCell::new(Vec::new()),
                 settings_window: RefCell::new(None),
                 shutdown_server: RefCell::new(None),
+                next_notification_id: Cell::new(0),
             }),
         }
     }
@@ -673,6 +677,12 @@ impl WaterApplication {
         ui_control_receiver: UiControlReceiver,
         terminal_session: Option<WaterSession>,
     ) {
+        let (app_identifier, app_name) = if crate::BUILD_VARIANT == "release" {
+            ("dev.water.terminal", "Water")
+        } else {
+            ("dev.water.terminal.dev", "Water Dev")
+        };
+        cx.set_app_identity(app_identifier, app_name);
         self.state
             .ui_control_client
             .replace(Some(ui_control_client));
@@ -739,6 +749,56 @@ impl WaterApplication {
             self.open_window(cx);
         }
         cx.activate(true);
+    }
+
+    /// Turns the model's agent activity edge into a platform notification.
+    ///
+    /// The model/PTY threads only publish state. GPUI owns the actual system
+    /// notification call and runs this method on the application thread.
+    fn notify_agent_transitions(
+        &self,
+        previous: &ModelSnapshot,
+        current: &ModelSnapshot,
+        cx: &mut App,
+    ) {
+        for before in &previous.agents {
+            let after = current
+                .agents
+                .iter()
+                .find(|agent| agent.terminal_id == before.terminal_id);
+            let became_idle = after.is_some_and(|agent| {
+                agent.kind == before.kind
+                    && before.active
+                    && !agent.active
+                    && matches!(agent.status, crate::surface::TerminalStatus::Running)
+            });
+            let exited = matches!(before.status, crate::surface::TerminalStatus::Running)
+                && after.is_none_or(|agent| {
+                    matches!(agent.status, crate::surface::TerminalStatus::Exited { .. })
+                });
+            if !became_idle && !exited {
+                continue;
+            }
+
+            let notification_id = self.state.next_notification_id.get().wrapping_add(1).max(1);
+            self.state.next_notification_id.set(notification_id);
+            let detail = if before.cwd.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", before.cwd)
+            };
+            let body = if exited {
+                format!("{} exited{}", before.display_label(), detail)
+            } else {
+                format!("{} is waiting for input{}", before.display_label(), detail)
+            };
+            cx.show_system_notification(SystemNotification {
+                tag: format!("water-agent-{}-{}", before.terminal_id, notification_id).into(),
+                title: "Agent finished".into(),
+                body: body.into(),
+                actions: Vec::new(),
+            });
+        }
     }
 
     pub fn open_window(&self, cx: &mut App) {
@@ -859,7 +919,7 @@ impl WaterApplication {
                         })
                         .await;
                 }
-                let installed = {
+                let (installed, previous_snapshot) = {
                     let mut connections = state.connections.borrow_mut();
                     let Some(connection) = connections
                         .iter_mut()
@@ -867,17 +927,21 @@ impl WaterApplication {
                     else {
                         break;
                     };
+                    let previous_snapshot = connection.projection.snapshot.clone();
                     if snapshot.state_revision <= connection.projection.snapshot.state_revision {
-                        false
+                        (false, previous_snapshot)
                     } else {
                         connection.last_snapshot_apply = std::time::Instant::now();
                         connection.projection.snapshot = snapshot.clone();
-                        true
+                        (true, previous_snapshot)
                     }
                 };
                 if !installed {
                     continue;
                 }
+                cx.update(|cx| {
+                    application.notify_agent_transitions(&previous_snapshot, &snapshot, cx);
+                });
                 application.sync_terminal_scrollback_protection(connection_id, &snapshot);
                 for terminal_id in terminal_ids_in_snapshot(&snapshot) {
                     application.ensure_terminal_attached(connection_id, terminal_id);
@@ -1956,6 +2020,45 @@ mod tests {
         assert_eq!(third.len(), 1);
         assert_eq!(snapshot_sequence(&third[0]), 3);
         assert!(pending.is_none());
+    }
+
+    #[gpui::test]
+    fn agent_activity_transition_posts_a_water_system_notification(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client: Arc<dyn CommandTransport> = Arc::new(host.client());
+        let initial = host.client().state_dump().unwrap();
+        let application = WaterApplication::new(client, initial.clone(), AppConfig::default());
+
+        let terminal_id = TerminalId::new(900);
+        let mut previous = initial;
+        previous.state_revision = 1;
+        previous.agents.push(AgentDump {
+            kind: AgentKind::Codex,
+            label: AgentKind::Codex.label().to_owned(),
+            custom_label: Some("Build agent".to_owned()),
+            active: true,
+            workspace_id: crate::ids::WorkspaceId::new(1),
+            tab_id: crate::ids::TabId::new(2),
+            pane_id: crate::ids::PaneId::new(3),
+            terminal_id,
+            cwd: "/tmp/project".to_owned(),
+            status: crate::surface::TerminalStatus::Running,
+        });
+        let mut current = previous.clone();
+        current.state_revision = 2;
+        current.agents[0].active = false;
+
+        cx.update(|cx| {
+            cx.set_app_identity("dev.water.terminal.dev", "Water Dev");
+            application.notify_agent_transitions(&previous, &current, cx);
+        });
+        let notifications = cx.shown_system_notifications();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].title.as_ref(), "Agent finished");
+        assert!(notifications[0].body.contains("Build agent"));
+        assert!(notifications[0].body.contains("/tmp/project"));
+
+        host.shutdown();
     }
 
     #[test]

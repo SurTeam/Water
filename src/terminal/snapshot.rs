@@ -16,6 +16,8 @@ use std::sync::Arc;
 /// from immutable local data while shaping remains bounded to a small band.
 pub const VIEWPORT_OVERSCAN_ROWS: usize = 32;
 
+#[cfg(feature = "gui")]
+use super::graphics::TerminalImage;
 use crate::ids::TerminalId;
 
 pub const DEFAULT_COLUMNS: usize = 80;
@@ -460,6 +462,8 @@ pub struct TerminalSnapshot {
     /// overscan reaches it). Paint consumers clamp the unacked downward
     /// offset against this distance, not against `rows_after` alone.
     pub last_source_row: i64,
+    #[cfg(feature = "gui")]
+    pub images: Arc<[TerminalImage]>,
 }
 
 #[derive(Serialize)]
@@ -566,6 +570,8 @@ impl<'de> Deserialize<'de> for TerminalSnapshot {
             // Wire snapshots carry the semantic live bottom; the materialized
             // window is not the clamp authority for them.
             last_source_row: wire.last_source_row,
+            #[cfg(feature = "gui")]
+            images: Arc::from([]),
         })
     }
 }
@@ -603,6 +609,8 @@ impl TerminalSnapshot {
             rows_before: Vec::new(),
             rows_after: Vec::new(),
             last_source_row: 0,
+            #[cfg(feature = "gui")]
+            images: Arc::from([]),
         }
     }
 
@@ -720,6 +728,8 @@ impl TerminalSnapshot {
             rows_before: Vec::new(),
             rows_after: Vec::new(),
             last_source_row: self.last_source_row.saturating_sub(removed as i64),
+            #[cfg(feature = "gui")]
+            images: self.images.clone(),
         }
     }
 
@@ -877,6 +887,8 @@ impl TerminalSnapshot {
                 // Absolute source row (0 = live bottom) of the newest
                 // materialized row: the visible window plus rows_after.
                 last_source_row: rows_after_count as i64,
+                #[cfg(feature = "gui")]
+                images: Arc::from([]),
             },
             materialized_cells,
         )

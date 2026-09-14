@@ -62,6 +62,9 @@ enum SettingField {
     SidebarHeaderHeight,
     PaneMargin,
     PanePadding,
+    WindowCornerRadius,
+    SidebarCardRadius,
+    SidebarWorkspaceRadius,
     ThemeTerminalBackground,
     ThemeTerminalForeground,
     ThemeSelectionBackground,
@@ -156,6 +159,9 @@ impl SettingField {
             Self::SidebarHeaderHeight => "sidebar-header-height",
             Self::PaneMargin => "pane-margin",
             Self::PanePadding => "pane-padding",
+            Self::WindowCornerRadius => "window-corner-radius",
+            Self::SidebarCardRadius => "sidebar-card-radius",
+            Self::SidebarWorkspaceRadius => "sidebar-workspace-radius",
             Self::ThemeTerminalBackground => "theme-terminal-background",
             Self::ThemeTerminalForeground => "theme-terminal-foreground",
             Self::ThemeSelectionBackground => "theme-selection-background",
@@ -618,6 +624,15 @@ impl SettingsView {
             SettingField::SidebarHeaderHeight => format_float(self.config.ui.sidebar_header_height),
             SettingField::PaneMargin => format_float(self.config.ui.pane_margin),
             SettingField::PanePadding => format_float(self.config.ui.pane_padding),
+            SettingField::WindowCornerRadius => {
+                format_float(self.config.ui.window_corner_radius)
+            }
+            SettingField::SidebarCardRadius => {
+                format_float(self.config.ui.sidebar_card_radius)
+            }
+            SettingField::SidebarWorkspaceRadius => {
+                format_float(self.config.ui.sidebar_workspace_radius)
+            }
             SettingField::ThemeTerminalBackground => self.config.theme.terminal_background.clone(),
             SettingField::ThemeTerminalForeground => self.config.theme.terminal_foreground.clone(),
             SettingField::ThemeSelectionBackground => {
@@ -800,6 +815,17 @@ impl SettingsView {
             }
             SettingField::PanePadding => {
                 self.config.ui.pane_padding = parse_float(&value, "面板内边距")?
+            }
+            SettingField::WindowCornerRadius => {
+                self.config.ui.window_corner_radius =
+                    parse_float(&value, "窗口圆角")?
+            }
+            SettingField::SidebarCardRadius => {
+                self.config.ui.sidebar_card_radius = parse_float(&value, "侧边栏卡片圆角")?
+            }
+            SettingField::SidebarWorkspaceRadius => {
+                self.config.ui.sidebar_workspace_radius =
+                    parse_float(&value, "工作区卡片圆角")?
             }
             field if field.is_color() => {
                 if !ThemeConfig::is_valid_color(&value) {
@@ -1465,6 +1491,30 @@ impl Render for SettingsView {
                 SettingField::PanePadding,
                 "面板内边距",
                 "终端面板内容的内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::WindowCornerRadius,
+                "窗口圆角",
+                "窗口内容的圆角半径，逻辑像素，0 为直角",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarCardRadius,
+                "侧边栏卡片圆角",
+                "侧边栏主机卡片的圆角半径，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarWorkspaceRadius,
+                "工作区卡片圆角",
+                "侧边栏内工作区卡片的圆角半径，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
