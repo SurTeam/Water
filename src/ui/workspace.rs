@@ -3836,51 +3836,27 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let tab_height = if active {
-            // The active tab extends through both the titlebar's lower
-            // inset and the pane's top margin. Its border box grows while
-            // the negative bottom margin keeps its top edge aligned with
-            // inactive tabs.
-            self.config.ui.tab_height + 2. * self.config.ui.pane_margin
-        } else {
-            self.config.ui.tab_height
-        };
+        // Selected and unselected tabs deliberately share the same floating
+        // shape. Their configured fills provide the small contrast needed to
+        // identify the active tab without creating a bridge into the pane.
         let background = if active {
-            // Match the pane surface so the selected tab visually opens into
-            // the terminal below; its lower corners are intentionally square.
-            rgb(theme.pane_background)
+            theme.tab_active_background
         } else {
-            rgb(theme.tab_inactive_background)
+            theme.tab_inactive_background
         };
         let mut tab = div()
             .id(format!("tab-{tab_id}"))
-            .h(px(tab_height))
+            .h(px(self.config.ui.tab_height))
             .px(px(self.config.ui.tab_padding))
             .items_center()
             .flex()
             .flex_none()
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
-            .bg(background)
+            .bg(rgb(background))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title));
-        if active {
-            // The active tab uses the pane surface and squared lower corners,
-            // so it reads as the tab's small top edge opening into the
-            // terminal below instead of as a floating pill in the titlebar.
-            tab = tab
-                .rounded_t(px(self
-                    .config
-                    .ui
-                    .pane_corner_radius
-                    .min(self.config.ui.tab_height / 2.)))
-                // The pane keeps its normal top margin. Extend only the
-                // active tab through that margin so the two surfaces still
-                // meet without moving the pane against the titlebar.
-                .mb(px(-2. * self.config.ui.pane_margin));
-        } else {
-            tab = tab.rounded(px((self.config.ui.tab_height / 4.).max(4.)));
-        }
+        tab = tab.rounded(px((self.config.ui.tab_height / 4.).max(4.)));
         tab.on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -3919,12 +3895,15 @@ impl WorkspaceView {
         .into_any_element()
     }
 
-    fn sidebar_resize_handle(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    fn sidebar_resize_handle(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
             .w(px(self.config.ui.sidebar_resize_handle_width))
             .h_full()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .right_0()
             .cursor(CursorStyle::ResizeLeftRight)
-            .bg(rgb(theme.sidebar_background))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
@@ -4013,6 +3992,9 @@ impl WorkspaceView {
             .items_center()
             .flex()
             .cursor_pointer()
+            .overflow_hidden()
+            .rounded(px(self.config.ui.sidebar_workspace_radius))
+            .bg(workspace_background)
             .hover(|style| style.bg(rgb(workspace_hover_background)))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, workspace_activate)
@@ -4048,28 +4030,18 @@ impl WorkspaceView {
                     .child(SharedString::from(running_agent_count.to_string())),
             );
         }
-        if collapsed {
-            workspace_row = workspace_row
-                .rounded(px(self.config.ui.sidebar_workspace_radius))
-                .bg(workspace_background);
-        }
-
         let mut group = div()
             .id(format!("workspace-group-{connection_id}-{workspace_id}"))
             .w_full()
             .flex()
             .flex_col()
-            .overflow_hidden()
-            .rounded(px(self.config.ui.sidebar_workspace_radius))
-            .bg(workspace_background)
-            .border_1()
-            .border_color(rgb(theme.inactive_pane_border))
             .child(workspace_row);
         if !collapsed {
             let mut agent_rows = div()
                 .w_full()
                 .flex()
-                .flex_col();
+                .flex_col()
+                .gap(px(1.));
             for agent in agents {
                 agent_rows =
                     agent_rows.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
@@ -4208,10 +4180,9 @@ impl WorkspaceView {
     }
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
-        // The sidebar card is the sidebar body: its background follows the
-        // window shape, so only the bottom-left corner needs the window
-        // radius (the window clip handles the rest, and the resize handle on
-        // the right stays square so it reaches the window edge).
+        // The sidebar is a floating surface alongside the terminal pane. Its
+        // vertical inset matches the pane's outer margin while the window
+        // body supplies the larger configurable breathing room.
         let mut list = div()
             .id("workspace-list")
             .flex_1()
@@ -4301,13 +4272,16 @@ impl WorkspaceView {
         let mut sidebar_content = div()
             .flex_1()
             .min_w(px(0.))
-            .h_full()
             .flex()
             .flex_col()
             .relative()
             .overflow_hidden()
             .bg(rgb(theme.sidebar_background))
-            .rounded_bl(px(self.config.ui.window_corner_radius))
+            .rounded(px(self.config.ui.sidebar_card_radius))
+            .border_1()
+            .border_color(rgb(theme.inactive_pane_border))
+            .mt(px(self.config.ui.pane_margin))
+            .mb(px(self.config.ui.pane_margin))
             .child(list)
             .child(connect_remote);
         if let Some(indicator) = indicator {
@@ -4316,11 +4290,13 @@ impl WorkspaceView {
         div()
             .w(px(self.sidebar_width))
             .h_full()
+            .mr(px(self.config.ui.window_padding))
+            .relative()
             .flex()
             .flex_row()
             .text_color(rgb(theme.ui_foreground))
             .child(sidebar_content)
-            .child(self.sidebar_resize_handle(theme, cx))
+            .child(self.sidebar_resize_handle(cx))
             .into_any_element()
     }
 
@@ -4408,6 +4384,13 @@ impl WorkspaceView {
             .gap(px(6.))
             .flex()
             .cursor_pointer()
+            .overflow_hidden()
+            .rounded(px(self.config.ui.sidebar_workspace_radius.min(8.)))
+            .bg(rgb(if focused_here {
+                theme.sidebar_agent_active_background
+            } else {
+                theme.sidebar_agent_background
+            }))
             .hover(move |style| style.bg(rgb(hover_background)))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
@@ -5258,8 +5241,8 @@ impl WorkspaceView {
             .h_full()
             .w_full()
             .gap(px(self.config.ui.tab_gap))
-            // Inactive tabs stay centered in the titlebar. The active tab
-            // extends below it to share a seam with the pane below.
+            // All tabs stay centered in the titlebar and remain independent
+            // floating pills; the pane below owns its own surface and gap.
             .items_center()
             .flex()
             .overflow_x_scroll()
@@ -5274,8 +5257,8 @@ impl WorkspaceView {
             .on_scroll_wheel(cx.listener(|this, event, _window, cx| {
                 this.scroll_tab_bar(event, cx);
             }));
-        // Horizontal scrolling must not clip the active tab's small bridge
-        // into the pane margin below it.
+        // Keep the strip's horizontal overflow scrollable without changing
+        // the rounded shape of any tab.
         tab_strip.style().overflow.y = Some(gpui::Overflow::Visible);
         for (tab_id, title, active, active_pane) in tab_data {
             tab_strip =
@@ -5431,7 +5414,10 @@ impl WorkspaceView {
                     + 28.,
             )
         } else {
-            self.sidebar_width
+            // The body is inset by `window_padding`, so include that inset
+            // here to keep the first tab aligned with the sidebar surface's
+            // visible right edge.
+            self.sidebar_width + self.config.ui.window_padding
         };
         let titlebar_leading = div()
             .h_full()
@@ -8685,14 +8671,6 @@ fn indexed_color(index: u8) -> u32 {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        #[cfg(target_os = "macos")]
-        if !window.is_fullscreen() {
-            // AppKit keeps its standard traffic lights even with a transparent
-            // titlebar. Park them off-canvas so the custom controls below are
-            // the only visible controls in the integrated titlebar.
-            window.set_traffic_light_position(point(px(-100.), px(9.)));
-        }
-
         let metrics = self.measured_terminal_metrics(window);
         self.terminal_metrics = metrics;
         self.input_handler_terminal = self
@@ -8712,7 +8690,6 @@ impl Render for WorkspaceView {
             .min_w(px(0.))
             .min_h(px(0.))
             .overflow_hidden()
-            .bg(rgb(theme.terminal_background))
             .child(self.render_active_tab(window_active, metrics, theme, cx));
 
         let action_view = cx.entity();
@@ -8721,6 +8698,7 @@ impl Render for WorkspaceView {
             .min_w(px(0.))
             .min_h(px(0.))
             .flex()
+            .p(px(self.config.ui.window_padding))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -8738,13 +8716,9 @@ impl Render for WorkspaceView {
         }
         let main_content = main_content.child(content);
         // The window content is shaped into a rounded rectangle: the canvas
-        // below fills the window bounds with the theme background clipped to
-        // the window's corner radius. The OS window is transparent outside
-        // the drawn shape, so the desktop (or the shadow beneath) shows
-        // through the corners instead of a hard square edge. The pane
-        // borders are inset by `pane_margin` from this shape, so the active
-        // pane's border runs parallel to the window's curve and stays
-        // visible right up to the corners.
+        // below fills the window bounds with the chrome background clipped to
+        // the window's corner radius. Floating sidebar and pane surfaces sit
+        // above this background with their own independent rounded borders.
         let corner_radius = self.config.ui.window_corner_radius;
         let window_background = canvas(
             |_bounds, _, _| {},
@@ -8791,7 +8765,7 @@ impl Render for WorkspaceView {
                 );
                 path.close();
                 if let Ok(shape) = path.build() {
-                    window.paint_path(shape, rgb(theme.terminal_background));
+                    window.paint_path(shape, rgb(theme.chrome_background));
                 }
             },
         )
@@ -9014,7 +8988,7 @@ impl Render for WorkspaceView {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 this.handle_key_down(event, cx);
             }))
-            .bg(rgb(theme.terminal_background))
+            .bg(rgb(theme.chrome_background))
             .text_size(px(self.config.ui.font_size))
             .text_color(rgb(theme.ui_foreground))
             .child(workspace_mouse_event_observer(cx.entity()))

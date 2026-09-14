@@ -31,6 +31,9 @@ pub const DEFAULT_TITLEBAR_HEIGHT: f32 = 36.0;
 pub const DEFAULT_TAB_HEIGHT: f32 = 28.0;
 pub const DEFAULT_SIDEBAR_HEADER_HEIGHT: f32 = 24.0;
 pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
+/// Inset around the sidebar and terminal surface group inside the window.
+/// This keeps the surfaces floating even when pane-to-pane margin is zero.
+pub const DEFAULT_WINDOW_PADDING: f32 = 8.0;
 pub const DEFAULT_PANE_PADDING: f32 = 8.0;
 pub const DEFAULT_PANE_CORNER_RADIUS: f32 = 12.0;
 pub const DEFAULT_PANE_DIVIDER_WIDTH: f32 = 2.0;
@@ -507,6 +510,8 @@ pub struct UiConfig {
     /// sidebar's section headers since agents nest under their workspace.
     pub sidebar_header_height: f32,
     pub pane_margin: f32,
+    /// Padding between the window chrome and the floating sidebar/pane group.
+    pub window_padding: f32,
     pub pane_padding: f32,
     /// Corner radius of each client-side pane surface.
     pub pane_corner_radius: f32,
@@ -554,6 +559,7 @@ impl Default for UiConfig {
             tab_height: DEFAULT_TAB_HEIGHT,
             sidebar_header_height: DEFAULT_SIDEBAR_HEADER_HEIGHT,
             pane_margin: DEFAULT_PANE_MARGIN,
+            window_padding: DEFAULT_WINDOW_PADDING,
             pane_padding: DEFAULT_PANE_PADDING,
             pane_corner_radius: DEFAULT_PANE_CORNER_RADIUS,
             pane_divider_width: DEFAULT_PANE_DIVIDER_WIDTH,
@@ -585,6 +591,7 @@ impl UiConfig {
         self.tab_height = self.tab_height.clamp(20.0, 80.0);
         self.sidebar_header_height = self.sidebar_header_height.clamp(20.0, 96.0);
         self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
+        self.window_padding = self.window_padding.clamp(0.0, 32.0);
         self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
         self.pane_corner_radius = self.pane_corner_radius.clamp(0.0, 48.0);
         self.pane_divider_width = self.pane_divider_width.clamp(1.0, 16.0);
@@ -789,7 +796,7 @@ impl Default for ThemeConfig {
             accent_foreground: "#000000".to_owned(),
             chrome_background: "#000000".to_owned(),
             tab_active_background: "#339966".to_owned(),
-            tab_inactive_background: "#000000".to_owned(),
+            tab_inactive_background: "#161616".to_owned(),
             tab_add_background: "#555555".to_owned(),
             ui_foreground: "#e4e4e4".to_owned(),
             sidebar_background: "#000000".to_owned(),
@@ -874,7 +881,7 @@ impl ThemeConfig {
             accent_foreground: parse_color(&self.accent_foreground, 0x000000),
             chrome_background: parse_color(&self.chrome_background, 0x000000),
             tab_active_background: parse_color(&self.tab_active_background, 0x339966),
-            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x000000),
+            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x161616),
             tab_add_background: parse_color(&self.tab_add_background, 0x555555),
             ui_foreground: parse_color(&self.ui_foreground, 0xe4e4e4),
             sidebar_background: parse_color(&self.sidebar_background, 0x000000),
@@ -1112,6 +1119,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.pane_margin {
                 config.ui.pane_margin = value;
             }
+            if let Some(value) = ui.window_padding {
+                config.ui.window_padding = value;
+            }
             if let Some(value) = ui.pane_padding {
                 config.ui.pane_padding = value;
             }
@@ -1304,6 +1314,7 @@ pub struct UiConfigOverrides {
     pub tab_height: Option<f32>,
     pub sidebar_header_height: Option<f32>,
     pub pane_margin: Option<f32>,
+    pub window_padding: Option<f32>,
     pub pane_padding: Option<f32>,
     pub pane_corner_radius: Option<f32>,
     pub pane_divider_width: Option<f32>,
@@ -1669,6 +1680,7 @@ mod tests {
                 "ui": {
                     "pane_corner_radius": 20.0,
                     "pane_divider_width": 3.0,
+                    "window_padding": 9.0,
                     "sidebar_margin": 5.0,
                     "sidebar_card_gap": 7.0,
                     "sidebar_card_padding": 8.0,
@@ -1684,6 +1696,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(config.ui.pane_corner_radius, 20.0);
         assert_eq!(config.ui.pane_divider_width, 3.0);
+        assert_eq!(config.ui.window_padding, 9.0);
         assert_eq!(config.ui.sidebar_margin, 5.0);
         assert_eq!(config.ui.sidebar_card_gap, 7.0);
         assert_eq!(config.ui.sidebar_card_padding, 8.0);

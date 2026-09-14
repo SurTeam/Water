@@ -834,6 +834,10 @@ impl WaterApplication {
         match cx.open_window(water_window_options(bounds, min_size), move |window, cx| {
             window.activate_window();
             window.focus(&focus_handle, cx);
+            // AppKit may not have attached the native traffic lights when
+            // `open_window` returns. Hide them once this window has rendered
+            // so custom controls cannot be covered by the native buttons.
+            window.on_next_frame(|_, _| hide_native_window_buttons());
             root
         }) {
             Ok(_) => {
@@ -872,6 +876,7 @@ impl WaterApplication {
             move |window, cx| {
                 window.activate_window();
                 window.focus(&focus_handle, cx);
+                window.on_next_frame(|_, _| hide_native_window_buttons());
                 root
             },
         ) {

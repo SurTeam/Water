@@ -1,6 +1,7 @@
 use gpui::{
     AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Window, div, font, prelude::*, px, rgb,
+    MouseMoveEvent, MouseUpEvent, SharedString, Window, WindowControlArea, div, font,
+    prelude::*, px, rgb,
 };
 
 use crate::agent::AgentKind;
@@ -61,6 +62,7 @@ enum SettingField {
     TabHeight,
     SidebarHeaderHeight,
     PaneMargin,
+    WindowPadding,
     PanePadding,
     PaneCornerRadius,
     PaneDividerWidth,
@@ -168,6 +170,7 @@ impl SettingField {
             Self::TabHeight => "tab-height",
             Self::SidebarHeaderHeight => "sidebar-header-height",
             Self::PaneMargin => "pane-margin",
+            Self::WindowPadding => "window-padding",
             Self::PanePadding => "pane-padding",
             Self::PaneCornerRadius => "pane-corner-radius",
             Self::PaneDividerWidth => "pane-divider-width",
@@ -643,6 +646,7 @@ impl SettingsView {
             SettingField::TabHeight => format_float(self.config.ui.tab_height),
             SettingField::SidebarHeaderHeight => format_float(self.config.ui.sidebar_header_height),
             SettingField::PaneMargin => format_float(self.config.ui.pane_margin),
+            SettingField::WindowPadding => format_float(self.config.ui.window_padding),
             SettingField::PanePadding => format_float(self.config.ui.pane_padding),
             SettingField::PaneCornerRadius => format_float(self.config.ui.pane_corner_radius),
             SettingField::PaneDividerWidth => format_float(self.config.ui.pane_divider_width),
@@ -844,6 +848,9 @@ impl SettingsView {
             }
             SettingField::PaneMargin => {
                 self.config.ui.pane_margin = parse_float(&value, "面板外边距")?
+            }
+            SettingField::WindowPadding => {
+                self.config.ui.window_padding = parse_float(&value, "窗口主体内边距")?
             }
             SettingField::PanePadding => {
                 self.config.ui.pane_padding = parse_float(&value, "面板内边距")?
@@ -1067,7 +1074,7 @@ impl SettingsView {
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
             .rounded(px(12.))
-            .bg(rgb(theme.chrome_background))
+            .bg(rgb(theme.pane_background))
             .flex()
             .flex_col()
             .child(
@@ -1090,6 +1097,33 @@ impl SettingsView {
         theme: crate::config::ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let close = self.render_titlebar_control(
+            0xff5f57,
+            WindowControlArea::Close,
+            |_, _event, window, _cx| window.remove_window(),
+            cx,
+        );
+        let minimize = self.render_titlebar_control(
+            0xfebc2e,
+            WindowControlArea::Min,
+            |_, _event, window, _cx| window.minimize_window(),
+            cx,
+        );
+        let maximize = self.render_titlebar_control(
+            0x28c840,
+            WindowControlArea::Max,
+            |_, _event, window, _cx| window.zoom_window(),
+            cx,
+        );
+        let controls = div()
+            .h_full()
+            .gap(px(self.config.ui.titlebar_gap))
+            .items_center()
+            .flex()
+            .flex_none()
+            .child(close)
+            .child(minimize)
+            .child(maximize);
         let save_label = if self.saving {
             "保存中…"
         } else if self.dirty {
@@ -1108,8 +1142,8 @@ impl SettingsView {
         div()
             .h(px(self.config.ui.titlebar_height))
             .w_full()
-            .px(px(16.))
-            .gap(px(12.))
+            .px(px(self.config.ui.titlebar_padding))
+            .gap(px(self.config.ui.titlebar_gap))
             .items_center()
             .flex()
             .bg(rgb(theme.chrome_background))
@@ -1135,6 +1169,7 @@ impl SettingsView {
                     window.start_window_move();
                 }
             }))
+            .child(controls)
             .child(
                 div()
                     .flex_1()
@@ -1219,6 +1254,31 @@ impl SettingsView {
             .into_any_element()
     }
 
+    fn render_titlebar_control(
+        &self,
+        color: u32,
+        area: WindowControlArea,
+        listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .size(px(12.))
+            .rounded(px(6.))
+            .bg(rgb(color))
+            .cursor_pointer()
+            .occlude()
+            .window_control_area(area)
+            .hover(|style| style.opacity(0.75))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event, window, cx| {
+                    cx.stop_propagation();
+                    listener(this, event, window, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
     fn render_status(&self, theme: crate::config::ThemeColors) -> Option<AnyElement> {
         let status = self.status.as_deref()?;
         Some(
@@ -1256,7 +1316,7 @@ impl Render for SettingsView {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .bg(rgb(theme.terminal_background));
+            .bg(rgb(theme.chrome_background));
 
         let startup_rows = vec![
             self.render_setting(
@@ -1548,6 +1608,14 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
+                SettingField::WindowPadding,
+                "窗口主体内边距",
+                "窗口 chrome 与浮动侧边栏、终端面板之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
                 SettingField::PanePadding,
                 "面板内边距",
                 "终端面板内容的内边距，逻辑像素",
@@ -1796,6 +1864,8 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
+            .rounded(px(self.config.ui.window_corner_radius))
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 this.handle_key_down(event, window, cx);
@@ -1807,7 +1877,7 @@ impl Render for SettingsView {
                 window.minimize_window();
             })
             .on_action(|_: &IgnoreQuit, _window, _cx| {})
-            .bg(rgb(theme.terminal_background))
+            .bg(rgb(theme.chrome_background))
             .font(font(self.config.terminal.font_family.clone()))
             .text_size(px(self.config.ui.font_size))
             .text_color(rgb(theme.ui_foreground))
