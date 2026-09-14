@@ -32,6 +32,16 @@ pub const DEFAULT_TAB_HEIGHT: f32 = 28.0;
 pub const DEFAULT_SIDEBAR_HEADER_HEIGHT: f32 = 24.0;
 pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
 pub const DEFAULT_PANE_PADDING: f32 = 8.0;
+pub const DEFAULT_PANE_CORNER_RADIUS: f32 = 12.0;
+pub const DEFAULT_PANE_DIVIDER_WIDTH: f32 = 2.0;
+pub const DEFAULT_SIDEBAR_MARGIN: f32 = 4.0;
+pub const DEFAULT_SIDEBAR_CARD_GAP: f32 = 6.0;
+pub const DEFAULT_SIDEBAR_CARD_PADDING: f32 = 6.0;
+pub const DEFAULT_SIDEBAR_ROW_PADDING: f32 = 10.0;
+pub const DEFAULT_TITLEBAR_PADDING: f32 = 10.0;
+pub const DEFAULT_TITLEBAR_GAP: f32 = 8.0;
+pub const DEFAULT_TAB_GAP: f32 = 2.0;
+pub const DEFAULT_TAB_PADDING: f32 = 10.0;
 /// Window corner radius applied to the client-side window shape.
 pub const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 12.0;
 /// Sidebar card radius; defaults to following the window corner radius.
@@ -498,6 +508,27 @@ pub struct UiConfig {
     pub sidebar_header_height: f32,
     pub pane_margin: f32,
     pub pane_padding: f32,
+    /// Corner radius of each client-side pane surface.
+    pub pane_corner_radius: f32,
+    /// Width of the draggable split divider. Pane margins provide the visual
+    /// separation around the divider.
+    pub pane_divider_width: f32,
+    /// Insets the sidebar card list and its bottom action row.
+    pub sidebar_margin: f32,
+    /// Gap between sidebar connection cards and their nested workspace cards.
+    pub sidebar_card_gap: f32,
+    /// Padding inside sidebar connection cards.
+    pub sidebar_card_padding: f32,
+    /// Horizontal padding shared by sidebar headers and rows.
+    pub sidebar_row_padding: f32,
+    /// Horizontal padding around the titlebar's leading controls.
+    pub titlebar_padding: f32,
+    /// Gap between titlebar controls.
+    pub titlebar_gap: f32,
+    /// Gap between tabs in the tab strip.
+    pub tab_gap: f32,
+    /// Horizontal padding inside a tab.
+    pub tab_padding: f32,
     /// Corner radius of the client-side window shape; 0 disables the rounded
     /// window background (square window).
     pub window_corner_radius: f32,
@@ -524,6 +555,16 @@ impl Default for UiConfig {
             sidebar_header_height: DEFAULT_SIDEBAR_HEADER_HEIGHT,
             pane_margin: DEFAULT_PANE_MARGIN,
             pane_padding: DEFAULT_PANE_PADDING,
+            pane_corner_radius: DEFAULT_PANE_CORNER_RADIUS,
+            pane_divider_width: DEFAULT_PANE_DIVIDER_WIDTH,
+            sidebar_margin: DEFAULT_SIDEBAR_MARGIN,
+            sidebar_card_gap: DEFAULT_SIDEBAR_CARD_GAP,
+            sidebar_card_padding: DEFAULT_SIDEBAR_CARD_PADDING,
+            sidebar_row_padding: DEFAULT_SIDEBAR_ROW_PADDING,
+            titlebar_padding: DEFAULT_TITLEBAR_PADDING,
+            titlebar_gap: DEFAULT_TITLEBAR_GAP,
+            tab_gap: DEFAULT_TAB_GAP,
+            tab_padding: DEFAULT_TAB_PADDING,
             window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
             sidebar_card_radius: DEFAULT_SIDEBAR_CARD_RADIUS,
             sidebar_workspace_radius: DEFAULT_SIDEBAR_WORKSPACE_RADIUS,
@@ -545,6 +586,16 @@ impl UiConfig {
         self.sidebar_header_height = self.sidebar_header_height.clamp(20.0, 96.0);
         self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
         self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
+        self.pane_corner_radius = self.pane_corner_radius.clamp(0.0, 48.0);
+        self.pane_divider_width = self.pane_divider_width.clamp(1.0, 16.0);
+        self.sidebar_margin = self.sidebar_margin.clamp(0.0, 32.0);
+        self.sidebar_card_gap = self.sidebar_card_gap.clamp(0.0, 32.0);
+        self.sidebar_card_padding = self.sidebar_card_padding.clamp(0.0, 32.0);
+        self.sidebar_row_padding = self.sidebar_row_padding.clamp(0.0, 48.0);
+        self.titlebar_padding = self.titlebar_padding.clamp(0.0, 32.0);
+        self.titlebar_gap = self.titlebar_gap.clamp(0.0, 32.0);
+        self.tab_gap = self.tab_gap.clamp(0.0, 24.0);
+        self.tab_padding = self.tab_padding.clamp(0.0, 48.0);
         self.window_corner_radius = self.window_corner_radius.clamp(0.0, 48.0);
         self.sidebar_card_radius = self.sidebar_card_radius.clamp(0.0, 32.0);
         self.sidebar_workspace_radius = self.sidebar_workspace_radius.clamp(0.0, 24.0);
@@ -1064,6 +1115,36 @@ impl AppConfigOverrides {
             if let Some(value) = ui.pane_padding {
                 config.ui.pane_padding = value;
             }
+            if let Some(value) = ui.pane_corner_radius {
+                config.ui.pane_corner_radius = value;
+            }
+            if let Some(value) = ui.pane_divider_width {
+                config.ui.pane_divider_width = value;
+            }
+            if let Some(value) = ui.sidebar_margin {
+                config.ui.sidebar_margin = value;
+            }
+            if let Some(value) = ui.sidebar_card_gap {
+                config.ui.sidebar_card_gap = value;
+            }
+            if let Some(value) = ui.sidebar_card_padding {
+                config.ui.sidebar_card_padding = value;
+            }
+            if let Some(value) = ui.sidebar_row_padding {
+                config.ui.sidebar_row_padding = value;
+            }
+            if let Some(value) = ui.titlebar_padding {
+                config.ui.titlebar_padding = value;
+            }
+            if let Some(value) = ui.titlebar_gap {
+                config.ui.titlebar_gap = value;
+            }
+            if let Some(value) = ui.tab_gap {
+                config.ui.tab_gap = value;
+            }
+            if let Some(value) = ui.tab_padding {
+                config.ui.tab_padding = value;
+            }
             if let Some(value) = ui.window_corner_radius {
                 config.ui.window_corner_radius = value;
             }
@@ -1224,6 +1305,16 @@ pub struct UiConfigOverrides {
     pub sidebar_header_height: Option<f32>,
     pub pane_margin: Option<f32>,
     pub pane_padding: Option<f32>,
+    pub pane_corner_radius: Option<f32>,
+    pub pane_divider_width: Option<f32>,
+    pub sidebar_margin: Option<f32>,
+    pub sidebar_card_gap: Option<f32>,
+    pub sidebar_card_padding: Option<f32>,
+    pub sidebar_row_padding: Option<f32>,
+    pub titlebar_padding: Option<f32>,
+    pub titlebar_gap: Option<f32>,
+    pub tab_gap: Option<f32>,
+    pub tab_padding: Option<f32>,
     pub window_corner_radius: Option<f32>,
     pub sidebar_card_radius: Option<f32>,
     pub sidebar_workspace_radius: Option<f32>,
@@ -1569,6 +1660,38 @@ mod tests {
         assert_eq!(config.ui.sidebar_min_width, 500.0);
         assert_eq!(config.ui.sidebar_max_width, 500.0);
         assert_eq!(config.ui.sidebar_width, 500.0);
+    }
+
+    #[test]
+    fn ui_geometry_overrides_cover_pane_and_chrome_spacing() {
+        let path = write_temp_config(
+            r#"{
+                "ui": {
+                    "pane_corner_radius": 20.0,
+                    "pane_divider_width": 3.0,
+                    "sidebar_margin": 5.0,
+                    "sidebar_card_gap": 7.0,
+                    "sidebar_card_padding": 8.0,
+                    "sidebar_row_padding": 11.0,
+                    "titlebar_padding": 12.0,
+                    "titlebar_gap": 9.0,
+                    "tab_gap": 4.0,
+                    "tab_padding": 13.0
+                }
+            }"#,
+        );
+        let config = AppConfig::load_from_path(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(config.ui.pane_corner_radius, 20.0);
+        assert_eq!(config.ui.pane_divider_width, 3.0);
+        assert_eq!(config.ui.sidebar_margin, 5.0);
+        assert_eq!(config.ui.sidebar_card_gap, 7.0);
+        assert_eq!(config.ui.sidebar_card_padding, 8.0);
+        assert_eq!(config.ui.sidebar_row_padding, 11.0);
+        assert_eq!(config.ui.titlebar_padding, 12.0);
+        assert_eq!(config.ui.titlebar_gap, 9.0);
+        assert_eq!(config.ui.tab_gap, 4.0);
+        assert_eq!(config.ui.tab_padding, 13.0);
     }
 
     fn write_temp_config(contents: &str) -> PathBuf {

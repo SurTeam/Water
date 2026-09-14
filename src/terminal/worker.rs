@@ -252,6 +252,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     });
     let mut process_metadata = ProcessMetadata::from_fallback(&metadata_fallback);
     let mut current_size = size;
+    let mut current_cell_width = 0u16;
+    let mut current_cell_height = 0u16;
     // Attached client fanout. A slow or dead client backpressures the PTY
     // (blocking send) or is dropped (disconnected channel) — never the other
     // way around; events are already in the replay ring either way.
@@ -402,7 +404,11 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         Ok(())
                     }
                 }
-                TerminalWorkerCommand::Resize(new_size) => {
+                TerminalWorkerCommand::Resize {
+                    size: new_size,
+                    cell_width,
+                    cell_height,
+                } => {
                     // Drain every byte already observed by the reader before
                     // applying the PTY geometry. This makes the stream order
                     // authoritative: Output(old) -> Resize -> Output(new).
@@ -432,11 +438,25 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     if matches!(drain_result, Ok(ReadEffect::Eof)) {
                         reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
+                    // Older control clients only know rows and columns. A
+                    // zero pixel field means "preserve the last measured
+                    // cell size" so an ordinary CLI resize cannot regress
+                    // image-protocol support.
+                    let next_cell_width = if cell_width == 0 {
+                        current_cell_width
+                    } else {
+                        cell_width
+                    };
+                    let next_cell_height = if cell_height == 0 {
+                        current_cell_height
+                    } else {
+                        cell_height
+                    };
                     let window_size = alacritty_terminal::event::WindowSize {
                         num_lines: new_size.lines as u16,
                         num_cols: new_size.columns as u16,
-                        cell_width: 0,
-                        cell_height: 0,
+                        cell_width: next_cell_width,
+                        cell_height: next_cell_height,
                     };
                     let result = (|| {
                         pty.on_resize(window_size);
@@ -444,6 +464,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     })();
                     if result.is_ok() {
                         current_size = new_size;
+                        current_cell_width = next_cell_width;
+                        current_cell_height = next_cell_height;
                         let seq = replay.push_resize(new_size);
                         metrics::inc(metrics::terminal_resize_events());
                         metrics::inc(metrics::terminal_stream_events());

@@ -168,6 +168,10 @@ pub enum TerminalCommand {
         pane_id: Option<PaneId>,
         columns: usize,
         lines: usize,
+        #[serde(default)]
+        cell_width: u16,
+        #[serde(default)]
+        cell_height: u16,
     },
     Scroll {
         terminal_id: Option<TerminalId>,
@@ -376,6 +380,10 @@ enum AppCommandWire {
         pane_id: Option<PaneId>,
         columns: usize,
         lines: usize,
+        #[serde(default)]
+        cell_width: u16,
+        #[serde(default)]
+        cell_height: u16,
     },
     #[serde(rename = "terminal.scroll")]
     TerminalScroll {
@@ -536,11 +544,15 @@ impl From<&AppCommand> for AppCommandWire {
                 pane_id,
                 columns,
                 lines,
+                cell_width,
+                cell_height,
             }) => Self::TerminalResize {
                 terminal_id: *terminal_id,
                 pane_id: *pane_id,
                 columns: *columns,
                 lines: *lines,
+                cell_width: *cell_width,
+                cell_height: *cell_height,
             },
             AppCommand::Terminal(TerminalCommand::Scroll {
                 terminal_id,
@@ -684,11 +696,15 @@ impl From<AppCommandWire> for AppCommand {
                 pane_id,
                 columns,
                 lines,
+                cell_width,
+                cell_height,
             } => Self::Terminal(TerminalCommand::Resize {
                 terminal_id,
                 pane_id,
                 columns,
                 lines,
+                cell_width,
+                cell_height,
             }),
             AppCommandWire::TerminalScroll {
                 terminal_id,

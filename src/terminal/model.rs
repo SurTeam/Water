@@ -116,7 +116,11 @@ pub struct TerminalAttachment {
 pub(crate) enum TerminalWorkerCommand {
     SendText(Vec<u8>),
     SendBytes(Vec<u8>),
-    Resize(TerminalSize),
+    Resize {
+        size: TerminalSize,
+        cell_width: u16,
+        cell_height: u16,
+    },
     Attach {
         sender: SyncSender<TerminalStreamEvent>,
         reply: Sender<(Vec<TerminalStreamEvent>, TerminalSeq)>,
@@ -798,8 +802,24 @@ impl TerminalManager {
     }
 
     pub fn resize(&self, terminal_id: TerminalId, size: TerminalSize) -> Result<(), TerminalError> {
-        self.registry
-            .send(terminal_id, TerminalWorkerCommand::Resize(size))
+        self.resize_with_cell_size(terminal_id, size, 0, 0)
+    }
+
+    pub fn resize_with_cell_size(
+        &self,
+        terminal_id: TerminalId,
+        size: TerminalSize,
+        cell_width: u16,
+        cell_height: u16,
+    ) -> Result<(), TerminalError> {
+        self.registry.send(
+            terminal_id,
+            TerminalWorkerCommand::Resize {
+                size,
+                cell_width,
+                cell_height,
+            },
+        )
     }
 
     pub fn attach(&self, terminal_id: TerminalId) -> Result<TerminalAttachment, TerminalError> {

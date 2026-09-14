@@ -92,6 +92,8 @@ fn resize_event_is_emitted_into_the_ordered_stream() {
             pane_id: Some(pane_id),
             columns: 120,
             lines: 30,
+            cell_width: 0,
+            cell_height: 0,
         }),
     );
 
@@ -149,6 +151,8 @@ fn resize_drains_pending_output_before_the_resize_event() {
             pane_id: Some(pane_id),
             columns: 100,
             lines: 28,
+            cell_width: 0,
+            cell_height: 0,
         }),
     );
     dispatcher.pump_background_events();

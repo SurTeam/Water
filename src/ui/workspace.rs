@@ -56,14 +56,10 @@ const SIDEBAR_DROP_TOLERANCE_PX: f32 = 14.0;
 const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 /// Pixels to move the sidebar per captured pointer move near an edge.
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
-const SPLIT_DIVIDER_WIDTH_PX: f32 = 6.0;
-
-/// Margin around the whole sidebar card list and the connect-remote row.
-const SIDEBAR_CARD_MARGIN: f32 = 6.0;
-/// Vertical gap between connection cards and inside them, between
-/// workspace cards. Kept fixed: the cards are the visual unit of the
-/// sidebar and the gap is not something users need to tune.
-const SIDEBAR_CARD_INNER_GAP: f32 = 6.0;
+/// Leading titlebar width used when the sidebar is collapsed. It keeps the
+/// tab strip from jumping all the way to the window edge when the controls
+/// still occupy the left side of the titlebar.
+const COLLAPSED_TITLEBAR_LEADING_WIDTH: f32 = 112.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceConnectionKind {
@@ -585,6 +581,8 @@ struct TerminalRenderCache {
 struct TerminalResizeRequest {
     terminal_id: TerminalId,
     target: TerminalSize,
+    cell_width: u16,
+    cell_height: u16,
     /// Size projected by the snapshot when this request was sent. If this
     /// changes while the target does not, another window has superseded us
     /// and the active window must be allowed to request its target again.
@@ -1612,7 +1610,7 @@ impl WorkspaceView {
                 split_pointer_coordinate(position, drag.axis),
                 drag.rect.origin,
                 drag.rect.extent,
-                SPLIT_DIVIDER_WIDTH_PX,
+                self.config.ui.pane_divider_width,
             ));
         }
         self.split_drag = Some(drag);
@@ -3036,7 +3034,9 @@ impl WorkspaceView {
             .connection_by_id(connection_id)
             .map(|connection| connection.client.clone())
             .unwrap_or_else(|| self.client.clone());
+        let application = self.application.clone();
         let resize_requests = self.resize_requests.clone();
+        let (cell_width, cell_height) = terminal_cell_size_pixels(metrics);
         canvas(
             move |bounds, _, _| {
                 // A terminal can be projected in several native windows. Only
@@ -3049,17 +3049,27 @@ impl WorkspaceView {
                     terminal_columns_for_width(bounds, metrics),
                     terminal_lines_for_height(bounds, metrics),
                 );
+                if let Some(application) = application.as_ref() {
+                    let _ = application.terminal_set_cell_size(
+                        connection_id,
+                        terminal_id,
+                        cell_width,
+                        cell_height,
+                    );
+                }
                 let should_enqueue = {
                     let mut requests = resize_requests
                         .lock()
                         .expect("terminal resize requests poisoned");
-                    terminal_resize_request_needed(
+                    terminal_resize_request_needed_with_pixels(
                         &mut requests,
                         connection_id,
                         pane_id,
                         terminal_id,
                         current_size,
                         size,
+                        cell_width,
+                        cell_height,
                         window_active,
                     )
                 };
@@ -3075,6 +3085,8 @@ impl WorkspaceView {
                             pane_id: Some(pane_id),
                             columns: size.columns,
                             lines: size.lines,
+                            cell_width,
+                            cell_height,
                         }))
                     {
                         let _ = client.wait_operation(operation_id);
@@ -3700,59 +3712,75 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let background = if active {
-            rgb(theme.tab_active_background)
+            // Match the pane surface so the selected tab visually opens into
+            // the terminal below; its lower corners are intentionally square.
+            rgb(theme.pane_background)
         } else {
             rgb(theme.tab_inactive_background)
         };
-        div()
+        let mut tab = div()
             .id(format!("tab-{tab_id}"))
             .h(px(self.config.ui.tab_height))
-            .px(px(10.))
+            .px(px(self.config.ui.tab_padding))
             .items_center()
             .flex()
             .flex_none()
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
-            .rounded(px(6.))
             .text_color(rgb(theme.terminal_foreground))
-            .child(SharedString::from(title))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                    if this.has_transient_ui() {
-                        cx.stop_propagation();
-                        return;
-                    }
-                    this.context_menu = None;
-                    this.focus_handle.focus(window, cx);
-                    this.focused_pane = Some(active_pane);
-                    this.split_drag = None;
-                    this.selection = None;
-                    this.clear_ime();
-                    this.dispatch(
-                        AppCommand::Tab(TabCommand::Activate {
-                            tab_id: Some(tab_id),
-                            index: None,
-                        }),
-                        cx,
-                    );
+            .child(SharedString::from(title));
+        if active {
+            // The active tab uses the pane surface and squared lower corners,
+            // so it reads as the tab's small top edge opening into the
+            // terminal below instead of as a floating pill in the titlebar.
+            tab = tab
+                .rounded_t(px(self
+                    .config
+                    .ui
+                    .pane_corner_radius
+                    .min(self.config.ui.tab_height / 2.)))
+                .border_1()
+                .border_color(rgb(theme.active_pane_border));
+        } else {
+            tab = tab.rounded(px((self.config.ui.tab_height / 4.).max(4.)));
+        }
+        tab.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
+                if this.has_transient_ui() {
                     cx.stop_propagation();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    this.context_menu = Some(ContextMenuState {
-                        target: ContextMenuTarget::Tab(tab_id),
-                        position: event.position,
-                    });
-                    this.focus_handle.focus(window, cx);
-                    cx.stop_propagation();
-                    cx.notify();
-                }),
-            )
-            .into_any_element()
+                    return;
+                }
+                this.context_menu = None;
+                this.focus_handle.focus(window, cx);
+                this.focused_pane = Some(active_pane);
+                this.split_drag = None;
+                this.selection = None;
+                this.clear_ime();
+                this.dispatch(
+                    AppCommand::Tab(TabCommand::Activate {
+                        tab_id: Some(tab_id),
+                        index: None,
+                    }),
+                    cx,
+                );
+                cx.stop_propagation();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                this.context_menu = Some(ContextMenuState {
+                    target: ContextMenuTarget::Tab(tab_id),
+                    position: event.position,
+                });
+                this.focus_handle.focus(window, cx);
+                cx.stop_propagation();
+                cx.notify();
+            }),
+        )
+        .into_any_element()
     }
 
     fn sidebar_resize_handle(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -3844,11 +3872,10 @@ impl WorkspaceView {
             .id(format!("workspace-{connection_id}-{workspace_id}"))
             .h(px(self.config.ui.sidebar_header_height))
             .w_full()
-            .px(px(10.))
+            .px(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .flex()
             .cursor_pointer()
-            .rounded_t(px(self.config.ui.sidebar_workspace_radius))
             .hover(|style| style.bg(rgb(workspace_hover_background)))
             .bg(workspace_background)
             .text_color(rgb(theme.ui_foreground))
@@ -3885,6 +3912,11 @@ impl WorkspaceView {
                     .child(SharedString::from(running_agent_count.to_string())),
             );
         }
+        if collapsed {
+            workspace_row = workspace_row.rounded(px(self.config.ui.sidebar_workspace_radius));
+        } else {
+            workspace_row = workspace_row.rounded_t(px(self.config.ui.sidebar_workspace_radius));
+        }
 
         let mut group = div()
             .id(format!("workspace-group-{connection_id}-{workspace_id}"))
@@ -3898,9 +3930,17 @@ impl WorkspaceView {
             .border_color(rgb(theme.inactive_pane_border))
             .child(workspace_row);
         if !collapsed {
+            let mut agent_rows = div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .overflow_hidden()
+                .rounded_b(px(self.config.ui.sidebar_workspace_radius));
             for agent in agents {
-                group = group.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
+                agent_rows =
+                    agent_rows.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
             }
+            group = group.child(agent_rows);
         }
         group.into_any_element()
     }
@@ -3923,11 +3963,12 @@ impl WorkspaceView {
             .id(format!("connection-{connection_id}"))
             .h(px(34.))
             .w_full()
-            .px(px(10.))
+            .px(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .flex()
             .flex_none()
             .cursor_pointer()
+            .rounded_t(px(self.config.ui.sidebar_card_radius))
             .bg(rgb(if selected {
                 theme.sidebar_connection_active_background
             } else {
@@ -3976,8 +4017,8 @@ impl WorkspaceView {
         let mut group = div()
             .id(format!("connection-group-{connection_id}"))
             .w_full()
-            .gap(px(SIDEBAR_CARD_INNER_GAP))
-            .p(px(SIDEBAR_CARD_INNER_GAP))
+            .gap(px(self.config.ui.sidebar_card_gap))
+            .p(px(self.config.ui.sidebar_card_padding))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -4004,7 +4045,9 @@ impl WorkspaceView {
                 div()
                     .h(px(24.))
                     .w_full()
-                    .pl(px(34.))
+                    .pl(px(
+                        self.config.ui.sidebar_row_padding + SIDEBAR_DISCLOSURE_WIDTH
+                    ))
                     .items_center()
                     .flex()
                     .text_color(rgb(theme.inactive_pane_border))
@@ -4041,9 +4084,9 @@ impl WorkspaceView {
             .min_h(px(0.))
             .overflow_y_scroll()
             .track_scroll(&self.sidebar_scroll)
-            .px(px(SIDEBAR_CARD_MARGIN))
-            .py(px(SIDEBAR_CARD_MARGIN))
-            .gap(px(SIDEBAR_CARD_INNER_GAP))
+            .px(px(self.config.ui.sidebar_margin))
+            .py(px(self.config.ui.sidebar_margin))
+            .gap(px(self.config.ui.sidebar_card_gap))
             .flex_col();
         for connection in &self.connections {
             list = list.child(self.render_sidebar_connection(connection, theme, cx));
@@ -4072,13 +4115,24 @@ impl WorkspaceView {
                 .h(px(2.0)),
             )
         });
-        let connect_remote = div()
+        let content_width =
+            (self.sidebar_width - self.config.ui.sidebar_resize_handle_width).max(0.);
+        let label_width = content_width
+            - 2. * self.config.ui.sidebar_margin
+            - 2. * self.config.ui.sidebar_row_padding
+            - 18.
+            - 6.;
+        // Leave a small safety allowance for proportional glyph widths so
+        // the default-width sidebar shows the complete label before falling
+        // back to truncation at very narrow widths.
+        let connect_label_size =
+            ((label_width - 16.).max(0.) / 7.).clamp(8., self.config.ui.font_size.min(11.));
+        let connect_remote_button = div()
             .id("connect-remote")
-            .mx(px(SIDEBAR_CARD_MARGIN))
-            .mb(px(SIDEBAR_CARD_MARGIN))
             .h(px(32.))
             .w_full()
-            .px(px(10.))
+            .min_w(px(0.))
+            .px(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .gap(px(6.))
             .flex()
@@ -4088,8 +4142,15 @@ impl WorkspaceView {
             .border_color(rgb(theme.inactive_pane_border))
             .rounded(px(self.config.ui.sidebar_card_radius))
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
-            .child("＋")
-            .child("Connect Remote…")
+            .child(div().flex_none().child("＋"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .truncate()
+                    .text_size(px(connect_label_size))
+                    .child("Connect Remote…"),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
@@ -4097,6 +4158,12 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
+        let connect_remote = div()
+            .w_full()
+            .min_w(px(0.))
+            .px(px(self.config.ui.sidebar_margin))
+            .pb(px(self.config.ui.sidebar_margin))
+            .child(connect_remote_button);
         let mut sidebar_content = div()
             .flex_1()
             .min_w(px(0.))
@@ -4104,6 +4171,7 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .relative()
+            .overflow_hidden()
             .bg(rgb(theme.sidebar_background))
             .rounded_bl(px(self.config.ui.window_corner_radius))
             .child(list)
@@ -4206,7 +4274,7 @@ impl WorkspaceView {
             .id(format!("agent-pane-{connection_id}-{pane_id}"))
             .h(px(28.))
             .w_full()
-            .px(px(10.))
+            .px(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .gap(px(6.))
             .flex()
@@ -5061,7 +5129,7 @@ impl WorkspaceView {
             .id("tab-bar-scroll")
             .h_full()
             .w_full()
-            .gap(px(2.))
+            .gap(px(self.config.ui.tab_gap))
             .items_center()
             .flex()
             .overflow_x_scroll()
@@ -5094,7 +5162,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
-            .rounded(px(6.))
+            .rounded(px((self.config.ui.tab_height / 4.).max(4.)))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5197,7 +5265,7 @@ impl WorkspaceView {
         );
         let controls = div()
             .h_full()
-            .gap(px(8.))
+            .gap(px(self.config.ui.titlebar_gap))
             .items_center()
             .flex()
             .flex_none()
@@ -5222,6 +5290,26 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
+        let titlebar_leading_width = if self.sidebar_collapsed {
+            COLLAPSED_TITLEBAR_LEADING_WIDTH.max(
+                self.config.ui.titlebar_padding * 2.
+                    + self.config.ui.titlebar_gap * 3.
+                    + 3. * 14.
+                    + 28.,
+            )
+        } else {
+            self.sidebar_width
+        };
+        let titlebar_leading = div()
+            .h_full()
+            .w(px(titlebar_leading_width))
+            .flex_none()
+            .items_center()
+            .gap(px(self.config.ui.titlebar_gap))
+            .px(px(self.config.ui.titlebar_padding))
+            .flex()
+            .child(controls)
+            .child(sidebar_toggle);
         let right_sidebar_placeholder = div()
             .id("right-sidebar-placeholder")
             .size(px(28.))
@@ -5244,8 +5332,8 @@ impl WorkspaceView {
             .id("water-titlebar")
             .h(px(self.config.ui.titlebar_height))
             .w_full()
-            .gap(px(8.))
-            .px(px(10.))
+            .gap(px(0.))
+            .px(px(0.))
             .items_center()
             .flex()
             // The titlebar owns its drag gesture explicitly below. Only the
@@ -5286,8 +5374,7 @@ impl WorkspaceView {
                     window.start_window_move();
                 }
             }))
-            .child(controls)
-            .child(sidebar_toggle)
+            .child(titlebar_leading)
             .child(self.render_tab_bar(theme, cx))
             .child(right_sidebar_placeholder)
             .into_any_element()
@@ -5418,6 +5505,7 @@ impl WorkspaceView {
                         .min_w(px(0.))
                         .min_h(px(0.))
                         .overflow_hidden()
+                        .rounded(px(self.config.ui.pane_corner_radius))
                         .relative()
                         .child(content)
                         .child(self.terminal_resize_observer(
@@ -5439,6 +5527,7 @@ impl WorkspaceView {
                             .min_w(px(0.))
                             .min_h(px(0.))
                             .overflow_hidden()
+                            .rounded(px(self.config.ui.pane_corner_radius))
                             .child(content)
                             .on_drop(cx.listener(
                                 move |this, paths: &ExternalPaths, _window, cx| {
@@ -5468,7 +5557,7 @@ impl WorkspaceView {
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
-                    .rounded(px(12.))
+                    .rounded(px(self.config.ui.pane_corner_radius))
                     .bg(rgb(theme.pane_background))
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
@@ -5651,7 +5740,7 @@ impl WorkspaceView {
                     CursorStyle::ResizeUpDown
                 };
                 let divider = {
-                    let divider_width = SPLIT_DIVIDER_WIDTH_PX;
+                    let divider_width = self.config.ui.pane_divider_width;
                     let divider_id = path
                         .iter()
                         .map(|bit| if *bit { '1' } else { '0' })
@@ -6765,6 +6854,7 @@ fn terminal_columns_for_width(bounds: Bounds<gpui::Pixels>, metrics: TerminalMet
         .count()
 }
 
+#[cfg(test)]
 fn terminal_resize_request_needed(
     requests: &mut BTreeMap<(ConnectionId, PaneId), TerminalResizeRequest>,
     connection_id: ConnectionId,
@@ -6786,6 +6876,8 @@ fn terminal_resize_request_needed(
     let request = TerminalResizeRequest {
         terminal_id,
         target,
+        cell_width: 0,
+        cell_height: 0,
         observed_size: current_size,
     };
     if requests.get(&key) == Some(&request) {
@@ -6794,6 +6886,51 @@ fn terminal_resize_request_needed(
         requests.insert(key, request);
         true
     }
+}
+
+fn terminal_resize_request_needed_with_pixels(
+    requests: &mut BTreeMap<(ConnectionId, PaneId), TerminalResizeRequest>,
+    connection_id: ConnectionId,
+    pane_id: PaneId,
+    terminal_id: TerminalId,
+    current_size: TerminalSize,
+    target: TerminalSize,
+    cell_width: u16,
+    cell_height: u16,
+    window_active: bool,
+) -> bool {
+    if !window_active {
+        return false;
+    }
+    let key = (connection_id, pane_id);
+    let request = TerminalResizeRequest {
+        terminal_id,
+        target,
+        cell_width,
+        cell_height,
+        observed_size: current_size,
+    };
+    if requests.get(&key) == Some(&request) {
+        false
+    } else {
+        // Keep the first request even when rows/columns already match. This
+        // is the initial pixel-size handshake: the PTY may have the right
+        // character grid but still have zero cell pixel dimensions.
+        requests.insert(key, request);
+        true
+    }
+}
+
+fn terminal_cell_size_pixels(metrics: TerminalMetrics) -> (u16, u16) {
+    let to_device_pixels = |value: f32| {
+        (value * metrics.scale_factor)
+            .round()
+            .clamp(1.0, f32::from(u16::MAX)) as u16
+    };
+    (
+        to_device_pixels(metrics.cell_width),
+        to_device_pixels(metrics.line_height),
+    )
 }
 
 fn terminal_lines_for_height(bounds: Bounds<gpui::Pixels>, metrics: TerminalMetrics) -> usize {
@@ -8453,6 +8590,8 @@ impl Render for WorkspaceView {
             .size_full()
             .flex()
             .flex_col()
+            .overflow_hidden()
+            .rounded(px(corner_radius))
             .on_action(|_: &HideWindow, window, _cx| {
                 window.remove_window();
             })
@@ -8856,6 +8995,49 @@ mod tests {
             false,
         ));
         assert!(!requests.contains_key(&(local, pane_id)));
+    }
+
+    #[test]
+    fn initial_pixel_geometry_is_sent_even_when_grid_size_matches() {
+        let connection_id = ConnectionId::new(3);
+        let pane_id = PaneId::new(3);
+        let terminal_id = TerminalId::new(3);
+        let size = TerminalSize::new(80, 24);
+        let mut requests = BTreeMap::new();
+
+        assert!(terminal_resize_request_needed_with_pixels(
+            &mut requests,
+            connection_id,
+            pane_id,
+            terminal_id,
+            size,
+            size,
+            84,
+            36,
+            true,
+        ));
+        assert!(!terminal_resize_request_needed_with_pixels(
+            &mut requests,
+            connection_id,
+            pane_id,
+            terminal_id,
+            size,
+            size,
+            84,
+            36,
+            true,
+        ));
+        assert!(terminal_resize_request_needed_with_pixels(
+            &mut requests,
+            connection_id,
+            pane_id,
+            terminal_id,
+            size,
+            size,
+            85,
+            36,
+            true,
+        ));
     }
 
     #[test]

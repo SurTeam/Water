@@ -113,6 +113,7 @@ struct TerminalConnection {
     snapshots: std::collections::BTreeMap<TerminalId, Arc<crate::terminal::TerminalSnapshot>>,
     pending_attachments: std::collections::BTreeSet<TerminalId>,
     attachments: std::collections::BTreeMap<TerminalId, Arc<TerminalAttachmentState>>,
+    cell_sizes: std::collections::BTreeMap<TerminalId, (u16, u16)>,
     events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>,
     scrollback_lines: usize,
     theme: TerminalTheme,
@@ -123,6 +124,7 @@ enum TerminalEmulatorCommand {
     ScrollTo(i64),
     SetPinned(bool),
     SetScrollbackProtected(bool),
+    SetCellSize { cell_width: u16, cell_height: u16 },
 }
 
 struct TerminalAttachmentState {
@@ -286,6 +288,10 @@ fn apply_emulator_commands(
             TerminalEmulatorCommand::SetScrollbackProtected(protected) => {
                 emulator.set_scrollback_protected(protected)
             }
+            TerminalEmulatorCommand::SetCellSize {
+                cell_width,
+                cell_height,
+            } => emulator.set_cell_size(cell_width, cell_height),
         }
         changed = true;
     }
@@ -989,6 +995,7 @@ impl WaterApplication {
             snapshots: std::collections::BTreeMap::new(),
             pending_attachments: std::collections::BTreeSet::new(),
             attachments: std::collections::BTreeMap::new(),
+            cell_sizes: std::collections::BTreeMap::new(),
             events_tx,
             scrollback_lines: config.terminal.scrollback_lines,
             theme,
@@ -1098,6 +1105,7 @@ impl WaterApplication {
                     terminal.pending_attachments.remove(&terminal_id);
                     terminal.attachments.remove(&terminal_id);
                     terminal.emulator_commands.remove(&terminal_id);
+                    terminal.cell_sizes.remove(&terminal_id);
                     terminal.snapshots.remove(&terminal_id);
                     changed.insert(terminal_id);
                 }
@@ -1148,6 +1156,7 @@ impl WaterApplication {
             }
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
+            terminal.cell_sizes.remove(&terminal_id);
             terminal.session.clone()
         };
         session.detach(terminal_id);
@@ -1403,6 +1412,7 @@ impl WaterApplication {
         {
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
+            terminal.cell_sizes.remove(&terminal_id);
             if let Some(attachment) = terminal.attachments.remove(&terminal_id) {
                 attachment.cancel();
             }
@@ -1422,6 +1432,47 @@ impl WaterApplication {
             .find(|connection| connection.projection.id == connection_id)?;
         let terminal = connection.terminal.as_ref()?;
         terminal.snapshots.get(&terminal_id).cloned()
+    }
+
+    /// Updates the local emulator's physical cell size. The cache keeps the
+    /// observer idempotent while the attachment worker receives the command
+    /// on its existing bounded channel.
+    pub(crate) fn terminal_set_cell_size(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        cell_width: u16,
+        cell_height: u16,
+    ) -> bool {
+        let mut connections = self.state.connections.borrow_mut();
+        let Some(connection) = connections
+            .iter_mut()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_mut() else {
+            return false;
+        };
+        if terminal.cell_sizes.get(&terminal_id) == Some(&(cell_width, cell_height)) {
+            return true;
+        }
+        let Some(commands) = terminal.emulator_commands.get(&terminal_id) else {
+            return false;
+        };
+        if commands
+            .try_send(TerminalEmulatorCommand::SetCellSize {
+                cell_width,
+                cell_height,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        terminal
+            .cell_sizes
+            .insert(terminal_id, (cell_width, cell_height));
+        true
     }
 
     pub(crate) fn terminal_scroll_by(

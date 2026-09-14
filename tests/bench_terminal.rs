@@ -177,6 +177,8 @@ fn run_server_interaction(id: u64) -> InteractionSample {
             pane_id: None,
             columns: resized.columns,
             lines: resized.lines,
+            cell_width: 0,
+            cell_height: 0,
         }))
         .unwrap();
     assert_eq!(

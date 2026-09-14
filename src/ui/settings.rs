@@ -62,6 +62,16 @@ enum SettingField {
     SidebarHeaderHeight,
     PaneMargin,
     PanePadding,
+    PaneCornerRadius,
+    PaneDividerWidth,
+    SidebarMargin,
+    SidebarCardGap,
+    SidebarCardPadding,
+    SidebarRowPadding,
+    TitlebarPadding,
+    TitlebarGap,
+    TabGap,
+    TabPadding,
     WindowCornerRadius,
     SidebarCardRadius,
     SidebarWorkspaceRadius,
@@ -159,6 +169,16 @@ impl SettingField {
             Self::SidebarHeaderHeight => "sidebar-header-height",
             Self::PaneMargin => "pane-margin",
             Self::PanePadding => "pane-padding",
+            Self::PaneCornerRadius => "pane-corner-radius",
+            Self::PaneDividerWidth => "pane-divider-width",
+            Self::SidebarMargin => "sidebar-margin",
+            Self::SidebarCardGap => "sidebar-card-gap",
+            Self::SidebarCardPadding => "sidebar-card-padding",
+            Self::SidebarRowPadding => "sidebar-row-padding",
+            Self::TitlebarPadding => "titlebar-padding",
+            Self::TitlebarGap => "titlebar-gap",
+            Self::TabGap => "tab-gap",
+            Self::TabPadding => "tab-padding",
             Self::WindowCornerRadius => "window-corner-radius",
             Self::SidebarCardRadius => "sidebar-card-radius",
             Self::SidebarWorkspaceRadius => "sidebar-workspace-radius",
@@ -624,6 +644,18 @@ impl SettingsView {
             SettingField::SidebarHeaderHeight => format_float(self.config.ui.sidebar_header_height),
             SettingField::PaneMargin => format_float(self.config.ui.pane_margin),
             SettingField::PanePadding => format_float(self.config.ui.pane_padding),
+            SettingField::PaneCornerRadius => format_float(self.config.ui.pane_corner_radius),
+            SettingField::PaneDividerWidth => format_float(self.config.ui.pane_divider_width),
+            SettingField::SidebarMargin => format_float(self.config.ui.sidebar_margin),
+            SettingField::SidebarCardGap => format_float(self.config.ui.sidebar_card_gap),
+            SettingField::SidebarCardPadding => {
+                format_float(self.config.ui.sidebar_card_padding)
+            }
+            SettingField::SidebarRowPadding => format_float(self.config.ui.sidebar_row_padding),
+            SettingField::TitlebarPadding => format_float(self.config.ui.titlebar_padding),
+            SettingField::TitlebarGap => format_float(self.config.ui.titlebar_gap),
+            SettingField::TabGap => format_float(self.config.ui.tab_gap),
+            SettingField::TabPadding => format_float(self.config.ui.tab_padding),
             SettingField::WindowCornerRadius => {
                 format_float(self.config.ui.window_corner_radius)
             }
@@ -815,6 +847,34 @@ impl SettingsView {
             }
             SettingField::PanePadding => {
                 self.config.ui.pane_padding = parse_float(&value, "面板内边距")?
+            }
+            SettingField::PaneCornerRadius => {
+                self.config.ui.pane_corner_radius = parse_float(&value, "面板圆角")?
+            }
+            SettingField::PaneDividerWidth => {
+                self.config.ui.pane_divider_width = parse_float(&value, "面板分隔线宽度")?
+            }
+            SettingField::SidebarMargin => {
+                self.config.ui.sidebar_margin = parse_float(&value, "侧边栏外边距")?
+            }
+            SettingField::SidebarCardGap => {
+                self.config.ui.sidebar_card_gap = parse_float(&value, "侧边栏卡片间距")?
+            }
+            SettingField::SidebarCardPadding => {
+                self.config.ui.sidebar_card_padding = parse_float(&value, "侧边栏卡片内边距")?
+            }
+            SettingField::SidebarRowPadding => {
+                self.config.ui.sidebar_row_padding = parse_float(&value, "侧边栏行内边距")?
+            }
+            SettingField::TitlebarPadding => {
+                self.config.ui.titlebar_padding = parse_float(&value, "标题栏内边距")?
+            }
+            SettingField::TitlebarGap => {
+                self.config.ui.titlebar_gap = parse_float(&value, "标题栏控件间距")?
+            }
+            SettingField::TabGap => self.config.ui.tab_gap = parse_float(&value, "标签间距")?,
+            SettingField::TabPadding => {
+                self.config.ui.tab_padding = parse_float(&value, "标签内边距")?
             }
             SettingField::WindowCornerRadius => {
                 self.config.ui.window_corner_radius =
@@ -1491,6 +1551,86 @@ impl Render for SettingsView {
                 SettingField::PanePadding,
                 "面板内边距",
                 "终端面板内容的内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::PaneCornerRadius,
+                "面板圆角",
+                "终端面板表面的圆角半径，逻辑像素，0 为直角",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::PaneDividerWidth,
+                "面板分隔线宽度",
+                "面板之间拖拽分隔线的宽度，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarMargin,
+                "侧边栏外边距",
+                "侧边栏卡片和底部操作按钮到边缘的间距，默认与面板外边距一致",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarCardGap,
+                "侧边栏卡片间距",
+                "主机卡片之间以及卡片内部工作区之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarCardPadding,
+                "侧边栏卡片内边距",
+                "主机卡片边框与标题、工作区之间的内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarRowPadding,
+                "侧边栏行内边距",
+                "主机、工作区和 Agent 行的水平内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::TitlebarPadding,
+                "标题栏内边距",
+                "标题栏左侧控件区域的水平内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::TitlebarGap,
+                "标题栏控件间距",
+                "标题栏交通灯、侧边栏按钮之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::TabGap,
+                "标签间距",
+                "标签之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::TabPadding,
+                "标签内边距",
+                "标签文字两侧的水平内边距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,

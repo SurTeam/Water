@@ -1208,11 +1208,13 @@ impl CommandDispatcher {
                 pane_id,
                 columns,
                 lines,
+                cell_width,
+                cell_height,
             } => {
                 let terminal_id = self.resolve_terminal_target(terminal_id, pane_id)?;
                 let size = TerminalSize::new(columns, lines);
                 self.terminals
-                    .resize(terminal_id, size)
+                    .resize_with_cell_size(terminal_id, size, cell_width, cell_height)
                     .map_err(terminal_command_error)?;
                 self.model
                     .set_terminal_size(terminal_id, size.columns, size.lines);

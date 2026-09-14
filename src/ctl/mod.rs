@@ -516,6 +516,8 @@ fn run_terminal(client: &ControlClient, arguments: &[String]) -> Result<()> {
                     pane_id,
                     columns,
                     lines,
+                    cell_width: 0,
+                    cell_height: 0,
                 }),
             )?;
         }

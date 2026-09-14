@@ -7,10 +7,10 @@
 //! goes to the PTY through the regular command path, and emulator query
 //! responses come back out through [`TerminalEmulator::pty_writes`].
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Processor, Rgb, StdSyncHandler};
@@ -48,6 +48,7 @@ struct EmulatorProxy {
     /// live (PtyWrite bytes forwarded to the PTY).
     live: Arc<AtomicBool>,
     pty_write_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    window_size: Arc<Mutex<WindowSize>>,
     theme: TerminalTheme,
 }
 
@@ -89,10 +90,16 @@ impl EventListener for EmulatorProxy {
             | Event::MouseCursorDirty
             | Event::ClipboardStore(_, _)
             | Event::ClipboardLoad(_, _)
-            | Event::TextAreaSizeRequest(_)
             | Event::CursorBlinkingChange
             | Event::Wakeup
             | Event::Bell => {}
+            Event::TextAreaSizeRequest(format) => {
+                let window_size = *self
+                    .window_size
+                    .lock()
+                    .expect("terminal window size poisoned");
+                self.forward(format(window_size).into_bytes());
+            }
         }
     }
 }
@@ -119,6 +126,10 @@ pub struct TerminalEmulator {
     processor: Processor<StdSyncHandler>,
     /// Shared replay/live flag (owned by the term's proxy as well).
     live: Arc<AtomicBool>,
+    /// Geometry shared with the event proxy. Alacritty uses this for
+    /// TextAreaSizeRequest (CSI 14t), which is how image protocols discover
+    /// the terminal's pixel dimensions.
+    window_size: Arc<Mutex<WindowSize>>,
     terminal_id: TerminalId,
     scrollback_lines: usize,
     last_seq: TerminalSeq,
@@ -185,9 +196,16 @@ impl TerminalEmulator {
     ) -> Self {
         let (pty_write_tx, pty_write_rx) = std::sync::mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
+        let window_size = Arc::new(Mutex::new(WindowSize {
+            num_lines: size.lines as u16,
+            num_cols: size.columns as u16,
+            cell_width: 0,
+            cell_height: 0,
+        }));
         let proxy = EmulatorProxy {
             live: live.clone(),
             pty_write_tx: pty_write_tx.clone(),
+            window_size: window_size.clone(),
             theme,
         };
         let term = Term::new(
@@ -202,6 +220,7 @@ impl TerminalEmulator {
             term,
             processor: Processor::new(),
             live,
+            window_size,
             terminal_id,
             scrollback_lines,
             last_seq: 0,
@@ -259,6 +278,12 @@ impl TerminalEmulator {
                     if *size != self.size() {
                         self.term.resize(*size);
                     }
+                    let mut window_size = self
+                        .window_size
+                        .lock()
+                        .expect("terminal window size poisoned");
+                    window_size.num_lines = size.lines as u16;
+                    window_size.num_cols = size.columns as u16;
                 }
                 TerminalStreamEvent::Exit { code, .. } => {
                     if !output.is_empty() {
@@ -354,6 +379,19 @@ impl TerminalEmulator {
     /// (PtyWrite) are forwarded to the PTY.
     pub fn start_live(&mut self) {
         self.live.store(true, Ordering::Release);
+    }
+
+    /// Updates the physical cell dimensions used by terminal pixel-size
+    /// queries. This is local emulator state; the matching PTY resize command
+    /// is sent separately through the owning connection's dispatcher.
+    pub fn set_cell_size(&mut self, cell_width: u16, cell_height: u16) {
+        let mut window_size = self
+            .window_size
+            .lock()
+            .expect("terminal window size poisoned");
+        window_size.cell_width = cell_width;
+        window_size.cell_height = cell_height;
+        self.dirty = true;
     }
 
     pub fn replaying(&self) -> bool {
@@ -935,6 +973,16 @@ mod tests {
             !emulator.pty_writes().is_empty(),
             "live terminal query responses must use the shared PTY input path"
         );
+    }
+
+    #[test]
+    fn live_text_area_pixel_query_uses_the_current_cell_geometry() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(60), size, 100);
+        emulator.set_cell_size(84, 36);
+        emulator.start_live();
+        emulator.apply(&output(1, b"\x1b[14t", size));
+        assert_eq!(emulator.pty_writes(), vec![b"\x1b[4;864;6720t".to_vec()]);
     }
 
     #[cfg(feature = "gui")]
