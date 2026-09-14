@@ -107,6 +107,8 @@ jobs:
               ;;
           esac
 
+          # GitHub normalizes spaces in release asset names to periods.
+          asset_prefix="${app_name// /.}"
           [[ "$RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || {
             echo "error: target tag contains unsupported characters" >&2
             exit 1
@@ -120,13 +122,13 @@ jobs:
             exit 1
           }
           case "$SOURCE_ASSET" in
-            "$app_name"-*-macOS-arm64.zip) ;;
+            "$asset_prefix"-*-macOS-arm64.zip) ;;
             *)
               echo "error: source asset does not match the selected app variant" >&2
               exit 1
               ;;
           esac
-          version="${SOURCE_ASSET#"$app_name-"}"
+          version="${SOURCE_ASSET#"$asset_prefix-"}"
           version="${version%-macOS-arm64.zip}"
           [[ -n "$version" && "$version" != "$SOURCE_ASSET" ]] || {
             echo "error: could not determine app version from source asset" >&2
