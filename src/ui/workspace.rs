@@ -176,9 +176,118 @@ struct SplitDrag {
     path: Vec<bool>,
     axis: SplitAxis,
     rect: SplitRect,
+    ratio_origin: f32,
+    ratio_extent: f32,
     start: f32,
     start_ratio: f32,
     preview_ratio: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PaneEdgeMargins {
+    top: f32,
+    right: f32,
+    bottom: f32,
+    left: f32,
+}
+
+impl PaneEdgeMargins {
+    fn all(value: f32) -> Self {
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
+    }
+
+    fn split(self, axis: SplitAxis, shared_margin: f32) -> (Self, Self) {
+        match axis {
+            SplitAxis::Horizontal => {
+                let mut first = self;
+                first.right = shared_margin;
+                let mut second = self;
+                second.left = shared_margin;
+                (first, second)
+            }
+            SplitAxis::Vertical => {
+                let mut first = self;
+                first.bottom = shared_margin;
+                let mut second = self;
+                second.top = shared_margin;
+                (first, second)
+            }
+        }
+    }
+}
+
+/// Returns the edge margins that a pane subtree receives at `path`. Split
+/// containers themselves are layout-only nodes; their edge margins are
+/// carried by the leaf surfaces below them.
+fn pane_edge_margins_at_path(
+    tree: &PaneTreeDump,
+    path: &[bool],
+    pane_margin: f32,
+) -> Option<PaneEdgeMargins> {
+    let mut node = tree;
+    let mut margins = PaneEdgeMargins::all(pane_margin);
+    for &is_second in path {
+        let PaneTreeDump::Split {
+            axis,
+            first,
+            second,
+            ..
+        } = node
+        else {
+            return None;
+        };
+        let (first_margins, second_margins) = margins.split(*axis, pane_margin / 2.);
+        if is_second {
+            margins = second_margins;
+            node = second;
+        } else {
+            margins = first_margins;
+            node = first;
+        }
+    }
+    Some(margins)
+}
+
+/// Calculates the fixed part of a split's flex geometry. Leaf surfaces have
+/// fixed padding and border dimensions even with a zero flex basis; split
+/// containers do not. The returned values let the overlay guide line up with
+/// the actual shared gap instead of the unadjusted percentage position.
+fn split_overlay_geometry(
+    axis: SplitAxis,
+    margins: PaneEdgeMargins,
+    first: &PaneTreeDump,
+    second: &PaneTreeDump,
+    pane_padding: f32,
+) -> (f32, f32) {
+    let surface_fixed_extent = |tree: &PaneTreeDump| {
+        matches!(tree, PaneTreeDump::Leaf { .. }).then_some(2. * (pane_padding + 1.))
+    };
+    let first_fixed = surface_fixed_extent(first).unwrap_or(0.);
+    let second_fixed = surface_fixed_extent(second).unwrap_or(0.);
+    let first_is_leaf = first_fixed > 0.;
+    let second_is_leaf = second_fixed > 0.;
+    let (first_leading, first_trailing, second_leading, second_trailing) = match axis {
+        SplitAxis::Horizontal => (
+            first_is_leaf.then_some(margins.left).unwrap_or(0.),
+            first_is_leaf.then_some(margins.right).unwrap_or(0.),
+            second_is_leaf.then_some(margins.left).unwrap_or(0.),
+            second_is_leaf.then_some(margins.right).unwrap_or(0.),
+        ),
+        SplitAxis::Vertical => (
+            first_is_leaf.then_some(margins.top).unwrap_or(0.),
+            first_is_leaf.then_some(margins.bottom).unwrap_or(0.),
+            second_is_leaf.then_some(margins.top).unwrap_or(0.),
+            second_is_leaf.then_some(margins.bottom).unwrap_or(0.),
+        ),
+    };
+    let first_static = first_leading + first_fixed + first_trailing;
+    let fixed_extent = first_static + second_leading + second_fixed + second_trailing;
+    (first_static, fixed_extent)
 }
 
 type SplitBounds = Arc<Mutex<BTreeMap<(TabId, Vec<bool>), SplitRect>>>;
@@ -596,6 +705,7 @@ struct TerminalRenderElement {
     snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
     options: TerminalRenderOptions,
+    corner_radius: f32,
     font_family: String,
     font_size: f32,
     ime_text: Option<String>,
@@ -1572,7 +1682,8 @@ impl WorkspaceView {
         let Some(tab) = self.active_tab_by_id(tab_id) else {
             return;
         };
-        let Some((current_axis, ratio, _, _)) = pane_split_at_path(&tab.tree, &path) else {
+        let Some((current_axis, ratio, first, second)) = pane_split_at_path(&tab.tree, &path)
+        else {
             return;
         };
         if current_axis != axis {
@@ -1581,12 +1692,27 @@ impl WorkspaceView {
         let Some(rect) = self.split_rect_for(tab_id, &path) else {
             return;
         };
+        let margins = pane_edge_margins_at_path(
+            &tab.tree,
+            &path,
+            self.config.ui.pane_margin,
+        )
+        .unwrap_or_else(|| PaneEdgeMargins::all(self.config.ui.pane_margin));
+        let (first_static, fixed_extent) = split_overlay_geometry(
+            axis,
+            margins,
+            first,
+            second,
+            self.config.ui.pane_padding,
+        );
         let start = split_pointer_coordinate(position, axis);
         self.split_drag = Some(SplitDrag {
             tab_id,
             path,
             axis,
             rect,
+            ratio_origin: rect.origin + first_static,
+            ratio_extent: (rect.extent - fixed_extent).max(0.),
             start,
             start_ratio: ratio,
             preview_ratio: None,
@@ -1608,9 +1734,8 @@ impl WorkspaceView {
         if valid {
             drag.preview_ratio = Some(split_ratio_for_pointer(
                 split_pointer_coordinate(position, drag.axis),
-                drag.rect.origin,
-                drag.rect.extent,
-                self.config.ui.pane_divider_width,
+                drag.ratio_origin,
+                drag.ratio_extent,
             ));
         }
         self.split_drag = Some(drag);
@@ -3711,6 +3836,15 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let tab_height = if active {
+            // The active tab extends through both the titlebar's lower
+            // inset and the pane's top margin. Its border box grows while
+            // the negative bottom margin keeps its top edge aligned with
+            // inactive tabs.
+            self.config.ui.tab_height + 2. * self.config.ui.pane_margin
+        } else {
+            self.config.ui.tab_height
+        };
         let background = if active {
             // Match the pane surface so the selected tab visually opens into
             // the terminal below; its lower corners are intentionally square.
@@ -3720,7 +3854,7 @@ impl WorkspaceView {
         };
         let mut tab = div()
             .id(format!("tab-{tab_id}"))
-            .h(px(self.config.ui.tab_height))
+            .h(px(tab_height))
             .px(px(self.config.ui.tab_padding))
             .items_center()
             .flex()
@@ -3740,8 +3874,10 @@ impl WorkspaceView {
                     .ui
                     .pane_corner_radius
                     .min(self.config.ui.tab_height / 2.)))
-                .border_1()
-                .border_color(rgb(theme.active_pane_border));
+                // The pane keeps its normal top margin. Extend only the
+                // active tab through that margin so the two surfaces still
+                // meet without moving the pane against the titlebar.
+                .mb(px(-2. * self.config.ui.pane_margin));
         } else {
             tab = tab.rounded(px((self.config.ui.tab_height / 4.).max(4.)));
         }
@@ -3872,12 +4008,12 @@ impl WorkspaceView {
             .id(format!("workspace-{connection_id}-{workspace_id}"))
             .h(px(self.config.ui.sidebar_header_height))
             .w_full()
-            .px(px(self.config.ui.sidebar_row_padding))
+            .pl(px(self.config.ui.sidebar_card_padding))
+            .pr(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .flex()
             .cursor_pointer()
             .hover(|style| style.bg(rgb(workspace_hover_background)))
-            .bg(workspace_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, workspace_activate)
             .on_mouse_down(
@@ -3913,9 +4049,9 @@ impl WorkspaceView {
             );
         }
         if collapsed {
-            workspace_row = workspace_row.rounded(px(self.config.ui.sidebar_workspace_radius));
-        } else {
-            workspace_row = workspace_row.rounded_t(px(self.config.ui.sidebar_workspace_radius));
+            workspace_row = workspace_row
+                .rounded(px(self.config.ui.sidebar_workspace_radius))
+                .bg(workspace_background);
         }
 
         let mut group = div()
@@ -3924,8 +4060,8 @@ impl WorkspaceView {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .rounded_t(px(self.config.ui.sidebar_workspace_radius))
-            .rounded_b(px(self.config.ui.sidebar_workspace_radius))
+            .rounded(px(self.config.ui.sidebar_workspace_radius))
+            .bg(workspace_background)
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
             .child(workspace_row);
@@ -3933,9 +4069,7 @@ impl WorkspaceView {
             let mut agent_rows = div()
                 .w_full()
                 .flex()
-                .flex_col()
-                .overflow_hidden()
-                .rounded_b(px(self.config.ui.sidebar_workspace_radius));
+                .flex_col();
             for agent in agents {
                 agent_rows =
                     agent_rows.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
@@ -3968,7 +4102,7 @@ impl WorkspaceView {
             .flex()
             .flex_none()
             .cursor_pointer()
-            .rounded_t(px(self.config.ui.sidebar_card_radius))
+            .rounded(px(self.config.ui.sidebar_card_radius))
             .bg(rgb(if selected {
                 theme.sidebar_connection_active_background
             } else {
@@ -4205,11 +4339,6 @@ impl WorkspaceView {
         let focused_here = self.active_connection == connection_id
             && self.selected_workspace == Some(workspace_id)
             && self.focused_pane == Some(pane_id);
-        let row_background = if focused_here {
-            rgb(theme.sidebar_agent_active_background)
-        } else {
-            rgb(theme.sidebar_agent_background)
-        };
         let hover_background = if focused_here {
             theme.sidebar_agent_active_background
         } else {
@@ -4280,7 +4409,6 @@ impl WorkspaceView {
             .flex()
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(hover_background)))
-            .bg(row_background)
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
             .child(div().w(px(SIDEBAR_DISCLOSURE_WIDTH)).flex_shrink_0())
@@ -5130,6 +5258,8 @@ impl WorkspaceView {
             .h_full()
             .w_full()
             .gap(px(self.config.ui.tab_gap))
+            // Inactive tabs stay centered in the titlebar. The active tab
+            // extends below it to share a seam with the pane below.
             .items_center()
             .flex()
             .overflow_x_scroll()
@@ -5144,6 +5274,9 @@ impl WorkspaceView {
             .on_scroll_wheel(cx.listener(|this, event, _window, cx| {
                 this.scroll_tab_bar(event, cx);
             }));
+        // Horizontal scrolling must not clip the active tab's small bridge
+        // into the pane margin below it.
+        tab_strip.style().overflow.y = Some(gpui::Overflow::Visible);
         for (tab_id, title, active, active_pane) in tab_data {
             tab_strip =
                 tab_strip.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
@@ -5395,6 +5528,7 @@ impl WorkspaceView {
             tree,
             &[],
             1.0,
+            PaneEdgeMargins::all(self.config.ui.pane_margin),
             window_active,
             metrics,
             theme,
@@ -5410,6 +5544,7 @@ impl WorkspaceView {
         tree: &PaneTreeDump,
         path: &[bool],
         grow: f32,
+        margins: PaneEdgeMargins,
         window_active: bool,
         metrics: TerminalMetrics,
         theme: ThemeColors,
@@ -5478,6 +5613,7 @@ impl WorkspaceView {
                                     cursor_focused: active && window_active,
                                     scroll_offset_rows,
                                 },
+                                self.config.ui.pane_corner_radius,
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
                                 ime_text,
@@ -5553,7 +5689,10 @@ impl WorkspaceView {
                     .min_w(px(0.))
                     .min_h(px(0.))
                     .overflow_hidden()
-                    .m(px(self.config.ui.pane_margin))
+                    .mt(px(margins.top))
+                    .mr(px(margins.right))
+                    .mb(px(margins.bottom))
+                    .ml(px(margins.left))
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
@@ -5739,18 +5878,74 @@ impl WorkspaceView {
                 } else {
                     CursorStyle::ResizeUpDown
                 };
+                // The divider is an overlay, not a flex item. Split the
+                // configured gap across both shared edges so it remains one
+                // `pane_margin` wide in total.
+                let shared_margin = self.config.ui.pane_margin / 2.;
+                let (first_margins, second_margins) =
+                    margins.split(split_axis, shared_margin);
+                let (first_static, fixed_extent) = split_overlay_geometry(
+                    split_axis,
+                    margins,
+                    first,
+                    second,
+                    self.config.ui.pane_padding,
+                );
+                let overlay_offset = first_static - preview_ratio * fixed_extent;
                 let divider = {
                     let divider_width = self.config.ui.pane_divider_width;
                     let divider_id = path
                         .iter()
                         .map(|bit| if *bit { '1' } else { '0' })
                         .collect::<String>();
-                    let divider = div()
+                    let divider_group = format!("pane-divider-hover-{tab_id}-{divider_id}");
+                    let is_dragging = self.split_drag.as_ref().is_some_and(|drag| {
+                        drag.tab_id == tab_id && drag.path == path && drag.axis == split_axis
+                    });
+                    let mut divider_line = div()
+                        .absolute()
+                        .bg(rgb(if is_dragging {
+                            theme.active_pane_border
+                        } else {
+                            theme.inactive_pane_border
+                        }));
+                    if split_axis == SplitAxis::Horizontal {
+                        divider_line = divider_line
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(0.5))
+                            .w(px(divider_width))
+                            .ml(px(-divider_width / 2.));
+                    } else {
+                        divider_line = divider_line
+                            .left_0()
+                            .right_0()
+                            .top(relative(0.5))
+                            .h(px(divider_width))
+                            .mt(px(-divider_width / 2.));
+                    }
+                    if is_dragging {
+                        divider_line = divider_line.visible();
+                    } else {
+                        divider_line = divider_line
+                            .invisible()
+                            .group_hover(divider_group.clone(), |style| style.visible());
+                    }
+
+                    // The transparent hitbox covers the padding around the
+                    // split while the child line is only painted on hover or
+                    // during an active drag. It therefore never changes flex
+                    // sizing or adds another visible rectangle.
+                    let hitbox_extent = self
+                        .config
+                        .ui
+                        .pane_margin
+                        .max(divider_width);
+                    let mut divider = div()
                         .id(format!("pane-divider-{tab_id}-{divider_id}"))
-                        .flex_none()
+                        .absolute()
                         .cursor(divider_cursor)
-                        .bg(rgba(0x00000000))
-                        .hover(|style| style.bg(rgb(theme.inactive_pane_border)))
+                        .group(divider_group)
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -5764,12 +5959,24 @@ impl WorkspaceView {
                                 );
                                 cx.stop_propagation();
                             }),
-                        );
+                        )
+                        .child(divider_line);
                     if split_axis == SplitAxis::Horizontal {
-                        divider.w(px(divider_width)).h_full()
+                        divider = divider
+                            .top_0()
+                            .bottom_0()
+                            .left(relative(preview_ratio))
+                            .w(px(hitbox_extent))
+                            .ml(px(overlay_offset - hitbox_extent / 2.));
                     } else {
-                        divider.h(px(divider_width)).w_full()
+                        divider = divider
+                            .left_0()
+                            .right_0()
+                            .top(relative(preview_ratio))
+                            .h(px(hitbox_extent))
+                            .mt(px(overlay_offset - hitbox_extent / 2.));
                     }
+                    divider
                 };
                 let split_bounds = self.split_bounds.clone();
                 let split_path = path.to_vec();
@@ -5800,6 +6007,7 @@ impl WorkspaceView {
                     .flex()
                     .min_w(px(0.))
                     .min_h(px(0.))
+                    .relative()
                     .overflow_hidden();
                 if split_axis == SplitAxis::Horizontal {
                     container = container.flex_row();
@@ -5812,18 +6020,19 @@ impl WorkspaceView {
                         first,
                         &first_path,
                         preview_ratio,
+                        first_margins,
                         window_active,
                         metrics,
                         theme,
                         view.clone(),
                         cx,
                     ))
-                    .child(divider)
                     .child(self.render_pane_tree_with_grow(
                         tab_id,
                         second,
                         &second_path,
                         1.0 - preview_ratio,
+                        second_margins,
                         window_active,
                         metrics,
                         theme,
@@ -5831,6 +6040,7 @@ impl WorkspaceView {
                         cx,
                     ))
                     .child(bounds_observer)
+                    .child(divider)
                     .into_any_element()
             }
         }
@@ -5924,19 +6134,16 @@ fn split_pointer_coordinate(position: Point<gpui::Pixels>, axis: SplitAxis) -> f
     }
 }
 
-fn split_ratio_for_pointer(pointer: f32, origin: f32, extent: f32, divider: f32) -> f32 {
+fn split_ratio_for_pointer(pointer: f32, origin: f32, extent: f32) -> f32 {
     if !pointer.is_finite() || !origin.is_finite() || !extent.is_finite() {
         return 0.5;
     }
-    // The divider is a fixed-size flex item: children share (extent -
-    // divider). The divider CENTER sits at origin + ratio * usable +
-    // divider / 2, which inverts to the formula below so the committed
-    // ratio matches what the pointer points at.
-    let usable = extent - divider.max(0.0);
-    if usable <= 0.0 {
+    // The divider is an overlay, so the split ratio is measured against the
+    // complete split bounds and does not reserve a layout slot.
+    if extent <= 0.0 {
         return 0.5;
     }
-    (((pointer - origin) - divider / 2.0) / usable).clamp(0.05, 0.95)
+    ((pointer - origin) / extent).clamp(0.05, 0.95)
 }
 
 fn pane_split_at_path<'a>(
@@ -7402,6 +7609,7 @@ fn render_terminal_snapshot(
     snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
     options: TerminalRenderOptions,
+    corner_radius: f32,
     font_family: &str,
     font_size: f32,
     ime_text: Option<String>,
@@ -7413,6 +7621,7 @@ fn render_terminal_snapshot(
         snapshot,
         selection,
         options,
+        corner_radius,
         font_family: font_family.to_owned(),
         font_size,
         ime_text,
@@ -7799,7 +8008,13 @@ impl gpui::Element for TerminalRenderElement {
         } = self.options;
         let whole = scroll_offset_rows.trunc() as i32;
         let fraction = scroll_offset_rows - whole as f32;
-        window.paint_quad(fill(bounds, rgb(theme.terminal_background)));
+        let corner_radius = px(self.corner_radius)
+            .min(bounds.size.width / 2.)
+            .min(bounds.size.height / 2.);
+        window.paint_quad(
+            fill(bounds, rgb(theme.terminal_background))
+                .corner_radii(gpui::Corners::all(corner_radius)),
+        );
 
         for row_paint in &prepaint.rows {
             for background in &row_paint.backgrounds {
@@ -7840,7 +8055,7 @@ impl gpui::Element for TerminalRenderElement {
             let _ = window.paint_image(
                 bounds,
                 image.bounds,
-                gpui::Corners::default(),
+                gpui::Corners::all(corner_radius),
                 image.image.clone(),
                 0,
                 false,
@@ -10203,24 +10418,25 @@ mod tests {
 
     #[test]
     fn split_ratio_geometry_clamps_pointer_to_dispatcher_range() {
-        assert_eq!(split_ratio_for_pointer(100.0, 0.0, 200.0, 0.0), 0.5);
-        assert_eq!(split_ratio_for_pointer(-20.0, 0.0, 200.0, 0.0), 0.05);
-        assert_eq!(split_ratio_for_pointer(240.0, 0.0, 200.0, 0.0), 0.95);
-        assert_eq!(split_ratio_for_pointer(20.0, 10.0, 0.0, 0.0), 0.5);
-        assert_eq!(split_ratio_for_pointer(f32::NAN, 0.0, 200.0, 0.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(100.0, 0.0, 200.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(-20.0, 0.0, 200.0), 0.05);
+        assert_eq!(split_ratio_for_pointer(240.0, 0.0, 200.0), 0.95);
+        assert_eq!(split_ratio_for_pointer(20.0, 10.0, 0.0), 0.5);
+        assert_eq!(split_ratio_for_pointer(f32::NAN, 0.0, 200.0), 0.5);
     }
 
     #[test]
-    fn split_ratio_accounts_for_the_fixed_divider() {
-        // The flex renderer gives children (extent - divider) to share and
-        // centers the fixed divider on the boundary; the pointer maps back
-        // with the same geometry so the committed ratio is what the user
-        // dragged to, without midpoint bias.
-        assert_eq!(split_ratio_for_pointer(33.0, 0.0, 106.0, 6.0), 0.3);
-        assert_eq!(split_ratio_for_pointer(53.0, 0.0, 106.0, 6.0), 0.5);
-        assert_eq!(split_ratio_for_pointer(93.0, 0.0, 106.0, 6.0), 0.9);
-        // No usable space without the divider band itself.
-        assert_eq!(split_ratio_for_pointer(50.0, 0.0, 6.0, 6.0), 0.5);
+    fn split_margins_share_one_inter_pane_gap() {
+        let margins = PaneEdgeMargins::all(4.0);
+        let (first, second) = margins.split(SplitAxis::Horizontal, 2.0);
+        assert_eq!(first.right + second.left, 4.0);
+        assert_eq!(first.left, 4.0);
+        assert_eq!(second.right, 4.0);
+
+        let (first, second) = margins.split(SplitAxis::Vertical, 2.0);
+        assert_eq!(first.bottom + second.top, 4.0);
+        assert_eq!(first.top, 4.0);
+        assert_eq!(second.bottom, 4.0);
     }
 
     #[test]

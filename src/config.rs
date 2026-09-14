@@ -510,8 +510,8 @@ pub struct UiConfig {
     pub pane_padding: f32,
     /// Corner radius of each client-side pane surface.
     pub pane_corner_radius: f32,
-    /// Width of the draggable split divider. Pane margins provide the visual
-    /// separation around the divider.
+    /// Width of the floating split guide shown over the single `pane_margin`
+    /// gap between adjacent pane surfaces.
     pub pane_divider_width: f32,
     /// Insets the sidebar card list and its bottom action row.
     pub sidebar_margin: f32,
