@@ -50,6 +50,9 @@ esac
 version="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
 [[ -n "$version" ]] || { echo "error: Cargo.toml version is empty" >&2; exit 1; }
 asset="${app_name}-${version}-macOS-arm64.zip"
+# GitHub normalizes spaces in release asset names to periods. Keep the local
+# archive path unchanged, but pass the server-side name to the signing action.
+release_asset="${asset// /.}"
 asset_path="$root_dir/dist/$asset"
 test -s "$asset_path" || {
   echo "error: missing unsigned archive $asset_path" >&2
@@ -100,7 +103,7 @@ gh workflow run macos-signed.yml \
   -f "publication=$publication" \
   -f "tag=$release_tag" \
   -f "source_release=$release_tag" \
-  -f "source_asset=$asset"
+  -f "source_asset=$release_asset"
 
 echo "Staged unsigned $app_name.app as $repository#$release_tag"
 echo "Dispatched signing workflow for $release_tag"
