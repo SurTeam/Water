@@ -63,6 +63,7 @@ enum SettingField {
     SidebarHeaderHeight,
     PaneMargin,
     WindowPadding,
+    SidebarSurfaceMargin,
     PanePadding,
     PaneCornerRadius,
     PaneDividerWidth,
@@ -171,6 +172,7 @@ impl SettingField {
             Self::SidebarHeaderHeight => "sidebar-header-height",
             Self::PaneMargin => "pane-margin",
             Self::WindowPadding => "window-padding",
+            Self::SidebarSurfaceMargin => "sidebar-surface-margin",
             Self::PanePadding => "pane-padding",
             Self::PaneCornerRadius => "pane-corner-radius",
             Self::PaneDividerWidth => "pane-divider-width",
@@ -647,6 +649,9 @@ impl SettingsView {
             SettingField::SidebarHeaderHeight => format_float(self.config.ui.sidebar_header_height),
             SettingField::PaneMargin => format_float(self.config.ui.pane_margin),
             SettingField::WindowPadding => format_float(self.config.ui.window_padding),
+            SettingField::SidebarSurfaceMargin => {
+                format_float(self.config.ui.sidebar_surface_margin)
+            }
             SettingField::PanePadding => format_float(self.config.ui.pane_padding),
             SettingField::PaneCornerRadius => format_float(self.config.ui.pane_corner_radius),
             SettingField::PaneDividerWidth => format_float(self.config.ui.pane_divider_width),
@@ -847,10 +852,14 @@ impl SettingsView {
                 self.config.ui.sidebar_header_height = parse_float(&value, "侧边栏标题高度")?
             }
             SettingField::PaneMargin => {
-                self.config.ui.pane_margin = parse_float(&value, "面板外边距")?
+                self.config.ui.pane_margin = parse_float(&value, "面板之间间距")?
             }
             SettingField::WindowPadding => {
                 self.config.ui.window_padding = parse_float(&value, "窗口主体内边距")?
+            }
+            SettingField::SidebarSurfaceMargin => {
+                self.config.ui.sidebar_surface_margin =
+                    parse_float(&value, "侧边栏主体外边距")?
             }
             SettingField::PanePadding => {
                 self.config.ui.pane_padding = parse_float(&value, "面板内边距")?
@@ -1601,8 +1610,8 @@ impl Render for SettingsView {
             ),
             self.render_setting(
                 SettingField::PaneMargin,
-                "面板外边距",
-                "终端面板之间的外边距，逻辑像素",
+                "面板之间间距",
+                "仅用于相邻终端面板之间的间距，不影响窗口顶部和外边缘，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
@@ -1611,6 +1620,14 @@ impl Render for SettingsView {
                 SettingField::WindowPadding,
                 "窗口主体内边距",
                 "窗口 chrome 与浮动侧边栏、终端面板之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarSurfaceMargin,
+                "侧边栏主体外边距",
+                "侧边栏悬浮卡片的上下外边距，独立于 pane 之间的间距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
@@ -1641,8 +1658,8 @@ impl Render for SettingsView {
             ),
             self.render_setting(
                 SettingField::SidebarMargin,
-                "侧边栏外边距",
-                "侧边栏卡片和底部操作按钮到边缘的间距，默认与面板外边距一致",
+                "侧边栏内容内边距",
+                "侧边栏卡片和底部操作按钮到侧边栏主体边缘的间距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,

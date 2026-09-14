@@ -192,6 +192,10 @@ struct PaneEdgeMargins {
 }
 
 impl PaneEdgeMargins {
+    fn zero() -> Self {
+        Self::all(0.0)
+    }
+
     fn all(value: f32) -> Self {
         Self {
             top: value,
@@ -230,7 +234,10 @@ fn pane_edge_margins_at_path(
     pane_margin: f32,
 ) -> Option<PaneEdgeMargins> {
     let mut node = tree;
-    let mut margins = PaneEdgeMargins::all(pane_margin);
+    // `pane_margin` is an inter-pane gap only. The outer top/right/bottom/
+    // left edges are owned by the window body and must not move when it
+    // changes.
+    let mut margins = PaneEdgeMargins::zero();
     for &is_second in path {
         let PaneTreeDump::Split {
             axis,
@@ -1697,7 +1704,7 @@ impl WorkspaceView {
             &path,
             self.config.ui.pane_margin,
         )
-        .unwrap_or_else(|| PaneEdgeMargins::all(self.config.ui.pane_margin));
+        .unwrap_or_else(PaneEdgeMargins::zero);
         let (first_static, fixed_extent) = split_overlay_geometry(
             axis,
             margins,
@@ -4181,8 +4188,8 @@ impl WorkspaceView {
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
         // The sidebar is a floating surface alongside the terminal pane. Its
-        // vertical inset matches the pane's outer margin while the window
-        // body supplies the larger configurable breathing room.
+        // vertical inset is independently configurable; the window body
+        // supplies the fixed outer breathing room shared with the panes.
         let mut list = div()
             .id("workspace-list")
             .flex_1()
@@ -4280,8 +4287,8 @@ impl WorkspaceView {
             .rounded(px(self.config.ui.sidebar_card_radius))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
-            .mt(px(self.config.ui.pane_margin))
-            .mb(px(self.config.ui.pane_margin))
+            .mt(px(self.config.ui.sidebar_surface_margin))
+            .mb(px(self.config.ui.sidebar_surface_margin))
             .child(list)
             .child(connect_remote);
         if let Some(indicator) = indicator {
@@ -5514,7 +5521,7 @@ impl WorkspaceView {
             tree,
             &[],
             1.0,
-            PaneEdgeMargins::all(self.config.ui.pane_margin),
+            PaneEdgeMargins::zero(),
             window_active,
             metrics,
             theme,
@@ -10411,6 +10418,30 @@ mod tests {
         assert_eq!(first.bottom + second.top, 4.0);
         assert_eq!(first.top, 4.0);
         assert_eq!(second.bottom, 4.0);
+    }
+
+    #[test]
+    fn pane_margin_does_not_inset_outer_edges() {
+        let margins = PaneEdgeMargins::zero();
+        let (first, second) = margins.split(SplitAxis::Horizontal, 2.0);
+        assert_eq!(first.top, 0.0);
+        assert_eq!(first.right, 2.0);
+        assert_eq!(first.bottom, 0.0);
+        assert_eq!(first.left, 0.0);
+        assert_eq!(second.top, 0.0);
+        assert_eq!(second.right, 0.0);
+        assert_eq!(second.bottom, 0.0);
+        assert_eq!(second.left, 2.0);
+
+        let (first, second) = margins.split(SplitAxis::Vertical, 2.0);
+        assert_eq!(first.top, 0.0);
+        assert_eq!(first.right, 0.0);
+        assert_eq!(first.bottom, 2.0);
+        assert_eq!(first.left, 0.0);
+        assert_eq!(second.top, 2.0);
+        assert_eq!(second.right, 0.0);
+        assert_eq!(second.bottom, 0.0);
+        assert_eq!(second.left, 0.0);
     }
 
     #[test]

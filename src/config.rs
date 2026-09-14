@@ -34,6 +34,8 @@ pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
 /// Inset around the sidebar and terminal surface group inside the window.
 /// This keeps the surfaces floating even when pane-to-pane margin is zero.
 pub const DEFAULT_WINDOW_PADDING: f32 = 8.0;
+/// Vertical margin around the independent floating sidebar surface.
+pub const DEFAULT_SIDEBAR_SURFACE_MARGIN: f32 = 0.0;
 pub const DEFAULT_PANE_PADDING: f32 = 8.0;
 pub const DEFAULT_PANE_CORNER_RADIUS: f32 = 12.0;
 pub const DEFAULT_PANE_DIVIDER_WIDTH: f32 = 2.0;
@@ -509,9 +511,14 @@ pub struct UiConfig {
     /// Height of a workspace group row in the sidebar. These rows are the
     /// sidebar's section headers since agents nest under their workspace.
     pub sidebar_header_height: f32,
+    /// Gap between adjacent pane surfaces. It does not inset the outer pane
+    /// tree edges or the window top/bottom.
     pub pane_margin: f32,
     /// Padding between the window chrome and the floating sidebar/pane group.
     pub window_padding: f32,
+    /// Vertical margin around the floating sidebar surface, independent from
+    /// the gap between panes.
+    pub sidebar_surface_margin: f32,
     pub pane_padding: f32,
     /// Corner radius of each client-side pane surface.
     pub pane_corner_radius: f32,
@@ -560,6 +567,7 @@ impl Default for UiConfig {
             sidebar_header_height: DEFAULT_SIDEBAR_HEADER_HEIGHT,
             pane_margin: DEFAULT_PANE_MARGIN,
             window_padding: DEFAULT_WINDOW_PADDING,
+            sidebar_surface_margin: DEFAULT_SIDEBAR_SURFACE_MARGIN,
             pane_padding: DEFAULT_PANE_PADDING,
             pane_corner_radius: DEFAULT_PANE_CORNER_RADIUS,
             pane_divider_width: DEFAULT_PANE_DIVIDER_WIDTH,
@@ -592,6 +600,7 @@ impl UiConfig {
         self.sidebar_header_height = self.sidebar_header_height.clamp(20.0, 96.0);
         self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
         self.window_padding = self.window_padding.clamp(0.0, 32.0);
+        self.sidebar_surface_margin = self.sidebar_surface_margin.clamp(0.0, 32.0);
         self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
         self.pane_corner_radius = self.pane_corner_radius.clamp(0.0, 48.0);
         self.pane_divider_width = self.pane_divider_width.clamp(1.0, 16.0);
@@ -1122,6 +1131,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.window_padding {
                 config.ui.window_padding = value;
             }
+            if let Some(value) = ui.sidebar_surface_margin {
+                config.ui.sidebar_surface_margin = value;
+            }
             if let Some(value) = ui.pane_padding {
                 config.ui.pane_padding = value;
             }
@@ -1315,6 +1327,7 @@ pub struct UiConfigOverrides {
     pub sidebar_header_height: Option<f32>,
     pub pane_margin: Option<f32>,
     pub window_padding: Option<f32>,
+    pub sidebar_surface_margin: Option<f32>,
     pub pane_padding: Option<f32>,
     pub pane_corner_radius: Option<f32>,
     pub pane_divider_width: Option<f32>,
@@ -1681,6 +1694,7 @@ mod tests {
                     "pane_corner_radius": 20.0,
                     "pane_divider_width": 3.0,
                     "window_padding": 9.0,
+                    "sidebar_surface_margin": 3.0,
                     "sidebar_margin": 5.0,
                     "sidebar_card_gap": 7.0,
                     "sidebar_card_padding": 8.0,
@@ -1697,6 +1711,7 @@ mod tests {
         assert_eq!(config.ui.pane_corner_radius, 20.0);
         assert_eq!(config.ui.pane_divider_width, 3.0);
         assert_eq!(config.ui.window_padding, 9.0);
+        assert_eq!(config.ui.sidebar_surface_margin, 3.0);
         assert_eq!(config.ui.sidebar_margin, 5.0);
         assert_eq!(config.ui.sidebar_card_gap, 7.0);
         assert_eq!(config.ui.sidebar_card_padding, 8.0);

@@ -89,6 +89,7 @@
     "sidebar_header_height": 24.0,
     "pane_margin": 4.0,
     "window_padding": 8.0,
+    "sidebar_surface_margin": 0.0,
     "pane_padding": 8.0,
     "pane_corner_radius": 12.0,
     "pane_divider_width": 2.0,
