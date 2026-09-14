@@ -5226,6 +5226,7 @@ impl WorkspaceView {
     }
 
     fn render_tab_bar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        let tab_height = self.config.ui.tab_height;
         let tab_data: Vec<(TabId, String, bool, PaneId)> = self
             .selected_workspace_dump()
             .map(|workspace| {
@@ -5245,11 +5246,12 @@ impl WorkspaceView {
             .unwrap_or_default();
         let mut tab_strip = div()
             .id("tab-bar-scroll")
-            .h_full()
+            .h(px(tab_height))
             .w_full()
             .gap(px(self.config.ui.tab_gap))
-            // All tabs stay centered in the titlebar and remain independent
-            // floating pills; the pane below owns its own surface and gap.
+            // The viewport has the same fixed height as each tab. Its parent
+            // centers it in the titlebar, so the top and bottom insets are
+            // always identical and do not depend on pane geometry.
             .items_center()
             .flex()
             .overflow_x_scroll()
@@ -5276,7 +5278,7 @@ impl WorkspaceView {
         // when the strip overflows.
         let new_tab = div()
             .id("new-tab")
-            .h(px(self.config.ui.tab_height))
+            .h(px(tab_height))
             .w(px(28.))
             .items_center()
             .justify_center()
@@ -5285,7 +5287,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
-            .rounded(px((self.config.ui.tab_height / 4.).max(4.)))
+            .rounded(px((tab_height / 4.).max(4.)))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5357,6 +5359,7 @@ impl WorkspaceView {
             .min_w(px(0.))
             .relative()
             .flex()
+            .items_center()
             .child(tab_viewport);
         if let Some(left_indicator) = left_indicator {
             root = root.child(left_indicator);
@@ -5421,10 +5424,11 @@ impl WorkspaceView {
                     + 28.,
             )
         } else {
-            // The body is inset by `window_padding`, so include that inset
-            // here to keep the first tab aligned with the sidebar surface's
-            // visible right edge.
-            self.sidebar_width + self.config.ui.window_padding
+            // The pane group starts after the body's left inset, the sidebar,
+            // and the sidebar-to-pane gap. Reserve all three pieces so the
+            // first tab aligns with the left edge of the first pane.
+            self.config.ui.window_padding + self.sidebar_width
+                + self.config.ui.window_padding
         };
         let titlebar_leading = div()
             .h_full()
@@ -9002,6 +9006,9 @@ impl Render for WorkspaceView {
             .child(window_background)
             .child(self.render_titlebar(theme, cx))
             .child(main_content);
+        if !self.config.ui.font_family.is_empty() {
+            root = root.font(font(self.config.ui.font_family.clone()));
+        }
         if let Some(overlay) = overlay {
             root = root.child(overlay);
         }

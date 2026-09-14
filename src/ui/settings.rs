@@ -1895,11 +1895,13 @@ impl Render for SettingsView {
             })
             .on_action(|_: &IgnoreQuit, _window, _cx| {})
             .bg(rgb(theme.chrome_background))
-            .font(font(self.config.terminal.font_family.clone()))
             .text_size(px(self.config.ui.font_size))
             .text_color(rgb(theme.ui_foreground))
             .child(self.render_header(theme, cx))
             .child(content);
+        if !self.config.ui.font_family.is_empty() {
+            root = root.font(font(self.config.ui.font_family.clone()));
+        }
         if let Some(status) = self.render_status(theme) {
             root = root.child(status);
         }
