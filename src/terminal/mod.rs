@@ -1,6 +1,8 @@
 use std::path::Path;
 
 mod emulator;
+#[cfg(feature = "gui")]
+mod graphics;
 mod model;
 mod replay;
 mod shell_integration;
@@ -73,6 +75,8 @@ pub fn default_shell_args(program: &str) -> Vec<String> {
 }
 
 pub use emulator::{EmulatorEffect, TerminalEmulator, snapshot_from_replay};
+#[cfg(feature = "gui")]
+pub use graphics::{TERMINAL_IMAGE_PLACEHOLDER, TerminalImage};
 pub use model::{
     TerminalAttachment, TerminalError, TerminalLimits, TerminalManager, TerminalRegistry,
     TerminalReplay,

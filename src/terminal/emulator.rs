@@ -19,6 +19,8 @@ use crate::ids::TerminalId;
 use crate::metrics;
 
 use super::TerminalTheme;
+#[cfg(feature = "gui")]
+use super::graphics::TerminalGraphics;
 use super::model::TerminalReplay;
 use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 use super::stream::{TerminalSeq, TerminalStreamEvent};
@@ -140,7 +142,13 @@ pub struct TerminalEmulator {
     /// sequence at any byte boundary.
     scrollback_protected: bool,
     pending_scrollback_clear: Vec<u8>,
+    /// Shared with the Alacritty event proxy so GUI-local graphics capability
+    /// probes use the same ordered PTY response path as DSR/DA queries.
+    #[cfg(feature = "gui")]
+    pty_write_tx: std::sync::mpsc::Sender<Vec<u8>>,
     pty_write_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    #[cfg(feature = "gui")]
+    graphics: TerminalGraphics,
 }
 
 impl TerminalEmulator {
@@ -179,7 +187,7 @@ impl TerminalEmulator {
         let live = Arc::new(AtomicBool::new(false));
         let proxy = EmulatorProxy {
             live: live.clone(),
-            pty_write_tx,
+            pty_write_tx: pty_write_tx.clone(),
             theme,
         };
         let term = Term::new(
@@ -203,7 +211,11 @@ impl TerminalEmulator {
             pinned_viewport: 0,
             scrollback_protected,
             pending_scrollback_clear: Vec::new(),
+            #[cfg(feature = "gui")]
+            pty_write_tx,
             pty_write_rx,
+            #[cfg(feature = "gui")]
+            graphics: TerminalGraphics::default(),
         }
     }
 
@@ -291,6 +303,19 @@ impl TerminalEmulator {
                 self.advance_unfiltered(&pending);
             }
             self.advance_unfiltered(bytes);
+        }
+        #[cfg(feature = "gui")]
+        {
+            // Process cursor motion first. Image producers commonly emit a
+            // MoveTo immediately before their graphics sequence, and the
+            // post-parse cursor is the only reliable anchor when a PTY event
+            // contains both operations.
+            let cursor = self.term.grid().cursor.point;
+            for response in self.graphics.feed(bytes, (cursor.line.0, cursor.column.0)) {
+                if self.live.load(Ordering::Acquire) {
+                    let _ = self.pty_write_tx.send(response);
+                }
+            }
         }
     }
 
@@ -480,7 +505,7 @@ impl TerminalEmulator {
     /// stay cheap during static content.
     pub fn snapshot(&self, previous: Option<&TerminalSnapshot>) -> TerminalSnapshot {
         let viewport_position = self.viewport_position();
-        match previous {
+        let snapshot = match previous {
             Some(previous)
                 if previous.terminal_id == self.terminal_id && previous.size == self.size() =>
             {
@@ -500,7 +525,16 @@ impl TerminalEmulator {
                 self.last_seq,
                 viewport_position,
             ),
-        }
+        };
+        #[cfg(feature = "gui")]
+        let snapshot = {
+            let mut snapshot = snapshot;
+            snapshot.images =
+                self.graphics
+                    .snapshot(self.term.grid().display_offset(), snapshot.size, &snapshot);
+            snapshot
+        };
+        snapshot
     }
 
     /// Process state for snapshots: the server's lifecycle is authoritative
@@ -901,6 +935,21 @@ mod tests {
             !emulator.pty_writes().is_empty(),
             "live terminal query responses must use the shared PTY input path"
         );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn live_kitty_capability_query_uses_the_pty_write_path() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(61), size, 100);
+        let query = b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\";
+
+        emulator.apply(&output(1, query, size));
+        assert!(emulator.pty_writes().is_empty());
+
+        emulator.start_live();
+        emulator.apply(&output(2, query, size));
+        assert_eq!(emulator.pty_writes(), vec![b"\x1b_Gi=31;OK\x1b\\".to_vec()]);
     }
 
     #[test]

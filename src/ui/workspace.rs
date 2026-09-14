@@ -7,11 +7,12 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
-    FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine,
-    SharedString, StrikethroughStyle, TextAlign, TextInputConfiguration, TextRun, TouchPhase,
-    UTF16Selection, UnderlineStyle, Window, WindowControlArea, anchored, canvas, deferred, div,
-    fill, font, outline, point, prelude::*, px, relative, rgb, rgba, size,
+    ExternalPaths, FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
+    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
+    WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
+    relative, rgb, rgba, size,
 };
 
 use crate::agent::AgentKind;
@@ -26,7 +27,8 @@ use crate::ids::{ConnectionId, PaneId, TabId, TerminalId, WorkspaceId};
 use crate::pane::SplitAxis;
 use crate::surface::SurfaceState;
 use crate::terminal::{
-    TerminalCell, TerminalColor, TerminalModes, TerminalRowSnapshot, TerminalSize, TerminalSnapshot,
+    TERMINAL_IMAGE_PLACEHOLDER, TerminalCell, TerminalColor, TerminalImage, TerminalModes,
+    TerminalRowSnapshot, TerminalSize, TerminalSnapshot,
 };
 
 use super::application::{
@@ -514,6 +516,12 @@ struct TerminalRowPaint {
 struct TerminalPrepaintState {
     rows: Vec<TerminalRowPaint>,
     ime_line: Option<(ShapedLine, usize, usize)>,
+    images: Vec<TerminalImagePaint>,
+}
+
+struct TerminalImagePaint {
+    bounds: Bounds<gpui::Pixels>,
+    image: Arc<gpui::RenderImage>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -558,6 +566,7 @@ struct TerminalCachedRowPaint {
 struct TerminalRenderCache {
     key: Option<TerminalRenderCacheKey>,
     rows: BTreeMap<i32, TerminalCachedRowPaint>,
+    images: BTreeMap<u64, Arc<gpui::RenderImage>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -683,6 +692,14 @@ impl InputHandler for TerminalInputHandler {
                 window,
                 cx,
             )
+        });
+    }
+
+    fn paste(&mut self, item: gpui::ClipboardItem, _window: &mut Window, cx: &mut App) {
+        let fallback_terminal_id = self.terminal_id;
+        self.update_view(cx, move |view, cx| {
+            let terminal_id = view.active_terminal_id().unwrap_or(fallback_terminal_id);
+            view.paste_clipboard_item_into_terminal(terminal_id, item, cx);
         });
     }
 
@@ -2268,9 +2285,14 @@ impl WorkspaceView {
     /// active connection's transport, so sending by terminal ID through it
     /// after a connection switch would reach the wrong server (local vs
     /// remote) and be dropped as an unknown terminal.
-    fn enqueue_terminal_command(&self, terminal_id: TerminalId, command: TerminalCommand) -> bool {
+    fn enqueue_terminal_command_on(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        command: TerminalCommand,
+    ) -> bool {
         let client = self
-            .connection_by_id(self.active_connection)
+            .connection_by_id(connection_id)
             .map(|connection| connection.client.clone())
             .unwrap_or_else(|| self.client.clone());
         match client.enqueue(AppCommand::Terminal(command)) {
@@ -2285,6 +2307,10 @@ impl WorkspaceView {
                 false
             }
         }
+    }
+
+    fn enqueue_terminal_command(&self, terminal_id: TerminalId, command: TerminalCommand) -> bool {
+        self.enqueue_terminal_command_on(self.active_connection, terminal_id, command)
     }
 
     /// Viewport moves are GUI-local in the raw-stream architecture. They are
@@ -3159,6 +3185,7 @@ impl WorkspaceView {
                     .unwrap_or_default();
                 self.focus_terminal_live_bottom(terminal_id, cx);
                 self.paste_into_terminal(
+                    self.active_connection,
                     terminal_id,
                     modes.bracketed_paste && self.config.features.bracketed_paste,
                     cx,
@@ -3257,12 +3284,13 @@ impl WorkspaceView {
 
     fn paste_into_terminal(
         &self,
+        connection_id: ConnectionId,
         terminal_id: TerminalId,
         bracketed_paste: bool,
         cx: &mut Context<Self>,
     ) {
         let client = self
-            .connection_by_id(self.active_connection)
+            .connection_by_id(connection_id)
             .map(|connection| connection.client.clone())
             .unwrap_or_else(|| self.client.clone());
         let clipboard = cx.read_from_clipboard_async();
@@ -3270,7 +3298,7 @@ impl WorkspaceView {
             let Ok(Some(item)) = clipboard.await else {
                 return;
             };
-            let Some(text) = clipboard_text(item) else {
+            let Some(text) = terminal_clipboard_text(item) else {
                 return;
             };
             let text = if bracketed_paste {
@@ -3285,6 +3313,64 @@ impl WorkspaceView {
             }));
         })
         .detach();
+    }
+
+    fn paste_clipboard_item_into_terminal(
+        &mut self,
+        terminal_id: TerminalId,
+        item: gpui::ClipboardItem,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = terminal_clipboard_text(item) else {
+            return;
+        };
+        let bracketed_paste = self
+            .terminal_snapshot_for(terminal_id)
+            .map(|snapshot| snapshot.modes.bracketed_paste && self.config.features.bracketed_paste)
+            .unwrap_or(false);
+        self.focus_terminal_live_bottom(terminal_id, cx);
+        self.enqueue_terminal_text(self.active_connection, terminal_id, text, bracketed_paste);
+    }
+
+    fn enqueue_terminal_text(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        text: String,
+        bracketed_paste: bool,
+    ) -> bool {
+        let text = if bracketed_paste {
+            format!("\u{1b}[200~{text}\u{1b}[201~")
+        } else {
+            text
+        };
+        self.enqueue_terminal_command_on(
+            connection_id,
+            terminal_id,
+            TerminalCommand::SendText {
+                terminal_id: Some(terminal_id),
+                pane_id: None,
+                text,
+            },
+        )
+    }
+
+    fn handle_terminal_file_drop(
+        &mut self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        paths: &ExternalPaths,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = shell_quote_paths(paths.paths().iter().map(|path| path.as_path())) else {
+            return;
+        };
+        let bracketed_paste = self
+            .terminal_snapshot_for(terminal_id)
+            .map(|snapshot| snapshot.modes.bracketed_paste && self.config.features.bracketed_paste)
+            .unwrap_or(false);
+        self.focus_terminal_live_bottom(terminal_id, cx);
+        self.enqueue_terminal_text(connection_id, terminal_id, text, bracketed_paste);
     }
 
     pub(crate) fn install_snapshot(&mut self, snapshot: ModelSnapshot, cx: &mut Context<Self>) {
@@ -5186,7 +5272,8 @@ impl WorkspaceView {
                         .child(SharedString::from(format!("Pane {pane_id} · {label}")))
                         .into_any_element()
                 };
-                let content = match surface_state {
+                let is_terminal_surface = matches!(surface_state, SurfaceState::Terminal(_));
+                let mut content = match surface_state {
                     SurfaceState::Terminal(terminal) => div()
                         .size_full()
                         .min_w(px(0.))
@@ -5205,6 +5292,33 @@ impl WorkspaceView {
                         .into_any_element(),
                     SurfaceState::Empty(_) => content,
                 };
+                if is_terminal_surface {
+                    if let Some(terminal_id) = terminal_id {
+                        let connection_id = self.active_connection;
+                        content = div()
+                            .size_full()
+                            .min_w(px(0.))
+                            .min_h(px(0.))
+                            .overflow_hidden()
+                            .child(content)
+                            .on_drop(cx.listener(
+                                move |this, paths: &ExternalPaths, _window, cx| {
+                                    this.handle_terminal_file_drop(
+                                        connection_id,
+                                        terminal_id,
+                                        paths,
+                                        cx,
+                                    );
+                                },
+                            ))
+                            .can_drop(|value, _window, _cx| {
+                                value
+                                    .downcast_ref::<ExternalPaths>()
+                                    .is_some_and(|paths| !paths.paths().is_empty())
+                            })
+                            .into_any_element();
+                    }
+                }
                 div()
                     .flex_1()
                     .flex_grow(grow)
@@ -6665,11 +6779,56 @@ fn terminal_input_for_keystroke_with_modes(
     Some(input)
 }
 
-fn clipboard_text(item: gpui::ClipboardItem) -> Option<String> {
-    item.entries.into_iter().find_map(|entry| match entry {
-        gpui::ClipboardEntry::String(text) => Some(text.into_text()),
-        gpui::ClipboardEntry::Image(_) | gpui::ClipboardEntry::ExternalPaths(_) => None,
-    })
+fn terminal_clipboard_text(item: gpui::ClipboardItem) -> Option<String> {
+    let mut paths = Vec::new();
+    let mut text = None;
+    for entry in item.entries {
+        match entry {
+            gpui::ClipboardEntry::ExternalPaths(external_paths) => {
+                paths.extend(external_paths.paths().iter().cloned());
+            }
+            gpui::ClipboardEntry::String(value) if text.is_none() => {
+                text = Some(value.into_text());
+            }
+            gpui::ClipboardEntry::String(_) | gpui::ClipboardEntry::Image(_) => {}
+        }
+    }
+    if !paths.is_empty() {
+        shell_quote_paths(paths.iter().map(std::path::PathBuf::as_path))
+    } else {
+        text
+    }
+}
+
+fn shell_quote_paths<'a>(paths: impl IntoIterator<Item = &'a std::path::Path>) -> Option<String> {
+    let mut quoted = Vec::new();
+    for path in paths {
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().ok()?.join(path)
+        };
+        let path = path.to_string_lossy();
+        if path.is_empty() {
+            continue;
+        }
+        quoted.push(shell_quote_path(&path));
+    }
+    (!quoted.is_empty()).then(|| quoted.join(" "))
+}
+
+fn shell_quote_path(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('\'');
+    for character in path.chars() {
+        if character == '\'' {
+            quoted.push_str("'\\''");
+        } else {
+            quoted.push(character);
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 fn terminal_special_key_input_with_modes(
@@ -6942,8 +7101,10 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
             if cell.flags.wide_spacer() || cell.flags.leading_wide_spacer() {
                 continue;
             }
-            text.push(cell.character);
-            text.extend(cell.zerowidth.iter().copied());
+            if cell.character != TERMINAL_IMAGE_PLACEHOLDER {
+                text.push(cell.character);
+                text.extend(cell.zerowidth.iter().copied());
+            }
         }
         let line = &text[line_start..];
         let trimmed_len = line.trim_end_matches(' ').len();
@@ -7137,6 +7298,7 @@ impl gpui::Element for TerminalRenderElement {
             scroll_stat_inc(&SCROLL_FRAMES);
         }
         let whole = scroll_offset_rows.trunc() as i32;
+        let fraction = scroll_offset_rows - whole as f32;
         let source_rows =
             terminal_visible_source_rows(self.snapshot.size.lines, scroll_offset_rows);
         let mut caches = self.render_caches.lock().expect("terminal cache poisoned");
@@ -7277,6 +7439,31 @@ impl gpui::Element for TerminalRenderElement {
             row.row = source_row.saturating_add(whole);
             rows.push(row);
         }
+        let image_ids: BTreeSet<_> = self.snapshot.images.iter().map(|image| image.id).collect();
+        cache.images.retain(|id, _| image_ids.contains(id));
+        let mut images = Vec::new();
+        for image in self.snapshot.images.iter() {
+            let render_image = if let Some(render_image) = cache.images.get(&image.id) {
+                render_image.clone()
+            } else {
+                let Some(buffer) = image::RgbaImage::from_raw(
+                    image.pixel_width,
+                    image.pixel_height,
+                    image.rgba.to_vec(),
+                ) else {
+                    continue;
+                };
+                let render_image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+                    image::Frame::new(buffer)
+                ]));
+                cache.images.insert(image.id, render_image.clone());
+                render_image
+            };
+            images.push(TerminalImagePaint {
+                bounds: terminal_image_bounds(bounds, self.options.metrics, image, whole, fraction),
+                image: render_image,
+            });
+        }
         drop(caches);
 
         let ime_line = self.ime_text.as_deref().and_then(|text| {
@@ -7311,7 +7498,11 @@ impl gpui::Element for TerminalRenderElement {
             SCROLL_PREPAINT_MICROS
                 .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
-        TerminalPrepaintState { rows, ime_line }
+        TerminalPrepaintState {
+            rows,
+            ime_line,
+            images,
+        }
     }
 
     fn paint(
@@ -7367,6 +7558,17 @@ impl gpui::Element for TerminalRenderElement {
                     cx,
                 );
             }
+        }
+
+        for image in &prepaint.images {
+            let _ = window.paint_image(
+                bounds,
+                image.bounds,
+                gpui::Corners::default(),
+                image.image.clone(),
+                0,
+                false,
+            );
         }
 
         if let Some((line, row, column)) = prepaint.ime_line.as_ref() {
@@ -7580,8 +7782,15 @@ fn terminal_row_data_for_cells(
         }
 
         let mut character = String::new();
-        character.push(cell.character);
-        character.extend(cell.zerowidth.iter().copied());
+        if cell.character == TERMINAL_IMAGE_PLACEHOLDER {
+            // Kitty placeholder cells are visual anchors for an image overlay,
+            // not terminal glyphs. Keep their cell background but never shape
+            // the private-use character or its coordinate diacritics.
+            character.push(' ');
+        } else {
+            character.push(cell.character);
+            character.extend(cell.zerowidth.iter().copied());
+        }
         let foreground_color = color_to_rgb(foreground, true, options.theme);
         let foreground_color = if cell.flags.dim() && !(cursor_at_cell && options.cursor_focused) {
             dim_terminal_color(foreground_color)
@@ -7875,6 +8084,30 @@ fn terminal_cell_bounds_for_row(
             px(f32::from(row_bounds.origin.y) + fractional_offset * metrics.line_height),
         ),
         row_bounds.size,
+    )
+}
+
+fn terminal_image_bounds(
+    bounds: Bounds<gpui::Pixels>,
+    metrics: TerminalMetrics,
+    image: &TerminalImage,
+    whole_scroll_offset: i32,
+    fractional_scroll_offset: f32,
+) -> Bounds<gpui::Pixels> {
+    let cell_bounds = terminal_cell_bounds_for_row(
+        bounds,
+        metrics,
+        image.row.saturating_add(whole_scroll_offset),
+        image.column,
+        image.width.max(1),
+        fractional_scroll_offset,
+    );
+    Bounds::new(
+        cell_bounds.origin,
+        size(
+            cell_bounds.size.width,
+            px(metrics.line_height * image.height.max(1) as f32),
+        ),
     )
 }
 
@@ -9004,10 +9237,18 @@ mod tests {
         // distance from the viewport bottom to the newest materialized
         // row (the live tail when the overscan reaches it).
         snapshot.last_source_row = 2;
-        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_before.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot.rows_after.push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot
+            .rows_before
+            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot
+            .rows_before
+            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot
+            .rows_after
+            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot
+            .rows_after
+            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
 
         // The clamp (mirroring terminal_scroll_offset_for_snapshot) allows
         // the full -viewport_position jump, not just -rows_after.len().
@@ -10295,5 +10536,25 @@ mod tests {
         );
         assert_eq!(center, window_center, "the dialog must be window-centered");
         host.shutdown();
+    }
+
+    #[test]
+    fn terminal_file_paths_are_shell_quoted() {
+        assert_eq!(
+            shell_quote_path("/Users/me/My Project/it's;safe"),
+            "'/Users/me/My Project/it'\\''s;safe'"
+        );
+    }
+
+    #[test]
+    fn terminal_file_paths_are_joined_as_separate_arguments() {
+        let paths = [
+            std::path::Path::new("/tmp/one file"),
+            std::path::Path::new("/tmp/two$files"),
+        ];
+        assert_eq!(
+            shell_quote_paths(paths),
+            Some("'/tmp/one file' '/tmp/two$files'".to_owned())
+        );
     }
 }
