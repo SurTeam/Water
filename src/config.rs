@@ -34,10 +34,21 @@ pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
 pub const DEFAULT_PANE_PADDING: f32 = 8.0;
 /// Window corner radius applied to the client-side window shape.
 pub const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 12.0;
+/// Pane corner radius; 0 disables the pane background radius.
+pub const DEFAULT_PANE_RADIUS: f32 = 12.0;
+/// Width of the drag handle painted between split panes. The gap itself is
+/// the sum of the adjacent pane margins, so only the hit/paint width lives
+/// here.
+pub const DEFAULT_PANE_DIVIDER_WIDTH: f32 = 4.0;
 /// Sidebar card radius; defaults to following the window corner radius.
 pub const DEFAULT_SIDEBAR_CARD_RADIUS: f32 = 12.0;
 /// Workspace card radius inside the sidebar.
 pub const DEFAULT_SIDEBAR_WORKSPACE_RADIUS: f32 = 10.0;
+/// Padding between the sidebar edges and its cards (host cards and the
+/// connect-remote button all share this margin).
+pub const DEFAULT_SIDEBAR_PADDING: f32 = 6.0;
+/// Vertical gap between sidebar cards (host cards, nested workspace cards).
+pub const DEFAULT_SIDEBAR_CARD_GAP: f32 = 6.0;
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = DEFAULT_LINE_HEIGHT;
 
@@ -501,10 +512,22 @@ pub struct UiConfig {
     /// Corner radius of the client-side window shape; 0 disables the rounded
     /// window background (square window).
     pub window_corner_radius: f32,
+    /// Corner radius of terminal pane backgrounds and borders. 0 disables the
+    /// pane radius (square panes).
+    pub pane_radius: f32,
+    /// Width of the visible drag handle between split panes; the gap between
+    /// panes is always the adjacent `pane_margin` values.
+    pub pane_divider_width: f32,
     /// Radius of the sidebar connection cards.
     pub sidebar_card_radius: f32,
     /// Radius of the workspace cards inside the sidebar.
     pub sidebar_workspace_radius: f32,
+    /// Padding between the sidebar edges and its cards; also the gap between
+    /// the sidebar and the first pane row.
+    pub sidebar_padding: f32,
+    /// Vertical gap between sidebar cards (host cards, nested workspace cards,
+    /// and the connect-remote button).
+    pub sidebar_card_gap: f32,
 }
 
 impl Default for UiConfig {
@@ -525,8 +548,12 @@ impl Default for UiConfig {
             pane_margin: DEFAULT_PANE_MARGIN,
             pane_padding: DEFAULT_PANE_PADDING,
             window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
+            pane_radius: DEFAULT_PANE_RADIUS,
+            pane_divider_width: DEFAULT_PANE_DIVIDER_WIDTH,
             sidebar_card_radius: DEFAULT_SIDEBAR_CARD_RADIUS,
             sidebar_workspace_radius: DEFAULT_SIDEBAR_WORKSPACE_RADIUS,
+            sidebar_padding: DEFAULT_SIDEBAR_PADDING,
+            sidebar_card_gap: DEFAULT_SIDEBAR_CARD_GAP,
         }
     }
 }
@@ -546,8 +573,12 @@ impl UiConfig {
         self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
         self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
         self.window_corner_radius = self.window_corner_radius.clamp(0.0, 48.0);
+        self.pane_radius = self.pane_radius.clamp(0.0, 48.0);
+        self.pane_divider_width = self.pane_divider_width.clamp(1.0, 24.0);
         self.sidebar_card_radius = self.sidebar_card_radius.clamp(0.0, 32.0);
         self.sidebar_workspace_radius = self.sidebar_workspace_radius.clamp(0.0, 24.0);
+        self.sidebar_padding = self.sidebar_padding.clamp(0.0, 32.0);
+        self.sidebar_card_gap = self.sidebar_card_gap.clamp(0.0, 32.0);
         self
     }
 }
@@ -1067,11 +1098,23 @@ impl AppConfigOverrides {
             if let Some(value) = ui.window_corner_radius {
                 config.ui.window_corner_radius = value;
             }
+            if let Some(value) = ui.pane_radius {
+                config.ui.pane_radius = value;
+            }
+            if let Some(value) = ui.pane_divider_width {
+                config.ui.pane_divider_width = value;
+            }
             if let Some(value) = ui.sidebar_card_radius {
                 config.ui.sidebar_card_radius = value;
             }
             if let Some(value) = ui.sidebar_workspace_radius {
                 config.ui.sidebar_workspace_radius = value;
+            }
+            if let Some(value) = ui.sidebar_padding {
+                config.ui.sidebar_padding = value;
+            }
+            if let Some(value) = ui.sidebar_card_gap {
+                config.ui.sidebar_card_gap = value;
             }
         }
         if let Some(shortcuts) = &self.shortcuts {
@@ -1225,8 +1268,12 @@ pub struct UiConfigOverrides {
     pub pane_margin: Option<f32>,
     pub pane_padding: Option<f32>,
     pub window_corner_radius: Option<f32>,
+    pub pane_radius: Option<f32>,
+    pub pane_divider_width: Option<f32>,
     pub sidebar_card_radius: Option<f32>,
     pub sidebar_workspace_radius: Option<f32>,
+    pub sidebar_padding: Option<f32>,
+    pub sidebar_card_gap: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

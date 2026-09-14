@@ -9,10 +9,10 @@ use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
     ExternalPaths, FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
-    ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
-    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
-    WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    Font, Hsla, ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
+    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle,
+    Window, WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point,
+    prelude::*, px, relative, rgb, rgba, size,
 };
 
 use crate::agent::AgentKind;
@@ -56,14 +56,6 @@ const SIDEBAR_DROP_TOLERANCE_PX: f32 = 14.0;
 const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 /// Pixels to move the sidebar per captured pointer move near an edge.
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
-const SPLIT_DIVIDER_WIDTH_PX: f32 = 6.0;
-
-/// Margin around the whole sidebar card list and the connect-remote row.
-const SIDEBAR_CARD_MARGIN: f32 = 6.0;
-/// Vertical gap between connection cards and inside them, between
-/// workspace cards. Kept fixed: the cards are the visual unit of the
-/// sidebar and the gap is not something users need to tune.
-const SIDEBAR_CARD_INNER_GAP: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceConnectionKind {
@@ -1612,7 +1604,7 @@ impl WorkspaceView {
                 split_pointer_coordinate(position, drag.axis),
                 drag.rect.origin,
                 drag.rect.extent,
-                SPLIT_DIVIDER_WIDTH_PX,
+                self.config.ui.pane_divider_width,
             ));
         }
         self.split_drag = Some(drag);
@@ -3696,6 +3688,7 @@ impl WorkspaceView {
         title: String,
         active: bool,
         active_pane: PaneId,
+        window: &mut Window,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -3704,19 +3697,26 @@ impl WorkspaceView {
         } else {
             rgb(theme.tab_inactive_background)
         };
-        div()
+        // The label is shaped once per render; when it overflows the fixed
+        // tab width it is repainted in a canvas with a smaller font instead
+        // of growing the tab (or truncating with `truncate()`).
+        let label = self.fit_tab_label(window, &title, theme.terminal_foreground);
+        let mut tab = div()
             .id(format!("tab-{tab_id}"))
             .h(px(self.config.ui.tab_height))
-            .px(px(10.))
+            .pl(px(14.))
+            .pr(px(12.))
+            .relative()
             .items_center()
             .flex()
             .flex_none()
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(background)
-            .rounded(px(6.))
+            .rounded_t(px(8.))
+            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .text_color(rgb(theme.terminal_foreground))
-            .child(SharedString::from(title))
+            .child(label);
+        tab = tab
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
@@ -3751,8 +3751,40 @@ impl WorkspaceView {
                     cx.stop_propagation();
                     cx.notify();
                 }),
-            )
-            .into_any_element()
+            );
+        // Active tab: a small "neck" in the tab's own background bridges the
+        // tab's bottom edge and the content background below it, visually
+        // merging the active tab with the terminal it selects (the "notch").
+        if active {
+            let neck = canvas(|_bounds, _, _| {}, move |bounds, _, window, _cx| {
+                // Trapezoid in the tab's own background: top edge spans the
+                // tab width, bottom edge widens by `r` on each side so the
+                // "mouth" into the pane area is wider than the tab itself —
+                // the "notch" that visually merges the active tab with the
+                // terminal it selects.
+                let w = f32::from(bounds.size.width);
+                let h = f32::from(bounds.size.height);
+                let x0 = f32::from(bounds.origin.x);
+                let y0 = f32::from(bounds.origin.y);
+                let r = (w / 6.0).max(8.0);
+                let mut path = gpui::PathBuilder::fill();
+                path.move_to(point(px(x0), px(y0)));
+                path.line_to(point(px(x0 + w), px(y0)));
+                path.line_to(point(px(x0 + w + r), px(y0 + h)));
+                path.line_to(point(px(x0 - r), px(y0 + h)));
+                path.close();
+                if let Ok(shape) = path.build() {
+                    window.paint_path(shape, background);
+                }
+            })
+            .absolute()
+            .left_0()
+            .right_0()
+            .top(px(self.config.ui.tab_height))
+            .h(px(8.));
+            tab = tab.child(neck);
+        }
+        tab.into_any_element()
     }
 
     fn sidebar_resize_handle(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -3976,8 +4008,8 @@ impl WorkspaceView {
         let mut group = div()
             .id(format!("connection-group-{connection_id}"))
             .w_full()
-            .gap(px(SIDEBAR_CARD_INNER_GAP))
-            .p(px(SIDEBAR_CARD_INNER_GAP))
+            .gap(px(self.config.ui.sidebar_card_gap))
+            .p(px(self.config.ui.sidebar_card_gap))
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -4030,7 +4062,12 @@ impl WorkspaceView {
         group.into_any_element()
     }
 
-    fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_sidebar(
+        &self,
+        window: &mut Window,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // The sidebar card is the sidebar body: its background follows the
         // window shape, so only the bottom-left corner needs the window
         // radius (the window clip handles the rest, and the resize handle on
@@ -4041,9 +4078,9 @@ impl WorkspaceView {
             .min_h(px(0.))
             .overflow_y_scroll()
             .track_scroll(&self.sidebar_scroll)
-            .px(px(SIDEBAR_CARD_MARGIN))
-            .py(px(SIDEBAR_CARD_MARGIN))
-            .gap(px(SIDEBAR_CARD_INNER_GAP))
+            .px(px(self.config.ui.sidebar_padding))
+            .py(px(self.config.ui.sidebar_padding))
+            .gap(px(self.config.ui.sidebar_card_gap))
             .flex_col();
         for connection in &self.connections {
             list = list.child(self.render_sidebar_connection(connection, theme, cx));
@@ -4074,11 +4111,11 @@ impl WorkspaceView {
         });
         let connect_remote = div()
             .id("connect-remote")
-            .mx(px(SIDEBAR_CARD_MARGIN))
-            .mb(px(SIDEBAR_CARD_MARGIN))
+            .mx(px(self.config.ui.sidebar_padding))
+            .mb(px(self.config.ui.sidebar_padding))
             .h(px(32.))
             .w_full()
-            .px(px(10.))
+            .min_w(px(0.))
             .items_center()
             .gap(px(6.))
             .flex()
@@ -4088,8 +4125,22 @@ impl WorkspaceView {
             .border_color(rgb(theme.inactive_pane_border))
             .rounded(px(self.config.ui.sidebar_card_radius))
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
-            .child("＋")
-            .child("Connect Remote…")
+            .child(
+                div()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .flex()
+                    .child("＋"),
+            )
+            .child(
+                // Fixed button: the label shrinks instead of the button
+                // growing past the sidebar.
+                div()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .child(self.fit_connect_remote_label(window)),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event: &MouseDownEvent, window, cx| {
@@ -5039,7 +5090,12 @@ impl WorkspaceView {
             .into_any_element()
     }
 
-    fn render_tab_bar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tab_bar(
+        &self,
+        window: &mut Window,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tab_data: Vec<(TabId, String, bool, PaneId)> = self
             .selected_workspace_dump()
             .map(|workspace| {
@@ -5061,9 +5117,15 @@ impl WorkspaceView {
             .id("tab-bar-scroll")
             .h_full()
             .w_full()
-            .gap(px(2.))
-            .items_center()
+            // Tabs hang from the top edge and connect to the pane area below
+            // (bottom edge flat), so the strip left-aligns them and gives them
+            // a small bottom gap; the active tab's bottom edge touches the
+            // content background to paint the "notch" through the strip.
+            .gap(px(6.))
+            .items_start()
             .flex()
+            .px(px(8.))
+            .pb(px(6.))
             .overflow_x_scroll()
             .restrict_scroll_to_axis()
             .track_scroll(&self.tab_scroll)
@@ -5077,16 +5139,23 @@ impl WorkspaceView {
                 this.scroll_tab_bar(event, cx);
             }));
         for (tab_id, title, active, active_pane) in tab_data {
-            tab_strip =
-                tab_strip.child(self.tab_button(tab_id, title, active, active_pane, theme, cx));
+            tab_strip = tab_strip.child(self.tab_button(
+                tab_id,
+                title,
+                active,
+                active_pane,
+                window,
+                theme,
+                cx,
+            ));
         }
         // The new-tab button rides at the end of the scrollable strip so it
         // always sits next to the last tab; the edge indicators below signal
-        // when the strip overflows.
+        // when the strip overflows. It uses the same tab shape as the tabs.
         let new_tab = div()
             .id("new-tab")
             .h(px(self.config.ui.tab_height))
-            .w(px(28.))
+            .w(px(36.))
             .items_center()
             .justify_center()
             .flex()
@@ -5094,7 +5163,7 @@ impl WorkspaceView {
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(theme.tab_inactive_background))
-            .rounded(px(6.))
+            .rounded_t(px(8.))
             .text_color(rgb(theme.ui_foreground))
             .child("+")
             .on_mouse_down(
@@ -5176,7 +5245,12 @@ impl WorkspaceView {
         root.into_any_element()
     }
 
-    fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+    fn render_titlebar(
+        &self,
+        window: &mut Window,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let close = self.render_titlebar_control(
             0xff5f57,
             WindowControlArea::Close,
@@ -5195,6 +5269,9 @@ impl WorkspaceView {
             |_, _event, window, _cx| window.zoom_window(),
             cx,
         );
+        // The three traffic-light controls stay in the DOM so
+        // `WindowControlArea` hitboxes still route close/minimize/maximize
+        // on direct click.
         let controls = div()
             .h_full()
             .gap(px(8.))
@@ -5247,6 +5324,7 @@ impl WorkspaceView {
             .gap(px(8.))
             .px(px(10.))
             .items_center()
+            .pb(px(6.))
             .flex()
             // The titlebar owns its drag gesture explicitly below. Only the
             // three control hitboxes use WindowControlArea so they are not
@@ -5288,10 +5366,133 @@ impl WorkspaceView {
             }))
             .child(controls)
             .child(sidebar_toggle)
-            .child(self.render_tab_bar(theme, cx))
+            .child(self.render_tab_bar(window, theme, cx))
             .child(right_sidebar_placeholder)
             .into_any_element()
     }
+
+    /// Measures a tab title at the UI font size and, when it would not fit
+    /// inside the tab's content width, returns the label as a canvas that
+    /// repaints it at the largest font that does fit. The tab itself always
+    /// keeps its fixed width; only the text shrinks.
+    fn fit_tab_label(
+        &self,
+        window: &mut Window,
+        title: &str,
+        color: u32,
+    ) -> AnyElement {
+        let title = title.to_owned();
+        let font_size = self.config.ui.font_size;
+        let runs = [TextRun {
+            len: title.len(),
+            font: font(self.config.ui.font_family.clone()),
+            color: Hsla::from(rgb(color)),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+        let shaped = window
+            .text_system()
+            .shape_line(SharedString::from(title.clone()), px(font_size), &runs, None);
+        let natural = f32::from(shaped.width());
+        // A fixed cap keeps the tab at a stable size; a longer label shrinks
+        // its font to fit instead of growing the tab.
+        let max_width = 180.0;
+        if natural <= max_width {
+            return SharedString::from(title).into_any_element();
+        }
+        let scaled = (font_size * max_width / natural).max(9.0);
+        let family = self.config.ui.font_family.clone();
+        canvas(
+            |_bounds, _, _| {},
+            move |bounds, _, window, cx| {
+                let runs = [TextRun {
+                    len: title.len(),
+                    font: font(family.clone()),
+                    color: Hsla::from(rgb(color)),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                let line = window
+                    .text_system()
+                    .shape_line(SharedString::from(title.to_owned()), px(scaled), &runs, None);
+                let line_height = line_height_for_font(window, scaled);
+                let top = ((f32::from(bounds.size.height) - line_height) / 2.0).max(0.0);
+                let _ = line.paint(
+                    point(px(0.), px(top)),
+                    line_height.into(),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            },
+        )
+        .w(px(max_width))
+        .into_any_element()
+    }
+
+    /// The Connect Remote button keeps its fixed size; its label is painted
+    /// at the largest font that fits the remaining button width so it never
+    /// grows the button past the sidebar edge.
+    fn fit_connect_remote_label(&self, window: &mut Window) -> AnyElement {
+        let title = "Connect Remote…";
+        let color = self.config.theme.colors().ui_foreground;
+        // The button is fixed-size; its label is capped to the space left of
+        // the "＋" icon and shrinks its font instead of growing the button.
+        let max_width = self.sidebar_width
+            - self.config.ui.sidebar_padding * 2.0
+            - 24.0;
+        let font_size = self.config.ui.font_size;
+        let runs = [TextRun {
+            len: title.len(),
+            font: font(self.config.ui.font_family.clone()),
+            color: Hsla::from(rgb(color)),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }];
+        let shaped = window
+            .text_system()
+            .shape_line(SharedString::from(title.to_owned()), px(font_size), &runs, None);
+        let natural = f32::from(shaped.width());
+        if natural <= max_width {
+            return SharedString::from(title.to_owned()).into_any_element();
+        }
+        let scaled = (font_size * max_width / natural).max(9.0);
+        let family = self.config.ui.font_family.clone();
+        canvas(
+            |_bounds, _, _| {},
+            move |bounds, _, window, cx| {
+                let runs = [TextRun {
+                    len: title.len(),
+                    font: font(family.clone()),
+                    color: Hsla::from(rgb(color)),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }];
+                let line = window
+                    .text_system()
+                    .shape_line(SharedString::from(title.to_owned()), px(scaled), &runs, None);
+                let line_height = line_height_for_font(window, scaled);
+                let top = ((f32::from(bounds.size.height) - line_height) / 2.0).max(0.0);
+                let _ = line.paint(
+                    point(px(0.), px(top)),
+                    line_height.into(),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            },
+        )
+        .w_full()
+        .into_any_element()
+    }
+
+
 
     fn render_pane_tree(
         &mut self,
@@ -5468,7 +5669,7 @@ impl WorkspaceView {
                     .p(px(self.config.ui.pane_padding))
                     .border_1()
                     .border_color(border)
-                    .rounded(px(12.))
+                    .rounded(px(self.config.ui.pane_radius))
                     .bg(rgb(theme.pane_background))
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
@@ -5650,37 +5851,79 @@ impl WorkspaceView {
                 } else {
                     CursorStyle::ResizeUpDown
                 };
-                let divider = {
-                    let divider_width = SPLIT_DIVIDER_WIDTH_PX;
-                    let divider_id = path
-                        .iter()
-                        .map(|bit| if *bit { '1' } else { '0' })
-                        .collect::<String>();
-                    let divider = div()
-                        .id(format!("pane-divider-{tab_id}-{divider_id}"))
-                        .flex_none()
-                        .cursor(divider_cursor)
-                        .bg(rgba(0x00000000))
-                        .hover(|style| style.bg(rgb(theme.inactive_pane_border)))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                this.focus_handle.focus(window, cx);
-                                this.begin_split_drag(
-                                    tab_id,
-                                    divider_path.clone(),
-                                    split_axis,
-                                    event.position,
-                                    cx,
-                                );
-                                cx.stop_propagation();
-                            }),
-                        );
-                    if split_axis == SplitAxis::Horizontal {
-                        divider.w(px(divider_width)).h_full()
-                    } else {
-                        divider.h(px(divider_width)).w_full()
-                    }
+                // The gap between pane backgrounds is always the sum of the
+                // adjacent pane margins; the divider is just a thin, visible
+                // drag handle drawn over that gap.
+                let divider_width = self.config.ui.pane_divider_width.max(1.0);
+                let divider_id = path
+                    .iter()
+                    .map(|bit| if *bit { '1' } else { '0' })
+                    .collect::<String>();
+                // Visible 1px line; the configured handle width only widens
+                // the hit/hover area, keeping the drag target comfortable
+                // while the line itself stays thin.
+                let divider = if split_axis == SplitAxis::Horizontal {
+                        div()
+                            .id(format!("pane-divider-{tab_id}-{divider_id}"))
+                            .flex_none()
+                            .cursor(divider_cursor)
+                            .w(px(divider_width))
+                            .h_full()
+                            .items_center()
+                            .flex()
+                            .hover(|style| style.bg(rgb(theme.inactive_pane_border)).opacity(0.4))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.focus_handle.focus(window, cx);
+                                    this.begin_split_drag(
+                                        tab_id,
+                                        divider_path.clone(),
+                                        split_axis,
+                                        event.position,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .w(px(1.))
+                                    .h_full()
+                                    .bg(rgb(theme.inactive_pane_border))
+                                    .flex_none(),
+                            )
+                } else {
+                        div()
+                            .id(format!("pane-divider-{tab_id}-{divider_id}"))
+                            .flex_none()
+                            .cursor(divider_cursor)
+                            .h(px(divider_width))
+                            .w_full()
+                            .items_center()
+                            .flex()
+                            .hover(|style| style.bg(rgb(theme.inactive_pane_border)).opacity(0.4))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    this.focus_handle.focus(window, cx);
+                                    this.begin_split_drag(
+                                        tab_id,
+                                        divider_path.clone(),
+                                        split_axis,
+                                        event.position,
+                                        cx,
+                                    );
+                                    cx.stop_propagation();
+                                }),
+                            )
+                            .child(
+                                div()
+                                    .w_full()
+                                    .h(px(1.))
+                                    .bg(rgb(theme.inactive_pane_border))
+                                    .flex_none(),
+                            )
                 };
                 let split_bounds = self.split_bounds.clone();
                 let split_path = path.to_vec();
@@ -8382,28 +8625,25 @@ impl Render for WorkspaceView {
                 }),
             );
         if !self.sidebar_collapsed {
-            main_content = main_content.child(self.render_sidebar(theme, cx));
+            main_content = main_content.child(self.render_sidebar(window, theme, cx));
         }
         let main_content = main_content.child(content);
-        // The window content is shaped into a rounded rectangle: the canvas
-        // below fills the window bounds with the theme background clipped to
-        // the window's corner radius. The OS window is transparent outside
-        // the drawn shape, so the desktop (or the shadow beneath) shows
-        // through the corners instead of a hard square edge. The pane
-        // borders are inset by `pane_margin` from this shape, so the active
-        // pane's border runs parallel to the window's curve and stays
-        // visible right up to the corners.
+        // The window background is a rounded rectangle: the canvas fills the
+        // window bounds with the theme background clipped to the window's
+        // corner radius. The OS window is transparent outside the drawn
+        // shape, so the desktop (or the shadow beneath) shows through the
+        // corners instead of a hard square edge.
         let corner_radius = self.config.ui.window_corner_radius;
         let window_background = canvas(
             |_bounds, _, _| {},
             move |bounds, _, window, _cx| {
-                let origin = bounds.origin;
-                let size = bounds.size;
                 let radius = px(corner_radius)
-                    .min(size.width / 2.)
-                    .min(size.height / 2.)
+                    .min(bounds.size.width / 2.)
+                    .min(bounds.size.height / 2.)
                     .max(px(0.));
                 let mut path = gpui::PathBuilder::fill();
+                let origin = bounds.origin;
+                let size = bounds.size;
                 path.move_to(point(origin.x + radius, origin.y));
                 path.line_to(point(origin.x + size.width - radius, origin.y));
                 path.arc_to(
@@ -8665,7 +8905,7 @@ impl Render for WorkspaceView {
             .text_color(rgb(theme.ui_foreground))
             .child(workspace_mouse_event_observer(cx.entity()))
             .child(window_background)
-            .child(self.render_titlebar(theme, cx))
+            .child(self.render_titlebar(window, theme, cx))
             .child(main_content);
         if let Some(overlay) = overlay {
             root = root.child(overlay);
@@ -8689,6 +8929,34 @@ fn tab_bar_edge_indicators(max_x: f32, offset_x: f32) -> (bool, bool) {
         overflow && offset_x < -1.0,
         overflow && offset_x > -max_x + 1.0,
     )
+}
+
+/// Line height matching how GPUI vertically centers shaped text: the font's
+/// natural ascent + descent (as `ShapedLine::paint` computes `padding_top`
+/// from), so the canvas label sits on the same baseline as regular text.
+fn line_height_for_font(window: &mut Window, font_size: f32) -> f32 {
+    let layout = window
+        .text_system()
+        .layout_line(
+            "x",
+            px(font_size),
+            &[TextRun {
+                len: 1,
+                font: Font::default(),
+                color: Hsla::from(rgb(0x000000)),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }],
+            None,
+        );
+    let ascent = f32::from(layout.ascent);
+    let descent = f32::from(layout.descent);
+    if ascent.is_finite() && descent.is_finite() && ascent + descent > 0.0 {
+        ascent + descent
+    } else {
+        font_size * 1.3
+    }
 }
 
 /// Blend two packed RGB colors; `factor` weights `from` (1.0 keeps `from`).
