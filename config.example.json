@@ -88,7 +88,10 @@
     "tab_height": 28.0,
     "sidebar_header_height": 24.0,
     "pane_margin": 4.0,
-    "pane_padding": 8.0
+    "pane_padding": 8.0,
+    "window_corner_radius": 12.0,
+    "sidebar_card_radius": 12.0,
+    "sidebar_workspace_radius": 10.0
   },
   "shortcuts": {
     "open_settings": "cmd-,",

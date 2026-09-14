@@ -32,6 +32,12 @@ pub const DEFAULT_TAB_HEIGHT: f32 = 28.0;
 pub const DEFAULT_SIDEBAR_HEADER_HEIGHT: f32 = 24.0;
 pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
 pub const DEFAULT_PANE_PADDING: f32 = 8.0;
+/// Window corner radius applied to the client-side window shape.
+pub const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 12.0;
+/// Sidebar card radius; defaults to following the window corner radius.
+pub const DEFAULT_SIDEBAR_CARD_RADIUS: f32 = 12.0;
+/// Workspace card radius inside the sidebar.
+pub const DEFAULT_SIDEBAR_WORKSPACE_RADIUS: f32 = 10.0;
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_TERMINAL_LINE_HEIGHT: f32 = DEFAULT_LINE_HEIGHT;
 
@@ -492,6 +498,13 @@ pub struct UiConfig {
     pub sidebar_header_height: f32,
     pub pane_margin: f32,
     pub pane_padding: f32,
+    /// Corner radius of the client-side window shape; 0 disables the rounded
+    /// window background (square window).
+    pub window_corner_radius: f32,
+    /// Radius of the sidebar connection cards.
+    pub sidebar_card_radius: f32,
+    /// Radius of the workspace cards inside the sidebar.
+    pub sidebar_workspace_radius: f32,
 }
 
 impl Default for UiConfig {
@@ -511,6 +524,9 @@ impl Default for UiConfig {
             sidebar_header_height: DEFAULT_SIDEBAR_HEADER_HEIGHT,
             pane_margin: DEFAULT_PANE_MARGIN,
             pane_padding: DEFAULT_PANE_PADDING,
+            window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
+            sidebar_card_radius: DEFAULT_SIDEBAR_CARD_RADIUS,
+            sidebar_workspace_radius: DEFAULT_SIDEBAR_WORKSPACE_RADIUS,
         }
     }
 }
@@ -529,6 +545,9 @@ impl UiConfig {
         self.sidebar_header_height = self.sidebar_header_height.clamp(20.0, 96.0);
         self.pane_margin = self.pane_margin.clamp(0.0, 32.0);
         self.pane_padding = self.pane_padding.clamp(0.0, 48.0);
+        self.window_corner_radius = self.window_corner_radius.clamp(0.0, 48.0);
+        self.sidebar_card_radius = self.sidebar_card_radius.clamp(0.0, 32.0);
+        self.sidebar_workspace_radius = self.sidebar_workspace_radius.clamp(0.0, 24.0);
         self
     }
 }
@@ -1045,6 +1064,15 @@ impl AppConfigOverrides {
             if let Some(value) = ui.pane_padding {
                 config.ui.pane_padding = value;
             }
+            if let Some(value) = ui.window_corner_radius {
+                config.ui.window_corner_radius = value;
+            }
+            if let Some(value) = ui.sidebar_card_radius {
+                config.ui.sidebar_card_radius = value;
+            }
+            if let Some(value) = ui.sidebar_workspace_radius {
+                config.ui.sidebar_workspace_radius = value;
+            }
         }
         if let Some(shortcuts) = &self.shortcuts {
             shortcuts.apply_to(&mut config.shortcuts);
@@ -1196,6 +1224,9 @@ pub struct UiConfigOverrides {
     pub sidebar_header_height: Option<f32>,
     pub pane_margin: Option<f32>,
     pub pane_padding: Option<f32>,
+    pub window_corner_radius: Option<f32>,
+    pub sidebar_card_radius: Option<f32>,
+    pub sidebar_workspace_radius: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
