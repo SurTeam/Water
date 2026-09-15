@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc::{self, Receiver, RecvTimeoutError, Sender},
+    mpsc::{self, Receiver, RecvTimeoutError, Sender, TrySendError},
 };
 use std::time::Duration;
 
@@ -86,25 +86,88 @@ impl ServerState {
 struct Session {
     id: u64,
     writer_tx: std::sync::mpsc::SyncSender<SessionWriterItem>,
+    closed: AtomicBool,
+    terminal_pumps: std::sync::Mutex<HashMap<crate::ids::TerminalId, Arc<AtomicBool>>>,
 }
 
 impl Session {
     fn new(id: u64, writer_tx: std::sync::mpsc::SyncSender<SessionWriterItem>) -> Self {
-        Self { id, writer_tx }
+        Self {
+            id,
+            writer_tx,
+            closed: AtomicBool::new(false),
+            terminal_pumps: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 
     /// Queues a push; returns false when the writer stopped (connection
     /// closed or its bounded queue is full) so callers can drop the item
     /// without blocking.
     fn push(&self, item: SessionWriterItem) -> bool {
-        self.writer_tx.try_send(item).is_ok()
+        self.is_open() && self.writer_tx.try_send(item).is_ok()
     }
 
-    /// Blocking variant for the ordered terminal stream: a slow writer
-    /// backpressures the PTY (via the worker fanout) instead of dropping
-    /// events.
-    fn push_blocking(&self, item: SessionWriterItem) -> bool {
-        self.writer_tx.send(item).is_ok()
+    fn is_open(&self) -> bool {
+        !self.closed.load(Ordering::Acquire)
+    }
+
+    /// Queues an ordered frame while remaining interruptible by either the
+    /// session closing or its terminal attachment being detached. A plain
+    /// `SyncSender::send` can otherwise keep a pump (and all raw event Arcs it
+    /// owns) alive forever behind a slow socket.
+    fn push_blocking(&self, mut item: SessionWriterItem, cancel: Option<&AtomicBool>) -> bool {
+        loop {
+            if !self.is_open() || cancel.is_some_and(|cancel| cancel.load(Ordering::Acquire)) {
+                return false;
+            }
+            match self.writer_tx.try_send(item) {
+                Ok(()) => return true,
+                Err(TrySendError::Disconnected(_)) => return false,
+                Err(TrySendError::Full(next)) => {
+                    item = next;
+                    std::thread::park_timeout(Duration::from_millis(1));
+                }
+            }
+        }
+    }
+
+    fn register_terminal_pump(&self, terminal_id: crate::ids::TerminalId) -> Arc<AtomicBool> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mut pumps = self.terminal_pumps.lock().expect("terminal pumps poisoned");
+        if let Some(previous) = pumps.insert(terminal_id, cancel.clone()) {
+            previous.store(true, Ordering::Release);
+        }
+        cancel
+    }
+
+    fn detach_terminal(&self, terminal_id: crate::ids::TerminalId) {
+        if let Some(cancel) = self
+            .terminal_pumps
+            .lock()
+            .expect("terminal pumps poisoned")
+            .remove(&terminal_id)
+        {
+            cancel.store(true, Ordering::Release);
+        }
+    }
+
+    fn finish_terminal_pump(&self, terminal_id: crate::ids::TerminalId, cancel: &Arc<AtomicBool>) {
+        let mut pumps = self.terminal_pumps.lock().expect("terminal pumps poisoned");
+        if pumps
+            .get(&terminal_id)
+            .is_some_and(|current| Arc::ptr_eq(current, cancel))
+        {
+            pumps.remove(&terminal_id);
+        }
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        let pumps =
+            std::mem::take(&mut *self.terminal_pumps.lock().expect("terminal pumps poisoned"));
+        for cancel in pumps.into_values() {
+            cancel.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -394,12 +457,18 @@ fn handle_connection(stream: std::os::unix::net::UnixStream, state: Arc<ServerSt
         }
         send_response(&mut stream, session.as_ref(), &response);
         if let Some(pending) = pending_terminal {
-            spawn_terminal_pump(pending.session, pending.terminal_id, pending.events);
+            spawn_terminal_pump(
+                pending.session,
+                pending.terminal_id,
+                pending.cancel,
+                pending.events,
+            );
         }
     }
     // Connection closed: drop the session (writer channel closes, pushes are
     // dropped) and unblock any pending UI forward.
     if let Some(session) = session {
+        session.close();
         state
             .sessions
             .lock()
@@ -422,9 +491,10 @@ fn send_response(
             // Replies share the ordered writer with terminal pushes. Blocking
             // avoids both loss and concurrent direct writes that could splice
             // two length-prefixed frames together.
-            let _ = session.push_blocking(SessionWriterItem::Message(WireMessage::from_response(
-                response,
-            )));
+            let _ = session.push_blocking(
+                SessionWriterItem::Message(WireMessage::from_response(response)),
+                None,
+            );
         }
         None => {
             let _ = write_frame(stream, response);
@@ -473,6 +543,7 @@ struct PendingTerminalPump {
     session: Arc<Session>,
     terminal_id: crate::ids::TerminalId,
     events: std::sync::mpsc::Receiver<crate::terminal::TerminalStreamEvent>,
+    cancel: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -591,16 +662,24 @@ fn handle_regular(
                     // there is no push channel; the replay alone answers
                     // one-shot callers.
                     if let Some(session) = session {
+                        let cancel = session.register_terminal_pump(terminal_id);
                         *pending_terminal = Some(PendingTerminalPump {
                             session: session.clone(),
                             terminal_id,
                             events: attachment.events,
+                            cancel,
                         });
                     }
                     response
                 }
                 Err(error) => RpcResponse::failure(request.request_id, dispatch_error(error)),
             }
+        }
+        RpcMethod::TerminalDetach { terminal_id } => {
+            if let Some(session) = session {
+                session.detach_terminal(terminal_id);
+            }
+            RpcResponse::success(request.request_id, &serde_json::json!({}))
         }
         RpcMethod::UiKeystroke { keystroke } => ui_request(
             request.request_id,
@@ -826,19 +905,29 @@ fn forward_ui_request(
 fn spawn_terminal_pump(
     session: Arc<Session>,
     terminal_id: crate::ids::TerminalId,
+    cancel: Arc<AtomicBool>,
     events: Receiver<crate::terminal::TerminalStreamEvent>,
 ) {
     std::thread::Builder::new()
         .name("water-terminal-pump".to_owned())
         .spawn(move || {
-            for event in events {
-                if !session.push_blocking(SessionWriterItem::Terminal(QueuedTerminalEvent::new(
-                    terminal_id,
-                    event,
-                ))) {
+            loop {
+                if cancel.load(Ordering::Acquire) || !session.is_open() {
+                    break;
+                }
+                let event = match events.recv_timeout(Duration::from_millis(50)) {
+                    Ok(event) => event,
+                    Err(RecvTimeoutError::Timeout) => continue,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                };
+                if !session.push_blocking(
+                    SessionWriterItem::Terminal(QueuedTerminalEvent::new(terminal_id, event)),
+                    Some(&cancel),
+                ) {
                     break;
                 }
             }
+            session.finish_terminal_pump(terminal_id, &cancel);
         })
         .ok();
 }
@@ -1035,5 +1124,30 @@ mod tests {
             })
             .collect();
         assert_eq!(seqs, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn terminal_pump_can_be_cancelled_while_writer_queue_is_full() {
+        let (writer_tx, _writer_rx) = mpsc::sync_channel(1);
+        let session = Session::new(1, writer_tx);
+        assert!(session.push(SessionWriterItem::Message(WireMessage::reply(
+            1,
+            Ok(serde_json::json!({})),
+        ))));
+        let cancel = Arc::new(AtomicBool::new(true));
+        assert!(!session.push_blocking(
+            SessionWriterItem::Message(WireMessage::reply(2, Ok(serde_json::json!({})))),
+            Some(&cancel),
+        ));
+    }
+
+    #[test]
+    fn detaching_a_terminal_cancels_its_registered_pump() {
+        let (writer_tx, _writer_rx) = mpsc::sync_channel(1);
+        let session = Session::new(1, writer_tx);
+        let cancel = session.register_terminal_pump(crate::ids::TerminalId::new(7));
+        assert!(!cancel.load(Ordering::Acquire));
+        session.detach_terminal(crate::ids::TerminalId::new(7));
+        assert!(cancel.load(Ordering::Acquire));
     }
 }

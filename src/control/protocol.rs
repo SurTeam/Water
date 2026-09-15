@@ -219,6 +219,9 @@ pub enum RpcMethod {
     /// on a GUI session connection.
     #[serde(rename = "terminal.attach")]
     TerminalAttach { terminal_id: TerminalId },
+    /// Stops a live terminal attachment without closing the terminal itself.
+    #[serde(rename = "terminal.detach")]
+    TerminalDetach { terminal_id: TerminalId },
     #[serde(rename = "ui.keystroke")]
     UiKeystroke { keystroke: String },
     #[serde(rename = "ui.snapshot")]

@@ -323,7 +323,8 @@ impl TerminalRegistry {
                 .recent_output
                 .windows(needle.len())
                 .any(|w| w == needle.as_bytes())
-                || state.replay.raw_contains(needle) {
+                || state.replay.raw_contains(needle)
+            {
                 return Ok(state.replay(terminal_id));
             }
             if matches!(state.process, TerminalProcessState::Exited { .. }) {
@@ -416,13 +417,28 @@ impl TerminalRegistry {
         };
         let mut state = entry.state.lock().expect("terminal entry poisoned");
         if !output.is_empty() {
-            // Keep the last 64KB as a byte-level ring: append, then
-            // truncate from the front. No UTF-8 conversion, no allocation.
-            let max = 64 * 1024;
-            state.recent_output.extend_from_slice(output);
-            if state.recent_output.len() > max {
-                let remove = state.recent_output.len() - max;
-                state.recent_output.drain(..remove);
+            // Keep the last 64KB as a byte-level ring. Never append a large
+            // worker batch before truncating it: that temporarily grows the
+            // Vec to the whole ANSI burst and leaves its capacity behind.
+            let max: usize = 64 * 1024;
+            if state.recent_output.capacity() > max.saturating_mul(2) {
+                state.recent_output = Vec::with_capacity(max);
+            }
+            if output.len() >= max {
+                state.recent_output.clear();
+                state
+                    .recent_output
+                    .extend_from_slice(&output[output.len() - max..]);
+            } else {
+                let remove = state
+                    .recent_output
+                    .len()
+                    .saturating_add(output.len())
+                    .saturating_sub(max);
+                if remove > 0 {
+                    state.recent_output.drain(..remove);
+                }
+                state.recent_output.extend_from_slice(output);
             }
         }
         entry.changed.notify_all();
@@ -521,10 +537,12 @@ impl TerminalEntryState {
 
 fn trim_recent_output(output: &mut Vec<u8>, max_bytes: usize) {
     if output.len() <= max_bytes {
+        output.shrink_to(max_bytes);
         return;
     }
     let remove = output.len() - max_bytes;
     output.drain(..remove);
+    output.shrink_to(max_bytes);
 }
 
 fn process_name_from_program(program: &str) -> String {
@@ -595,7 +613,7 @@ fn bundled_terminfo_dir() -> Option<PathBuf> {
 
 /// Best-effort hint for the macOS zone allocator to consolidate freed
 /// regions after large terminal state was dropped.
-fn release_allocator_pressure() {
+pub(crate) fn release_allocator_pressure() {
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn malloc_zone_pressure_relief(
@@ -975,6 +993,27 @@ mod tests {
             .unwrap();
         assert_eq!(first.seq(), second.seq());
         assert_eq!(first.output_bytes(), b"print\n".len());
+    }
+
+    #[test]
+    fn recent_output_does_not_retain_a_large_worker_batch_capacity() {
+        let registry = TerminalRegistry::new();
+        let terminal_id = TerminalId::new(99);
+        let (command_tx, _command_rx) = mpsc::channel();
+        registry
+            .register(
+                terminal_id,
+                test_ring(),
+                command_tx,
+                Arc::new(Mutex::new(None)),
+            )
+            .unwrap();
+
+        registry.publish_output(terminal_id, &vec![b'x'; 16 * 1024 * 1024]);
+        let entry = registry.entry(terminal_id).unwrap();
+        let state = entry.state.lock().expect("terminal entry poisoned");
+        assert_eq!(state.recent_output.len(), 64 * 1024);
+        assert!(state.recent_output.capacity() <= 128 * 1024);
     }
 
     #[test]

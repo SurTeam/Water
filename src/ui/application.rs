@@ -116,6 +116,8 @@ struct TerminalConnection {
     cell_sizes: std::collections::BTreeMap<TerminalId, (u16, u16)>,
     events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>,
     scrollback_lines: usize,
+    inactive_scrollback_lines: usize,
+    max_total_scrollback_bytes: usize,
     theme: TerminalTheme,
 }
 
@@ -123,6 +125,7 @@ enum TerminalEmulatorCommand {
     ScrollBy(i64),
     ScrollTo(i64),
     SetPinned(bool),
+    SetScrollbackLines(usize),
     SetScrollbackProtected(bool),
     SetCellSize { cell_width: u16, cell_height: u16 },
 }
@@ -144,6 +147,17 @@ impl TerminalAttachmentState {
 
     fn cancel(&self) {
         self.active.store(false, Ordering::Release);
+    }
+}
+
+/// Large terminal grids are owned by attachment threads. Once one exits, ask
+/// the platform allocator to return releasable pages (a no-op on platforms
+/// without the macOS API) so Activity Monitor reflects the dropped grid sooner.
+struct TerminalAttachmentCleanup;
+
+impl Drop for TerminalAttachmentCleanup {
+    fn drop(&mut self) {
+        crate::terminal::release_allocator_pressure();
     }
 }
 
@@ -182,6 +196,10 @@ const MAX_TERMINAL_BYTES_PER_UI_TURN: usize = MAX_OUTPUT_EVENT_BYTES;
 const MAX_TERMINAL_MESSAGES_PER_UI_TURN: usize = 64;
 const TERMINAL_UI_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
 const TERMINAL_SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+/// Terminal snapshots are immutable and can contain many rows. Keep the
+/// cross-thread mailbox small; producers drop stale snapshots when the UI is
+/// not keeping up, while the raw replay ring remains the resync source.
+const TERMINAL_EVENT_QUEUE_CAPACITY: usize = 64;
 
 impl TerminalEventMsg {
     fn terminal_id(&self) -> TerminalId {
@@ -266,13 +284,32 @@ fn publish_replay_progress(
     if !publish_snapshot {
         return true;
     }
-    sender
-        .send(TerminalEventMsg::ReplayProgress {
+    try_publish_terminal_event(
+        sender,
+        attachment,
+        TerminalEventMsg::ReplayProgress {
             terminal_id,
             attachment: attachment.clone(),
             snapshot: Arc::new(emulator.snapshot(None)),
-        })
-        .is_ok()
+        },
+    )
+}
+
+/// Publishes a GUI-local terminal event without allowing a slow GPUI turn to
+/// park the parser thread. Snapshot events are disposable: the next raw
+/// event/replay remains authoritative and a sequence gap triggers resync.
+fn try_publish_terminal_event(
+    sender: &std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    attachment: &Arc<TerminalAttachmentState>,
+    message: TerminalEventMsg,
+) -> bool {
+    if !attachment.is_active() {
+        return false;
+    }
+    match sender.try_send(message) {
+        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => attachment.is_active(),
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
+    }
 }
 
 fn apply_emulator_commands(
@@ -285,6 +322,9 @@ fn apply_emulator_commands(
             TerminalEmulatorCommand::ScrollBy(delta) => emulator.scroll_by(delta),
             TerminalEmulatorCommand::ScrollTo(target) => emulator.scroll_to(target),
             TerminalEmulatorCommand::SetPinned(pinned) => emulator.set_viewport_pinned(pinned),
+            TerminalEmulatorCommand::SetScrollbackLines(lines) => {
+                emulator.set_scrollback_lines(lines)
+            }
             TerminalEmulatorCommand::SetScrollbackProtected(protected) => {
                 emulator.set_scrollback_protected(protected)
             }
@@ -317,14 +357,16 @@ fn publish_live_snapshot(
     if !attachment.is_active() {
         return false;
     }
-    sender
-        .send(TerminalEventMsg::LiveSnapshot {
+    try_publish_terminal_event(
+        sender,
+        attachment,
+        TerminalEventMsg::LiveSnapshot {
             terminal_id,
             attachment: attachment.clone(),
             snapshot: Arc::new(emulator.snapshot(previous)),
             pty_writes: emulator.pty_writes(),
-        })
-        .is_ok()
+        },
+    )
 }
 
 struct RemoteConnectionSetup {
@@ -963,9 +1005,7 @@ impl WaterApplication {
                     .copied()
                     .filter(|terminal_id| !current_ids.contains(terminal_id))
                 {
-                    cx.update(|cx| {
-                        application.detach_terminal(cx, connection_id, terminal_id)
-                    });
+                    cx.update(|cx| application.detach_terminal(cx, connection_id, terminal_id));
                 }
                 let views = state.views.borrow().clone();
                 let mut live_views = Vec::with_capacity(views.len());
@@ -996,7 +1036,7 @@ impl WaterApplication {
         connection_id: ConnectionId,
         session: WaterSession,
     ) -> TerminalConnection {
-        let (events_tx, events_rx) = std::sync::mpsc::sync_channel(1024);
+        let (events_tx, events_rx) = std::sync::mpsc::sync_channel(TERMINAL_EVENT_QUEUE_CAPACITY);
         let config = self.config();
         let colors = config.theme.colors();
         let theme = TerminalTheme::new(
@@ -1013,6 +1053,8 @@ impl WaterApplication {
             cell_sizes: std::collections::BTreeMap::new(),
             events_tx,
             scrollback_lines: config.terminal.scrollback_lines,
+            inactive_scrollback_lines: config.terminal.inactive_scrollback_lines,
+            max_total_scrollback_bytes: config.terminal.max_total_scrollback_bytes,
             theme,
         };
         self.spawn_terminal_event_listener(cx, connection_id, events_rx)
@@ -1181,11 +1223,7 @@ impl WaterApplication {
     /// Attaches the raw stream and starts its worker-owned emulator. Replay
     /// and live parsing both publish immutable snapshots; GPUI never mutates
     /// or waits on the emulator.
-    pub fn ensure_terminal_attached(
-        &self,
-        connection_id: ConnectionId,
-        terminal_id: TerminalId,
-    ) {
+    pub fn ensure_terminal_attached(&self, connection_id: ConnectionId, terminal_id: TerminalId) {
         let terminal_exists = self
             .state
             .connections
@@ -1234,7 +1272,13 @@ impl WaterApplication {
             (
                 terminal.session.clone(),
                 terminal.events_tx.clone(),
-                terminal.scrollback_lines,
+                terminal_scrollback_lines(
+                    &connection.projection.snapshot,
+                    terminal_id,
+                    terminal.scrollback_lines,
+                    terminal.inactive_scrollback_lines,
+                    terminal.max_total_scrollback_bytes,
+                ),
                 terminal.theme,
                 scrollback_protected,
                 attachment,
@@ -1245,6 +1289,7 @@ impl WaterApplication {
             .name(format!("water-terminal-events-{terminal_id}"))
             .spawn(move || match session.attach(terminal_id) {
                 Ok((response, stream)) => {
+                    let _allocator_cleanup = TerminalAttachmentCleanup;
                     if !attachment.is_active() {
                         return;
                     }
@@ -1309,14 +1354,15 @@ impl WaterApplication {
                     if !attachment.is_active() {
                         return;
                     }
-                    if events_tx
-                        .send(TerminalEventMsg::Attached {
+                    if !try_publish_terminal_event(
+                        &events_tx,
+                        &attachment,
+                        TerminalEventMsg::Attached {
                             terminal_id,
                             attachment: attachment.clone(),
                             snapshot: Arc::new(emulator.snapshot(None)),
-                        })
-                        .is_err()
-                    {
+                        },
+                    ) {
                         return;
                     }
                     let mut stream = stream;
@@ -1362,10 +1408,14 @@ impl WaterApplication {
                         if effects.iter().any(|effect| {
                             matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
                         }) {
-                            let _ = events_tx.send(TerminalEventMsg::Restart {
-                                terminal_id,
-                                attachment: attachment.clone(),
-                            });
+                            let _ = try_publish_terminal_event(
+                                &events_tx,
+                                &attachment,
+                                TerminalEventMsg::Restart {
+                                    terminal_id,
+                                    attachment: attachment.clone(),
+                                },
+                            );
                             return;
                         }
                         let stream_backlogged = match stream.try_recv() {
@@ -1395,13 +1445,18 @@ impl WaterApplication {
                         }
                     }
                     if attachment.is_active() {
-                        let _ = events_tx.send(TerminalEventMsg::Detached {
-                            terminal_id,
-                            attachment,
-                        });
+                        let _ = try_publish_terminal_event(
+                            &events_tx,
+                            &attachment,
+                            TerminalEventMsg::Detached {
+                                terminal_id,
+                                attachment: attachment.clone(),
+                            },
+                        );
                     }
                 }
                 Err(error) => {
+                    let _allocator_cleanup = TerminalAttachmentCleanup;
                     tracing::warn!(
                         target: "water::workspace",
                         ?error,
@@ -1409,10 +1464,14 @@ impl WaterApplication {
                         "terminal attach failed"
                     );
                     if attachment.is_active() {
-                        let _ = events_tx.send(TerminalEventMsg::Detached {
-                            terminal_id,
-                            attachment,
-                        });
+                        let _ = try_publish_terminal_event(
+                            &events_tx,
+                            &attachment,
+                            TerminalEventMsg::Detached {
+                                terminal_id,
+                                attachment: attachment.clone(),
+                            },
+                        );
                     }
                 }
             });
@@ -1457,10 +1516,14 @@ impl WaterApplication {
                 return;
             };
             let had_attachment = terminal.attachments.remove(&terminal_id);
-            if had_attachment.is_none()
-                && !terminal.pending_attachments.contains(&terminal_id)
-            {
+            if had_attachment.is_none() && !terminal.pending_attachments.contains(&terminal_id) {
                 return;
+            }
+            if let Some(attachment) = had_attachment.as_ref() {
+                // Cancel before dropping the local command/channel handles so
+                // a parser that is between recv timeouts cannot publish more
+                // snapshots while the tab's state is being removed.
+                attachment.cancel();
             }
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
@@ -1627,6 +1690,16 @@ impl WaterApplication {
             return;
         };
         for (&terminal_id, commands) in &terminal.emulator_commands {
+            let scrollback_lines = terminal_scrollback_lines(
+                snapshot,
+                terminal_id,
+                terminal.scrollback_lines,
+                terminal.inactive_scrollback_lines,
+                terminal.max_total_scrollback_bytes,
+            );
+            let _ = commands.try_send(TerminalEmulatorCommand::SetScrollbackLines(
+                scrollback_lines,
+            ));
             let protected = terminal_scrollback_protected(snapshot, terminal_id);
             let _ = commands.try_send(TerminalEmulatorCommand::SetScrollbackProtected(protected));
         }
@@ -2586,6 +2659,86 @@ mod tests {
         assert_eq!(cx.read(|cx| cx.windows().len()), 1);
 
         host.shutdown();
+    }
+}
+
+/// Computes the per-terminal history limit from focus state and the aggregate
+/// byte budget. Rows are weighted by their actual cell width so a wide terminal
+/// cannot silently consume the whole GUI history budget.
+fn terminal_scrollback_lines(
+    snapshot: &ModelSnapshot,
+    terminal_id: TerminalId,
+    focused_lines: usize,
+    inactive_lines: usize,
+    max_total_bytes: usize,
+) -> usize {
+    let terminal_ids = terminal_ids_in_snapshot(snapshot);
+    let mut total_bytes = 0usize;
+    let mut selected_bytes = 0usize;
+    let mut selected_lines = inactive_lines.max(1);
+    for id in terminal_ids {
+        let Some(size) = terminal_size_in_snapshot(snapshot, id) else {
+            continue;
+        };
+        let lines = if terminal_is_focused(snapshot, id) {
+            focused_lines.max(1)
+        } else {
+            inactive_lines.max(1)
+        };
+        let row_bytes = crate::terminal::scrollback_row_bytes(size.columns.max(1));
+        let bytes = lines.saturating_mul(row_bytes);
+        total_bytes = total_bytes.saturating_add(bytes);
+        if id == terminal_id {
+            selected_bytes = bytes;
+            selected_lines = lines;
+        }
+    }
+    if selected_bytes == 0 || total_bytes <= max_total_bytes.max(1) {
+        return selected_lines;
+    }
+    selected_bytes
+        .saturating_mul(max_total_bytes.max(1))
+        .checked_div(total_bytes)
+        .unwrap_or(1)
+        .max(1)
+}
+
+fn terminal_is_focused(snapshot: &ModelSnapshot, terminal_id: TerminalId) -> bool {
+    let Some(workspace_id) = snapshot.active_workspace else {
+        return false;
+    };
+    let Some(workspace) = snapshot
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return false;
+    };
+    let Some(tab_id) = workspace.active_tab else {
+        return false;
+    };
+    let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == tab_id) else {
+        return false;
+    };
+    terminal_id_for_pane(&tab.tree, tab.active_pane) == Some(terminal_id)
+}
+
+fn terminal_id_for_pane(
+    tree: &crate::app::model::PaneTreeDump,
+    pane_id: crate::ids::PaneId,
+) -> Option<TerminalId> {
+    match tree {
+        crate::app::model::PaneTreeDump::Leaf {
+            pane_id: leaf_id,
+            terminal,
+            ..
+        } if *leaf_id == pane_id => terminal
+            .as_ref()
+            .map(|terminal| terminal.summary.terminal_id),
+        crate::app::model::PaneTreeDump::Split { first, second, .. } => {
+            terminal_id_for_pane(first, pane_id).or_else(|| terminal_id_for_pane(second, pane_id))
+        }
+        _ => None,
     }
 }
 

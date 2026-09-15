@@ -440,7 +440,8 @@ fn into_dispatch_error(error: ControlClientError) -> DispatchError {
 #[cfg(unix)]
 pub struct WaterSession {
     next_request_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    attach_tx: std::sync::mpsc::Sender<AttachRequest>,
+    attach_tx: std::sync::mpsc::Sender<SessionTerminalRequest>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     /// Per-terminal live channels; shared with the session reader thread.
     /// A missing entry means the GUI is not consuming that terminal.
     terminal_channels: std::sync::Arc<
@@ -460,6 +461,14 @@ struct AttachRequest {
     reply: std::sync::mpsc::Sender<AttachReply>,
 }
 
+enum SessionTerminalRequest {
+    Attach(AttachRequest),
+    Detach {
+        request_id: u64,
+        terminal_id: TerminalId,
+    },
+}
+
 enum AttachReply {
     Response(TerminalAttachResponse),
     Failed(ControlClientError),
@@ -471,10 +480,22 @@ impl std::fmt::Debug for WaterSession {
     }
 }
 
+#[cfg(unix)]
+impl Drop for WaterSession {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        self.terminal_channels
+            .lock()
+            .expect("terminal channels poisoned")
+            .clear();
+    }
+}
+
 /// Live terminal event stream: events buffered while the attach reply was in
 /// flight (prefix) followed by the live channel. The split exists so the
-/// session reader can deliver events with strict (blocking) backpressure
-/// even before the attach call returns, without losing anything.
+/// session reader can deliver events before the attach call returns without
+/// losing replay/live ordering. Both queues are bounded; an overloaded live
+/// consumer resynchronizes from the server replay ring.
 #[cfg(unix)]
 pub struct TerminalEventStream {
     prefix: std::collections::VecDeque<QueuedLiveTerminalEvent>,
@@ -602,6 +623,13 @@ impl WaterSession {
             .lock()
             .expect("terminal channels poisoned")
             .remove(&terminal_id);
+        let request_id = self
+            .next_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let _ = self.attach_tx.send(SessionTerminalRequest::Detach {
+            request_id,
+            terminal_id,
+        });
     }
 
     /// Attaches to a terminal's raw stream. Returns the ordered historical
@@ -629,11 +657,11 @@ impl WaterSession {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.attach_tx
-            .send(AttachRequest {
+            .send(SessionTerminalRequest::Attach(AttachRequest {
                 request_id,
                 terminal_id,
                 reply: reply_tx,
-            })
+            }))
             .map_err(|_| {
                 ControlClientError::Protocol(serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::BrokenPipe,
@@ -652,10 +680,7 @@ impl WaterSession {
                     Ok(event) => prefix.push_back(event),
                     Err(std::sync::mpsc::TryRecvError::Empty) => {
                         if std::time::Instant::now() >= deadline {
-                            self.terminal_channels
-                                .lock()
-                                .expect("terminal channels poisoned")
-                                .remove(&terminal_id);
+                            self.detach(terminal_id);
                             return Err(ControlClientError::Remote {
                                 code: "ATTACH_TIMEOUT".to_owned(),
                                 message: "terminal attach timed out".to_owned(),
@@ -666,10 +691,7 @@ impl WaterSession {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {}
                 },
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.terminal_channels
-                        .lock()
-                        .expect("terminal channels poisoned")
-                        .remove(&terminal_id);
+                    self.detach(terminal_id);
                     return Err(ControlClientError::Remote {
                         code: "ATTACH_FAILED".to_owned(),
                         message: "session closed during attach".to_owned(),
@@ -739,7 +761,9 @@ pub fn connect_water_session(
 
     let (snapshot_tx, snapshot_rx) = crate::app::runtime::snapshot_stream_channel();
     let (write_tx, write_rx) = std::sync::mpsc::channel::<WireMessage>();
-    let (attach_tx, attach_rx) = std::sync::mpsc::channel::<AttachRequest>();
+    let (attach_tx, attach_rx) = std::sync::mpsc::channel::<SessionTerminalRequest>();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_stop = stop.clone();
     let mut writer_stream = stream.try_clone()?;
     std::thread::Builder::new()
         .name("water-session-writer".to_owned())
@@ -763,6 +787,7 @@ pub fn connect_water_session(
                 write_tx,
                 ui_client,
                 attach_rx,
+                reader_stop,
                 reader_channels,
             )
         })
@@ -770,6 +795,7 @@ pub fn connect_water_session(
     Ok(WaterSession {
         next_request_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         attach_tx,
+        stop,
         terminal_channels,
         snapshot_rx,
     })
@@ -805,7 +831,8 @@ fn session_reader_loop(
     snapshot_tx: crate::app::runtime::SnapshotStreamSender,
     write_tx: std::sync::mpsc::Sender<WireMessage>,
     ui_client: UiControlClient,
-    attach_rx: std::sync::mpsc::Receiver<AttachRequest>,
+    attach_rx: std::sync::mpsc::Receiver<SessionTerminalRequest>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
     terminal_channels: std::sync::Arc<
         std::sync::Mutex<
             std::collections::HashMap<
@@ -838,21 +865,40 @@ fn session_reader_loop(
     // without a second thread; terminal bursts keep the timeout hot anyway.
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(50)));
 
-    loop {
+    while !stop.load(std::sync::atomic::Ordering::Acquire) {
         // Forward attach requests onto the session connection.
         while let Ok(request) = attach_rx.try_recv() {
-            pending_attach.insert(request.request_id, request.reply);
-            let frame = WireMessage {
-                build_variant: crate::BUILD_VARIANT.to_owned(),
-                protocol_version: PROTOCOL_VERSION,
-                request_id: request.request_id,
-                method: Some("terminal.attach".to_owned()),
-                params: Some(serde_json::json!({
-                    "terminal_id": request.terminal_id,
-                })),
-                ok: None,
-                result: None,
-                error: None,
+            let frame = match request {
+                SessionTerminalRequest::Attach(request) => {
+                    pending_attach.insert(request.request_id, request.reply);
+                    WireMessage {
+                        build_variant: crate::BUILD_VARIANT.to_owned(),
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: request.request_id,
+                        method: Some("terminal.attach".to_owned()),
+                        params: Some(serde_json::json!({
+                            "terminal_id": request.terminal_id,
+                        })),
+                        ok: None,
+                        result: None,
+                        error: None,
+                    }
+                }
+                SessionTerminalRequest::Detach {
+                    request_id,
+                    terminal_id,
+                } => WireMessage {
+                    build_variant: crate::BUILD_VARIANT.to_owned(),
+                    protocol_version: PROTOCOL_VERSION,
+                    request_id,
+                    method: Some("terminal.detach".to_owned()),
+                    params: Some(serde_json::json!({
+                        "terminal_id": terminal_id,
+                    })),
+                    ok: None,
+                    result: None,
+                    error: None,
+                },
             };
             if write_tx.send(frame).is_err() {
                 return;
@@ -880,8 +926,8 @@ fn session_reader_loop(
                     .get(&terminal_id)
                     .cloned();
                 if let Some(sender) = sender {
-                    let _ =
-                        sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Raw(event)));
+                    let _ = sender
+                        .try_send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Raw(event)));
                 }
                 continue;
             }
@@ -941,7 +987,7 @@ fn session_reader_loop(
                 let Some(sender) = sender else {
                     continue;
                 };
-                let _ = sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Wire(
+                let _ = sender.try_send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Wire(
                     push.event,
                 )));
             }

@@ -21,7 +21,7 @@ use std::time::Duration;
 use water::app::ModelHost;
 use water::command::{AppCommand, OperationStatus, TabCommand, WorkspaceCommand};
 use water::config::AppConfig;
-use water::control::{ControlServer, connect_water_session};
+use water::control::{ControlClient, ControlServer, connect_water_session};
 use water::ui::{WaterApplication, ui_control_channel};
 
 fn find_terminal(tree: &water::app::model::PaneTreeDump) -> Option<water::ids::TerminalId> {
@@ -64,7 +64,7 @@ fn wait_for(mut within: impl FnMut() -> bool) {
             std::time::Instant::now() < deadline,
             "timed out waiting for attach threads to settle"
         );
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::yield_now();
     }
 }
 
@@ -86,6 +86,7 @@ fn closed_terminal_releases_its_attach_thread(cx: &mut gpui::TestAppContext) {
     .unwrap();
     let (ui_client, _ui_rx) = ui_control_channel();
     let session = connect_water_session(&socket, ui_client.clone()).unwrap();
+    let metrics_client = ControlClient::new(&socket);
     // The real push stream: model changes flow to the GUI snapshot listener,
     // which attaches visible terminals and detaches them on close.
     let snapshot_stream = session.snapshot_stream().clone();
@@ -163,14 +164,31 @@ fn closed_terminal_releases_its_attach_thread(cx: &mut gpui::TestAppContext) {
     );
 
     wait_for(|| attach_thread_count() <= baseline.saturating_sub(1));
+    wait_for(|| {
+        let Ok(metrics) = metrics_client.metrics() else {
+            return false;
+        };
+        let current = |name: &str| {
+            metrics
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+        };
+        current("terminal_server_queue_events") == 0
+            && current("terminal_server_queue_bytes") == 0
+            && current("terminal_client_queue_events") == 0
+            && current("terminal_client_queue_bytes") == 0
+    });
 
-    // The target terminal's attach thread is gone. The test process holds
-    // live PTY worker threads (from the initial workspace) that outlive
-    // `host.shutdown()` in the test harness, so exit explicitly once the
-    // assertion has passed rather than waiting for them to drain.
+    // The target terminal's attach thread is gone. Normal teardown must also
+    // complete: this catches a server pump or PTY worker that is still holding
+    // the closed terminal's output buffers.
     eprintln!("closed_terminal_releases_its_attach_thread: OK (baseline={baseline})");
     drop(server);
     drop(session);
     let _ = host.shutdown();
+    // The GPUI test harness retains its executor task until process teardown;
+    // all Water resources have been dropped and joined above, so terminate the
+    // one-purpose integration process after the assertions complete.
     std::process::exit(0);
 }

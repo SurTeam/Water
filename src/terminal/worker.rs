@@ -45,11 +45,11 @@ const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
 /// One tick of the worker loop will coalesce at most this much PTY output
 /// before yielding to command processing.
-const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;
-/// In-flight block ceiling (512 x 128KiB = 64MiB): a large burst must not
-/// backpressure the writer down to our fanout rate, while keeping allocation
-/// bounded and every consumed block reusable by the reader.
-const READER_CHANNEL_CAPACITY: usize = 512;
+const MAX_PTY_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+/// In-flight block ceiling (64 x 128KiB = 8MiB). A large burst remains
+/// bounded, and the worker can still drain faster than normal interactive
+/// output without retaining tens of megabytes per terminal.
+const READER_CHANNEL_CAPACITY: usize = 64;
 /// After a successful read, the reader keeps spin-reading for this bounded
 /// window to catch a microsecond-scale refill without another poller round
 /// trip. An empty readiness wake never enters this path.
@@ -687,27 +687,33 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
                 // A final non-blocking drain avoids losing bytes that were
                 // already queued in the PTY when SIGCHLD arrived.
-                let mut final_batch = Vec::new();
-                let _ = drain_data(
-                    &pty_data_rx,
-                    &pty_free_tx,
-                    &parser_wakeup_pending,
-                    &mut final_batch,
-                    usize::MAX,
-                );
-                if !final_batch.is_empty() {
-                    publish_raw_output(
-                        terminal_id,
-                        current_size,
-                        &final_batch,
-                        &replay,
-                        &mut subscribers,
-                        &registry,
-                        &mut title_scanner,
-                        &mut last_title,
-                        &event_tx,
-                        event_wakeup.as_ref(),
-                    );
+                loop {
+                    let mut final_batch = Vec::new();
+                    let drain_effect = drain_data(
+                        &pty_data_rx,
+                        &pty_free_tx,
+                        &parser_wakeup_pending,
+                        &mut final_batch,
+                        MAX_PTY_BYTES_PER_TICK,
+                    )
+                    .unwrap_or(ReadEffect::Eof);
+                    if !final_batch.is_empty() {
+                        publish_raw_output(
+                            terminal_id,
+                            current_size,
+                            &final_batch,
+                            &replay,
+                            &mut subscribers,
+                            &registry,
+                            &mut title_scanner,
+                            &mut last_title,
+                            &event_tx,
+                            event_wakeup.as_ref(),
+                        );
+                    }
+                    if !matches!(drain_effect, ReadEffect::BudgetExhausted) {
+                        break;
+                    }
                 }
                 // Record the exit in the ordered stream, then fanout.
                 let seq = replay.finish(code);
@@ -780,12 +786,11 @@ fn publish_raw_output(
 
 /// Sends an event to every attached client.
 ///
-/// `SyncSender::send` blocks while the client queue is full: a slow client
-/// backpressures the PTY (tmux semantics) instead of dropping output. Only a
-/// disconnected receiver is dropped; the replay ring remains the resync
-/// source for any client that falls behind and re-attaches.
+/// A slow consumer is detached once its bounded queue is full. The replay
+/// ring remains the resync source; dropping the subscriber is important because
+/// a blocking fanout would prevent terminal shutdown from joining its worker.
 fn fanout(subscribers: &mut Vec<SyncSender<TerminalStreamEvent>>, event: &TerminalStreamEvent) {
-    subscribers.retain(|sender| sender.send(event.clone()).is_ok());
+    subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
 }
 
 fn write_pending_input(pending: &mut Vec<u8>, pty: &mut Pty) -> io::Result<()> {

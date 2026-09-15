@@ -777,6 +777,20 @@ impl TerminalEmulator {
         }
     }
 
+    /// Changes the local history limit and immediately trims an unpinned grid.
+    /// The GUI sends this when focus or the aggregate terminal budget changes.
+    pub fn set_scrollback_lines(&mut self, lines: usize) {
+        let lines = lines.max(1);
+        if self.scrollback_lines == lines {
+            return;
+        }
+        self.scrollback_lines = lines;
+        if !self.viewport_pinned {
+            self.trim_scrollback_to_configured_limit();
+        }
+        self.dirty = true;
+    }
+
     pub fn set_scrollback_protected(&mut self, protected: bool) {
         if self.scrollback_protected == protected {
             return;
