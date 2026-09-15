@@ -466,6 +466,7 @@ impl TerminalEmulator {
     /// (yazi and friends) otherwise fall back to a 1x1 cell and draw every
     /// image a single cell wide. The sequence is consumed rather than passed
     /// on so the unknown-CSI path cannot leave residue in the grid.
+    #[cfg(feature = "gui")]
     fn filter_cell_size_query(&mut self, bytes: &[u8]) -> Vec<u8> {
         const QUERY: &[u8] = b"\x1b[16t";
         let mut input = Vec::with_capacity(self.pending_cell_size_query.len() + bytes.len());
