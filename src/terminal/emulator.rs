@@ -160,6 +160,10 @@ pub struct TerminalEmulator {
     /// sequence at any byte boundary.
     scrollback_protected: bool,
     pending_scrollback_clear: Vec<u8>,
+    /// Bytes of a possibly split `CSI 16 t` query awaiting the rest of the
+    /// sequence. Cell-size replies only exist on the GUI emulator.
+    #[cfg(feature = "gui")]
+    pending_cell_size_query: Vec<u8>,
     /// Shared with the Alacritty event proxy so GUI-local graphics capability
     /// probes use the same ordered PTY response path as DSR/DA queries.
     #[cfg(feature = "gui")]
@@ -237,6 +241,8 @@ impl TerminalEmulator {
             pinned_viewport: 0,
             scrollback_protected,
             pending_scrollback_clear: Vec::new(),
+            #[cfg(feature = "gui")]
+            pending_cell_size_query: Vec::new(),
             #[cfg(feature = "gui")]
             pty_write_tx,
             pty_write_rx,
@@ -386,6 +392,15 @@ impl TerminalEmulator {
         }
         #[cfg(feature = "gui")]
         let oldest_line = self.term.grid().topmost_line().0;
+        #[cfg(feature = "gui")]
+        let bytes = self.filter_cell_size_query(bytes);
+        #[cfg(feature = "gui")]
+        let bytes = bytes.as_slice();
+        #[cfg(feature = "gui")]
+        self.apply_erase_sequences(bytes);
+        if bytes.is_empty() {
+            return;
+        }
         if self.scrollback_protected {
             let filtered = self.filter_scrollback_clear(bytes);
             self.advance_unfiltered(&filtered);
@@ -413,6 +428,72 @@ impl TerminalEmulator {
         if !bytes.is_empty() {
             self.processor.advance(&mut self.term, bytes);
         }
+    }
+
+    /// Applies erase escapes to graphics using the same main/alternate-screen
+    /// semantics as Alacritty's grid.
+    ///
+    /// On the main screen `CSI 2 J` calls `clear_viewport()`, which pushes the
+    /// current cells into scrollback. Do not delete their images: the normal
+    /// grid rebase below moves them into history with the text. The alternate
+    /// screen has no history, so its visible placements are erased in place.
+    /// `CSI 3 J` removes only saved lines and keeps the current screen.
+    #[cfg(feature = "gui")]
+    fn apply_erase_sequences(&mut self, bytes: &[u8]) {
+        const ERASE_DISPLAY: &[u8] = b"\x1b[2J";
+        const ERASE_SAVED: &[u8] = b"\x1b[3J";
+        let erases_scrollback = bytes.windows(ERASE_SAVED.len()).any(|w| w == ERASE_SAVED);
+        let erases_display = bytes
+            .windows(ERASE_DISPLAY.len())
+            .any(|w| w == ERASE_DISPLAY);
+        if !erases_scrollback && !erases_display {
+            return;
+        }
+        let viewport_start = -(self.term.grid().display_offset() as i32);
+        if erases_scrollback {
+            self.graphics.erase_scrollback(viewport_start);
+        }
+        if erases_display && self.alternate_screen() {
+            self.graphics
+                .erase_visible(viewport_start, self.term.grid().screen_lines());
+        }
+    }
+
+    /// Answers `CSI 16 t`, which reports the cell size in pixels.
+    ///
+    /// Alacritty implements `CSI 14 t` (whole text area in pixels) but not the
+    /// per-cell variant, so image clients that size their output from cells
+    /// (yazi and friends) otherwise fall back to a 1x1 cell and draw every
+    /// image a single cell wide. The sequence is consumed rather than passed
+    /// on so the unknown-CSI path cannot leave residue in the grid.
+    fn filter_cell_size_query(&mut self, bytes: &[u8]) -> Vec<u8> {
+        const QUERY: &[u8] = b"\x1b[16t";
+        let mut input = Vec::with_capacity(self.pending_cell_size_query.len() + bytes.len());
+        input.append(&mut self.pending_cell_size_query);
+        input.extend_from_slice(bytes);
+
+        let (cell_width, cell_height) = self.graphics_cell_size();
+        let response = format!("\x1b[6;{cell_height};{cell_width}t").into_bytes();
+
+        let mut filtered = Vec::with_capacity(input.len());
+        let mut index = 0;
+        while index < input.len() {
+            let remaining = &input[index..];
+            if remaining.len() < QUERY.len() && QUERY.starts_with(remaining) {
+                self.pending_cell_size_query.extend_from_slice(remaining);
+                break;
+            }
+            if remaining.starts_with(QUERY) {
+                if self.live.load(Ordering::Acquire) {
+                    let _ = self.pty_write_tx.send(response.clone());
+                }
+                index += QUERY.len();
+            } else {
+                filtered.push(input[index]);
+                index += 1;
+            }
+        }
+        filtered
     }
 
     fn filter_scrollback_clear(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -1070,6 +1151,32 @@ mod tests {
 
     #[cfg(feature = "gui")]
     #[test]
+    fn cell_size_pixel_query_reports_the_current_cell_geometry() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(63), size, 100);
+        emulator.set_cell_size(84, 36);
+        emulator.start_live();
+        // yazi and other clients size their images from this reply; without
+        // it they fall back to a 1x1 cell and draw a single cell.
+        emulator.apply(&output(1, b"\x1b[16t", size));
+        assert_eq!(emulator.pty_writes(), vec![b"\x1b[6;36;84t".to_vec()]);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn cell_size_query_split_across_events_is_still_answered() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(64), size, 100);
+        emulator.set_cell_size(84, 36);
+        emulator.start_live();
+        emulator.apply(&output(1, b"\x1b[1", size));
+        assert!(emulator.pty_writes().is_empty());
+        emulator.apply(&output(2, b"6t", size));
+        assert_eq!(emulator.pty_writes(), vec![b"\x1b[6;36;84t".to_vec()]);
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
     fn live_kitty_capability_query_uses_the_pty_write_path() {
         let size = TerminalSize::new(80, 24);
         let mut emulator = TerminalEmulator::new(TerminalId::new(61), size, 100);
@@ -1112,6 +1219,25 @@ mod tests {
             ),
             (2, 2)
         );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn main_screen_ctrl_l_moves_image_into_scrollback() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(65), size, 100);
+        emulator.apply(&output(
+            1,
+            b"before\r\n\x1b_Ga=T,q=2,f=100,s=2,v=2,X=3;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC\x1b\\after",
+            size,
+        ));
+        assert_eq!(emulator.snapshot(None).images.len(), 1);
+
+        // Zsh's Ctrl+L emits cursor-home + erase-display. Alacritty moves the
+        // current viewport into history; the image must follow it rather than
+        // being deleted before the grid processes the clear.
+        emulator.apply(&output(2, b"\x1b[H\x1b[2J", size));
+        assert_eq!(emulator.snapshot(None).images.len(), 1);
     }
 
     #[test]

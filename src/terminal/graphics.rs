@@ -27,6 +27,7 @@ const MAX_SIXEL_PIXELS: usize = if MAX_IMAGE_BYTES / 4 < MAX_IMAGE_PIXELS as usi
     MAX_IMAGE_PIXELS as usize
 };
 const IMAGE_OVERSCAN_ROWS: i32 = 64;
+const MAX_IMAGE_PLACEMENTS: usize = 64 * 1024;
 
 /// Kitty's Unicode placeholder code point. The actual image ID is carried by
 /// the cell foreground color; the combining marks are only needed by a full
@@ -46,6 +47,10 @@ pub struct TerminalImage {
     pub height: usize,
     pub pixel_width: u32,
     pub pixel_height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
     /// Decoded RGBA pixels. This is shared between immutable snapshots.
     pub rgba: Arc<[u8]>,
 }
@@ -66,6 +71,11 @@ struct ImagePlacement {
     column: usize,
     width: usize,
     height: usize,
+    placement_id: Option<u32>,
+    source_x: u32,
+    source_y: u32,
+    source_width: u32,
+    source_height: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +84,11 @@ struct ImageRecord {
     width: u32,
     height: u32,
     rgba: Arc<[u8]>,
-    placement: Option<ImagePlacement>,
+    placements: Vec<ImagePlacement>,
     /// A Kitty `U=1` placement is anchored by placeholder cells rather than
-    /// by the cursor. This stores the virtual placement's existence and lets
-    /// the next terminal snapshot resolve its cell rectangle.
+    /// by the cursor. Yazi omits `c/r`, so this must be independent from the
+    /// optional declared placeholder size.
+    unicode_placeholder: bool,
     placeholder_size: Option<(usize, usize)>,
 }
 
@@ -113,7 +124,7 @@ impl TerminalGraphics {
             return;
         }
         for record in self.images.values_mut() {
-            if let Some(placement) = record.placement.as_mut() {
+            for placement in &mut record.placements {
                 placement.grid_line = placement.grid_line.saturating_add(delta);
             }
         }
@@ -128,11 +139,12 @@ impl TerminalGraphics {
     /// it was discarded and must not keep floating over unrelated text.
     pub fn evict_rows(&mut self, topmost_line: i32) {
         self.images.retain(|_, record| {
-            if let Some(placement) = record.placement.as_ref() {
-                if placement.grid_line < topmost_line {
-                    self.stored_bytes = self.stored_bytes.saturating_sub(record.rgba.len());
-                    return false;
-                }
+            record
+                .placements
+                .retain(|placement| placement.grid_line >= topmost_line);
+            if record.placements.is_empty() && !record.unicode_placeholder {
+                self.stored_bytes = self.stored_bytes.saturating_sub(record.rgba.len());
+                return false;
             }
             true
         });
@@ -141,16 +153,6 @@ impl TerminalGraphics {
     pub(super) fn parse(&mut self, bytes: &[u8]) -> Vec<ParsedGraphicsEvent> {
         if bytes.is_empty() {
             return Vec::new();
-        }
-
-        // Full-screen TUI redraws conventionally erase terminal images too.
-        // Kitty applications normally send an explicit delete action, while
-        // this covers Sixel/iTerm2 producers that rely on the erase command.
-        if bytes
-            .windows(4)
-            .any(|window| window == b"\x1b[2J" || window == b"\x1b[3J")
-        {
-            self.clear_images();
         }
 
         self.parser
@@ -192,6 +194,35 @@ impl TerminalGraphics {
         }
     }
 
+    /// Removes placements intersecting the visible screen. This is used for
+    /// the alternate screen, whose `CSI 2 J` resets cells in place. On the
+    /// main screen Alacritty pushes the viewport into scrollback instead, so
+    /// those placements must be rebased rather than deleted.
+    pub(super) fn erase_visible(&mut self, viewport_start: i32, lines: usize) {
+        let viewport_end = viewport_start.saturating_add(lines as i32);
+        self.retain_placements(|placement| {
+            let placement_end = placement.grid_line.saturating_add(placement.height as i32);
+            placement_end <= viewport_start || placement.grid_line >= viewport_end
+        });
+    }
+
+    /// Removes only placements already above the viewport. `CSI 3 J` erases
+    /// saved lines but leaves visible images intact.
+    pub(super) fn erase_scrollback(&mut self, viewport_start: i32) {
+        self.retain_placements(|placement| placement.grid_line >= viewport_start);
+    }
+
+    fn retain_placements(&mut self, mut keep: impl FnMut(&ImagePlacement) -> bool) {
+        self.images.retain(|_, record| {
+            record.placements.retain(&mut keep);
+            if record.placements.is_empty() && !record.unicode_placeholder {
+                self.stored_bytes = self.stored_bytes.saturating_sub(record.rgba.len());
+                return false;
+            }
+            true
+        });
+    }
+
     #[cfg(test)]
     fn feed(&mut self, bytes: &[u8], cursor: (i32, usize)) -> Vec<Vec<u8>> {
         let mut responses = Vec::new();
@@ -220,37 +251,46 @@ impl TerminalGraphics {
         let placeholder_bounds = self.placeholder_bounds(terminal_snapshot);
         self.images
             .values()
-            .filter_map(|record| {
-                let placement = if let Some((min_row, min_column, max_row, max_column)) =
-                    placeholder_bounds.get(&record.render_id)
+            .flat_map(|record| {
+                let mut placements = record.placements.clone();
+                if record.unicode_placeholder
+                    && let Some((min_row, min_column, max_row, max_column)) =
+                        placeholder_bounds.get(&record.render_id)
                 {
-                    Some(ImagePlacement {
+                    placements.push(ImagePlacement {
                         grid_line: viewport_start.saturating_add(*min_row),
                         column: *min_column,
                         width: max_column.saturating_sub(*min_column).saturating_add(1),
                         height: max_row.saturating_sub(*min_row).saturating_add(1) as usize,
-                    })
-                } else if record.placeholder_size.is_some() {
-                    None
-                } else {
-                    record.placement.as_ref().cloned()
-                }?;
-                let row = placement.grid_line.saturating_sub(viewport_start);
-                let height = placement.height.max(1) as i32;
-                if row.saturating_add(height) < -IMAGE_OVERSCAN_ROWS
-                    || row > size.lines as i32 + IMAGE_OVERSCAN_ROWS
-                {
-                    return None;
+                        placement_id: None,
+                        source_x: 0,
+                        source_y: 0,
+                        source_width: record.width,
+                        source_height: record.height,
+                    });
                 }
-                Some(TerminalImage {
-                    id: record.render_id,
-                    row,
-                    column: placement.column,
-                    width: placement.width.max(1),
-                    height: placement.height.max(1),
-                    pixel_width: record.width,
-                    pixel_height: record.height,
-                    rgba: record.rgba.clone(),
+                placements.into_iter().filter_map(move |placement| {
+                    let row = placement.grid_line.saturating_sub(viewport_start);
+                    let height = placement.height.max(1) as i32;
+                    if row.saturating_add(height) < -IMAGE_OVERSCAN_ROWS
+                        || row > size.lines as i32 + IMAGE_OVERSCAN_ROWS
+                    {
+                        return None;
+                    }
+                    Some(TerminalImage {
+                        id: record.render_id,
+                        row,
+                        column: placement.column,
+                        width: placement.width.max(1),
+                        height: placement.height.max(1),
+                        pixel_width: record.width,
+                        pixel_height: record.height,
+                        source_x: placement.source_x,
+                        source_y: placement.source_y,
+                        source_width: placement.source_width.max(1),
+                        source_height: placement.source_height.max(1),
+                        rgba: record.rgba.clone(),
+                    })
                 })
             })
             .collect::<Vec<_>>()
@@ -277,7 +317,7 @@ impl TerminalGraphics {
                 let Some(record) = self.images.get(&image_id) else {
                     continue;
                 };
-                if record.placeholder_size.is_none() {
+                if !record.unicode_placeholder {
                     continue;
                 }
                 let row = row as i32 - snapshot.display_offset as i32;
@@ -322,8 +362,9 @@ impl TerminalGraphics {
             if let Some(image_id) = parameter_u32(parameters, b'i') {
                 if parameter(parameters, b'U') == Some(b"1") {
                     if let Some(record) = self.images.get_mut(&image_id) {
+                        record.unicode_placeholder = true;
                         record.placeholder_size = placeholder_size_from_parameters(parameters);
-                        record.placement = None;
+                        record.placements.clear();
                     }
                 } else {
                     return self
@@ -394,9 +435,18 @@ impl TerminalGraphics {
         let Some(decoded) = self.decode_kitty_data(&raw, format, &pending.parameters) else {
             return 0;
         };
-        let placement = (pending.action == b'T'
-            && parameter_u32(&pending.parameters, b'U') != Some(1))
-        .then(|| placement_from_parameters(&pending.parameters, grid_line, cursor.1, cell_size));
+        let unicode_placeholder =
+            pending.action == b'T' && parameter_u32(&pending.parameters, b'U') == Some(1);
+        let placement = (pending.action == b'T' && !unicode_placeholder).then(|| {
+            placement_from_parameters(
+                &pending.parameters,
+                grid_line,
+                cursor.1,
+                decoded.width,
+                decoded.height,
+                cell_size,
+            )
+        });
         let cursor_rows = placement
             .as_ref()
             .filter(|_| parameter(&pending.parameters, b'C') != Some(b"1"))
@@ -405,7 +455,8 @@ impl TerminalGraphics {
             image_id,
             decoded,
             placement,
-            (pending.action == b'T' && parameter_u32(&pending.parameters, b'U') == Some(1))
+            unicode_placeholder,
+            unicode_placeholder
                 .then(|| placeholder_size_from_parameters(&pending.parameters))
                 .flatten(),
         );
@@ -475,10 +526,10 @@ impl TerminalGraphics {
         };
         let width = options
             .get(b"width".as_slice())
-            .and_then(|value| parse_dimension(value));
+            .and_then(|value| parse_dimension(value, cell_size.0));
         let height = options
             .get(b"height".as_slice())
-            .and_then(|value| parse_dimension(value));
+            .and_then(|value| parse_dimension(value, cell_size.1));
         let mut placement = placement_from_dimensions(
             grid_line,
             cursor.1,
@@ -496,7 +547,7 @@ impl TerminalGraphics {
             placement.height = height.unwrap_or(placement.height).max(1);
         }
         let image_id = self.allocate_protocol_id();
-        self.store(image_id, decoded, Some(placement), None);
+        self.store(image_id, decoded, Some(placement), false, None);
     }
 
     fn handle_sixel(
@@ -519,7 +570,7 @@ impl TerminalGraphics {
             None,
             cell_size,
         );
-        self.store(image_id, decoded, Some(placement), None);
+        self.store(image_id, decoded, Some(placement), false, None);
     }
 
     fn store(
@@ -527,6 +578,7 @@ impl TerminalGraphics {
         image_id: u32,
         decoded: DecodedImage,
         placement: Option<ImagePlacement>,
+        unicode_placeholder: bool,
         placeholder_size: Option<(usize, usize)>,
     ) {
         let byte_len = decoded.rgba.len();
@@ -554,7 +606,8 @@ impl TerminalGraphics {
                 width: decoded.width,
                 height: decoded.height,
                 rgba: decoded.rgba.into(),
-                placement,
+                placements: placement.into_iter().collect(),
+                unicode_placeholder,
                 placeholder_size,
             },
         );
@@ -569,17 +622,26 @@ impl TerminalGraphics {
         cell_size: (u16, u16),
     ) -> Option<usize> {
         let record = self.images.get_mut(&image_id)?;
-        let placement = placement_from_dimensions(
+        let placement = placement_from_parameters(
+            parameters,
             grid_line,
             cursor.1,
             record.width,
             record.height,
-            parameter_u32(parameters, b'c').and_then(|value| usize::try_from(value).ok()),
-            parameter_u32(parameters, b'r').and_then(|value| usize::try_from(value).ok()),
             cell_size,
         );
         let height = placement.height;
-        record.placement = Some(placement);
+        if let Some(placement_id) = placement.placement_id
+            && let Some(existing) = record
+                .placements
+                .iter_mut()
+                .find(|existing| existing.placement_id == Some(placement_id))
+        {
+            *existing = placement;
+        } else if record.placements.len() < MAX_IMAGE_PLACEMENTS {
+            record.placements.push(placement);
+        }
+        record.unicode_placeholder = false;
         Some(height)
     }
 
@@ -589,7 +651,15 @@ impl TerminalGraphics {
             Some(b"A") => self.clear_images(),
             Some(b"i") | Some(b"I") => {
                 if let Some(image_id) = parameter_u32(parameters, b'i') {
-                    if let Some(record) = self.images.remove(&image_id) {
+                    if let Some(placement_id) =
+                        parameter_u32(parameters, b'p').filter(|id| *id != 0)
+                    {
+                        if let Some(record) = self.images.get_mut(&image_id) {
+                            record
+                                .placements
+                                .retain(|placement| placement.placement_id != Some(placement_id));
+                        }
+                    } else if let Some(record) = self.images.remove(&image_id) {
                         self.stored_bytes = self.stored_bytes.saturating_sub(record.rgba.len());
                     }
                 }
@@ -819,11 +889,17 @@ fn split_once_byte(bytes: &[u8], separator: u8) -> Option<(&[u8], &[u8])> {
     Some((&bytes[..index], &bytes[index + 1..]))
 }
 
-fn parse_dimension(value: &[u8]) -> Option<usize> {
-    let value = value
-        .strip_suffix(b"px")
-        .or_else(|| value.strip_suffix(b"%"))
-        .unwrap_or(value);
+fn parse_dimension(value: &[u8], cell_pixels: u16) -> Option<usize> {
+    if value.ends_with(b"%") {
+        // Percentages are relative to the terminal area, which this local
+        // graphics decoder does not own. Falling back to the image's natural
+        // size is safer than misreading a percentage as a cell count.
+        return None;
+    }
+    if let Some(value) = value.strip_suffix(b"px") {
+        let pixels: u64 = std::str::from_utf8(value).ok()?.parse().ok()?;
+        return usize::try_from(ceil_div(pixels, u64::from(cell_pixels.max(1)))).ok();
+    }
     std::str::from_utf8(value).ok()?.parse().ok()
 }
 
@@ -916,17 +992,39 @@ fn placement_from_parameters(
     parameters: &[u8],
     grid_line: i32,
     column: usize,
+    image_width: u32,
+    image_height: u32,
     cell_size: (u16, u16),
 ) -> ImagePlacement {
-    placement_from_dimensions(
+    let source_x = parameter_u32(parameters, b'x')
+        .unwrap_or(0)
+        .min(image_width.saturating_sub(1));
+    let source_y = parameter_u32(parameters, b'y')
+        .unwrap_or(0)
+        .min(image_height.saturating_sub(1));
+    let source_width = parameter_u32(parameters, b'w')
+        .unwrap_or_else(|| image_width.saturating_sub(source_x))
+        .min(image_width.saturating_sub(source_x))
+        .max(1);
+    let source_height = parameter_u32(parameters, b'h')
+        .unwrap_or_else(|| image_height.saturating_sub(source_y))
+        .min(image_height.saturating_sub(source_y))
+        .max(1);
+    let mut placement = placement_from_dimensions(
         grid_line,
         column,
-        parameter_u32(parameters, b's').unwrap_or(0),
-        parameter_u32(parameters, b'v').unwrap_or(0),
+        source_width,
+        source_height,
         parameter_u32(parameters, b'c').and_then(|value| usize::try_from(value).ok()),
         parameter_u32(parameters, b'r').and_then(|value| usize::try_from(value).ok()),
         cell_size,
-    )
+    );
+    placement.placement_id = parameter_u32(parameters, b'p').filter(|id| *id != 0);
+    placement.source_x = source_x;
+    placement.source_y = source_y;
+    placement.source_width = source_width;
+    placement.source_height = source_height;
+    placement
 }
 
 fn placement_from_dimensions(
@@ -974,6 +1072,11 @@ fn placement_from_dimensions(
         column: place_column,
         width: width.max(1),
         height: height.max(1),
+        placement_id: None,
+        source_x: 0,
+        source_y: 0,
+        source_width: u32::try_from(pixel_width).unwrap_or(u32::MAX),
+        source_height: u32::try_from(pixel_height).unwrap_or(u32::MAX),
     }
 }
 
@@ -1299,6 +1402,117 @@ mod tests {
         graphics.rebase(30, 40);
         after.grid_line_at_top = 40;
         assert!(graphics.snapshot(35, size, &after).is_empty());
+    }
+
+    #[test]
+    fn erase_display_keeps_scrollback_placements() {
+        let size = TerminalSize::new(80, 24);
+        let mut graphics = TerminalGraphics::default();
+        // One placement that already scrolled above the visible screen, and
+        // one sitting inside it.
+        feed_kitty_png(&mut graphics, (0, 20), -30, 3);
+        feed_kitty_png(&mut graphics, (5, 20), 5, 3);
+
+        let mut at_bottom = TerminalSnapshot::empty(TerminalId::new(1), size);
+        at_bottom.grid_line_at_top = 0;
+        assert_eq!(graphics.snapshot(0, size, &at_bottom).len(), 2);
+
+        // Alternate-screen erase-in-display removes the on-screen placement,
+        // while the one in scrollback stays reachable.
+        graphics.erase_visible(0, size.lines);
+        let mut scrolled = TerminalSnapshot::empty(TerminalId::new(1), size);
+        scrolled.grid_line_at_top = -30;
+        let remaining = graphics.snapshot(30, size, &scrolled);
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].row, 0);
+
+        // Erase-saved-lines removes the remaining history placement.
+        graphics.erase_scrollback(0);
+        assert!(graphics.snapshot(30, size, &scrolled).is_empty());
+    }
+
+    #[test]
+    fn yazi_kgp_old_keeps_all_cropped_cell_placements() {
+        let encoded = tiny_png_base64();
+        let mut graphics = TerminalGraphics::default();
+        graphics.feed(
+            format!("\x1b_Ga=t,i=42,f=100,s=2,v=2;{encoded}\x1b\\").as_bytes(),
+            (0, 0),
+        );
+        for (placement_id, row, column, x, y) in [
+            (1, 3, 4, 0, 0),
+            (2, 3, 5, 1, 0),
+            (3, 4, 4, 0, 1),
+            (4, 4, 5, 1, 1),
+        ] {
+            graphics.feed(
+                format!("\x1b_Ga=p,i=42,p={placement_id},x={x},y={y},w=1,h=1,c=1,r=1,C=1\x1b\\")
+                    .as_bytes(),
+                (row, column),
+            );
+        }
+
+        let size = TerminalSize::new(80, 24);
+        let snapshot =
+            graphics.snapshot(0, size, &TerminalSnapshot::empty(TerminalId::new(1), size));
+        assert_eq!(snapshot.len(), 4);
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|image| (image.row, image.column, image.source_x, image.source_y))
+                .collect::<Vec<_>>(),
+            vec![(3, 4, 0, 0), (3, 5, 1, 0), (4, 4, 0, 1), (4, 5, 1, 1)]
+        );
+    }
+
+    #[test]
+    fn yazi_unicode_placeholder_does_not_require_declared_cell_size() {
+        let encoded = tiny_png_base64();
+        let mut graphics = TerminalGraphics::default();
+        graphics.feed(
+            format!("\x1b_Ga=T,C=1,U=1,f=100,s=2,v=2,i=42;{encoded}\x1b\\").as_bytes(),
+            (0, 0),
+        );
+        let size = TerminalSize::new(80, 24);
+        let mut terminal_snapshot = TerminalSnapshot::empty(TerminalId::new(1), size);
+        for row in 2..4 {
+            for column in 6..9 {
+                let cell = terminal_snapshot.cell_mut(row, column).unwrap();
+                cell.character = TERMINAL_IMAGE_PLACEHOLDER;
+                cell.fg = TerminalColor::Rgb {
+                    red: 0,
+                    green: 0,
+                    blue: 42,
+                };
+            }
+        }
+        let snapshot = graphics.snapshot(0, size, &terminal_snapshot);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!((snapshot[0].row, snapshot[0].column), (2, 6));
+        assert_eq!((snapshot[0].width, snapshot[0].height), (3, 2));
+    }
+
+    #[test]
+    fn iterm_pixel_dimensions_are_converted_to_cells() {
+        assert_eq!(parse_dimension(b"32px", 16), Some(2));
+        assert_eq!(parse_dimension(b"37px", 16), Some(3));
+        assert_eq!(parse_dimension(b"4", 16), Some(4));
+        assert_eq!(parse_dimension(b"50%", 16), None);
+    }
+
+    fn tiny_png_base64() -> String {
+        let png = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        image::ImageEncoder::write_image(
+            encoder,
+            png.as_raw(),
+            2,
+            2,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        super::super::stream::encode_base64(&bytes)
     }
 
     fn feed_kitty_png(

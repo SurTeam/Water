@@ -643,7 +643,8 @@ struct TerminalPrepaintState {
 }
 
 struct TerminalImagePaint {
-    bounds: Bounds<gpui::Pixels>,
+    clip_bounds: Bounds<gpui::Pixels>,
+    image_bounds: Bounds<gpui::Pixels>,
     image: Arc<gpui::RenderImage>,
 }
 
@@ -8136,8 +8137,11 @@ impl gpui::Element for TerminalRenderElement {
                 cache.images.insert(image.id, render_image.clone());
                 render_image
             };
+            let (clip_bounds, image_bounds) =
+                terminal_image_bounds(bounds, self.options.metrics, image, whole, fraction);
             images.push(TerminalImagePaint {
-                bounds: terminal_image_bounds(bounds, self.options.metrics, image, whole, fraction),
+                clip_bounds,
+                image_bounds,
                 image: render_image,
             });
         }
@@ -8247,8 +8251,8 @@ impl gpui::Element for TerminalRenderElement {
             // Terminal images are pixel content, not chrome: they are drawn
             // square so the pane's corner radius cannot clip the artwork.
             let _ = window.paint_image(
-                bounds,
-                image.bounds,
+                image.clip_bounds,
+                image.image_bounds,
                 gpui::Corners::default(),
                 image.image.clone(),
                 0,
@@ -8778,7 +8782,7 @@ fn terminal_image_bounds(
     image: &TerminalImage,
     whole_scroll_offset: i32,
     fractional_scroll_offset: f32,
-) -> Bounds<gpui::Pixels> {
+) -> (Bounds<gpui::Pixels>, Bounds<gpui::Pixels>) {
     let cell_bounds = terminal_cell_bounds_for_row(
         bounds,
         metrics,
@@ -8787,13 +8791,26 @@ fn terminal_image_bounds(
         image.width.max(1),
         fractional_scroll_offset,
     );
-    Bounds::new(
+    let clip_bounds = Bounds::new(
         cell_bounds.origin,
         size(
             cell_bounds.size.width,
             px(metrics.line_height * image.height.max(1) as f32),
         ),
-    )
+    );
+    let scale_x = f32::from(clip_bounds.size.width) / image.source_width.max(1) as f32;
+    let scale_y = f32::from(clip_bounds.size.height) / image.source_height.max(1) as f32;
+    let image_bounds = Bounds::new(
+        point(
+            px(f32::from(clip_bounds.origin.x) - image.source_x as f32 * scale_x),
+            px(f32::from(clip_bounds.origin.y) - image.source_y as f32 * scale_y),
+        ),
+        size(
+            px(image.pixel_width as f32 * scale_x),
+            px(image.pixel_height as f32 * scale_y),
+        ),
+    );
+    (clip_bounds, image_bounds)
 }
 
 fn terminal_cursor_position(snapshot: &TerminalSnapshot) -> (usize, usize) {
