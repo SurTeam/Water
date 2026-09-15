@@ -43,6 +43,19 @@ pub const DEFAULT_SIDEBAR_MARGIN: f32 = 4.0;
 pub const DEFAULT_SIDEBAR_CARD_GAP: f32 = 6.0;
 pub const DEFAULT_SIDEBAR_CARD_PADDING: f32 = 6.0;
 pub const DEFAULT_SIDEBAR_ROW_PADDING: f32 = 10.0;
+/// Left padding inside workspace rows (the right side keeps `sidebar_row_padding`).
+pub const DEFAULT_SIDEBAR_WORKSPACE_ROW_PADDING: f32 = 10.0;
+/// Left padding inside agent rows (the right side keeps `sidebar_row_padding`).
+pub const DEFAULT_SIDEBAR_AGENT_ROW_PADDING: f32 = 10.0;
+pub const DEFAULT_SIDEBAR_AGENT_ROW_GAP: f32 = 1.0;
+pub const DEFAULT_SIDEBAR_AGENT_PADDING: f32 = 4.0;
+pub const DEFAULT_SIDEBAR_AGENT_ROW_HEIGHT: f32 = 28.0;
+pub const DEFAULT_SIDEBAR_HOST_HEADER_HEIGHT: f32 = 28.0;
+/// Gap between the host title's bottom hairline and the first workspace row
+/// inside the host card (the card gap is not used there).
+pub const DEFAULT_SIDEBAR_HOST_WORKSPACE_GAP: f32 = 6.0;
+pub const DEFAULT_SIDEBAR_AGENT_ROW_WIDTH: f32 = 0.8;
+pub const DEFAULT_SIDEBAR_WORKSPACE_GAP: f32 = 2.0;
 pub const DEFAULT_TITLEBAR_PADDING: f32 = 10.0;
 pub const DEFAULT_TITLEBAR_GAP: f32 = 8.0;
 pub const DEFAULT_TAB_GAP: f32 = 2.0;
@@ -519,6 +532,29 @@ pub struct UiConfig {
     /// Vertical margin around the floating sidebar surface, independent from
     /// the gap between panes.
     pub sidebar_surface_margin: f32,
+    /// Vertical gap between agent rows inside one workspace group.
+    pub sidebar_agent_row_gap: f32,
+    /// Vertical padding around the agent rows inside one workspace group.
+    pub sidebar_agent_padding: f32,
+    /// Height of the host title row inside its card, in logical pixels.
+    /// Derived from the default UI font size (28 ≈ 2 × 14) but editable as
+    /// a plain pixel value in the settings.
+    pub sidebar_host_header_height: f32,
+    /// Vertical gap between the host title hairline and the first workspace
+    /// row inside the host card.
+    pub sidebar_host_workspace_gap: f32,
+    /// Agent row width as a fraction of the workspace row width (1.0 for the
+    /// same width); the row is centered on the workspace row.
+    pub sidebar_agent_row_width: f32,
+    /// Left padding inside workspace rows, in logical pixels.
+    pub sidebar_workspace_row_padding: f32,
+    /// Left padding inside agent rows, in logical pixels.
+    pub sidebar_agent_row_padding: f32,
+    /// Height of each Agent row, in logical pixels.
+    pub sidebar_agent_row_height: f32,
+    /// Vertical gap between workspace groups (workspace card and its agent
+    /// rows) inside one host card; the card gap above is not used there.
+    pub sidebar_workspace_gap: f32,
     pub pane_padding: f32,
     /// Corner radius of each client-side pane surface.
     pub pane_corner_radius: f32,
@@ -582,6 +618,15 @@ impl Default for UiConfig {
             window_corner_radius: DEFAULT_WINDOW_CORNER_RADIUS,
             sidebar_card_radius: DEFAULT_SIDEBAR_CARD_RADIUS,
             sidebar_workspace_radius: DEFAULT_SIDEBAR_WORKSPACE_RADIUS,
+            sidebar_agent_row_gap: DEFAULT_SIDEBAR_AGENT_ROW_GAP,
+            sidebar_agent_padding: DEFAULT_SIDEBAR_AGENT_PADDING,
+            sidebar_host_header_height: DEFAULT_SIDEBAR_HOST_HEADER_HEIGHT,
+            sidebar_host_workspace_gap: DEFAULT_SIDEBAR_HOST_WORKSPACE_GAP,
+            sidebar_agent_row_width: DEFAULT_SIDEBAR_AGENT_ROW_WIDTH,
+            sidebar_workspace_row_padding: DEFAULT_SIDEBAR_WORKSPACE_ROW_PADDING,
+            sidebar_agent_row_padding: DEFAULT_SIDEBAR_AGENT_ROW_PADDING,
+            sidebar_agent_row_height: DEFAULT_SIDEBAR_AGENT_ROW_HEIGHT,
+            sidebar_workspace_gap: DEFAULT_SIDEBAR_WORKSPACE_GAP,
         }
     }
 }
@@ -615,6 +660,15 @@ impl UiConfig {
         self.window_corner_radius = self.window_corner_radius.clamp(0.0, 48.0);
         self.sidebar_card_radius = self.sidebar_card_radius.clamp(0.0, 32.0);
         self.sidebar_workspace_radius = self.sidebar_workspace_radius.clamp(0.0, 24.0);
+        self.sidebar_agent_row_gap = self.sidebar_agent_row_gap.clamp(0.0, 24.0);
+        self.sidebar_agent_padding = self.sidebar_agent_padding.clamp(0.0, 24.0);
+        self.sidebar_host_header_height = self.sidebar_host_header_height.clamp(16.0, 64.0);
+        self.sidebar_host_workspace_gap = self.sidebar_host_workspace_gap.clamp(0.0, 32.0);
+        self.sidebar_agent_row_width = self.sidebar_agent_row_width.clamp(0.2, 1.0);
+        self.sidebar_workspace_row_padding = self.sidebar_workspace_row_padding.clamp(0.0, 48.0);
+        self.sidebar_agent_row_padding = self.sidebar_agent_row_padding.clamp(0.0, 48.0);
+        self.sidebar_agent_row_height = self.sidebar_agent_row_height.clamp(16.0, 80.0);
+        self.sidebar_workspace_gap = self.sidebar_workspace_gap.clamp(0.0, 32.0);
         self
     }
 }
@@ -1176,6 +1230,33 @@ impl AppConfigOverrides {
             if let Some(value) = ui.sidebar_workspace_radius {
                 config.ui.sidebar_workspace_radius = value;
             }
+            if let Some(value) = ui.sidebar_agent_row_gap {
+                config.ui.sidebar_agent_row_gap = value;
+            }
+            if let Some(value) = ui.sidebar_agent_padding {
+                config.ui.sidebar_agent_padding = value;
+            }
+            if let Some(value) = ui.sidebar_host_header_height {
+                config.ui.sidebar_host_header_height = value;
+            }
+            if let Some(value) = ui.sidebar_host_workspace_gap {
+                config.ui.sidebar_host_workspace_gap = value;
+            }
+            if let Some(value) = ui.sidebar_agent_row_width {
+                config.ui.sidebar_agent_row_width = value;
+            }
+            if let Some(value) = ui.sidebar_workspace_row_padding {
+                config.ui.sidebar_workspace_row_padding = value;
+            }
+            if let Some(value) = ui.sidebar_agent_row_padding {
+                config.ui.sidebar_agent_row_padding = value;
+            }
+            if let Some(value) = ui.sidebar_agent_row_height {
+                config.ui.sidebar_agent_row_height = value;
+            }
+            if let Some(value) = ui.sidebar_workspace_gap {
+                config.ui.sidebar_workspace_gap = value;
+            }
         }
         if let Some(shortcuts) = &self.shortcuts {
             shortcuts.apply_to(&mut config.shortcuts);
@@ -1342,6 +1423,15 @@ pub struct UiConfigOverrides {
     pub window_corner_radius: Option<f32>,
     pub sidebar_card_radius: Option<f32>,
     pub sidebar_workspace_radius: Option<f32>,
+    pub sidebar_agent_row_gap: Option<f32>,
+    pub sidebar_agent_padding: Option<f32>,
+    pub sidebar_host_header_height: Option<f32>,
+    pub sidebar_host_workspace_gap: Option<f32>,
+    pub sidebar_agent_row_width: Option<f32>,
+    pub sidebar_workspace_row_padding: Option<f32>,
+    pub sidebar_agent_row_padding: Option<f32>,
+    pub sidebar_agent_row_height: Option<f32>,
+    pub sidebar_workspace_gap: Option<f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1699,6 +1789,12 @@ mod tests {
                     "sidebar_card_gap": 7.0,
                     "sidebar_card_padding": 8.0,
                     "sidebar_row_padding": 11.0,
+                    "sidebar_header_height": 30.0,
+                    "sidebar_host_header_height": 32.0,
+                    "sidebar_agent_row_width": 0.75,
+                    "sidebar_workspace_row_padding": 14.0,
+                    "sidebar_agent_row_padding": 12.0,
+                    "sidebar_agent_row_height": 26.0,
                     "titlebar_padding": 12.0,
                     "titlebar_gap": 9.0,
                     "tab_gap": 4.0,
@@ -1716,6 +1812,12 @@ mod tests {
         assert_eq!(config.ui.sidebar_card_gap, 7.0);
         assert_eq!(config.ui.sidebar_card_padding, 8.0);
         assert_eq!(config.ui.sidebar_row_padding, 11.0);
+        assert_eq!(config.ui.sidebar_header_height, 30.0);
+        assert_eq!(config.ui.sidebar_host_header_height, 32.0);
+        assert_eq!(config.ui.sidebar_agent_row_width, 0.75);
+        assert_eq!(config.ui.sidebar_workspace_row_padding, 14.0);
+        assert_eq!(config.ui.sidebar_agent_row_padding, 12.0);
+        assert_eq!(config.ui.sidebar_agent_row_height, 26.0);
         assert_eq!(config.ui.titlebar_padding, 12.0);
         assert_eq!(config.ui.titlebar_gap, 9.0);
         assert_eq!(config.ui.tab_gap, 4.0);

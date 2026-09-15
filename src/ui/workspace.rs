@@ -42,8 +42,7 @@ use super::application::{
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
 /// Pixel step for a single click on the tab-strip overflow indicators.
 const TAB_SCROLL_NUDGE_PX: f32 = 160.0;
-/// Width of the sidebar disclosure column. Agent rows indent by the same
-/// amount so nested rows line up with their workspace title.
+/// Width of the sidebar disclosure column used by Workspace rows.
 const SIDEBAR_DISCLOSURE_WIDTH: f32 = 18.0;
 /// Scrim painted behind in-window dialogs; darker than the old 60%
 /// overlay so the background reads as inactive while a dialog is open.
@@ -983,6 +982,11 @@ pub struct WorkspaceView {
     sidebar_collapsed: bool,
     collapsed_connections: BTreeSet<ConnectionId>,
     collapsed_workspaces: BTreeSet<(ConnectionId, WorkspaceId)>,
+    /// Sidebar row (host/workspace/agent) with the pointer currently
+    /// pressed on it; the pointer-up decides between activation (single
+    /// click), collapse (double click) and drag, and gates hover styling
+    /// so a row cannot hover while a context menu is open.
+    sidebar_row_press: Option<(String, bool)>,
     sidebar_scroll: ScrollHandle,
     tab_scroll: ScrollHandle,
     /// Tab-strip shape seen at the last snapshot install; changes trigger a
@@ -1109,6 +1113,7 @@ impl WorkspaceView {
             terminal_snapshots: BTreeMap::new(),
             collapsed_connections: BTreeSet::new(),
             collapsed_workspaces: BTreeSet::new(),
+            sidebar_row_press: None,
             sidebar_scroll: ScrollHandle::new(),
             tab_scroll: ScrollHandle::new(),
             last_tab_strip_signature: (None, 0),
@@ -1287,6 +1292,101 @@ impl WorkspaceView {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         cx.notify();
+    }
+
+    /// Pointer press on a sidebar row: records the row and its kind of double
+    /// click, and defers activation until the pointer releases so a double
+    /// click can replace it with the collapse toggle. Returns false when a
+    /// context menu or dialog is open so plain rows do not light up while
+    /// the menu is open.
+    fn begin_sidebar_row_activate(&mut self, key: String, is_double: bool) -> bool {
+        if self.context_menu.is_some() || self.dialog.is_some() {
+            return false;
+        }
+        self.sidebar_row_press = Some((key, is_double));
+        true
+    }
+
+    /// Completes the pending sidebar row activation on a pointer release that
+    /// landed inside the sidebar. Runs from the root-level mouse-up observer
+    /// (registered before the terminal's own listeners), because the sidebar
+    /// rows have no hitboxes of their own: on a release over a row, gpui's
+    /// hit-test finds the terminal beneath the sidebar surface and its
+    /// `finish_terminal_selection` would consume the event before it reached
+    /// the row's `on_mouse_up`, so activation never ran. Returns true when a
+    /// pending press was consumed so the caller can stop further propagation.
+    fn finish_sidebar_row_release(
+        &mut self,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.sidebar_row_press.is_none() {
+            return false;
+        }
+        if self.sidebar_collapsed {
+            self.sidebar_row_press = None;
+            return true;
+        }
+        let bounds = self.sidebar_scroll.bounds();
+        if !bounds.contains(&position) {
+            return false;
+        }
+        if let Some((key, is_double)) = self.sidebar_row_press.take() {
+            if is_double {
+                self.apply_sidebar_collapse(&key, cx);
+            } else {
+                self.apply_sidebar_activate(&key, cx);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    fn apply_sidebar_activate(&mut self, key: &str, cx: &mut Context<Self>) {
+        let (connection_id, workspace_id, pane_id) = parse_sidebar_row_key(key);
+        match (workspace_id, pane_id) {
+            (Some(_), Some(pane_id)) => {
+                // Agent row: focus the pane.
+                self.select_connection_locally(connection_id, cx);
+                self.select_workspace_locally(workspace_id.unwrap(), cx);
+                self.focused_pane = Some(pane_id);
+                self.dispatch(
+                    AppCommand::Pane(PaneCommand::Focus {
+                        pane_id: Some(pane_id),
+                        direction: None,
+                    }),
+                    cx,
+                );
+            }
+            (Some(ws), None) => {
+                // Workspace row: activate the workspace.
+                self.select_connection_locally(connection_id, cx);
+                self.select_workspace_locally(ws, cx);
+                self.dispatch(
+                    AppCommand::Workspace(WorkspaceCommand::Activate {
+                        workspace_id: Some(ws),
+                    }),
+                    cx,
+                );
+            }
+            (None, None) => {
+                // Host header: switch to the connection.
+                self.select_connection_locally(connection_id, cx);
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_sidebar_collapse(&mut self, key: &str, cx: &mut Context<Self>) {
+        let (connection_id, workspace_id, pane_id) = parse_sidebar_row_key(key);
+        if pane_id.is_some() {
+            return;
+        }
+        match workspace_id {
+            Some(ws) => self.toggle_workspace_collapsed(connection_id, ws, cx),
+            None => self.toggle_connection_collapsed(connection_id, cx),
+        }
     }
 
     fn toggle_connection_collapsed(&mut self, connection_id: ConnectionId, cx: &mut Context<Self>) {
@@ -3952,23 +4052,20 @@ impl WorkspaceView {
         } else {
             theme.tab_add_background
         };
-        let workspace_active_pane = workspace
+        let _workspace_active_pane = workspace
             .active_tab
             .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
             .map(|tab| tab.active_pane);
+        let workspace_row_key = format!("w\u{1f}{}\u{1f}{}", connection_id, workspace_id);
+        let workspace_activate_key = workspace_row_key.clone();
         let workspace_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            this.context_menu = None;
+            if !this
+                .begin_sidebar_row_activate(workspace_activate_key.clone(), event.click_count >= 2)
+            {
+                return;
+            }
             this.focus_handle.focus(window, cx);
-            this.select_connection_locally(connection_id, cx);
-            this.select_workspace_locally(workspace_id, cx);
-            this.focused_pane = workspace_active_pane;
             this.begin_sidebar_drag(SidebarDragSource::Workspace(workspace_id), event.position);
-            this.dispatch(
-                AppCommand::Workspace(WorkspaceCommand::Activate {
-                    workspace_id: Some(workspace_id),
-                }),
-                cx,
-            );
             cx.stop_propagation();
         });
         let disclosure = div()
@@ -3985,8 +4082,10 @@ impl WorkspaceView {
             .child(SharedString::from(if collapsed { "▸" } else { "▾" }))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, _window, cx| {
-                    this.toggle_workspace_collapsed(connection_id, workspace_id, cx);
+                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                    if event.click_count >= 2 {
+                        this.toggle_workspace_collapsed(connection_id, workspace_id, cx);
+                    }
                     cx.stop_propagation();
                 }),
             );
@@ -3994,7 +4093,7 @@ impl WorkspaceView {
             .id(format!("workspace-{connection_id}-{workspace_id}"))
             .h(px(self.config.ui.sidebar_header_height))
             .w_full()
-            .pl(px(self.config.ui.sidebar_card_padding))
+            .pl(px(self.config.ui.sidebar_workspace_row_padding))
             .pr(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .flex()
@@ -4046,9 +4145,11 @@ impl WorkspaceView {
         if !collapsed {
             let mut agent_rows = div()
                 .w_full()
+                .py(px(self.config.ui.sidebar_agent_padding))
                 .flex()
                 .flex_col()
-                .gap(px(1.));
+                .gap(px(self.config.ui.sidebar_agent_row_gap))
+                .items_center();
             for agent in agents {
                 agent_rows =
                     agent_rows.child(self.render_sidebar_agent(connection_id, agent, theme, cx));
@@ -4072,22 +4173,31 @@ impl WorkspaceView {
             WorkspaceConnectionKind::Local => "LOCAL",
             WorkspaceConnectionKind::Remote => "SSH",
         };
+        // The host card is the one large rounded rectangle: the host title
+        // is a plain text row at its top, separated from the workspaces
+        // below by a hairline; no card of its own and no background. Clicking
+        // switches to the host, never collapses. Double click or the
+        // right-click menu toggles the fold.
+        let connection_key = format!("c\u{1f}{}", connection_id);
+        let connection_activate_key = connection_key.clone();
+        let header_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+            if !this
+                .begin_sidebar_row_activate(connection_activate_key.clone(), event.click_count >= 2)
+            {
+                return;
+            }
+            this.focus_handle.focus(window, cx);
+            cx.stop_propagation();
+        });
         let mut header = div()
             .id(format!("connection-{connection_id}"))
-            .h(px(34.))
+            .h(px(self.config.ui.sidebar_host_header_height))
             .w_full()
             .px(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .flex()
             .flex_none()
             .cursor_pointer()
-            .rounded(px(self.config.ui.sidebar_card_radius))
-            .bg(rgb(if selected {
-                theme.sidebar_connection_active_background
-            } else {
-                theme.sidebar_connection_background
-            }))
-            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .child(
                 div()
                     .flex_1()
@@ -4102,16 +4212,7 @@ impl WorkspaceView {
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(kind_label),
             )
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event: &MouseDownEvent, window, cx| {
-                    this.context_menu = None;
-                    this.focus_handle.focus(window, cx);
-                    this.select_connection_locally(connection_id, cx);
-                    this.toggle_connection_collapsed(connection_id, cx);
-                    cx.stop_propagation();
-                }),
-            );
+            .on_mouse_down(MouseButton::Left, header_activate);
         if connection.kind == WorkspaceConnectionKind::Remote {
             header = header.on_mouse_down(
                 MouseButton::Right,
@@ -4127,21 +4228,42 @@ impl WorkspaceView {
             );
         }
 
-        let mut group = div()
+        let mut card = div()
             .id(format!("connection-group-{connection_id}"))
             .w_full()
-            .gap(px(self.config.ui.sidebar_card_gap))
-            .p(px(self.config.ui.sidebar_card_padding))
             .flex()
             .flex_col()
             .overflow_hidden()
             .rounded(px(self.config.ui.sidebar_card_radius))
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
+            .pb(px(if collapsed {
+                0.
+            } else {
+                self.config.ui.sidebar_card_padding
+            }))
             .child(header);
         if collapsed {
-            return group.into_any_element();
+            // Folded host: only the title row, no hairline.
+            return card.into_any_element();
         }
+        // Hairline under the host title; the space between it and the first
+        // workspace row is the host/workspace gap. Both disappear together
+        // when the host is folded.
+        card = card.child(
+            div()
+                .w_full()
+                .h(px(1.))
+                .flex_none()
+                .bg(rgb(theme.inactive_pane_border)),
+        );
+        let mut body = div()
+            .w_full()
+            .mt(px(self.config.ui.sidebar_host_workspace_gap))
+            .gap(px(self.config.ui.sidebar_workspace_gap))
+            .px(px(self.config.ui.sidebar_card_padding))
+            .flex()
+            .flex_col();
 
         let active_workspace = if selected {
             self.active_workspace_id()
@@ -4154,7 +4276,7 @@ impl WorkspaceView {
             connection.snapshot.workspaces.iter().collect::<Vec<_>>()
         };
         if workspaces.is_empty() {
-            group = group.child(
+            body = body.child(
                 div()
                     .h(px(24.))
                     .w_full()
@@ -4174,7 +4296,7 @@ impl WorkspaceView {
                 .iter()
                 .filter(|agent| agent.workspace_id == workspace.id)
                 .collect::<Vec<_>>();
-            group = group.child(self.render_sidebar_workspace(
+            body = body.child(self.render_sidebar_workspace(
                 connection_id,
                 workspace,
                 &agents,
@@ -4183,7 +4305,8 @@ impl WorkspaceView {
                 cx,
             ));
         }
-        group.into_any_element()
+        card = card.child(body);
+        card.into_any_element()
     }
 
     fn render_sidebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
@@ -4198,9 +4321,21 @@ impl WorkspaceView {
             .track_scroll(&self.sidebar_scroll)
             .px(px(self.config.ui.sidebar_margin))
             .py(px(self.config.ui.sidebar_margin))
-            .gap(px(self.config.ui.sidebar_card_gap))
             .flex_col();
-        for connection in &self.connections {
+        for (index, connection) in self.connections.iter().enumerate() {
+            if index > 0 {
+                // Hairline between host sections; each host is a plain title
+                // row above its own rounded card, so the divider separates
+                // the previous card from the next title.
+                list = list.child(
+                    div()
+                        .h(px(1.))
+                        .w_full()
+                        .my(px(self.config.ui.sidebar_card_gap))
+                        .bg(rgb(theme.inactive_pane_border))
+                        .flex_none(),
+                );
+            }
             list = list.child(self.render_sidebar_connection(connection, theme, cx));
         }
         let list_bounds = self.sidebar_scroll.bounds();
@@ -4285,8 +4420,6 @@ impl WorkspaceView {
             .overflow_hidden()
             .bg(rgb(theme.sidebar_background))
             .rounded(px(self.config.ui.sidebar_card_radius))
-            .border_1()
-            .border_color(rgb(theme.inactive_pane_border))
             .mt(px(self.config.ui.sidebar_surface_margin))
             .mb(px(self.config.ui.sidebar_surface_margin))
             .child(list)
@@ -4360,12 +4493,13 @@ impl WorkspaceView {
             .unwrap_or("")
             .to_owned();
         let agent_label = agent.display_label().to_owned();
+        let agent_row_key = format!("a\u{1f}{}\u{1f}{}\u{1f}{}", connection_id, workspace_id, pane_id);
+        let agent_activate_key = agent_row_key.clone();
         let agent_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            this.context_menu = None;
+            if !this.begin_sidebar_row_activate(agent_activate_key.clone(), event.click_count >= 2) {
+                return;
+            }
             this.focus_handle.focus(window, cx);
-            this.select_connection_locally(connection_id, cx);
-            this.select_workspace_locally(workspace_id, cx);
-            this.focused_pane = Some(pane_id);
             this.begin_sidebar_drag(
                 SidebarDragSource::Agent {
                     pane_id,
@@ -4373,20 +4507,19 @@ impl WorkspaceView {
                 },
                 event.position,
             );
-            this.dispatch(
-                AppCommand::Pane(PaneCommand::Focus {
-                    pane_id: Some(pane_id),
-                    direction: None,
-                }),
-                cx,
-            );
             cx.stop_propagation();
         });
+        // The agent cell is `fraction` of the workspace row width, centered
+        // on it. The wrapper fills the container and centers the cell; the
+        // cell itself is the rounded background/border/hitbox, so the whole
+        // agent cell is narrower, not just its content.
+        let fraction = self.config.ui.sidebar_agent_row_width;
         let mut row = div()
             .id(format!("agent-pane-{connection_id}-{pane_id}"))
-            .h(px(28.))
-            .w_full()
-            .px(px(self.config.ui.sidebar_row_padding))
+            .h(px(self.config.ui.sidebar_agent_row_height))
+            .w(relative(fraction))
+            .pl(px(self.config.ui.sidebar_agent_row_padding))
+            .pr(px(self.config.ui.sidebar_row_padding))
             .items_center()
             .gap(px(6.))
             .flex()
@@ -4401,14 +4534,18 @@ impl WorkspaceView {
             .hover(move |style| style.bg(rgb(hover_background)))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
-            .child(div().w(px(SIDEBAR_DISCLOSURE_WIDTH)).flex_shrink_0())
             .child(
                 div()
                     .flex_shrink_0()
                     .text_color(rgb(dot_color))
                     .child(SharedString::from("●")),
             )
-            .child(SharedString::from(agent_label))
+            .child(
+                div()
+                    .flex_none()
+                    .truncate()
+                    .child(SharedString::from(agent_label)),
+            )
             .child(
                 div()
                     .flex_1()
@@ -4557,7 +4694,17 @@ impl WorkspaceView {
             menu = menu.child(close);
         }
         if let ContextMenuTarget::Connection(connection_id) = target {
+            let collapsed = self.collapsed_connections.contains(&connection_id);
             menu = menu
+                .child(self.render_context_menu_item(
+                    if collapsed { "Expand host" } else { "Collapse host" },
+                    theme,
+                    move |this, _event, _window, cx| {
+                        this.context_menu = None;
+                        this.toggle_connection_collapsed(connection_id, cx);
+                    },
+                    cx,
+                ))
                 .child(self.render_context_menu_item(
                     "Disconnect",
                     theme,
@@ -6752,6 +6899,31 @@ fn collect_terminal_ids(tree: &PaneTreeDump, terminal_ids: &mut BTreeSet<Termina
 }
 
 /// Registers window-level listeners during paint so terminal selection and
+/// Parses a sidebar row key of the form `w\u{1f}{cid}\u{1f}{wid}`,
+/// `c\u{1f}{cid}`, or `a\u{1f}{cid}\u{1f}{wid}\u{1f}{pid}`.
+/// The `\u{1f}` unit separator cannot appear in a UUID string, so the
+/// fields split unambiguously. Returns `(connection_id, workspace_id,
+/// pane_id)`. A malformed key yields a zero connection and no workspace/pane,
+/// which the caller treats as a no-op.
+fn parse_sidebar_row_key(key: &str) -> (ConnectionId, Option<WorkspaceId>, Option<PaneId>) {
+    let sep = '\u{1f}';
+    let parts: Vec<&str> = key.split(sep).collect();
+    let cid = parts
+        .get(1)
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(ConnectionId::from)
+        .unwrap_or(ConnectionId::new(0));
+    let wid = parts
+        .get(2)
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(WorkspaceId::from);
+    let pid = parts
+        .get(3)
+        .and_then(|s| s.parse::<uuid::Uuid>().ok())
+        .map(PaneId::from);
+    (cid, wid, pid)
+}
+
 /// view-local drag gestures keep receiving moves and release events after the
 /// pointer crosses another pane or the root hitbox.
 fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
@@ -6794,6 +6966,16 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
             let up_entity = entity;
             window.on_mouse_event(move |event: &MouseUpEvent, phase, _window, cx| {
                 if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
+                    return;
+                }
+                // Complete a pending sidebar row activation before the
+                // terminal's own release handler runs. The sidebar rows have
+                // no hitboxes, so a release over a row is hit-tested against
+                // the terminal beneath the sidebar surface and would be
+                // consumed by `finish_terminal_selection` before the row's
+                // `on_mouse_up` ever fired.
+                if up_entity.update(cx, |view, cx| view.finish_sidebar_row_release(event.position, cx)) {
+                    cx.stop_propagation();
                     return;
                 }
                 let handled = up_entity.update(cx, |view, cx| {
@@ -10230,6 +10412,76 @@ mod tests {
 
         local_host.shutdown();
         remote_host.shutdown();
+    }
+
+    #[gpui::test]
+    fn sidebar_row_press_releases_single_double_and_menu_gating(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut host = crate::app::ModelHost::start();
+        let client = std::sync::Arc::new(host.client());
+        let connection_id = crate::ids::ConnectionId::new(1);
+        let connection = WorkspaceConnection {
+            id: connection_id,
+            title: "Local".to_owned(),
+            kind: WorkspaceConnectionKind::Local,
+            client: client.clone(),
+            snapshot: client.state_dump().unwrap(),
+        };
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                vec![connection],
+                connection_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        // A single click on the host header activates the connection.
+        view.update_in(cx, |view, _, cx| {
+            let key = format!("c\u{1f}{}", connection_id);
+            assert!(view.begin_sidebar_row_activate(key.clone(), false));
+            view.apply_sidebar_activate(&key, cx);
+            assert_eq!(view.active_connection, connection_id);
+        });
+        // A double click on a workspace key collapses it (no workspace in the
+        // empty snapshot, so the toggle is a guarded no-op that must not panic).
+        view.update_in(cx, |view, _, cx| {
+            let key = format!("w\u{1f}{}\u{1f}{}", connection_id, crate::ids::WorkspaceId::new(99));
+            assert!(view.begin_sidebar_row_activate(key.clone(), true));
+            view.apply_sidebar_collapse(&key, cx);
+        });
+        // Agent rows can be double-clicked for focus, but never collapse their
+        // containing workspace.
+        view.update_in(cx, |view, _, cx| {
+            let key = format!(
+                "a\u{1f}{}\u{1f}{}\u{1f}{}",
+                connection_id,
+                crate::ids::WorkspaceId::new(99),
+                crate::ids::PaneId::new(1),
+            );
+            assert!(view.begin_sidebar_row_activate(key.clone(), true));
+            view.apply_sidebar_collapse(&key, cx);
+            assert!(view.collapsed_workspaces.is_empty());
+        });
+        // With a context menu open, no row press registers at all.
+        view.update_in(cx, |view, _, _cx| {
+            view.context_menu = Some(ContextMenuState {
+                target: ContextMenuTarget::Tab(crate::ids::TabId::new(1)),
+                position: Point::default(),
+            });
+            assert!(!view.begin_sidebar_row_activate("c\u{1f}x".to_owned(), false));
+            assert!(!view.begin_sidebar_row_activate("c\u{1f}x".to_owned(), true));
+            view.context_menu = None;
+        });
+        // A malformed key is a no-op, not a panic.
+        view.update_in(cx, |view, _, cx| {
+            assert!(view.begin_sidebar_row_activate("garbage".to_owned(), false));
+            view.apply_sidebar_activate("garbage", cx);
+            assert!(view.begin_sidebar_row_activate("garbage".to_owned(), true));
+            view.apply_sidebar_collapse("garbage", cx);
+        });
+        host.shutdown();
     }
 
     #[gpui::test]

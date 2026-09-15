@@ -78,6 +78,15 @@ enum SettingField {
     WindowCornerRadius,
     SidebarCardRadius,
     SidebarWorkspaceRadius,
+    SidebarAgentRowGap,
+    SidebarAgentPadding,
+    SidebarHostHeaderHeight,
+    SidebarHostWorkspaceGap,
+    SidebarAgentRowWidth,
+    SidebarWorkspaceRowPadding,
+    SidebarAgentRowPadding,
+    SidebarAgentRowHeight,
+    SidebarWorkspaceGap,
     ThemeTerminalBackground,
     ThemeTerminalForeground,
     ThemeSelectionBackground,
@@ -187,6 +196,15 @@ impl SettingField {
             Self::WindowCornerRadius => "window-corner-radius",
             Self::SidebarCardRadius => "sidebar-card-radius",
             Self::SidebarWorkspaceRadius => "sidebar-workspace-radius",
+            Self::SidebarAgentRowGap => "sidebar-agent-row-gap",
+            Self::SidebarAgentPadding => "sidebar-agent-padding",
+            Self::SidebarHostHeaderHeight => "sidebar-host-header-height",
+            Self::SidebarHostWorkspaceGap => "sidebar-host-workspace-gap",
+            Self::SidebarAgentRowWidth => "sidebar-agent-row-width",
+            Self::SidebarWorkspaceRowPadding => "sidebar-workspace-row-padding",
+            Self::SidebarAgentRowPadding => "sidebar-agent-row-padding",
+            Self::SidebarAgentRowHeight => "sidebar-agent-row-height",
+            Self::SidebarWorkspaceGap => "sidebar-workspace-gap",
             Self::ThemeTerminalBackground => "theme-terminal-background",
             Self::ThemeTerminalForeground => "theme-terminal-foreground",
             Self::ThemeSelectionBackground => "theme-selection-background",
@@ -674,6 +692,33 @@ impl SettingsView {
             SettingField::SidebarWorkspaceRadius => {
                 format_float(self.config.ui.sidebar_workspace_radius)
             }
+            SettingField::SidebarAgentRowGap => {
+                format_float(self.config.ui.sidebar_agent_row_gap)
+            }
+            SettingField::SidebarAgentPadding => {
+                format_float(self.config.ui.sidebar_agent_padding)
+            }
+            SettingField::SidebarHostHeaderHeight => {
+                format_float(self.config.ui.sidebar_host_header_height)
+            }
+            SettingField::SidebarHostWorkspaceGap => {
+                format_float(self.config.ui.sidebar_host_workspace_gap)
+            }
+            SettingField::SidebarAgentRowWidth => {
+                format_float(self.config.ui.sidebar_agent_row_width)
+            }
+            SettingField::SidebarWorkspaceRowPadding => {
+                format_float(self.config.ui.sidebar_workspace_row_padding)
+            }
+            SettingField::SidebarAgentRowPadding => {
+                format_float(self.config.ui.sidebar_agent_row_padding)
+            }
+            SettingField::SidebarAgentRowHeight => {
+                format_float(self.config.ui.sidebar_agent_row_height)
+            }
+            SettingField::SidebarWorkspaceGap => {
+                format_float(self.config.ui.sidebar_workspace_gap)
+            }
             SettingField::ThemeTerminalBackground => self.config.theme.terminal_background.clone(),
             SettingField::ThemeTerminalForeground => self.config.theme.terminal_foreground.clone(),
             SettingField::ThemeSelectionBackground => {
@@ -903,6 +948,42 @@ impl SettingsView {
                 self.config.ui.sidebar_workspace_radius =
                     parse_float(&value, "工作区卡片圆角")?
             }
+            SettingField::SidebarAgentRowGap => {
+                self.config.ui.sidebar_agent_row_gap =
+                    parse_float(&value, "Agent 行间距")?
+            }
+            SettingField::SidebarAgentPadding => {
+                self.config.ui.sidebar_agent_padding =
+                    parse_float(&value, "Agent 区域上下边距")?
+            }
+            SettingField::SidebarHostHeaderHeight => {
+                self.config.ui.sidebar_host_header_height =
+                    parse_float(&value, "主机标题高度")?
+            }
+            SettingField::SidebarHostWorkspaceGap => {
+                self.config.ui.sidebar_host_workspace_gap =
+                    parse_float(&value, "主机标题与首个工作区间距")?
+            }
+            SettingField::SidebarAgentRowWidth => {
+                self.config.ui.sidebar_agent_row_width =
+                    parse_float(&value, "Agent 行宽度")?
+            }
+            SettingField::SidebarWorkspaceRowPadding => {
+                self.config.ui.sidebar_workspace_row_padding =
+                    parse_float(&value, "工作区行左内边距")?
+            }
+            SettingField::SidebarAgentRowPadding => {
+                self.config.ui.sidebar_agent_row_padding =
+                    parse_float(&value, "Agent 行左内边距")?
+            }
+            SettingField::SidebarAgentRowHeight => {
+                self.config.ui.sidebar_agent_row_height =
+                    parse_float(&value, "Agent 行高度")?
+            }
+            SettingField::SidebarWorkspaceGap => {
+                self.config.ui.sidebar_workspace_gap =
+                    parse_float(&value, "工作区间距")?
+            }
             field if field.is_color() => {
                 if !ThemeConfig::is_valid_color(&value) {
                     return Err("颜色必须是 3 位或 6 位十六进制值，例如 #339966".to_owned());
@@ -1099,6 +1180,22 @@ impl SettingsView {
             section = section.child(row);
         }
         section.into_any_element()
+    }
+
+    fn render_setting_group_header(
+        &self,
+        title: &'static str,
+        theme: crate::config::ThemeColors,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .mt(px(10.))
+            .mb(px(4.))
+            .px(px(12.))
+            .text_size(px(self.config.ui.font_size * 0.85))
+            .text_color(rgb(theme.active_pane_border))
+            .child(title)
+            .into_any_element()
     }
 
     fn render_header(
@@ -1512,6 +1609,7 @@ impl Render for SettingsView {
         content = content.child(self.render_section("终端交互功能", feature_rows, theme));
 
         let ui_rows = vec![
+            self.render_setting_group_header("界面基础", theme),
             self.render_setting(
                 SettingField::UiFontSize,
                 "界面字体大小",
@@ -1552,6 +1650,7 @@ impl Render for SettingsView {
                 theme,
                 cx,
             ),
+            self.render_setting_group_header("侧边栏尺寸", theme),
             self.render_setting(
                 SettingField::SidebarWidth,
                 "侧边栏宽度",
@@ -1584,6 +1683,7 @@ impl Render for SettingsView {
                 theme,
                 cx,
             ),
+            self.render_setting_group_header("窗口与标签栏尺寸", theme),
             self.render_setting(
                 SettingField::TitlebarHeight,
                 "标题栏高度",
@@ -1601,22 +1701,6 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
-                SettingField::SidebarHeaderHeight,
-                "侧边栏标题高度",
-                "逻辑像素",
-                ApplyKind::Immediate,
-                theme,
-                cx,
-            ),
-            self.render_setting(
-                SettingField::PaneMargin,
-                "面板之间间距",
-                "仅用于相邻终端面板之间的间距，不影响窗口顶部和外边缘，逻辑像素",
-                ApplyKind::Immediate,
-                theme,
-                cx,
-            ),
-            self.render_setting(
                 SettingField::WindowPadding,
                 "窗口主体内边距",
                 "窗口 chrome 与浮动侧边栏、终端面板之间的间距，逻辑像素",
@@ -1624,10 +1708,20 @@ impl Render for SettingsView {
                 theme,
                 cx,
             ),
+            self.render_setting_group_header("Workspace 行", theme),
             self.render_setting(
-                SettingField::SidebarSurfaceMargin,
-                "侧边栏主体外边距",
-                "侧边栏悬浮卡片的上下外边距，独立于 pane 之间的间距，逻辑像素",
+                SettingField::SidebarHeaderHeight,
+                "Workspace 行高度",
+                "Workspace 整个 cell 的高度，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting_group_header("终端面板", theme),
+            self.render_setting(
+                SettingField::PaneMargin,
+                "面板之间间距",
+                "仅用于相邻终端面板之间的间距，不影响窗口顶部和外边缘，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
@@ -1641,14 +1735,6 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
-                SettingField::PaneCornerRadius,
-                "面板圆角",
-                "终端面板表面的圆角半径，逻辑像素，0 为直角",
-                ApplyKind::Immediate,
-                theme,
-                cx,
-            ),
-            self.render_setting(
                 SettingField::PaneDividerWidth,
                 "面板分隔线宽度",
                 "面板之间拖拽分隔线的宽度，逻辑像素",
@@ -1656,6 +1742,24 @@ impl Render for SettingsView {
                 theme,
                 cx,
             ),
+            self.render_setting(
+                SettingField::PaneCornerRadius,
+                "面板圆角",
+                "终端面板表面的圆角半径，逻辑像素，0 为直角",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting_group_header("侧边栏悬浮主体", theme),
+            self.render_setting(
+                SettingField::SidebarSurfaceMargin,
+                "侧边栏主体外边距",
+                "侧边栏悬浮卡片的上下外边距，独立于 pane 之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting_group_header("侧边栏卡片", theme),
             self.render_setting(
                 SettingField::SidebarMargin,
                 "侧边栏内容内边距",
@@ -1682,12 +1786,13 @@ impl Render for SettingsView {
             ),
             self.render_setting(
                 SettingField::SidebarRowPadding,
-                "侧边栏行内边距",
-                "主机、工作区和 Agent 行的水平内边距，逻辑像素",
+                "侧边栏行右内边距",
+                "主机名、Workspace 和 Agent cell 右侧的共享内边距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
             ),
+            self.render_setting_group_header("标题栏与标签细节", theme),
             self.render_setting(
                 SettingField::TitlebarPadding,
                 "标题栏内边距",
@@ -1720,6 +1825,7 @@ impl Render for SettingsView {
                 theme,
                 cx,
             ),
+            self.render_setting_group_header("圆角", theme),
             self.render_setting(
                 SettingField::WindowCornerRadius,
                 "窗口圆角",
@@ -1740,6 +1846,79 @@ impl Render for SettingsView {
                 SettingField::SidebarWorkspaceRadius,
                 "工作区卡片圆角",
                 "侧边栏内工作区卡片的圆角半径，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting_group_header("侧边栏行布局", theme),
+            self.render_setting(
+                SettingField::SidebarAgentRowGap,
+                "Agent cell 间距",
+                "同一 Workspace 下相邻 Agent cell 之间的上下间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarAgentPadding,
+                "Agent 区域上下边距",
+                "Workspace cell 与 Agent cell 区域之间的上下内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarHostHeaderHeight,
+                "主机名行高度",
+                "主机名整个标题 cell 的高度，逻辑像素（默认 28）",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarHostWorkspaceGap,
+                "主机名与 Workspace 间距",
+                "主机名分割线与第一个 Workspace cell 之间的间距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarAgentRowWidth,
+                "Agent cell 宽度比例",
+                "Agent 整个 cell 相对 Workspace cell 的宽度比例（0.8 为 80%），居中对齐",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarWorkspaceRowPadding,
+                "Workspace 行左内边距",
+                "Workspace cell 内容相对左边缘的内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarAgentRowPadding,
+                "Agent 行左内边距",
+                "Agent cell 内容相对左边缘的内边距，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarAgentRowHeight,
+                "Agent 行高度",
+                "Agent 整个 cell 的高度，逻辑像素",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::SidebarWorkspaceGap,
+                "Workspace 行间距",
+                "同一主机卡片内相邻 Workspace group 之间的上下间距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
