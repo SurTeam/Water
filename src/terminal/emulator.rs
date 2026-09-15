@@ -26,6 +26,8 @@ use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
 use super::stream::{TerminalSeq, TerminalStreamEvent};
 
 const CLEAR_SCROLLBACK_SEQUENCE: &[u8] = b"\x1b[3J";
+const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?6;22c";
+const DEFAULT_GRAPHICS_CELL_SIZE: (u16, u16) = (8, 16);
 
 /// How the emulator reacts to an applied event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +68,11 @@ impl std::fmt::Debug for EmulatorProxy {
 impl EmulatorProxy {
     fn forward(&self, bytes: Vec<u8>) {
         if self.live.load(Ordering::Acquire) {
+            let bytes = if bytes == b"\x1b[?6c" {
+                PRIMARY_DEVICE_ATTRIBUTES_RESPONSE.to_vec()
+            } else {
+                bytes
+            };
             let _ = self.pty_write_tx.send(bytes);
         }
     }
@@ -319,6 +326,66 @@ impl TerminalEmulator {
             // change the terminal's scrollback size.
             self.term.grid_mut().update_history(usize::MAX);
         }
+        #[cfg(feature = "gui")]
+        {
+            let parsed = self.graphics.parse(bytes);
+            let mut consumed = 0usize;
+            for parsed_event in parsed {
+                let end = parsed_event.end_offset.max(consumed).min(bytes.len());
+                self.advance_terminal_bytes(&bytes[consumed..end]);
+                consumed = end;
+                if let Some(response) = parsed_event.response {
+                    if self.live.load(Ordering::Acquire) {
+                        let _ = self.pty_write_tx.send(response);
+                    }
+                    continue;
+                }
+                let Some(event) = parsed_event.event else {
+                    continue;
+                };
+                let cursor = self.term.grid().cursor.point;
+                let cell_size = self.graphics_cell_size();
+                let rows = self.graphics.finish_event(
+                    event,
+                    (cursor.line.0, cursor.column.0),
+                    cursor.line.0 - self.term.grid().display_offset() as i32,
+                    cell_size,
+                );
+                if rows > 0 {
+                    self.advance_terminal_bytes(
+                        format!("\r\n{}", "\n".repeat(rows - 1)).as_bytes(),
+                    );
+                }
+            }
+            if consumed < bytes.len() {
+                let tail = bytes[consumed..].to_vec();
+                self.advance_terminal_bytes(&tail);
+            }
+            return;
+        }
+        #[cfg(not(feature = "gui"))]
+        self.advance_terminal_bytes(bytes);
+    }
+
+    #[cfg(feature = "gui")]
+    fn graphics_cell_size(&self) -> (u16, u16) {
+        let window_size = *self
+            .window_size
+            .lock()
+            .expect("terminal window size poisoned");
+        if window_size.cell_width == 0 || window_size.cell_height == 0 {
+            DEFAULT_GRAPHICS_CELL_SIZE
+        } else {
+            (window_size.cell_width, window_size.cell_height)
+        }
+    }
+
+    fn advance_terminal_bytes(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        #[cfg(feature = "gui")]
+        let oldest_line = self.term.grid().topmost_line().0;
         if self.scrollback_protected {
             let filtered = self.filter_scrollback_clear(bytes);
             self.advance_unfiltered(&filtered);
@@ -331,15 +398,13 @@ impl TerminalEmulator {
         }
         #[cfg(feature = "gui")]
         {
-            // Process cursor motion first. Image producers commonly emit a
-            // MoveTo immediately before their graphics sequence, and the
-            // post-parse cursor is the only reliable anchor when a PTY event
-            // contains both operations.
-            let cursor = self.term.grid().cursor.point;
-            for response in self.graphics.feed(bytes, (cursor.line.0, cursor.column.0)) {
-                if self.live.load(Ordering::Acquire) {
-                    let _ = self.pty_write_tx.send(response);
-                }
+            // The grid renumbers its rows whenever content scrolls off the
+            // top, so placements must follow the same shift or an image would
+            // stay pinned while its text is pushed into history.
+            let shift = self.term.grid().topmost_line().0 - oldest_line;
+            if shift != 0 {
+                self.graphics
+                    .rebase(shift, self.term.grid().topmost_line().0);
             }
         }
     }
@@ -462,6 +527,13 @@ impl TerminalEmulator {
             .saturating_sub(self.term.grid().screen_lines()) as i64
     }
 
+    /// Absolute grid line of the viewport's first row. Alacritty keeps the
+    /// visible region at `-display_offset..`, so this is the coordinate the
+    /// image placements are stored against.
+    pub fn grid_line_at_top(&self) -> i32 {
+        -(self.term.grid().display_offset() as i32)
+    }
+
     /// Scrolls by `delta` rows (positive = up into history).
     pub fn scroll_by(&mut self, delta: i64) {
         if delta == 0 {
@@ -567,6 +639,7 @@ impl TerminalEmulator {
         #[cfg(feature = "gui")]
         let snapshot = {
             let mut snapshot = snapshot;
+            snapshot.grid_line_at_top = self.grid_line_at_top();
             snapshot.images =
                 self.graphics
                     .snapshot(self.term.grid().display_offset(), snapshot.size, &snapshot);
@@ -609,7 +682,17 @@ impl TerminalEmulator {
     }
 
     fn trim_scrollback_to_configured_limit(&mut self) {
+        #[cfg(feature = "gui")]
+        let oldest_line = self.term.grid().topmost_line().0;
         self.term.grid_mut().update_history(self.scrollback_lines);
+        #[cfg(feature = "gui")]
+        {
+            let shift = self.term.grid().topmost_line().0 - oldest_line;
+            if shift != 0 {
+                self.graphics
+                    .rebase(shift, self.term.grid().topmost_line().0);
+            }
+        }
     }
 
     pub fn set_scrollback_protected(&mut self, protected: bool) {
@@ -998,6 +1081,37 @@ mod tests {
         emulator.start_live();
         emulator.apply(&output(2, query, size));
         assert_eq!(emulator.pty_writes(), vec![b"\x1b_Gi=31;OK\x1b\\".to_vec()]);
+
+        let query_with_da = b"\x1b_Gi=32,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\\x1b[c";
+        emulator.apply(&output(3, query_with_da, size));
+        assert_eq!(
+            emulator.pty_writes(),
+            vec![
+                b"\x1b_Gi=32;OK\x1b\\".to_vec(),
+                PRIMARY_DEVICE_ATTRIBUTES_RESPONSE.to_vec(),
+            ]
+        );
+    }
+
+    #[cfg(feature = "gui")]
+    #[test]
+    fn kitty_png_reaches_terminal_snapshot() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(62), size, 100);
+        emulator.apply(&output(
+            1,
+            b"\x1b_Ga=T,q=2,f=100,s=2,v=2,X=3;iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC\x1b\\\r\n",
+            size,
+        ));
+        let snapshot = emulator.snapshot(None);
+        assert_eq!(snapshot.images.len(), 1);
+        assert_eq!(
+            (
+                snapshot.images[0].pixel_width,
+                snapshot.images[0].pixel_height
+            ),
+            (2, 2)
+        );
     }
 
     #[test]

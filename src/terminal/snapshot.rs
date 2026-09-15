@@ -442,6 +442,10 @@ pub struct TerminalSnapshot {
     pub modes: TerminalModes,
     pub process: TerminalProcessState,
     pub revision: u64,
+    /// Absolute grid line of `rows[0]` (the viewport's first row). Image
+    /// placements are anchored to this coordinate so they scroll with their
+    /// text instead of staying pinned to the screen.
+    pub grid_line_at_top: i32,
     /// Rows of scrollback history retained above the viewport (the grid's
     /// `total_lines - screen_lines`). The materialized `rows_before` only
     /// covers a bounded overscan window; this field is the authoritative
@@ -478,6 +482,7 @@ struct TerminalSnapshotRef<'a> {
     modes: TerminalModes,
     process: TerminalProcessState,
     revision: u64,
+    grid_line_at_top: i32,
     cells: Vec<&'a TerminalCell>,
     rows_before: Vec<&'a [TerminalCell]>,
     rows_after: Vec<&'a [TerminalCell]>,
@@ -500,6 +505,8 @@ struct TerminalSnapshotOwned {
     modes: TerminalModes,
     process: TerminalProcessState,
     revision: u64,
+    #[serde(default)]
+    grid_line_at_top: i32,
     cells: Vec<TerminalCell>,
     #[serde(default)]
     rows_before: Vec<Vec<TerminalCell>>,
@@ -525,6 +532,7 @@ impl Serialize for TerminalSnapshot {
             modes: self.modes,
             process: self.process,
             revision: self.revision,
+            grid_line_at_top: self.grid_line_at_top,
             cells: self.rows.iter().flat_map(|row| row.iter()).collect(),
             rows_before: self.rows_before.iter().map(AsRef::as_ref).collect(),
             rows_after: self.rows_after.iter().map(AsRef::as_ref).collect(),
@@ -552,6 +560,7 @@ impl<'de> Deserialize<'de> for TerminalSnapshot {
             modes: wire.modes,
             process: wire.process,
             revision: wire.revision,
+            grid_line_at_top: wire.grid_line_at_top,
             // Deserialized wire snapshots carry no grid; the GUI local
             // emulator is the scrollback authority, so treat them as flat.
             history_len: 0,
@@ -601,6 +610,7 @@ impl TerminalSnapshot {
             modes: TerminalModes::default(),
             process: TerminalProcessState::Running,
             revision: 0,
+            grid_line_at_top: 0,
             history_len: 0,
             history_bottom: 0,
             rows: (0..size.lines)
@@ -707,6 +717,7 @@ impl TerminalSnapshot {
             },
             process_name: self.process_name.clone(),
             cwd: self.cwd.clone(),
+            grid_line_at_top: 0,
             // The retired history is gone, so any pinned viewport is moot.
             display_offset: 0,
             viewport_position: self.viewport_position,
@@ -877,6 +888,7 @@ impl TerminalSnapshot {
                 viewport_position,
                 cursor,
                 modes,
+                grid_line_at_top: 0,
                 process,
                 revision,
                 history_len,
@@ -1059,8 +1071,7 @@ mod tests {
         let mut term = test_term(size, 64);
         let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
         for index in 0..40u32 {
-            processor
-                .advance(&mut term, format!("row {index}\r\n").as_bytes());
+            processor.advance(&mut term, format!("row {index}\r\n").as_bytes());
         }
         // Browse one row up: the live tail then sits below the viewport.
         term.scroll_display(Scroll::Delta(1));
@@ -1081,10 +1092,7 @@ mod tests {
         term.scroll_display(Scroll::Top);
         let at_top =
             TerminalSnapshot::from_term(terminal_id, &term, TerminalProcessState::Running, 2);
-        assert!(
-            at_top.last_source_row <= (size.lines - 1) as i64
-                + at_top.rows_after.len() as i64
-        );
+        assert!(at_top.last_source_row <= (size.lines - 1) as i64 + at_top.rows_after.len() as i64);
         assert!(at_top.relative_row(at_top.last_source_row as i32).is_some());
 
         // At the live bottom the newest materialized row IS the tail and

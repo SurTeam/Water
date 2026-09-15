@@ -5993,6 +5993,7 @@ version = "0.2.11"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "flate2",
  "gpui",
  "gpui_platform",
  "image",

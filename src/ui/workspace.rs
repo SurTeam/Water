@@ -1799,19 +1799,10 @@ impl WorkspaceView {
         let Some(rect) = self.split_rect_for(tab_id, &path) else {
             return;
         };
-        let margins = pane_edge_margins_at_path(
-            &tab.tree,
-            &path,
-            self.config.ui.pane_margin,
-        )
-        .unwrap_or_else(PaneEdgeMargins::zero);
-        let (first_static, fixed_extent) = split_overlay_geometry(
-            axis,
-            margins,
-            first,
-            second,
-            self.config.ui.pane_padding,
-        );
+        let margins = pane_edge_margins_at_path(&tab.tree, &path, self.config.ui.pane_margin)
+            .unwrap_or_else(PaneEdgeMargins::zero);
+        let (first_static, fixed_extent) =
+            split_overlay_geometry(axis, margins, first, second, self.config.ui.pane_padding);
         let start = split_pointer_coordinate(position, axis);
         self.split_drag = Some(SplitDrag {
             tab_id,
@@ -1988,7 +1979,9 @@ impl WorkspaceView {
             } => self.tab_by_id(tab_id).is_some(),
             DialogState::Rename {
                 target: RenameTarget::Agent { pane_id, .. },
-            } => self.agent_by_pane_id_in(self.active_connection, pane_id).is_some(),
+            } => self
+                .agent_by_pane_id_in(self.active_connection, pane_id)
+                .is_some(),
             DialogState::ConfirmCloseWorkspace { workspace_id } => {
                 self.workspace_by_id(workspace_id).is_some()
             }
@@ -3277,10 +3270,18 @@ impl WorkspaceView {
                 if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
                     return;
                 }
-                let size = TerminalSize::new(
+                let measured_size = TerminalSize::new(
                     terminal_columns_for_width(bounds, metrics),
                     terminal_lines_for_height(bounds, metrics),
                 );
+                // An inactive window must not renegotiate the shared grid,
+                // but it still delivers the pixel geometry the image
+                // protocols need for their capability handshake.
+                let size = if window_active {
+                    measured_size
+                } else {
+                    current_size
+                };
                 if let Some(application) = application.as_ref() {
                     let _ = application.terminal_set_cell_size(
                         connection_id,
@@ -4493,10 +4494,14 @@ impl WorkspaceView {
             .unwrap_or("")
             .to_owned();
         let agent_label = agent.display_label().to_owned();
-        let agent_row_key = format!("a\u{1f}{}\u{1f}{}\u{1f}{}", connection_id, workspace_id, pane_id);
+        let agent_row_key = format!(
+            "a\u{1f}{}\u{1f}{}\u{1f}{}",
+            connection_id, workspace_id, pane_id
+        );
         let agent_activate_key = agent_row_key.clone();
         let agent_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-            if !this.begin_sidebar_row_activate(agent_activate_key.clone(), event.click_count >= 2) {
+            if !this.begin_sidebar_row_activate(agent_activate_key.clone(), event.click_count >= 2)
+            {
                 return;
             }
             this.focus_handle.focus(window, cx);
@@ -4697,7 +4702,11 @@ impl WorkspaceView {
             let collapsed = self.collapsed_connections.contains(&connection_id);
             menu = menu
                 .child(self.render_context_menu_item(
-                    if collapsed { "Expand host" } else { "Collapse host" },
+                    if collapsed {
+                        "Expand host"
+                    } else {
+                        "Collapse host"
+                    },
                     theme,
                     move |this, _event, _window, cx| {
                         this.context_menu = None;
@@ -4953,11 +4962,11 @@ impl WorkspaceView {
             .justify_end()
             .flex()
             .child(div().flex_none().child(cancel))
-            .child(
-                div()
-                    .flex_none()
-                    .child(self.render_dialog_confirm_button(connect_label, theme, cx)),
-            );
+            .child(div().flex_none().child(self.render_dialog_confirm_button(
+                connect_label,
+                theme,
+                cx,
+            )));
         dialog = dialog.child(button_row);
         deferred(
             div()
@@ -5273,7 +5282,9 @@ impl WorkspaceView {
             .flex()
             .child(div().flex_none().child(cancel))
             .child(
-                div().flex_none().child(self.render_rename_confirm_button(theme, cx)),
+                div()
+                    .flex_none()
+                    .child(self.render_rename_confirm_button(theme, cx)),
             );
         dialog = dialog.child(button_row);
         deferred(
@@ -5574,8 +5585,7 @@ impl WorkspaceView {
             // The pane group starts after the body's left inset, the sidebar,
             // and the sidebar-to-pane gap. Reserve all three pieces so the
             // first tab aligns with the left edge of the first pane.
-            self.config.ui.window_padding + self.sidebar_width
-                + self.config.ui.window_padding
+            self.config.ui.window_padding + self.sidebar_width + self.config.ui.window_padding
         };
         let titlebar_leading = div()
             .h_full()
@@ -5977,7 +5987,11 @@ impl WorkspaceView {
                                         this.accumulate_terminal_scroll(terminal_id, delta_rows);
                                     should_repaint = repaint;
                                     if let Some(target) = target {
-                                        this.apply_terminal_viewport_request(terminal_id, target, cx);
+                                        this.apply_terminal_viewport_request(
+                                            terminal_id,
+                                            target,
+                                            cx,
+                                        );
                                     }
                                 }
                             }
@@ -6026,8 +6040,7 @@ impl WorkspaceView {
                 // configured gap across both shared edges so it remains one
                 // `pane_margin` wide in total.
                 let shared_margin = self.config.ui.pane_margin / 2.;
-                let (first_margins, second_margins) =
-                    margins.split(split_axis, shared_margin);
+                let (first_margins, second_margins) = margins.split(split_axis, shared_margin);
                 let (first_static, fixed_extent) = split_overlay_geometry(
                     split_axis,
                     margins,
@@ -6046,13 +6059,11 @@ impl WorkspaceView {
                     let is_dragging = self.split_drag.as_ref().is_some_and(|drag| {
                         drag.tab_id == tab_id && drag.path == path && drag.axis == split_axis
                     });
-                    let mut divider_line = div()
-                        .absolute()
-                        .bg(rgb(if is_dragging {
-                            theme.active_pane_border
-                        } else {
-                            theme.inactive_pane_border
-                        }));
+                    let mut divider_line = div().absolute().bg(rgb(if is_dragging {
+                        theme.active_pane_border
+                    } else {
+                        theme.inactive_pane_border
+                    }));
                     if split_axis == SplitAxis::Horizontal {
                         divider_line = divider_line
                             .top_0()
@@ -6080,11 +6091,7 @@ impl WorkspaceView {
                     // split while the child line is only painted on hover or
                     // during an active drag. It therefore never changes flex
                     // sizing or adds another visible rectangle.
-                    let hitbox_extent = self
-                        .config
-                        .ui
-                        .pane_margin
-                        .max(divider_width);
+                    let hitbox_extent = self.config.ui.pane_margin.max(divider_width);
                     let mut divider = div()
                         .id(format!("pane-divider-{tab_id}-{divider_id}"))
                         .absolute()
@@ -6974,7 +6981,9 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                 // the terminal beneath the sidebar surface and would be
                 // consumed by `finish_terminal_selection` before the row's
                 // `on_mouse_up` ever fired.
-                if up_entity.update(cx, |view, cx| view.finish_sidebar_row_release(event.position, cx)) {
+                if up_entity.update(cx, |view, cx| {
+                    view.finish_sidebar_row_release(event.position, cx)
+                }) {
                     cx.stop_propagation();
                     return;
                 }
@@ -7285,7 +7294,7 @@ fn terminal_resize_request_needed_with_pixels(
     cell_height: u16,
     window_active: bool,
 ) -> bool {
-    if !window_active {
+    if !window_active && target != current_size {
         return false;
     }
     let key = (connection_id, pane_id);
@@ -8110,11 +8119,15 @@ impl gpui::Element for TerminalRenderElement {
             let render_image = if let Some(render_image) = cache.images.get(&image.id) {
                 render_image.clone()
             } else {
-                let Some(buffer) = image::RgbaImage::from_raw(
-                    image.pixel_width,
-                    image.pixel_height,
-                    image.rgba.to_vec(),
-                ) else {
+                // gpui uploads `RenderImage` pixels as BGRA, so the decoded
+                // RGBA buffer is swapped before it becomes a texture.
+                let mut pixels = image.rgba.to_vec();
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                let Some(buffer) =
+                    image::RgbaImage::from_raw(image.pixel_width, image.pixel_height, pixels)
+                else {
                     continue;
                 };
                 let render_image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![
@@ -8231,10 +8244,12 @@ impl gpui::Element for TerminalRenderElement {
         }
 
         for image in &prepaint.images {
+            // Terminal images are pixel content, not chrome: they are drawn
+            // square so the pane's corner radius cannot clip the artwork.
             let _ = window.paint_image(
                 bounds,
                 image.bounds,
-                gpui::Corners::all(corner_radius),
+                gpui::Corners::default(),
                 image.image.clone(),
                 0,
                 false,
@@ -8932,7 +8947,10 @@ impl Render for WorkspaceView {
                     true,
                     point(origin.x + size.width, origin.y + radius),
                 );
-                path.line_to(point(origin.x + size.width, origin.y + size.height - radius));
+                path.line_to(point(
+                    origin.x + size.width,
+                    origin.y + size.height - radius,
+                ));
                 path.arc_to(
                     point(radius, radius),
                     px(0.),
@@ -9422,6 +9440,38 @@ mod tests {
             85,
             36,
             true,
+        ));
+    }
+
+    #[test]
+    fn inactive_window_only_delivers_the_pixel_handshake() {
+        let connection_id = ConnectionId::new(4);
+        let pane_id = PaneId::new(4);
+        let terminal_id = TerminalId::new(4);
+        let size = TerminalSize::new(80, 24);
+        let mut requests = BTreeMap::new();
+
+        assert!(terminal_resize_request_needed_with_pixels(
+            &mut requests,
+            connection_id,
+            pane_id,
+            terminal_id,
+            size,
+            size,
+            84,
+            36,
+            false,
+        ));
+        assert!(!terminal_resize_request_needed_with_pixels(
+            &mut requests,
+            connection_id,
+            pane_id,
+            terminal_id,
+            size,
+            TerminalSize::new(81, 24),
+            84,
+            36,
+            false,
         ));
     }
 
@@ -10005,18 +10055,18 @@ mod tests {
         // distance from the viewport bottom to the newest materialized
         // row (the live tail when the overscan reaches it).
         snapshot.last_source_row = 2;
-        snapshot
-            .rows_before
-            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot
-            .rows_before
-            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot
-            .rows_after
-            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
-        snapshot
-            .rows_after
-            .push(Arc::from(vec![TerminalCell::default(); 8].into_boxed_slice()));
+        snapshot.rows_before.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
+        snapshot.rows_before.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
+        snapshot.rows_after.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
+        snapshot.rows_after.push(Arc::from(
+            vec![TerminalCell::default(); 8].into_boxed_slice(),
+        ));
 
         // The clamp (mirroring terminal_scroll_offset_for_snapshot) allows
         // the full -viewport_position jump, not just -rows_after.len().
@@ -10415,9 +10465,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn sidebar_row_press_releases_single_double_and_menu_gating(
-        cx: &mut gpui::TestAppContext,
-    ) {
+    fn sidebar_row_press_releases_single_double_and_menu_gating(cx: &mut gpui::TestAppContext) {
         let mut host = crate::app::ModelHost::start();
         let client = std::sync::Arc::new(host.client());
         let connection_id = crate::ids::ConnectionId::new(1);
@@ -10447,7 +10495,11 @@ mod tests {
         // A double click on a workspace key collapses it (no workspace in the
         // empty snapshot, so the toggle is a guarded no-op that must not panic).
         view.update_in(cx, |view, _, cx| {
-            let key = format!("w\u{1f}{}\u{1f}{}", connection_id, crate::ids::WorkspaceId::new(99));
+            let key = format!(
+                "w\u{1f}{}\u{1f}{}",
+                connection_id,
+                crate::ids::WorkspaceId::new(99)
+            );
             assert!(view.begin_sidebar_row_activate(key.clone(), true));
             view.apply_sidebar_collapse(&key, cx);
         });
@@ -11433,16 +11485,21 @@ mod tests {
             .unwrap();
         client.wait_operation(tab_op).unwrap();
         let dump = client.state_dump().unwrap();
-        let tab_id = dump.workspaces.iter()
+        let tab_id = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
             .id;
-        let tab_title = dump.workspaces.iter()
+        let tab_title = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
-            .title.clone();
+            .title
+            .clone();
         let client_arc: Arc<dyn CommandTransport> = client.clone();
         let (view, cx) = cx.add_window_view(|_, cx| {
             WorkspaceView::new(client_arc, client.state_dump().unwrap(), cx.focus_handle())
@@ -11472,13 +11529,18 @@ mod tests {
         view.update_in(cx, |view, _, cx| view.confirm_dialog(cx));
         cx.run_until_parked();
         let dump = client.state_dump().unwrap();
-        let updated_title = dump.workspaces.iter()
+        let updated_title = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .map(|t| t.title.clone())
             .unwrap_or_default();
-        assert_eq!(updated_title, format!("{}xy", &tab_title[..tab_title.len().saturating_sub(2)]),
-            "tab title must reflect the dialog input");
+        assert_eq!(
+            updated_title,
+            format!("{}xy", &tab_title[..tab_title.len().saturating_sub(2)]),
+            "tab title must reflect the dialog input"
+        );
         host.shutdown();
     }
 
@@ -11497,16 +11559,21 @@ mod tests {
             .unwrap();
         client.wait_operation(tab_op).unwrap();
         let dump = client.state_dump().unwrap();
-        let tab_id = dump.workspaces.iter()
+        let tab_id = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
             .id;
-        let tab_title = dump.workspaces.iter()
+        let tab_title = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
-            .title.clone();
+            .title
+            .clone();
         let client_arc: Arc<dyn CommandTransport> = client.clone();
         let (view, cx) = cx.add_window_view(|_, cx| {
             WorkspaceView::new(client_arc, client.state_dump().unwrap(), cx.focus_handle())
@@ -11520,12 +11587,17 @@ mod tests {
             assert_eq!(view.dialog, None);
         });
         let dump = client.state_dump().unwrap();
-        let unchanged_title = dump.workspaces.iter()
+        let unchanged_title = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .map(|t| t.title.clone())
             .unwrap_or_default();
-        assert_eq!(unchanged_title, tab_title, "cancel must not change the title");
+        assert_eq!(
+            unchanged_title, tab_title,
+            "cancel must not change the title"
+        );
         host.shutdown();
     }
 
@@ -11545,7 +11617,9 @@ mod tests {
             .unwrap();
         client.wait_operation(tab_op).unwrap();
         let dump = client.state_dump().unwrap();
-        let tab_id = dump.workspaces.iter()
+        let tab_id = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
@@ -11590,16 +11664,21 @@ mod tests {
             .unwrap();
         client.wait_operation(tab_op).unwrap();
         let dump = client.state_dump().unwrap();
-        let tab_id = dump.workspaces.iter()
+        let tab_id = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.first())
             .expect("tab was created")
             .id;
         // Get the active pane.
-        let active_pane = dump.workspaces.iter()
+        let active_pane = dump
+            .workspaces
+            .iter()
             .find(|w| w.id == workspace_id)
             .and_then(|w| w.tabs.iter().find(|t| t.id == tab_id))
-            .expect("tab exists").active_pane;
+            .expect("tab exists")
+            .active_pane;
         let client_arc: Arc<dyn CommandTransport> = client.clone();
         let (view, cx) = cx.add_window_view(|_, cx| {
             WorkspaceView::new(client_arc, client.state_dump().unwrap(), cx.focus_handle())
@@ -11610,7 +11689,10 @@ mod tests {
         });
         view.update_in(cx, |view, _, _| {
             // Without a running agent, the dialog should not open.
-            assert_eq!(view.dialog, None, "agent rename without a running agent is a no-op");
+            assert_eq!(
+                view.dialog, None,
+                "agent rename without a running agent is a no-op"
+            );
         });
         host.shutdown();
     }

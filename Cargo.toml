@@ -43,6 +43,7 @@ path = "src/bin/water-server.rs"
 [dependencies]
 alacritty_terminal = "0.26.0"
 anyhow = "1.0"
+flate2 = "1.1"
 image = { version = "0.25.10", optional = true }
 libc = "0.2"
 gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit"], optional = true }

@@ -6,8 +6,12 @@
 //! RGBA image placements. The decoded data never crosses the control-plane
 //! snapshot wire.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::io::Read;
 use std::sync::Arc;
+
+use flate2::read::ZlibDecoder;
 
 use super::snapshot::{TerminalColor, TerminalSize, TerminalSnapshot};
 use super::stream::decode_base64;
@@ -53,15 +57,18 @@ struct DecodedImage {
     rgba: Vec<u8>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ImagePlacement {
-    line: i32,
+    /// The absolute grid line the placement starts on. Anchoring to grid
+    /// coordinates (rather than viewport rows) is what makes an image scroll
+    /// with its text and survive history growth.
+    grid_line: i32,
     column: usize,
     width: usize,
     height: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ImageRecord {
     render_id: u64,
     width: u32,
@@ -93,7 +100,45 @@ pub struct TerminalGraphics {
 }
 
 impl TerminalGraphics {
-    pub fn feed(&mut self, bytes: &[u8], cursor: (i32, usize)) -> Vec<Vec<u8>> {
+    /// Rebases every placement after the grid's row numbering moved.
+    ///
+    /// Alacritty renumbers rows in `[topmost_line, screen_lines)` whenever the
+    /// screen scrolls or history is trimmed, so a placement stored as a grid
+    /// line must shift by the same delta to stay on its own text. Placements
+    /// left above the new `topmost_line` were pushed out of the grid and are
+    /// dropped.
+    pub fn rebase(&mut self, delta: i32, topmost_line: i32) {
+        if delta == 0 {
+            self.evict_rows(topmost_line);
+            return;
+        }
+        for record in self.images.values_mut() {
+            if let Some(placement) = record.placement.as_mut() {
+                placement.grid_line = placement.grid_line.saturating_add(delta);
+            }
+        }
+        // Evict against the grid's post-shift origin: rows the grid no longer
+        // retains cannot hold a placement any more.
+        self.evict_rows(topmost_line);
+    }
+
+    /// Drops placements that fell out of the grid.
+    ///
+    /// `topmost_line` is the oldest row the grid still retains; anything above
+    /// it was discarded and must not keep floating over unrelated text.
+    pub fn evict_rows(&mut self, topmost_line: i32) {
+        self.images.retain(|_, record| {
+            if let Some(placement) = record.placement.as_ref() {
+                if placement.grid_line < topmost_line {
+                    self.stored_bytes = self.stored_bytes.saturating_sub(record.rgba.len());
+                    return false;
+                }
+            }
+            true
+        });
+    }
+
+    pub(super) fn parse(&mut self, bytes: &[u8]) -> Vec<ParsedGraphicsEvent> {
         if bytes.is_empty() {
             return Vec::new();
         }
@@ -108,29 +153,70 @@ impl TerminalGraphics {
             self.clear_images();
         }
 
-        let mut responses = Vec::new();
-        for event in self.parser.feed(bytes) {
-            match event {
-                GraphicsEvent::Kitty(payload) => {
-                    if let Some(response) = self.handle_kitty(&payload, cursor) {
-                        responses.push(response);
-                    }
+        self.parser
+            .feed(bytes)
+            .into_iter()
+            .map(|(end_offset, event)| {
+                let response = match &event {
+                    GraphicsEvent::Kitty(payload) => kitty_query_response(payload),
+                    _ => None,
+                };
+                ParsedGraphicsEvent {
+                    end_offset,
+                    event: response.is_none().then_some(event),
+                    response,
                 }
-                GraphicsEvent::Iterm(payload) => self.handle_iterm(&payload, cursor),
-                GraphicsEvent::Sixel(payload) => self.handle_sixel(&payload, cursor),
+            })
+            .collect()
+    }
+
+    pub(super) fn finish_event(
+        &mut self,
+        event: GraphicsEvent,
+        cursor: (i32, usize),
+        grid_line: i32,
+        cell_size: (u16, u16),
+    ) -> usize {
+        match event {
+            GraphicsEvent::Kitty(payload) => {
+                self.handle_kitty(&payload, cursor, grid_line, cell_size)
+            }
+            GraphicsEvent::Iterm(payload) => {
+                self.handle_iterm(&payload, cursor, grid_line, cell_size);
+                0
+            }
+            GraphicsEvent::Sixel(payload) => {
+                self.handle_sixel(&payload, cursor, grid_line, cell_size);
+                0
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn feed(&mut self, bytes: &[u8], cursor: (i32, usize)) -> Vec<Vec<u8>> {
+        let mut responses = Vec::new();
+        for parsed in self.parse(bytes) {
+            if let Some(response) = parsed.response {
+                responses.push(response);
+            }
+            if let Some(event) = parsed.event {
+                self.finish_event(event, cursor, cursor.0, (8, 16));
             }
         }
         responses
     }
 
     /// Returns placements close enough to the current viewport to be painted.
-    pub fn snapshot(
+    pub(super) fn snapshot(
         &self,
         display_offset: usize,
         size: TerminalSize,
         terminal_snapshot: &TerminalSnapshot,
     ) -> Arc<[TerminalImage]> {
-        let display_offset = display_offset as i32;
+        // Placements are anchored to absolute grid rows so that they follow
+        // their text through scrollback and history growth, exactly like the
+        // cells they were placed over.
+        let viewport_start = -(display_offset as i32);
         let placeholder_bounds = self.placeholder_bounds(terminal_snapshot);
         self.images
             .values()
@@ -139,7 +225,7 @@ impl TerminalGraphics {
                     placeholder_bounds.get(&record.render_id)
                 {
                     Some(ImagePlacement {
-                        line: *min_row,
+                        grid_line: viewport_start.saturating_add(*min_row),
                         column: *min_column,
                         width: max_column.saturating_sub(*min_column).saturating_add(1),
                         height: max_row.saturating_sub(*min_row).saturating_add(1) as usize,
@@ -147,14 +233,9 @@ impl TerminalGraphics {
                 } else if record.placeholder_size.is_some() {
                     None
                 } else {
-                    record.placement.as_ref().map(|placement| ImagePlacement {
-                        line: placement.line,
-                        column: placement.column,
-                        width: placement.width,
-                        height: placement.height,
-                    })
+                    record.placement.as_ref().cloned()
                 }?;
-                let row = placement.line.saturating_add(display_offset);
+                let row = placement.grid_line.saturating_sub(viewport_start);
                 let height = placement.height.max(1) as i32;
                 if row.saturating_add(height) < -IMAGE_OVERSCAN_ROWS
                     || row > size.lines as i32 + IMAGE_OVERSCAN_ROWS
@@ -221,19 +302,21 @@ impl TerminalGraphics {
             .collect()
     }
 
-    fn handle_kitty(&mut self, payload: &[u8], cursor: (i32, usize)) -> Option<Vec<u8>> {
+    fn handle_kitty(
+        &mut self,
+        payload: &[u8],
+        cursor: (i32, usize),
+        grid_line: i32,
+        cell_size: (u16, u16),
+    ) -> usize {
         let (parameters, data) = split_once_byte(payload, b';').unwrap_or((payload, &[]));
         let action = parameter(parameters, b'a')
             .and_then(|value| value.first().copied())
             .unwrap_or(b't');
 
-        if action == b'q' {
-            let image_id = parameter_u32(parameters, b'i').filter(|id| *id != 0)?;
-            return Some(format!("\x1b_Gi={image_id};OK\x1b\\").into_bytes());
-        }
         if action == b'd' {
             self.delete_kitty(parameters);
-            return None;
+            return 0;
         }
         if action == b'p' {
             if let Some(image_id) = parameter_u32(parameters, b'i') {
@@ -243,13 +326,16 @@ impl TerminalGraphics {
                         record.placement = None;
                     }
                 } else {
-                    self.place(image_id, parameters, cursor);
+                    return self
+                        .place(image_id, parameters, cursor, grid_line, cell_size)
+                        .filter(|_| parameter(parameters, b'C') != Some(b"1"))
+                        .unwrap_or(0);
                 }
             }
-            return None;
+            return 0;
         }
         if action != b'T' && action != b't' {
-            return None;
+            return 0;
         }
 
         // Kitty sends all chunks for one image consecutively. Continuation
@@ -282,39 +368,48 @@ impl TerminalGraphics {
             ));
         }
         let Some((_, pending)) = self.pending_kitty.as_mut() else {
-            return None;
+            return 0;
         };
         if pending.encoded.len().saturating_add(data.len()) > MAX_GRAPHICS_BUFFER_BYTES {
             self.pending_kitty = None;
-            return None;
+            return 0;
         }
         pending.encoded.extend_from_slice(data);
         if parameter_u32(parameters, b'm') == Some(1) {
-            return None;
+            return 0;
         }
         let Some((image_id, pending)) = self.pending_kitty.take() else {
-            return None;
+            return 0;
         };
         let Some(encoded) = std::str::from_utf8(&pending.encoded).ok() else {
-            return None;
+            return 0;
         };
         let Some(raw) = decode_base64(encoded) else {
-            return None;
+            return 0;
+        };
+        let Some(raw) = decompress_kitty_data(&raw, &pending.parameters) else {
+            return 0;
         };
         let format = parameter_u32(&pending.parameters, b'f').unwrap_or(100);
         let Some(decoded) = self.decode_kitty_data(&raw, format, &pending.parameters) else {
-            return None;
+            return 0;
         };
+        let placement = (pending.action == b'T'
+            && parameter_u32(&pending.parameters, b'U') != Some(1))
+        .then(|| placement_from_parameters(&pending.parameters, grid_line, cursor.1, cell_size));
+        let cursor_rows = placement
+            .as_ref()
+            .filter(|_| parameter(&pending.parameters, b'C') != Some(b"1"))
+            .map_or(0, |placement| placement.height);
         self.store(
             image_id,
             decoded,
-            (pending.action == b'T' && parameter_u32(&pending.parameters, b'U') != Some(1))
-                .then(|| placement_from_parameters(&pending.parameters, cursor)),
+            placement,
             (pending.action == b'T' && parameter_u32(&pending.parameters, b'U') == Some(1))
                 .then(|| placeholder_size_from_parameters(&pending.parameters))
                 .flatten(),
         );
-        None
+        cursor_rows
     }
 
     fn decode_kitty_data(
@@ -349,7 +444,13 @@ impl TerminalGraphics {
         }
     }
 
-    fn handle_iterm(&mut self, payload: &[u8], cursor: (i32, usize)) {
+    fn handle_iterm(
+        &mut self,
+        payload: &[u8],
+        cursor: (i32, usize),
+        grid_line: i32,
+        cell_size: (u16, u16),
+    ) {
         let Some(rest) = payload.strip_prefix(b"1337;File=") else {
             return;
         };
@@ -378,8 +479,15 @@ impl TerminalGraphics {
         let height = options
             .get(b"height".as_slice())
             .and_then(|value| parse_dimension(value));
-        let mut placement =
-            placement_from_dimensions(cursor, decoded.width, decoded.height, width, height);
+        let mut placement = placement_from_dimensions(
+            grid_line,
+            cursor.1,
+            decoded.width,
+            decoded.height,
+            width,
+            height,
+            cell_size,
+        );
         if options
             .get(b"preserveAspectRatio".as_slice())
             .is_some_and(|value| *value == b"0")
@@ -391,13 +499,26 @@ impl TerminalGraphics {
         self.store(image_id, decoded, Some(placement), None);
     }
 
-    fn handle_sixel(&mut self, payload: &[u8], cursor: (i32, usize)) {
+    fn handle_sixel(
+        &mut self,
+        payload: &[u8],
+        cursor: (i32, usize),
+        grid_line: i32,
+        cell_size: (u16, u16),
+    ) {
         let Some(decoded) = decode_sixel(payload) else {
             return;
         };
         let image_id = self.allocate_protocol_id();
-        let placement =
-            placement_from_dimensions(cursor, decoded.width, decoded.height, None, None);
+        let placement = placement_from_dimensions(
+            grid_line,
+            cursor.1,
+            decoded.width,
+            decoded.height,
+            None,
+            None,
+            cell_size,
+        );
         self.store(image_id, decoded, Some(placement), None);
     }
 
@@ -439,17 +560,27 @@ impl TerminalGraphics {
         );
     }
 
-    fn place(&mut self, image_id: u32, parameters: &[u8], cursor: (i32, usize)) {
-        let Some(record) = self.images.get_mut(&image_id) else {
-            return;
-        };
-        record.placement = Some(placement_from_dimensions(
-            cursor,
+    fn place(
+        &mut self,
+        image_id: u32,
+        parameters: &[u8],
+        cursor: (i32, usize),
+        grid_line: i32,
+        cell_size: (u16, u16),
+    ) -> Option<usize> {
+        let record = self.images.get_mut(&image_id)?;
+        let placement = placement_from_dimensions(
+            grid_line,
+            cursor.1,
             record.width,
             record.height,
             parameter_u32(parameters, b'c').and_then(|value| usize::try_from(value).ok()),
             parameter_u32(parameters, b'r').and_then(|value| usize::try_from(value).ok()),
-        ));
+            cell_size,
+        );
+        let height = placement.height;
+        record.placement = Some(placement);
+        Some(height)
     }
 
     fn delete_kitty(&mut self, parameters: &[u8]) {
@@ -488,13 +619,20 @@ impl TerminalGraphics {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct ParsedGraphicsEvent {
+    pub end_offset: usize,
+    pub response: Option<Vec<u8>>,
+    pub event: Option<GraphicsEvent>,
+}
+
 #[derive(Debug, Default)]
 struct GraphicsParser {
     buffer: Vec<u8>,
 }
 
 #[derive(Debug)]
-enum GraphicsEvent {
+pub(super) enum GraphicsEvent {
     Kitty(Vec<u8>),
     Iterm(Vec<u8>),
     Sixel(Vec<u8>),
@@ -508,20 +646,23 @@ enum GraphicsKind {
 }
 
 impl GraphicsParser {
-    fn feed(&mut self, bytes: &[u8]) -> Vec<GraphicsEvent> {
+    fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, GraphicsEvent)> {
+        let previous_len = self.buffer.len();
         self.buffer.extend_from_slice(bytes);
+        let mut consumed = 0usize;
         let mut events = Vec::new();
         loop {
             let Some((start, kind)) = find_graphics_start(&self.buffer) else {
                 // Keep enough UTF-8 context to distinguish a C1 control from
                 // a continuation byte when the text stream splits a scalar.
-                let retain = self.buffer.len().min(3);
+                let retain = self.buffer.len().min(4);
                 let split_at = self.buffer.len().saturating_sub(retain);
                 self.buffer.drain(..split_at);
                 break;
             };
             if start > 0 {
                 self.buffer.drain(..start);
+                consumed = consumed.saturating_add(start);
             }
             let header_len = match kind {
                 GraphicsKind::Kitty => self
@@ -556,12 +697,18 @@ impl GraphicsParser {
             let payload_start = header_len;
             let payload_end = header_len + terminator;
             let payload = self.buffer[payload_start..payload_end].to_vec();
-            self.buffer.drain(..payload_end + terminator_len);
-            events.push(match kind {
-                GraphicsKind::Kitty => GraphicsEvent::Kitty(payload),
-                GraphicsKind::Iterm => GraphicsEvent::Iterm(payload),
-                GraphicsKind::Sixel => GraphicsEvent::Sixel(payload),
-            });
+            let event_len = payload_end + terminator_len;
+            self.buffer.drain(..event_len);
+            consumed = consumed.saturating_add(event_len);
+            let end_offset = consumed.saturating_sub(previous_len).min(bytes.len());
+            events.push((
+                end_offset,
+                match kind {
+                    GraphicsKind::Kitty => GraphicsEvent::Kitty(payload),
+                    GraphicsKind::Iterm => GraphicsEvent::Iterm(payload),
+                    GraphicsKind::Sixel => GraphicsEvent::Sixel(payload),
+                },
+            ));
         }
         events
     }
@@ -602,10 +749,8 @@ fn is_utf8_continuation(bytes: &[u8], index: usize) -> bool {
         return false;
     }
     let mut lead = index;
-    let mut preceding_continuations = 0;
-    while lead > 0 && preceding_continuations < 3 && (bytes[lead - 1] & 0xc0) == 0x80 {
+    while lead > 0 && (bytes[lead] & 0xc0) == 0x80 {
         lead -= 1;
-        preceding_continuations += 1;
     }
     let required_continuations = match bytes.get(lead).copied() {
         Some(0xc2..=0xdf) => 1,
@@ -613,7 +758,7 @@ fn is_utf8_continuation(bytes: &[u8], index: usize) -> bool {
         Some(0xf0..=0xf4) => 3,
         _ => return false,
     };
-    preceding_continuations < required_continuations
+    (1..=required_continuations).contains(&index.saturating_sub(lead))
 }
 
 fn find_graphics_terminator(bytes: &[u8], allow_bel: bool) -> Option<(usize, usize)> {
@@ -629,6 +774,17 @@ fn find_graphics_terminator(bytes: &[u8], allow_bel: bool) -> Option<(usize, usi
         }
     }
     None
+}
+
+fn kitty_query_response(payload: &[u8]) -> Option<Vec<u8>> {
+    let parameters = split_once_byte(payload, b';').map_or(payload, |(parameters, _)| parameters);
+    (parameter(parameters, b'a') == Some(b"q")).then_some(())?;
+    let image_id = parameter_u32(parameters, b'i').filter(|id| *id != 0)?;
+    let message = match parameter(parameters, b't') {
+        None | Some(b"d") => "OK",
+        _ => "EINVAL:unsupported transmission medium",
+    };
+    Some(format!("\x1b_Gi={image_id};{message}\x1b\\").into_bytes())
 }
 
 fn parameter<'a>(parameters: &'a [u8], key: u8) -> Option<&'a [u8]> {
@@ -692,6 +848,21 @@ fn placeholder_image_id(color: &TerminalColor) -> Option<u32> {
     }
 }
 
+fn decompress_kitty_data<'a>(data: &'a [u8], parameters: &[u8]) -> Option<Cow<'a, [u8]>> {
+    match parameter(parameters, b'o') {
+        None => Some(Cow::Borrowed(data)),
+        Some(b"z") => {
+            let mut decoded = Vec::new();
+            ZlibDecoder::new(data)
+                .take(MAX_IMAGE_BYTES as u64 + 1)
+                .read_to_end(&mut decoded)
+                .ok()?;
+            (decoded.len() <= MAX_IMAGE_BYTES).then_some(Cow::Owned(decoded))
+        }
+        _ => None,
+    }
+}
+
 fn decode_encoded_image(data: &[u8]) -> Option<DecodedImage> {
     if data.len() > MAX_IMAGE_BYTES {
         return None;
@@ -741,52 +912,84 @@ fn validate_image_size(width: u32, height: u32, bytes: usize) -> Option<()> {
         .then_some(())
 }
 
-fn placement_from_parameters(parameters: &[u8], cursor: (i32, usize)) -> ImagePlacement {
+fn placement_from_parameters(
+    parameters: &[u8],
+    grid_line: i32,
+    column: usize,
+    cell_size: (u16, u16),
+) -> ImagePlacement {
     placement_from_dimensions(
-        cursor,
+        grid_line,
+        column,
         parameter_u32(parameters, b's').unwrap_or(0),
         parameter_u32(parameters, b'v').unwrap_or(0),
         parameter_u32(parameters, b'c').and_then(|value| usize::try_from(value).ok()),
         parameter_u32(parameters, b'r').and_then(|value| usize::try_from(value).ok()),
+        cell_size,
     )
 }
 
 fn placement_from_dimensions(
-    cursor: (i32, usize),
+    grid_line: i32,
+    place_column: usize,
     pixel_width: u32,
     pixel_height: u32,
     requested_width: Option<usize>,
     requested_height: Option<usize>,
+    cell_size: (u16, u16),
 ) -> ImagePlacement {
-    let width = requested_width
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            (usize::try_from(pixel_width).unwrap_or(1).saturating_add(7) / 8).max(1)
-        });
-    let height = requested_height
-        .filter(|value| *value > 0)
-        .unwrap_or_else(|| {
-            let numerator = u64::from(pixel_height)
-                .saturating_mul(width as u64)
-                .saturating_add(
-                    u64::from(pixel_width.max(1))
-                        .saturating_mul(2)
-                        .saturating_sub(1),
-                );
-            usize::try_from(numerator / u64::from(pixel_width.max(1)) / 2)
-                .unwrap_or(1)
-                .max(1)
-        });
+    let pixel_width = u64::from(pixel_width.max(1));
+    let pixel_height = u64::from(pixel_height.max(1));
+    let cell_width = u64::from(cell_size.0.max(1));
+    let cell_height = u64::from(cell_size.1.max(1));
+    let requested_width = requested_width.filter(|value| *value > 0);
+    let requested_height = requested_height.filter(|value| *value > 0);
+    let (width, height) = match (requested_width, requested_height) {
+        (Some(width), Some(height)) => (width, height),
+        (Some(width), None) => {
+            let height = ceil_div(
+                pixel_height
+                    .saturating_mul(width as u64)
+                    .saturating_mul(cell_width),
+                pixel_width.saturating_mul(cell_height),
+            );
+            (width, usize::try_from(height).unwrap_or(usize::MAX))
+        }
+        (None, Some(height)) => {
+            let width = ceil_div(
+                pixel_width
+                    .saturating_mul(height as u64)
+                    .saturating_mul(cell_height),
+                pixel_height.saturating_mul(cell_width),
+            );
+            (usize::try_from(width).unwrap_or(usize::MAX), height)
+        }
+        (None, None) => (
+            usize::try_from(ceil_div(pixel_width, cell_width)).unwrap_or(usize::MAX),
+            usize::try_from(ceil_div(pixel_height, cell_height)).unwrap_or(usize::MAX),
+        ),
+    };
     ImagePlacement {
-        line: cursor.0,
-        column: cursor.1,
+        grid_line,
+        column: place_column,
         width: width.max(1),
         height: height.max(1),
     }
 }
 
+fn ceil_div(numerator: u64, denominator: u64) -> u64 {
+    numerator.saturating_add(denominator.saturating_sub(1)) / denominator.max(1)
+}
+
 fn decode_sixel(payload: &[u8]) -> Option<DecodedImage> {
-    let start = payload.iter().position(|byte| *byte == b'q')? + 1;
+    let final_index = payload.iter().position(|byte| *byte == b'q')?;
+    if !payload[..final_index]
+        .iter()
+        .all(|byte| (0x30..=0x3f).contains(byte))
+    {
+        return None;
+    }
+    let start = final_index + 1;
     let mut canvas = SixelCanvas::default();
     let mut colors = [[255u8, 255, 255, 255]; 256];
     let mut color_index = 0usize;
@@ -972,6 +1175,8 @@ fn sixel_numbers(bytes: &[u8]) -> (Vec<u32>, usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+
     use super::*;
     use crate::ids::TerminalId;
 
@@ -984,8 +1189,9 @@ mod tests {
         second.extend_from_slice(b"suffix");
         let events = parser.feed(&second);
         assert!(
-            matches!(events.as_slice(), [GraphicsEvent::Kitty(payload)] if payload == b"a=T;data")
+            matches!(events.as_slice(), [(_, GraphicsEvent::Kitty(payload))] if payload == b"a=T;data")
         );
+        assert_eq!(events[0].0, b"data\x1b\\".len());
     }
 
     #[test]
@@ -993,11 +1199,22 @@ mod tests {
         let mut parser = GraphicsParser::default();
         let events = parser.feed(b"\x9fGi=31,a=q\x9c");
         assert!(
-            matches!(events.as_slice(), [GraphicsEvent::Kitty(payload)] if payload == b"i=31,a=q")
+            matches!(events.as_slice(), [(_, GraphicsEvent::Kitty(payload))] if payload == b"i=31,a=q")
         );
 
         let mut parser = GraphicsParser::default();
         assert!(parser.feed("”".as_bytes()).is_empty());
+        let events = parser.feed(b"\x1b_Gi=31,a=q\x1b\\");
+        assert!(
+            matches!(events.as_slice(), [(_, GraphicsEvent::Kitty(payload))] if payload == b"i=31,a=q")
+        );
+
+        let mut parser = GraphicsParser::default();
+        assert!(parser.feed("😝".as_bytes()).is_empty());
+        let events = parser.feed(b"\x1b_Gi=32,a=q\x1b\\");
+        assert!(
+            matches!(events.as_slice(), [(_, GraphicsEvent::Kitty(payload))] if payload == b"i=32,a=q")
+        );
     }
 
     #[test]
@@ -1005,6 +1222,112 @@ mod tests {
         let decoded = decode_sixel(b"q#1;2;100;0;0~").unwrap();
         assert_eq!((decoded.width, decoded.height), (1, 6));
         assert_eq!(&decoded.rgba[..4], &[255, 0, 0, 255]);
+        assert!(decode_sixel(b"1+r544e=787465726d+q").is_none());
+    }
+
+    #[test]
+    fn kitty_zlib_rgb_is_decoded() {
+        let raw = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let encoded = super::super::stream::encode_base64(&encoder.finish().unwrap());
+        let mut graphics = TerminalGraphics::default();
+        graphics.feed(
+            format!("\x1b_Ga=T,q=2,f=24,o=z,s=2,v=2;{encoded}\x1b\\").as_bytes(),
+            (3, 4),
+        );
+        let size = TerminalSize::new(80, 24);
+        let terminal_snapshot = TerminalSnapshot::empty(TerminalId::new(1), size);
+        let snapshot = graphics.snapshot(0, size, &terminal_snapshot);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(&snapshot[0].rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn placement_follows_scrollback_instead_of_the_screen() {
+        // Alacritty's `cursor.line` is viewport-relative, so a cursor on
+        // viewport row 9 while 10 rows of history are scrolled below it is
+        // grid line -1. `snapshot` maps display_offset N to viewport_start
+        // -N, so the same grid line paints back at viewport row 9.
+        let display_offset = 10;
+        let cursor_line = 9;
+        let grid_line = cursor_line - display_offset as i32;
+        let size = TerminalSize::new(80, 24);
+        let mut graphics = TerminalGraphics::default();
+        feed_kitty_png(&mut graphics, (cursor_line, 20), grid_line, 3);
+
+        let mut viewport = TerminalSnapshot::empty(TerminalId::new(1), size);
+        viewport.grid_line_at_top = grid_line;
+        let displayed = graphics.snapshot(display_offset, size, &viewport);
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0].row, cursor_line);
+
+        // Scrolling one more row into history moves the viewport's top past
+        // the image, so the image is painted one row further down.
+        let mut scrolled = TerminalSnapshot::empty(TerminalId::new(1), size);
+        scrolled.grid_line_at_top = grid_line + 1;
+        let displayed = graphics.snapshot(display_offset + 1, size, &scrolled);
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0].row, cursor_line + 1);
+    }
+
+    #[test]
+    fn evicted_history_drops_placement_and_moves_survivors() {
+        let size = TerminalSize::new(80, 24);
+        let mut graphics = TerminalGraphics::default();
+        // Placed with 10 rows of history below the viewport, so the cursor on
+        // viewport row 9 is grid line -1.
+        feed_kitty_png(&mut graphics, (9, 20), -1, 3);
+
+        let mut before = TerminalSnapshot::empty(TerminalId::new(1), size);
+        before.grid_line_at_top = -10;
+        let placed = graphics.snapshot(10, size, &before);
+        assert_eq!(placed[0].row, 9);
+
+        // Evicting five grid rows shifts the placement down by five, so it
+        // still lands on the same screen row for the same viewport.
+        graphics.rebase(5, -5);
+        let mut after = TerminalSnapshot::empty(TerminalId::new(1), size);
+        after.grid_line_at_top = -5;
+        let displayed = graphics.snapshot(5, size, &after);
+        assert_eq!(displayed.len(), 1);
+        assert_eq!(displayed[0].row, 9);
+
+        // Once the grid discards rows that include the placement, it is
+        // dropped instead of floating over unrelated text.
+        graphics.rebase(30, 40);
+        after.grid_line_at_top = 40;
+        assert!(graphics.snapshot(35, size, &after).is_empty());
+    }
+
+    fn feed_kitty_png(
+        graphics: &mut TerminalGraphics,
+        cursor: (i32, usize),
+        grid_line: i32,
+        columns: usize,
+    ) {
+        let png = image::RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
+        image::ImageEncoder::write_image(
+            encoder,
+            png.as_raw(),
+            2,
+            2,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+        let encoded = super::super::stream::encode_base64(&bytes);
+        let mut parsed =
+            graphics.parse(format!("\x1b_Ga=T,f=100,c=2,r=2;{encoded}\x1b\\").as_bytes());
+        let last = parsed.pop().expect("one graphics event");
+        graphics.finish_event(
+            last.event.expect("a transmit event"),
+            (cursor.0, columns),
+            grid_line,
+            (8, 16),
+        );
     }
 
     #[test]
@@ -1087,5 +1410,23 @@ mod tests {
         let mut graphics = TerminalGraphics::default();
         let responses = graphics.feed(b"\x1b_Gi=278941603,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\", (0, 0));
         assert_eq!(responses, vec![b"\x1b_Gi=278941603;OK\x1b\\".to_vec()]);
+
+        let responses = graphics.feed(
+            concat!(
+                "\x1b_Ga=q,f=24,s=1,v=1,S=3,i=1;MTIz\x1b\\",
+                "\x1b_Ga=q,f=24,t=t,s=1,v=1,S=87,i=2;L3RtcC9raXR0eS10dHktZ3JhcGhpY3MtcHJvdG9jb2w=\x1b\\",
+                "\x1b_Ga=q,f=24,t=s,s=1,v=1,S=18,i=3;aWNhdC1zaGFyZWQtbWVtb3J5\x1b\\",
+            )
+            .as_bytes(),
+            (0, 0),
+        );
+        assert_eq!(
+            responses,
+            vec![
+                b"\x1b_Gi=1;OK\x1b\\".to_vec(),
+                b"\x1b_Gi=2;EINVAL:unsupported transmission medium\x1b\\".to_vec(),
+                b"\x1b_Gi=3;EINVAL:unsupported transmission medium\x1b\\".to_vec(),
+            ]
+        );
     }
 }
