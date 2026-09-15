@@ -73,6 +73,12 @@ impl OperationRegistry {
         });
         let mut entries = self.entries.lock().expect("operation registry poisoned");
         entries.insert(id, cell);
+        // ponytail: eviction only removes *terminal* entries, so the 4096
+        // cap holds only while every operation is finished on the model
+        // thread before the next `begin` (true today: dispatch is
+        // synchronous). A deferred `finish` would let the map grow past the
+        // cap until a terminal entry reappears — revisit then, and enforce
+        // a hard bound there.
         while entries.len() > MAX_RETAINED_OPERATIONS {
             let completed_id = entries.iter().find_map(|(candidate_id, cell)| {
                 let snapshot = cell.snapshot.lock().expect("operation cell poisoned");

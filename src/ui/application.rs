@@ -954,8 +954,18 @@ impl WaterApplication {
                     application.notify_agent_transitions(&previous_snapshot, &snapshot, cx);
                 });
                 application.sync_terminal_scrollback_protection(connection_id, &snapshot);
-                for terminal_id in terminal_ids_in_snapshot(&snapshot) {
-                    application.ensure_terminal_attached(connection_id, terminal_id);
+                let current_ids = terminal_ids_in_snapshot(&snapshot);
+                for terminal_id in &current_ids {
+                    application.ensure_terminal_attached(connection_id, *terminal_id);
+                }
+                for terminal_id in terminal_ids_in_snapshot(&previous_snapshot)
+                    .iter()
+                    .copied()
+                    .filter(|terminal_id| !current_ids.contains(terminal_id))
+                {
+                    cx.update(|cx| {
+                        application.detach_terminal(cx, connection_id, terminal_id)
+                    });
                 }
                 let views = state.views.borrow().clone();
                 let mut live_views = Vec::with_capacity(views.len());
@@ -1171,7 +1181,7 @@ impl WaterApplication {
     /// Attaches the raw stream and starts its worker-owned emulator. Replay
     /// and live parsing both publish immutable snapshots; GPUI never mutates
     /// or waits on the emulator.
-    pub(crate) fn ensure_terminal_attached(
+    pub fn ensure_terminal_attached(
         &self,
         connection_id: ConnectionId,
         terminal_id: TerminalId,
@@ -1421,6 +1431,49 @@ impl WaterApplication {
             if let Some(attachment) = terminal.attachments.remove(&terminal_id) {
                 attachment.cancel();
             }
+        }
+    }
+
+    /// Stops the local emulator worker for a terminal that left the model
+    /// (closed tab/pane/window) and detaches its live stream.
+    ///
+    /// Without this the attach thread parks on `recv_timeout` forever (its
+    /// `SyncSender` stays alive in `WaterSession::terminal_channels`) and its
+    /// Alacritty grid + scrollback stay allocated for the life of the GUI
+    /// process, while the server keeps pumping a queue nobody drains.
+    fn detach_terminal(
+        &self,
+        cx: &mut gpui::App,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+    ) {
+        let session = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(terminal) = connections
+                .iter_mut()
+                .find(|connection| connection.projection.id == connection_id)
+                .and_then(|connection| connection.terminal.as_mut())
+            else {
+                return;
+            };
+            let had_attachment = terminal.attachments.remove(&terminal_id);
+            if had_attachment.is_none()
+                && !terminal.pending_attachments.contains(&terminal_id)
+            {
+                return;
+            }
+            terminal.pending_attachments.remove(&terminal_id);
+            terminal.emulator_commands.remove(&terminal_id);
+            terminal.cell_sizes.remove(&terminal_id);
+            terminal.snapshots.remove(&terminal_id);
+            terminal.session.clone()
+        };
+        session.detach(terminal_id);
+        for view in self.state.views.borrow().iter().cloned() {
+            // Dropped views free their maps with the entity.
+            let _ = view.update(cx, |workspace, _| {
+                workspace.forget_closed_terminal(terminal_id)
+            });
         }
     }
 

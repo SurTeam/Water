@@ -1514,6 +1514,10 @@ fn kill_process_group(pty: &mut Pty) {
 /// This is the only terminal-escape knowledge the server keeps: it mirrors
 /// the vte parser's OSC 0/2 title rule (`OSC 0/2 ; <text>` terminated by
 /// BEL, CAN/SUB, or ESC) without a grid, cursor, or full VT state machine.
+/// Maximum retained params of one title OSC; longer corrupt tails are
+/// truncated from the front so `params` stays bounded per stream.
+const MAX_TITLE_PARAMS: usize = 2;
+
 struct TitleScanner {
     state: TitleState,
     params: Vec<Vec<u8>>,
@@ -1573,6 +1577,12 @@ impl TitleScanner {
                     0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {}
                     0x3b => {
                         self.params.push(std::mem::take(&mut self.param));
+                        // A title OSC has one selector plus one text param;
+                        // cap the vector so a corrupt, unterminated stream
+                        // cannot grow it without bound.
+                        if self.params.len() > MAX_TITLE_PARAMS {
+                            self.params.drain(..self.params.len() - MAX_TITLE_PARAMS);
+                        }
                     }
                     _ => {
                         if self.param.len() < MAX_TITLE_BYTES {
