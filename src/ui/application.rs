@@ -1,8 +1,8 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use gpui::{
     App, AppContext, Bounds, DispatchEventResult, Focusable, KeyBinding, Keystroke, Menu, MenuItem,
@@ -106,15 +106,14 @@ struct ManagedConnection {
 /// GPUI sends viewport commands and consumes immutable snapshots.
 struct TerminalConnection {
     session: Arc<WaterSession>,
-    emulator_commands: std::collections::BTreeMap<
-        TerminalId,
-        std::sync::mpsc::SyncSender<TerminalEmulatorCommand>,
-    >,
+    emulator_commands:
+        std::collections::BTreeMap<TerminalId, std::sync::mpsc::Sender<TerminalEmulatorCommand>>,
     snapshots: std::collections::BTreeMap<TerminalId, Arc<crate::terminal::TerminalSnapshot>>,
     pending_attachments: std::collections::BTreeSet<TerminalId>,
     attachments: std::collections::BTreeMap<TerminalId, Arc<TerminalAttachmentState>>,
     cell_sizes: std::collections::BTreeMap<TerminalId, (u16, u16)>,
-    events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    desired_scrollback: std::collections::BTreeMap<TerminalId, (usize, bool)>,
+    event_sink: TerminalEventSink,
     scrollback_lines: usize,
     inactive_scrollback_lines: usize,
     max_total_scrollback_bytes: usize,
@@ -167,16 +166,14 @@ enum TerminalEventMsg {
         attachment: Arc<TerminalAttachmentState>,
         snapshot: Arc<crate::terminal::TerminalSnapshot>,
     },
-    LiveSnapshot {
+    SnapshotReady {
         terminal_id: TerminalId,
         attachment: Arc<TerminalAttachmentState>,
-        snapshot: Arc<crate::terminal::TerminalSnapshot>,
-        pty_writes: Vec<Vec<u8>>,
     },
-    ReplayProgress {
+    PtyWrites {
         terminal_id: TerminalId,
         attachment: Arc<TerminalAttachmentState>,
-        snapshot: Arc<crate::terminal::TerminalSnapshot>,
+        writes: Vec<Vec<u8>>,
     },
     Restart {
         terminal_id: TerminalId,
@@ -196,17 +193,17 @@ const MAX_TERMINAL_BYTES_PER_UI_TURN: usize = MAX_OUTPUT_EVENT_BYTES;
 const MAX_TERMINAL_MESSAGES_PER_UI_TURN: usize = 64;
 const TERMINAL_UI_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
 const TERMINAL_SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
-/// Terminal snapshots are immutable and can contain many rows. Keep the
-/// cross-thread mailbox small; producers drop stale snapshots when the UI is
-/// not keeping up, while the raw replay ring remains the resync source.
+/// Keep the control/wakeup mailbox small. Full render snapshots live in a
+/// per-terminal latest-value slot, so a slow UI cannot accumulate historical
+/// frames and a full mailbox cannot discard the final state.
 const TERMINAL_EVENT_QUEUE_CAPACITY: usize = 64;
 
 impl TerminalEventMsg {
     fn terminal_id(&self) -> TerminalId {
         match self {
             Self::Attached { terminal_id, .. }
-            | Self::LiveSnapshot { terminal_id, .. }
-            | Self::ReplayProgress { terminal_id, .. }
+            | Self::SnapshotReady { terminal_id, .. }
+            | Self::PtyWrites { terminal_id, .. }
             | Self::Restart { terminal_id, .. }
             | Self::Detached { terminal_id, .. } => *terminal_id,
         }
@@ -215,8 +212,8 @@ impl TerminalEventMsg {
     fn attachment(&self) -> &TerminalAttachmentState {
         match self {
             Self::Attached { attachment, .. }
-            | Self::LiveSnapshot { attachment, .. }
-            | Self::ReplayProgress { attachment, .. }
+            | Self::SnapshotReady { attachment, .. }
+            | Self::PtyWrites { attachment, .. }
             | Self::Restart { attachment, .. }
             | Self::Detached { attachment, .. } => attachment,
         }
@@ -231,10 +228,142 @@ impl TerminalEventMsg {
             return 0;
         }
         match self {
-            Self::LiveSnapshot { .. } | Self::ReplayProgress { .. } => {
-                MAX_TERMINAL_BYTES_PER_UI_TURN
+            Self::SnapshotReady { .. } => MAX_TERMINAL_BYTES_PER_UI_TURN,
+            Self::Attached { .. }
+            | Self::PtyWrites { .. }
+            | Self::Restart { .. }
+            | Self::Detached { .. } => 0,
+        }
+    }
+}
+
+struct PendingTerminalSnapshot {
+    attachment: Arc<TerminalAttachmentState>,
+    snapshot: Arc<crate::terminal::TerminalSnapshot>,
+}
+
+struct TerminalSnapshotStore {
+    pending: std::collections::BTreeMap<TerminalId, PendingTerminalSnapshot>,
+    notified: std::collections::BTreeSet<TerminalId>,
+}
+
+/// Delivers lifecycle/control messages reliably while keeping only the latest
+/// render snapshot per terminal. Snapshot notifications are tiny; the actual
+/// immutable snapshot lives in this coalescing slot instead of piling up in a
+/// FIFO when GPUI is busy.
+#[derive(Clone)]
+struct TerminalEventSink {
+    events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    snapshots: Arc<Mutex<TerminalSnapshotStore>>,
+}
+
+impl TerminalEventSink {
+    fn new(events_tx: std::sync::mpsc::SyncSender<TerminalEventMsg>) -> Self {
+        Self {
+            events_tx,
+            snapshots: Arc::new(Mutex::new(TerminalSnapshotStore {
+                pending: std::collections::BTreeMap::new(),
+                notified: std::collections::BTreeSet::new(),
+            })),
+        }
+    }
+
+    fn publish_control(
+        &self,
+        attachment: &Arc<TerminalAttachmentState>,
+        mut message: TerminalEventMsg,
+    ) -> bool {
+        if !attachment.is_active() {
+            return false;
+        }
+        loop {
+            match self.events_tx.try_send(message) {
+                Ok(()) => return true,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return false,
+                Err(std::sync::mpsc::TrySendError::Full(next)) => {
+                    if !attachment.is_active() {
+                        return false;
+                    }
+                    message = next;
+                    std::thread::park_timeout(std::time::Duration::from_millis(1));
+                }
             }
-            Self::Attached { .. } | Self::Restart { .. } | Self::Detached { .. } => 0,
+        }
+    }
+
+    fn publish_snapshot(
+        &self,
+        terminal_id: TerminalId,
+        attachment: &Arc<TerminalAttachmentState>,
+        snapshot: Arc<crate::terminal::TerminalSnapshot>,
+    ) -> bool {
+        if !attachment.is_active() {
+            return false;
+        }
+        let should_notify = {
+            let mut store = self.snapshots.lock().expect("terminal snapshots poisoned");
+            store.pending.insert(
+                terminal_id,
+                PendingTerminalSnapshot {
+                    attachment: attachment.clone(),
+                    snapshot,
+                },
+            );
+            store.notified.insert(terminal_id)
+        };
+        if !should_notify {
+            return true;
+        }
+        if self.publish_control(
+            attachment,
+            TerminalEventMsg::SnapshotReady {
+                terminal_id,
+                attachment: attachment.clone(),
+            },
+        ) {
+            true
+        } else {
+            self.remove_if(terminal_id, attachment);
+            false
+        }
+    }
+
+    fn take_snapshot(
+        &self,
+        terminal_id: TerminalId,
+        attachment: &Arc<TerminalAttachmentState>,
+    ) -> Option<Arc<crate::terminal::TerminalSnapshot>> {
+        let mut store = self.snapshots.lock().expect("terminal snapshots poisoned");
+        let matches = store
+            .pending
+            .get(&terminal_id)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.attachment, attachment));
+        if !matches {
+            return None;
+        }
+        let pending = store
+            .pending
+            .remove(&terminal_id)
+            .expect("snapshot disappeared");
+        store.notified.remove(&terminal_id);
+        Some(pending.snapshot)
+    }
+
+    fn remove(&self, terminal_id: TerminalId) {
+        let mut store = self.snapshots.lock().expect("terminal snapshots poisoned");
+        store.pending.remove(&terminal_id);
+        store.notified.remove(&terminal_id);
+    }
+
+    fn remove_if(&self, terminal_id: TerminalId, attachment: &Arc<TerminalAttachmentState>) {
+        let mut store = self.snapshots.lock().expect("terminal snapshots poisoned");
+        if store
+            .pending
+            .get(&terminal_id)
+            .is_some_and(|pending| Arc::ptr_eq(&pending.attachment, attachment))
+        {
+            store.pending.remove(&terminal_id);
+            store.notified.remove(&terminal_id);
         }
     }
 }
@@ -265,7 +394,7 @@ fn recv_terminal_event_batch(
 }
 
 fn publish_replay_progress(
-    sender: &std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    sender: &TerminalEventSink,
     terminal_id: TerminalId,
     attachment: &Arc<TerminalAttachmentState>,
     emulator: &mut TerminalEmulator,
@@ -277,39 +406,24 @@ fn publish_replay_progress(
     }
     emulator.apply_batch(events);
     events.clear();
-    let _ = emulator.take_dirty();
     if !attachment.is_active() {
         return false;
     }
     if !publish_snapshot {
         return true;
     }
-    try_publish_terminal_event(
-        sender,
-        attachment,
-        TerminalEventMsg::ReplayProgress {
-            terminal_id,
-            attachment: attachment.clone(),
-            snapshot: Arc::new(emulator.snapshot(None)),
-        },
-    )
+    sender.publish_snapshot(terminal_id, attachment, Arc::new(emulator.snapshot(None)))
 }
 
-/// Publishes a GUI-local terminal event without allowing a slow GPUI turn to
-/// park the parser thread. Snapshot events are disposable: the next raw
-/// event/replay remains authoritative and a sequence gap triggers resync.
+/// Publishes a lifecycle/control event without silently dropping it. A slow
+/// GPUI turn can backpressure this attachment thread, but PTY bytes and state
+/// transitions remain ordered and intact.
 fn try_publish_terminal_event(
-    sender: &std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    sender: &TerminalEventSink,
     attachment: &Arc<TerminalAttachmentState>,
     message: TerminalEventMsg,
 ) -> bool {
-    if !attachment.is_active() {
-        return false;
-    }
-    match sender.try_send(message) {
-        Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => attachment.is_active(),
-        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
-    }
+    sender.publish_control(attachment, message)
 }
 
 fn apply_emulator_commands(
@@ -347,25 +461,33 @@ fn terminal_scrollback_protected(snapshot: &ModelSnapshot, terminal_id: Terminal
 }
 
 fn publish_live_snapshot(
-    sender: &std::sync::mpsc::SyncSender<TerminalEventMsg>,
+    sender: &TerminalEventSink,
     terminal_id: TerminalId,
     attachment: &Arc<TerminalAttachmentState>,
     emulator: &mut TerminalEmulator,
     previous: Option<&crate::terminal::TerminalSnapshot>,
 ) -> bool {
-    let _ = emulator.take_dirty();
     if !attachment.is_active() {
         return false;
     }
-    try_publish_terminal_event(
-        sender,
+    let pty_writes = emulator.pty_writes();
+    if !pty_writes.is_empty()
+        && !try_publish_terminal_event(
+            sender,
+            attachment,
+            TerminalEventMsg::PtyWrites {
+                terminal_id,
+                attachment: attachment.clone(),
+                writes: pty_writes,
+            },
+        )
+    {
+        return false;
+    }
+    sender.publish_snapshot(
+        terminal_id,
         attachment,
-        TerminalEventMsg::LiveSnapshot {
-            terminal_id,
-            attachment: attachment.clone(),
-            snapshot: Arc::new(emulator.snapshot(previous)),
-            pty_writes: emulator.pty_writes(),
-        },
+        Arc::new(emulator.snapshot(previous)),
     )
 }
 
@@ -1037,6 +1159,7 @@ impl WaterApplication {
         session: WaterSession,
     ) -> TerminalConnection {
         let (events_tx, events_rx) = std::sync::mpsc::sync_channel(TERMINAL_EVENT_QUEUE_CAPACITY);
+        let event_sink = TerminalEventSink::new(events_tx);
         let config = self.config();
         let colors = config.theme.colors();
         let theme = TerminalTheme::new(
@@ -1051,7 +1174,8 @@ impl WaterApplication {
             pending_attachments: std::collections::BTreeSet::new(),
             attachments: std::collections::BTreeMap::new(),
             cell_sizes: std::collections::BTreeMap::new(),
-            events_tx,
+            desired_scrollback: std::collections::BTreeMap::new(),
+            event_sink,
             scrollback_lines: config.terminal.scrollback_lines,
             inactive_scrollback_lines: config.terminal.inactive_scrollback_lines,
             max_total_scrollback_bytes: config.terminal.max_total_scrollback_bytes,
@@ -1133,25 +1257,28 @@ impl WaterApplication {
             for (terminal_id, messages) in grouped {
                 let mut latest_snapshot = None;
                 let mut detached = false;
+                let mut detached_attachment = None;
                 for message in messages {
                     match message {
                         TerminalEventMsg::Attached { snapshot, .. } => {
                             terminal.pending_attachments.remove(&terminal_id);
                             latest_snapshot = Some(snapshot);
                         }
-                        TerminalEventMsg::LiveSnapshot {
-                            snapshot,
-                            pty_writes: writes,
-                            ..
-                        } => {
-                            latest_snapshot = Some(snapshot);
+                        TerminalEventMsg::SnapshotReady { attachment, .. } => {
+                            if let Some(snapshot) =
+                                terminal.event_sink.take_snapshot(terminal_id, &attachment)
+                            {
+                                latest_snapshot = Some(snapshot);
+                            }
+                        }
+                        TerminalEventMsg::PtyWrites { writes, .. } => {
                             pty_writes.extend(writes.into_iter().map(|bytes| (terminal_id, bytes)));
                         }
-                        TerminalEventMsg::ReplayProgress { snapshot, .. } => {
-                            latest_snapshot = Some(snapshot);
-                        }
                         TerminalEventMsg::Restart { .. } => resync.push(terminal_id),
-                        TerminalEventMsg::Detached { .. } => detached = true,
+                        TerminalEventMsg::Detached { attachment, .. } => {
+                            detached = true;
+                            detached_attachment = Some(attachment);
+                        }
                     }
                 }
                 if let Some(snapshot) = latest_snapshot {
@@ -1159,6 +1286,9 @@ impl WaterApplication {
                     changed.insert(terminal_id);
                 }
                 if detached {
+                    if detached_attachment.is_some() {
+                        terminal.event_sink.remove(terminal_id);
+                    }
                     terminal.pending_attachments.remove(&terminal_id);
                     terminal.attachments.remove(&terminal_id);
                     terminal.emulator_commands.remove(&terminal_id);
@@ -1211,9 +1341,11 @@ impl WaterApplication {
             if let Some(attachment) = terminal.attachments.remove(&terminal_id) {
                 attachment.cancel();
             }
+            terminal.event_sink.remove(terminal_id);
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
+            terminal.desired_scrollback.remove(&terminal_id);
             terminal.session.clone()
         };
         session.detach(terminal_id);
@@ -1239,7 +1371,7 @@ impl WaterApplication {
         }
         let (
             session,
-            events_tx,
+            event_sink,
             scrollback_lines,
             theme,
             scrollback_protected,
@@ -1264,21 +1396,25 @@ impl WaterApplication {
                 return;
             }
             let attachment = Arc::new(TerminalAttachmentState::new());
-            let (emulator_commands_tx, emulator_commands) = std::sync::mpsc::sync_channel(64);
+            let (emulator_commands_tx, emulator_commands) = std::sync::mpsc::channel();
+            let scrollback_lines = terminal_scrollback_lines(
+                &connection.projection.snapshot,
+                terminal_id,
+                terminal.scrollback_lines,
+                terminal.inactive_scrollback_lines,
+                terminal.max_total_scrollback_bytes,
+            );
+            terminal
+                .desired_scrollback
+                .insert(terminal_id, (scrollback_lines, scrollback_protected));
             terminal.attachments.insert(terminal_id, attachment.clone());
             terminal
                 .emulator_commands
                 .insert(terminal_id, emulator_commands_tx);
             (
                 terminal.session.clone(),
-                terminal.events_tx.clone(),
-                terminal_scrollback_lines(
-                    &connection.projection.snapshot,
-                    terminal_id,
-                    terminal.scrollback_lines,
-                    terminal.inactive_scrollback_lines,
-                    terminal.max_total_scrollback_bytes,
-                ),
+                terminal.event_sink.clone(),
+                scrollback_lines,
                 terminal.theme,
                 scrollback_protected,
                 attachment,
@@ -1323,7 +1459,7 @@ impl WaterApplication {
                             let publish_snapshot =
                                 last_replay_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;
                             if !publish_replay_progress(
-                                &events_tx,
+                                &event_sink,
                                 terminal_id,
                                 &attachment,
                                 &mut emulator,
@@ -1341,7 +1477,7 @@ impl WaterApplication {
                         }
                     }
                     if !publish_replay_progress(
-                        &events_tx,
+                        &event_sink,
                         terminal_id,
                         &attachment,
                         &mut emulator,
@@ -1355,7 +1491,7 @@ impl WaterApplication {
                         return;
                     }
                     if !try_publish_terminal_event(
-                        &events_tx,
+                        &event_sink,
                         &attachment,
                         TerminalEventMsg::Attached {
                             terminal_id,
@@ -1383,7 +1519,7 @@ impl WaterApplication {
                                 if commands_changed {
                                     let prev = last_snapshot.as_ref();
                                     if !publish_live_snapshot(
-                                        &events_tx,
+                                        &event_sink,
                                         terminal_id,
                                         &attachment,
                                         &mut emulator,
@@ -1409,7 +1545,7 @@ impl WaterApplication {
                             matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
                         }) {
                             let _ = try_publish_terminal_event(
-                                &events_tx,
+                                &event_sink,
                                 &attachment,
                                 TerminalEventMsg::Restart {
                                     terminal_id,
@@ -1432,7 +1568,7 @@ impl WaterApplication {
                         if publish_snapshot {
                             let prev = last_snapshot.as_ref();
                             if !publish_live_snapshot(
-                                &events_tx,
+                                &event_sink,
                                 terminal_id,
                                 &attachment,
                                 &mut emulator,
@@ -1446,7 +1582,7 @@ impl WaterApplication {
                     }
                     if attachment.is_active() {
                         let _ = try_publish_terminal_event(
-                            &events_tx,
+                            &event_sink,
                             &attachment,
                             TerminalEventMsg::Detached {
                                 terminal_id,
@@ -1465,7 +1601,7 @@ impl WaterApplication {
                     );
                     if attachment.is_active() {
                         let _ = try_publish_terminal_event(
-                            &events_tx,
+                            &event_sink,
                             &attachment,
                             TerminalEventMsg::Detached {
                                 terminal_id,
@@ -1487,6 +1623,8 @@ impl WaterApplication {
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
+            terminal.desired_scrollback.remove(&terminal_id);
+            terminal.event_sink.remove(terminal_id);
             if let Some(attachment) = terminal.attachments.remove(&terminal_id) {
                 attachment.cancel();
             }
@@ -1525,9 +1663,11 @@ impl WaterApplication {
                 // snapshots while the tab's state is being removed.
                 attachment.cancel();
             }
+            terminal.event_sink.remove(terminal_id);
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
+            terminal.desired_scrollback.remove(&terminal_id);
             terminal.snapshots.remove(&terminal_id);
             terminal.session.clone()
         };
@@ -1557,7 +1697,7 @@ impl WaterApplication {
 
     /// Updates the local emulator's physical cell size. The cache keeps the
     /// observer idempotent while the attachment worker receives the command
-    /// on its existing bounded channel.
+    /// on its lossless local command channel.
     pub(crate) fn terminal_set_cell_size(
         &self,
         connection_id: ConnectionId,
@@ -1582,7 +1722,7 @@ impl WaterApplication {
             return false;
         };
         if commands
-            .try_send(TerminalEmulatorCommand::SetCellSize {
+            .send(TerminalEmulatorCommand::SetCellSize {
                 cell_width,
                 cell_height,
             })
@@ -1617,7 +1757,7 @@ impl WaterApplication {
             .get(&terminal_id)
             .is_some_and(|commands| {
                 commands
-                    .try_send(TerminalEmulatorCommand::ScrollBy(delta))
+                    .send(TerminalEmulatorCommand::ScrollBy(delta))
                     .is_ok()
             })
     }
@@ -1643,7 +1783,7 @@ impl WaterApplication {
             .get(&terminal_id)
             .is_some_and(|commands| {
                 commands
-                    .try_send(TerminalEmulatorCommand::ScrollTo(target))
+                    .send(TerminalEmulatorCommand::ScrollTo(target))
                     .is_ok()
             })
     }
@@ -1669,7 +1809,7 @@ impl WaterApplication {
             .get(&terminal_id)
             .is_some_and(|commands| {
                 commands
-                    .try_send(TerminalEmulatorCommand::SetPinned(pinned))
+                    .send(TerminalEmulatorCommand::SetPinned(pinned))
                     .is_ok()
             })
     }
@@ -1679,17 +1819,22 @@ impl WaterApplication {
         connection_id: ConnectionId,
         snapshot: &ModelSnapshot,
     ) {
-        let connections = self.state.connections.borrow();
+        let mut connections = self.state.connections.borrow_mut();
         let Some(connection) = connections
-            .iter()
+            .iter_mut()
             .find(|connection| connection.projection.id == connection_id)
         else {
             return;
         };
-        let Some(terminal) = connection.terminal.as_ref() else {
+        let Some(terminal) = connection.terminal.as_mut() else {
             return;
         };
-        for (&terminal_id, commands) in &terminal.emulator_commands {
+        let command_channels: Vec<_> = terminal
+            .emulator_commands
+            .iter()
+            .map(|(&terminal_id, commands)| (terminal_id, commands.clone()))
+            .collect();
+        for (terminal_id, commands) in command_channels {
             let scrollback_lines = terminal_scrollback_lines(
                 snapshot,
                 terminal_id,
@@ -1697,11 +1842,22 @@ impl WaterApplication {
                 terminal.inactive_scrollback_lines,
                 terminal.max_total_scrollback_bytes,
             );
-            let _ = commands.try_send(TerminalEmulatorCommand::SetScrollbackLines(
-                scrollback_lines,
-            ));
             let protected = terminal_scrollback_protected(snapshot, terminal_id);
-            let _ = commands.try_send(TerminalEmulatorCommand::SetScrollbackProtected(protected));
+            let desired = (scrollback_lines, protected);
+            if terminal.desired_scrollback.get(&terminal_id) == Some(&desired) {
+                continue;
+            }
+            if commands
+                .send(TerminalEmulatorCommand::SetScrollbackLines(
+                    scrollback_lines,
+                ))
+                .is_ok()
+                && commands
+                    .send(TerminalEmulatorCommand::SetScrollbackProtected(protected))
+                    .is_ok()
+            {
+                terminal.desired_scrollback.insert(terminal_id, desired);
+            }
         }
     }
 
@@ -2148,60 +2304,40 @@ fn application_menus() -> Vec<Menu> {
 mod tests {
     use super::*;
 
-    fn terminal_snapshot_message(seq: u64) -> TerminalEventMsg {
-        terminal_snapshot_message_for(seq, Arc::new(TerminalAttachmentState::new()))
-    }
-
-    fn terminal_snapshot_message_for(
-        seq: u64,
-        attachment: Arc<TerminalAttachmentState>,
-    ) -> TerminalEventMsg {
-        let terminal_id = TerminalId::new(1);
-        let size = crate::terminal::TerminalSize::new(80, 24);
-        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
-        emulator.apply(&TerminalStreamEvent::Output {
-            seq,
-            size,
-            bytes: Arc::from(format!("snapshot {seq}\r\n").into_bytes()),
-        });
-        TerminalEventMsg::LiveSnapshot {
-            terminal_id,
-            attachment,
-            snapshot: Arc::new(emulator.snapshot(None)),
-            pty_writes: Vec::new(),
-        }
-    }
-
-    fn snapshot_sequence(message: &TerminalEventMsg) -> u64 {
-        match message {
-            TerminalEventMsg::Attached { snapshot, .. }
-            | TerminalEventMsg::LiveSnapshot { snapshot, .. }
-            | TerminalEventMsg::ReplayProgress { snapshot, .. } => snapshot.revision,
-            TerminalEventMsg::Restart { .. } | TerminalEventMsg::Detached { .. } => {
-                panic!("expected terminal snapshot")
-            }
-        }
-    }
-
     #[test]
-    fn terminal_snapshot_batches_preserve_order_and_pace_frames() {
-        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
-        for seq in 1..=3 {
-            sender.send(terminal_snapshot_message(seq)).unwrap();
-        }
+    fn terminal_control_events_are_lossless_when_mailbox_is_full() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let sink = TerminalEventSink::new(sender);
+        let attachment = Arc::new(TerminalAttachmentState::new());
+        assert!(sink.publish_control(
+            &attachment,
+            TerminalEventMsg::Restart {
+                terminal_id: TerminalId::new(1),
+                attachment: attachment.clone(),
+            },
+        ));
 
-        let (first, pending) = recv_terminal_event_batch(&receiver, None).unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(snapshot_sequence(&first[0]), 1);
+        let blocked_sink = sink.clone();
+        let blocked_attachment = attachment.clone();
+        let second = std::thread::spawn(move || {
+            blocked_sink.publish_control(
+                &blocked_attachment,
+                TerminalEventMsg::Restart {
+                    terminal_id: TerminalId::new(2),
+                    attachment: blocked_attachment.clone(),
+                },
+            )
+        });
 
-        let (second, pending) = recv_terminal_event_batch(&receiver, pending).unwrap();
-        assert_eq!(second.len(), 1);
-        assert_eq!(snapshot_sequence(&second[0]), 2);
-
-        let (third, pending) = recv_terminal_event_batch(&receiver, pending).unwrap();
-        assert_eq!(third.len(), 1);
-        assert_eq!(snapshot_sequence(&third[0]), 3);
-        assert!(pending.is_none());
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            TerminalEventMsg::Restart { terminal_id, .. } if terminal_id == TerminalId::new(1)
+        ));
+        assert!(second.join().unwrap());
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            TerminalEventMsg::Restart { terminal_id, .. } if terminal_id == TerminalId::new(2)
+        ));
     }
 
     #[gpui::test]
@@ -2244,30 +2380,40 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_attachment_events_do_not_consume_the_ui_byte_budget() {
+    fn cancelled_snapshot_notifications_do_not_consume_the_ui_byte_budget() {
         let cancelled = Arc::new(TerminalAttachmentState::new());
         cancelled.cancel();
         let active = Arc::new(TerminalAttachmentState::new());
         let (sender, receiver) = std::sync::mpsc::sync_channel(4);
         sender
-            .send(terminal_snapshot_message_for(1, cancelled.clone()))
+            .send(TerminalEventMsg::SnapshotReady {
+                terminal_id: TerminalId::new(1),
+                attachment: cancelled,
+            })
             .unwrap();
         sender
-            .send(terminal_snapshot_message_for(2, cancelled))
+            .send(TerminalEventMsg::SnapshotReady {
+                terminal_id: TerminalId::new(2),
+                attachment: active.clone(),
+            })
             .unwrap();
         sender
-            .send(terminal_snapshot_message_for(3, active.clone()))
-            .unwrap();
-        sender
-            .send(terminal_snapshot_message_for(4, active))
+            .send(TerminalEventMsg::SnapshotReady {
+                terminal_id: TerminalId::new(3),
+                attachment: active.clone(),
+            })
             .unwrap();
 
         let (batch, pending) = recv_terminal_event_batch(&receiver, None).unwrap();
+        assert_eq!(batch.len(), 2);
+        assert!(!batch[0].is_active());
+        assert!(batch[1].is_active());
+        assert_eq!(batch[0].ui_cost_bytes(), 0);
+        assert_eq!(batch[1].ui_cost_bytes(), MAX_TERMINAL_BYTES_PER_UI_TURN);
         assert_eq!(
-            batch.iter().map(snapshot_sequence).collect::<Vec<_>>(),
-            [1, 2, 3]
+            pending.as_ref().map(TerminalEventMsg::terminal_id),
+            Some(TerminalId::new(3))
         );
-        assert_eq!(pending.as_ref().map(snapshot_sequence), Some(4));
     }
 
     #[test]
@@ -2276,6 +2422,7 @@ mod tests {
         let size = crate::terminal::TerminalSize::new(80, 24);
         let attachment = Arc::new(TerminalAttachmentState::new());
         let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let sink = TerminalEventSink::new(sender);
         let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
         let mut events = vec![TerminalStreamEvent::Output {
             seq: 1,
@@ -2283,7 +2430,7 @@ mod tests {
             bytes: Arc::from(b"first replay row\r\n".as_slice()),
         }];
         assert!(publish_replay_progress(
-            &sender,
+            &sink,
             terminal_id,
             &attachment,
             &mut emulator,
@@ -2296,7 +2443,7 @@ mod tests {
             bytes: Arc::from(b"second replay row\r\n".as_slice()),
         });
         assert!(publish_replay_progress(
-            &sender,
+            &sink,
             terminal_id,
             &attachment,
             &mut emulator,
@@ -2306,11 +2453,21 @@ mod tests {
 
         let (batch, pending) = recv_terminal_event_batch(&receiver, None).unwrap();
         assert_eq!(batch.len(), 1);
-        let TerminalEventMsg::ReplayProgress { snapshot, .. } = &batch[0] else {
-            panic!("expected replay progress")
+        let TerminalEventMsg::SnapshotReady {
+            terminal_id,
+            attachment,
+        } = &batch[0]
+        else {
+            panic!("expected snapshot notification")
         };
-        assert!(snapshot.visible_text().contains("first replay row"));
-        assert!(pending.is_some(), "the next progress frame must be paced");
+        let snapshot = sink
+            .take_snapshot(*terminal_id, attachment)
+            .expect("latest replay snapshot");
+        assert!(snapshot.visible_text().contains("second replay row"));
+        assert!(
+            pending.is_none(),
+            "intermediate replay frames are coalesced"
+        );
     }
 
     #[test]
@@ -2319,6 +2476,7 @@ mod tests {
         let size = crate::terminal::TerminalSize::new(80, 24);
         let attachment = Arc::new(TerminalAttachmentState::new());
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let sink = TerminalEventSink::new(sender);
         let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
         let mut events = vec![TerminalStreamEvent::Output {
             seq: 1,
@@ -2327,7 +2485,7 @@ mod tests {
         }];
 
         assert!(publish_replay_progress(
-            &sender,
+            &sink,
             terminal_id,
             &attachment,
             &mut emulator,
@@ -2340,6 +2498,66 @@ mod tests {
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn latest_snapshot_slot_preserves_the_final_state_when_ui_is_slow() {
+        let terminal_id = TerminalId::new(7);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let attachment = Arc::new(TerminalAttachmentState::new());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let sink = TerminalEventSink::new(sender);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+
+        for seq in 1..=10_000 {
+            emulator.apply(&TerminalStreamEvent::Output {
+                seq,
+                size,
+                bytes: Arc::from(format!("seq {seq}\r\n").into_bytes()),
+            });
+            assert!(sink.publish_snapshot(
+                terminal_id,
+                &attachment,
+                Arc::new(emulator.snapshot(None)),
+            ));
+        }
+
+        let TerminalEventMsg::SnapshotReady {
+            terminal_id: ready_id,
+            attachment: ready_attachment,
+        } = receiver.recv().expect("snapshot wakeup")
+        else {
+            panic!("expected snapshot wakeup")
+        };
+        let snapshot = sink
+            .take_snapshot(ready_id, &ready_attachment)
+            .expect("latest snapshot slot");
+        assert!(snapshot.visible_text().contains("seq 10000"));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn scrollback_budget_scaling_preserves_line_units_and_bounds() {
+        let row_80 = crate::terminal::scrollback_row_bytes(80);
+        let row_512 = crate::terminal::scrollback_row_bytes(512);
+        let total_bytes = 2_000usize
+            .saturating_mul(row_80)
+            .saturating_add(500usize.saturating_mul(row_512));
+        let budget = 64 * 1024;
+        let cases = [(2_000, 2_000usize * row_80), (500, 500usize * row_512)];
+
+        for (requested, selected_bytes) in cases {
+            let lines = scale_scrollback_lines(requested, selected_bytes, total_bytes, budget);
+            assert!((1..=requested).contains(&lines));
+            assert!(lines <= crate::terminal::MAX_SCROLLBACK_LINES);
+            assert!(lines.saturating_mul(selected_bytes / requested.max(1)) <= budget + row_512);
+        }
+
+        assert_eq!(scale_scrollback_lines(0, 0, 0, 0), 1);
+        assert_eq!(
+            scale_scrollback_lines(crate::terminal::MAX_SCROLLBACK_LINES * 2, 1, 1, usize::MAX,),
+            crate::terminal::MAX_SCROLLBACK_LINES
+        );
     }
 
     #[test]
@@ -2672,6 +2890,7 @@ fn terminal_scrollback_lines(
     inactive_lines: usize,
     max_total_bytes: usize,
 ) -> usize {
+    let max_lines = crate::terminal::MAX_SCROLLBACK_LINES;
     let terminal_ids = terminal_ids_in_snapshot(snapshot);
     let mut total_bytes = 0usize;
     let mut selected_bytes = 0usize;
@@ -2684,7 +2903,8 @@ fn terminal_scrollback_lines(
             focused_lines.max(1)
         } else {
             inactive_lines.max(1)
-        };
+        }
+        .clamp(1, max_lines);
         let row_bytes = crate::terminal::scrollback_row_bytes(size.columns.max(1));
         let bytes = lines.saturating_mul(row_bytes);
         total_bytes = total_bytes.saturating_add(bytes);
@@ -2696,11 +2916,26 @@ fn terminal_scrollback_lines(
     if selected_bytes == 0 || total_bytes <= max_total_bytes.max(1) {
         return selected_lines;
     }
-    selected_bytes
+    scale_scrollback_lines(selected_lines, selected_bytes, total_bytes, max_total_bytes)
+}
+
+fn scale_scrollback_lines(
+    selected_lines: usize,
+    selected_bytes: usize,
+    total_bytes: usize,
+    max_total_bytes: usize,
+) -> usize {
+    let upper = selected_lines.clamp(1, crate::terminal::MAX_SCROLLBACK_LINES);
+    if selected_bytes == 0 || total_bytes <= max_total_bytes.max(1) {
+        return upper;
+    }
+    // selected_bytes/total_bytes is the terminal's share of the budget. It
+    // must scale the requested *line count*, not be returned as a byte count.
+    let scaled = upper
         .saturating_mul(max_total_bytes.max(1))
-        .checked_div(total_bytes)
-        .unwrap_or(1)
-        .max(1)
+        .checked_div(total_bytes.max(1))
+        .unwrap_or(1);
+    scaled.clamp(1, upper)
 }
 
 fn terminal_is_focused(snapshot: &ModelSnapshot, terminal_id: TerminalId) -> bool {

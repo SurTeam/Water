@@ -494,8 +494,8 @@ impl Drop for WaterSession {
 /// Live terminal event stream: events buffered while the attach reply was in
 /// flight (prefix) followed by the live channel. The split exists so the
 /// session reader can deliver events before the attach call returns without
-/// losing replay/live ordering. Both queues are bounded; an overloaded live
-/// consumer resynchronizes from the server replay ring.
+/// losing replay/live ordering. The bounded live channel applies backpressure
+/// to the socket reader; it never turns ordinary queue pressure into a gap.
 #[cfg(unix)]
 pub struct TerminalEventStream {
     prefix: std::collections::VecDeque<QueuedLiveTerminalEvent>,
@@ -926,8 +926,8 @@ fn session_reader_loop(
                     .get(&terminal_id)
                     .cloned();
                 if let Some(sender) = sender {
-                    let _ = sender
-                        .try_send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Raw(event)));
+                    let _ =
+                        sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Raw(event)));
                 }
                 continue;
             }
@@ -974,11 +974,10 @@ fn session_reader_loop(
                 let Ok(push) = serde_json::from_str::<TerminalPush>(params.get()) else {
                     continue;
                 };
-                // Blocking send: a slow GUI backpressures the PTY through the
-                // whole chain (socket -> server session writer -> worker
-                // fanout) instead of dropping output. A terminal without a
-                // registered consumer (not attached / detached) is skipped;
-                // the server replay ring remains the resync source.
+                // A slow GUI backpressures the PTY through the whole chain
+                // (socket -> server session writer -> worker fanout) instead
+                // of dropping output. A terminal without a registered
+                // consumer (not attached / detached) is skipped.
                 let sender = terminal_channels
                     .lock()
                     .expect("terminal channels poisoned")
@@ -987,7 +986,7 @@ fn session_reader_loop(
                 let Some(sender) = sender else {
                     continue;
                 };
-                let _ = sender.try_send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Wire(
+                let _ = sender.send(QueuedLiveTerminalEvent::new(LiveTerminalEvent::Wire(
                     push.event,
                 )));
             }

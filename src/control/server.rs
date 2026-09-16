@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::PathBuf;
 use std::sync::{
@@ -100,11 +100,21 @@ impl Session {
         }
     }
 
-    /// Queues a push; returns false when the writer stopped (connection
-    /// closed or its bounded queue is full) so callers can drop the item
-    /// without blocking.
+    /// Queues a control/message push without silently dropping it. Terminal
+    /// pumps use the interruptible variant below; ordinary control frames
+    /// must remain ordered even when the writer queue is temporarily full.
     fn push(&self, item: SessionWriterItem) -> bool {
-        self.is_open() && self.writer_tx.try_send(item).is_ok()
+        self.push_blocking(item, None)
+    }
+
+    /// Model snapshots are latest-wins and may be skipped while the writer is
+    /// busy; the next model revision remains authoritative.
+    fn push_snapshot(&self, snapshot: ModelSnapshot) -> bool {
+        self.is_open()
+            && self
+                .writer_tx
+                .try_send(SessionWriterItem::Snapshot(snapshot))
+                .is_ok()
     }
 
     fn is_open(&self) -> bool {
@@ -179,11 +189,6 @@ enum SessionWriterItem {
     Message(WireMessage),
     /// Ordered live terminal data-plane frame. Kept raw until the writer so
     /// the hot path never expands bytes through Base64/JSON.
-    Terminal(QueuedTerminalEvent),
-}
-
-enum PendingSessionMessage {
-    Json(WireMessage),
     Terminal(QueuedTerminalEvent),
 }
 
@@ -328,8 +333,7 @@ impl ControlServer {
                                 for session in
                                     state.sessions.lock().expect("sessions poisoned").values()
                                 {
-                                    if !session.push(SessionWriterItem::Snapshot(snapshot.clone()))
-                                    {
+                                    if !session.push_snapshot(snapshot.clone()) {
                                         break;
                                     }
                                 }
@@ -939,58 +943,40 @@ fn session_writer(
     compact_snapshots: bool,
 ) {
     // Messages (handshakes, forwarded UI requests, ordered `push.terminal`
-    // frames) must reach the wire in arrival order; they are never
-    // coalesced. Snapshots are latest-wins: at most one per flush, written
-    // after the messages so terminal stream order is untouched.
-    let mut pending_messages: VecDeque<PendingSessionMessage> = VecDeque::new();
+    // frames) are written one at a time in arrival order. Do not drain the
+    // bounded channel into an unbounded VecDeque: that would make a slow
+    // socket retain every PTY event despite the upstream backpressure.
+    // Snapshots are latest-wins and may wait behind ordered frames.
     let mut pending_snapshot: Option<ModelSnapshot> = None;
     loop {
         match rx.recv_timeout(SESSION_FLUSH_INTERVAL) {
-            Ok(item) => queue_item(item, &mut pending_messages, &mut pending_snapshot),
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(_) => {}
-        }
-        while let Ok(item) = rx.try_recv() {
-            queue_item(item, &mut pending_messages, &mut pending_snapshot);
-        }
-        if pending_messages.is_empty() && pending_snapshot.is_none() {
-            continue;
-        }
-        while let Some(message) = pending_messages.pop_front() {
-            let result = match message {
-                PendingSessionMessage::Json(message) => write_frame(&mut stream, &message),
-                PendingSessionMessage::Terminal(queued) => {
-                    write_terminal_frame(&mut stream, queued.terminal_id, &queued.event)
+            Ok(SessionWriterItem::Snapshot(snapshot)) => {
+                pending_snapshot = Some(snapshot);
+            }
+            Ok(SessionWriterItem::Message(message)) => {
+                if write_frame(&mut stream, &message).is_err() {
+                    return;
                 }
-            };
-            if result.is_err() {
+            }
+            Ok(SessionWriterItem::Terminal(queued)) => {
+                if write_terminal_frame(&mut stream, queued.terminal_id, &queued.event).is_err() {
+                    return;
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                if let Some(snapshot) = pending_snapshot.take() {
+                    let _ = write_snapshot_frame(&mut stream, &snapshot, compact_snapshots);
+                }
                 return;
             }
-        }
-        if let Some(snapshot) = pending_snapshot.take() {
-            if write_snapshot_frame(&mut stream, &snapshot, compact_snapshots).is_err() {
-                return;
+            Err(RecvTimeoutError::Timeout) => {
+                if let Some(snapshot) = pending_snapshot.take() {
+                    if write_snapshot_frame(&mut stream, &snapshot, compact_snapshots).is_err() {
+                        return;
+                    }
+                    crate::metrics::inc(crate::metrics::model_snapshot_pushes());
+                }
             }
-            crate::metrics::inc(crate::metrics::model_snapshot_pushes());
-        }
-    }
-}
-
-#[cfg(unix)]
-fn queue_item(
-    item: SessionWriterItem,
-    pending_messages: &mut VecDeque<PendingSessionMessage>,
-    pending_snapshot: &mut Option<ModelSnapshot>,
-) {
-    match item {
-        SessionWriterItem::Message(message) => {
-            pending_messages.push_back(PendingSessionMessage::Json(message));
-        }
-        SessionWriterItem::Terminal(queued) => {
-            pending_messages.push_back(PendingSessionMessage::Terminal(queued));
-        }
-        SessionWriterItem::Snapshot(snapshot) => {
-            *pending_snapshot = Some(snapshot);
         }
     }
 }
@@ -1076,7 +1062,6 @@ mod tests {
 
     #[test]
     fn snapshot_items_coalesce_to_the_latest_revision() {
-        let mut messages: VecDeque<PendingSessionMessage> = VecDeque::new();
         let mut snapshot: Option<ModelSnapshot> = None;
         for revision in [1_u64, 2, 3] {
             let state = crate::app::StateDump {
@@ -1087,42 +1072,26 @@ mod tests {
                 focused_pane: None,
                 agents: Vec::new(),
             };
-            queue_item(
-                SessionWriterItem::Snapshot(state),
-                &mut messages,
-                &mut snapshot,
-            );
+            snapshot = Some(state);
         }
-        assert!(messages.is_empty());
         assert_eq!(snapshot.as_ref().unwrap().state_revision, 3);
     }
 
     #[test]
     fn terminal_messages_keep_arrival_order() {
-        let mut messages: VecDeque<PendingSessionMessage> = VecDeque::new();
-        let mut snapshot: Option<ModelSnapshot> = None;
+        let mut messages = Vec::new();
         for seq in 1..=4u64 {
             let event = crate::terminal::TerminalStreamEvent::Resize {
                 seq,
                 size: crate::terminal::TerminalSize::new(80, 24),
             };
-            queue_item(
-                SessionWriterItem::Terminal(QueuedTerminalEvent::new(
-                    crate::ids::TerminalId::new(1),
-                    event,
-                )),
-                &mut messages,
-                &mut snapshot,
-            );
+            messages.push(QueuedTerminalEvent::new(
+                crate::ids::TerminalId::new(1),
+                event,
+            ));
         }
         assert_eq!(messages.len(), 4);
-        let seqs: Vec<u64> = messages
-            .iter()
-            .filter_map(|message| match message {
-                PendingSessionMessage::Terminal(queued) => Some(queued.event.seq()),
-                PendingSessionMessage::Json(_) => None,
-            })
-            .collect();
+        let seqs: Vec<u64> = messages.iter().map(|queued| queued.event.seq()).collect();
         assert_eq!(seqs, vec![1, 2, 3, 4]);
     }
 

@@ -254,9 +254,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut current_size = size;
     let mut current_cell_width = 0u16;
     let mut current_cell_height = 0u16;
-    // Attached client fanout. A slow or dead client backpressures the PTY
-    // (blocking send) or is dropped (disconnected channel) — never the other
-    // way around; events are already in the replay ring either way.
+    // Attached client fanout. A slow client backpressures the PTY rather than
+    // dropping bytes. A disconnected receiver is removed on the next event.
     let mut subscribers: Vec<SyncSender<TerminalStreamEvent>> = Vec::new();
 
     let poller = match Poller::new() {
@@ -784,13 +783,14 @@ fn publish_raw_output(
     registry.publish_output(terminal_id, bytes);
 }
 
-/// Sends an event to every attached client.
+/// Sends an event to every attached client without losing a PTY event.
 ///
-/// A slow consumer is detached once its bounded queue is full. The replay
-/// ring remains the resync source; dropping the subscriber is important because
-/// a blocking fanout would prevent terminal shutdown from joining its worker.
+/// The bounded channel is an intentional backpressure boundary: once it is
+/// full, the PTY reader eventually pauses instead of creating an unbounded
+/// queue or a sequence gap. A disconnected receiver is the only reason a
+/// subscriber is removed.
 fn fanout(subscribers: &mut Vec<SyncSender<TerminalStreamEvent>>, event: &TerminalStreamEvent) {
-    subscribers.retain(|sender| sender.try_send(event.clone()).is_ok());
+    subscribers.retain(|sender| sender.send(event.clone()).is_ok());
 }
 
 fn write_pending_input(pending: &mut Vec<u8>, pty: &mut Pty) -> io::Result<()> {
@@ -1742,5 +1742,21 @@ mod tests {
         assert_eq!(free_rx.try_recv().unwrap().len(), 0);
         assert_eq!(free_rx.try_recv().unwrap().len(), 0);
         assert!(free_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fanout_backpressures_a_slow_subscriber_without_dropping_events() {
+        let size = TerminalSize::new(80, 24);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut subscribers = vec![sender];
+        let first = TerminalStreamEvent::Resize { seq: 1, size };
+        let second = TerminalStreamEvent::Resize { seq: 2, size };
+
+        fanout(&mut subscribers, &first);
+        let handle = std::thread::spawn(move || fanout(&mut subscribers, &second));
+
+        assert_eq!(receiver.recv().unwrap().seq(), 1);
+        handle.join().unwrap();
+        assert_eq!(receiver.recv().unwrap().seq(), 2);
     }
 }
