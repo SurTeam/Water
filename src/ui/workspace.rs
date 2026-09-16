@@ -651,6 +651,10 @@ struct TerminalImagePaint {
 #[derive(Clone, PartialEq)]
 struct TerminalRenderCacheKey {
     terminal_id: TerminalId,
+    /// The grid dimensions can change during the initial size handshake
+    /// without changing the stream revision. They affect which rows need to
+    /// be prepared, including a newly exposed bottom prompt row.
+    size: TerminalSize,
     snapshot_revision: u64,
     viewport_position: i64,
     /// The focused cursor is baked into its row's colors. Keep its position
@@ -670,6 +674,7 @@ struct TerminalRenderCacheKey {
 impl TerminalRenderCacheKey {
     fn rows_compatible_with(&self, other: &Self) -> bool {
         self.terminal_id == other.terminal_id
+            && self.size == other.size
             && self.font_family == other.font_family
             && self.font_size_bits == other.font_size_bits
             && self.metrics == other.metrics
@@ -7974,6 +7979,7 @@ impl gpui::Element for TerminalRenderElement {
             .and_then(|selection| selection_bounds(&self.snapshot, selection));
         let cache_key = TerminalRenderCacheKey {
             terminal_id: self.snapshot.terminal_id,
+            size: self.snapshot.size,
             snapshot_revision: self.snapshot.revision,
             viewport_position: self.snapshot.viewport_position,
             focused_cursor: (self.options.cursor_focused && self.snapshot.cursor.visible)
@@ -9784,6 +9790,32 @@ mod tests {
         assert_eq!(previous_cached_source_row(0, 11, 10), Some(-1));
         assert_eq!(previous_cached_source_row(5, 11, 10), Some(4));
         assert_eq!(previous_cached_source_row(-2, 9, 10), Some(-1));
+    }
+
+    #[test]
+    fn terminal_render_cache_invalidates_when_grid_size_changes() {
+        let key = TerminalRenderCacheKey {
+            terminal_id: TerminalId::new(1),
+            size: TerminalSize::new(80, 24),
+            snapshot_revision: 7,
+            viewport_position: 0,
+            focused_cursor: None,
+            font_family: "monospace".to_owned(),
+            font_size_bits: 13.0_f32.to_bits(),
+            metrics: TerminalMetrics::default(),
+            theme: AppConfig::default().theme.colors(),
+            cursor_focused: false,
+            selection: None,
+            bounds_origin_x_bits: 0.0_f32.to_bits(),
+            bounds_width_bits: 640.0_f32.to_bits(),
+        };
+        let resized = TerminalRenderCacheKey {
+            size: TerminalSize::new(80, 25),
+            ..key.clone()
+        };
+
+        assert!(key != resized);
+        assert!(!key.rows_compatible_with(&resized));
     }
 
     #[test]
