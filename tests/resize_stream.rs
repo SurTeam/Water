@@ -190,7 +190,7 @@ fn resize_drains_pending_output_before_the_resize_event() {
 #[test]
 fn detach_then_reattach_replays_history_and_resumes_live() {
     use water::app::ModelHost;
-    use water::control::{ControlServer, connect_water_session};
+    use water::control::{ControlClient, ControlServer, connect_water_session};
     use water::terminal::WireTerminalEvent;
     use water::terminal::decode_base64;
     use water::ui::ui_control_channel;
@@ -251,6 +251,7 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
 
     let (ui_client, _ui_rx) = ui_control_channel();
     let session = connect_water_session(&socket, ui_client).unwrap();
+    let metrics_client = ControlClient::new(&socket);
 
     // Phase 1: attach, observe marker A, then detach.
     let (_response, mut stream) = session.attach(terminal_id).unwrap();
@@ -264,6 +265,29 @@ fn detach_then_reattach_replays_history_and_resumes_live() {
         }
     }
     session.detach(terminal_id);
+    drop(stream);
+
+    // Detach must cancel the server-side pump too. In particular, the current
+    // queue gauges must settle even though the terminal itself keeps running.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let metrics = metrics_client.metrics().unwrap();
+        let server_events = metrics
+            .get("terminal_server_queue_events")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        let server_bytes = metrics
+            .get("terminal_server_queue_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default();
+        assert!(
+            server_events == 0 && server_bytes == 0 || Instant::now() < deadline,
+            "server terminal queue did not drain after detach: events={server_events}, bytes={server_bytes}"
+        );
+        if server_events == 0 && server_bytes == 0 {
+            break;
+        }
+    }
 
     // The terminal keeps running while the GUI is detached: wait for marker B
     // through the server-side lifecycle path, not the stream.

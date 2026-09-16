@@ -45,11 +45,11 @@ const MAX_COMMANDS_PER_TICK: usize = 64;
 const MAX_PENDING_METADATA_PROBES: usize = 64;
 /// One tick of the worker loop will coalesce at most this much PTY output
 /// before yielding to command processing.
-const MAX_PTY_BYTES_PER_TICK: usize = 16 * 1024 * 1024;
-/// In-flight block ceiling (512 x 128KiB = 64MiB): a large burst must not
-/// backpressure the writer down to our fanout rate, while keeping allocation
-/// bounded and every consumed block reusable by the reader.
-const READER_CHANNEL_CAPACITY: usize = 512;
+const MAX_PTY_BYTES_PER_TICK: usize = 4 * 1024 * 1024;
+/// In-flight block ceiling (64 x 128KiB = 8MiB). A large burst remains
+/// bounded, and the worker can still drain faster than normal interactive
+/// output without retaining tens of megabytes per terminal.
+const READER_CHANNEL_CAPACITY: usize = 64;
 /// After a successful read, the reader keeps spin-reading for this bounded
 /// window to catch a microsecond-scale refill without another poller round
 /// trip. An empty readiness wake never enters this path.
@@ -254,9 +254,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     let mut current_size = size;
     let mut current_cell_width = 0u16;
     let mut current_cell_height = 0u16;
-    // Attached client fanout. A slow or dead client backpressures the PTY
-    // (blocking send) or is dropped (disconnected channel) — never the other
-    // way around; events are already in the replay ring either way.
+    // Attached client fanout. A slow client backpressures the PTY rather than
+    // dropping bytes. A disconnected receiver is removed on the next event.
     let mut subscribers: Vec<SyncSender<TerminalStreamEvent>> = Vec::new();
 
     let poller = match Poller::new() {
@@ -687,27 +686,33 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 }
                 // A final non-blocking drain avoids losing bytes that were
                 // already queued in the PTY when SIGCHLD arrived.
-                let mut final_batch = Vec::new();
-                let _ = drain_data(
-                    &pty_data_rx,
-                    &pty_free_tx,
-                    &parser_wakeup_pending,
-                    &mut final_batch,
-                    usize::MAX,
-                );
-                if !final_batch.is_empty() {
-                    publish_raw_output(
-                        terminal_id,
-                        current_size,
-                        &final_batch,
-                        &replay,
-                        &mut subscribers,
-                        &registry,
-                        &mut title_scanner,
-                        &mut last_title,
-                        &event_tx,
-                        event_wakeup.as_ref(),
-                    );
+                loop {
+                    let mut final_batch = Vec::new();
+                    let drain_effect = drain_data(
+                        &pty_data_rx,
+                        &pty_free_tx,
+                        &parser_wakeup_pending,
+                        &mut final_batch,
+                        MAX_PTY_BYTES_PER_TICK,
+                    )
+                    .unwrap_or(ReadEffect::Eof);
+                    if !final_batch.is_empty() {
+                        publish_raw_output(
+                            terminal_id,
+                            current_size,
+                            &final_batch,
+                            &replay,
+                            &mut subscribers,
+                            &registry,
+                            &mut title_scanner,
+                            &mut last_title,
+                            &event_tx,
+                            event_wakeup.as_ref(),
+                        );
+                    }
+                    if !matches!(drain_effect, ReadEffect::BudgetExhausted) {
+                        break;
+                    }
                 }
                 // Record the exit in the ordered stream, then fanout.
                 let seq = replay.finish(code);
@@ -778,12 +783,12 @@ fn publish_raw_output(
     registry.publish_output(terminal_id, bytes);
 }
 
-/// Sends an event to every attached client.
+/// Sends an event to every attached client without losing a PTY event.
 ///
-/// `SyncSender::send` blocks while the client queue is full: a slow client
-/// backpressures the PTY (tmux semantics) instead of dropping output. Only a
-/// disconnected receiver is dropped; the replay ring remains the resync
-/// source for any client that falls behind and re-attaches.
+/// The bounded channel is an intentional backpressure boundary: once it is
+/// full, the PTY reader eventually pauses instead of creating an unbounded
+/// queue or a sequence gap. A disconnected receiver is the only reason a
+/// subscriber is removed.
 fn fanout(subscribers: &mut Vec<SyncSender<TerminalStreamEvent>>, event: &TerminalStreamEvent) {
     subscribers.retain(|sender| sender.send(event.clone()).is_ok());
 }
@@ -1514,6 +1519,10 @@ fn kill_process_group(pty: &mut Pty) {
 /// This is the only terminal-escape knowledge the server keeps: it mirrors
 /// the vte parser's OSC 0/2 title rule (`OSC 0/2 ; <text>` terminated by
 /// BEL, CAN/SUB, or ESC) without a grid, cursor, or full VT state machine.
+/// Maximum retained params of one title OSC; longer corrupt tails are
+/// truncated from the front so `params` stays bounded per stream.
+const MAX_TITLE_PARAMS: usize = 2;
+
 struct TitleScanner {
     state: TitleState,
     params: Vec<Vec<u8>>,
@@ -1573,6 +1582,12 @@ impl TitleScanner {
                     0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {}
                     0x3b => {
                         self.params.push(std::mem::take(&mut self.param));
+                        // A title OSC has one selector plus one text param;
+                        // cap the vector so a corrupt, unterminated stream
+                        // cannot grow it without bound.
+                        if self.params.len() > MAX_TITLE_PARAMS {
+                            self.params.drain(..self.params.len() - MAX_TITLE_PARAMS);
+                        }
                     }
                     _ => {
                         if self.param.len() < MAX_TITLE_BYTES {
@@ -1727,5 +1742,21 @@ mod tests {
         assert_eq!(free_rx.try_recv().unwrap().len(), 0);
         assert_eq!(free_rx.try_recv().unwrap().len(), 0);
         assert!(free_rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn fanout_backpressures_a_slow_subscriber_without_dropping_events() {
+        let size = TerminalSize::new(80, 24);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let mut subscribers = vec![sender];
+        let first = TerminalStreamEvent::Resize { seq: 1, size };
+        let second = TerminalStreamEvent::Resize { seq: 2, size };
+
+        fanout(&mut subscribers, &first);
+        let handle = std::thread::spawn(move || fanout(&mut subscribers, &second));
+
+        assert_eq!(receiver.recv().unwrap().seq(), 1);
+        handle.join().unwrap();
+        assert_eq!(receiver.recv().unwrap().seq(), 2);
     }
 }

@@ -22,12 +22,16 @@ use super::TerminalTheme;
 #[cfg(feature = "gui")]
 use super::graphics::TerminalGraphics;
 use super::model::TerminalReplay;
-use super::snapshot::{TerminalProcessState, TerminalSize, TerminalSnapshot};
+use super::snapshot::{MAX_SCROLLBACK_LINES, TerminalProcessState, TerminalSize, TerminalSnapshot};
 use super::stream::{TerminalSeq, TerminalStreamEvent};
 
 const CLEAR_SCROLLBACK_SEQUENCE: &[u8] = b"\x1b[3J";
 const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?6;22c";
 const DEFAULT_GRAPHICS_CELL_SIZE: (u16, u16) = (8, 16);
+/// Browsing may temporarily retain more history than the normal configured
+/// limit, but it must remain finite so a pinned viewport cannot turn output
+/// into an unbounded grid.
+const PINNED_SCROLLBACK_LINES: usize = MAX_SCROLLBACK_LINES;
 
 /// How the emulator reacts to an applied event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +209,7 @@ impl TerminalEmulator {
         theme: TerminalTheme,
         scrollback_protected: bool,
     ) -> Self {
+        let scrollback_lines = scrollback_lines.clamp(1, MAX_SCROLLBACK_LINES);
         let (pty_write_tx, pty_write_rx) = std::sync::mpsc::channel();
         let live = Arc::new(AtomicBool::new(false));
         let window_size = Arc::new(Mutex::new(WindowSize {
@@ -325,12 +330,10 @@ impl TerminalEmulator {
         metrics::inc(metrics::processor_advances());
         metrics::add(metrics::terminal_bytes_advanced(), bytes.len());
         if self.viewport_pinned {
-            // Preserve the rows behind a browsing viewport even after the
-            // configured history limit is reached. The excess is deliberately
-            // temporary: the first downward scroll trims it back to the
-            // configured limit, so an idle live stream cannot permanently
-            // change the terminal's scrollback size.
-            self.term.grid_mut().update_history(usize::MAX);
+            // Preserve the rows behind a browsing viewport up to a finite
+            // limit. Once that limit is reached, old rows are evicted instead
+            // of allowing a pinned terminal to grow without bound.
+            self.term.grid_mut().update_history(PINNED_SCROLLBACK_LINES);
         }
         #[cfg(feature = "gui")]
         {
@@ -751,7 +754,7 @@ impl TerminalEmulator {
                 self.pinned_viewport = self.term.grid().display_offset() as i64;
             }
             self.viewport_pinned = true;
-            self.term.grid_mut().update_history(usize::MAX);
+            self.term.grid_mut().update_history(PINNED_SCROLLBACK_LINES);
         } else if self.viewport_pinned {
             // Only a pin->unpin transition keeps temporary rows above the
             // current (now released) viewport; a repeated SetPinned(false)
@@ -775,6 +778,20 @@ impl TerminalEmulator {
                     .rebase(shift, self.term.grid().topmost_line().0);
             }
         }
+    }
+
+    /// Changes the local history limit and immediately trims an unpinned grid.
+    /// The GUI sends this when focus or the aggregate terminal budget changes.
+    pub fn set_scrollback_lines(&mut self, lines: usize) {
+        let lines = lines.clamp(1, MAX_SCROLLBACK_LINES);
+        if self.scrollback_lines == lines {
+            return;
+        }
+        self.scrollback_lines = lines;
+        if !self.viewport_pinned {
+            self.trim_scrollback_to_configured_limit();
+        }
+        self.dirty = true;
     }
 
     pub fn set_scrollback_protected(&mut self, protected: bool) {
@@ -869,6 +886,71 @@ mod tests {
                 .trim_end(),
             "hello world"
         );
+    }
+
+    #[test]
+    fn continuous_large_output_reaches_the_final_state_without_input_wakeup() {
+        let size = TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(12), size, 128);
+        for seq in 1..=100_000u64 {
+            let effects = emulator.apply(&output(seq, format!("line {seq}\r\n").as_bytes(), size));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, EmulatorEffect::SequenceGap { .. }))
+            );
+        }
+        assert_eq!(emulator.last_seq(), 100_000);
+        assert!(
+            emulator
+                .snapshot(None)
+                .visible_text()
+                .contains("line 100000")
+        );
+    }
+
+    #[test]
+    fn ansi_parser_pressure_preserves_cursor_and_screen_transitions() {
+        let size = TerminalSize::new(40, 6);
+        let mut emulator = TerminalEmulator::new(TerminalId::new(13), size, 64);
+        let chunks = [
+            b"\x1b[31mred\x1b[0m\r".as_slice(),
+            b"progress 1%\x1b[K".as_slice(),
+            b"\r\x1b[2Kprogress 50%".as_slice(),
+            b"\x1b[2;4Hcursor move\x1b[1;1H".as_slice(),
+            b"\x1b[2J\x1b[Hfinal screen".as_slice(),
+        ];
+        for (index, bytes) in chunks.iter().enumerate() {
+            let effects = emulator.apply(&output(index as TerminalSeq + 1, bytes, size));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, EmulatorEffect::SequenceGap { .. }))
+            );
+        }
+        let text = emulator.snapshot(None).visible_text();
+        assert!(text.contains("final screen"));
+        assert!(!emulator.alternate_screen());
+    }
+
+    #[test]
+    fn scrolling_during_output_keeps_a_stable_viewport_with_finite_history() {
+        let size = TerminalSize::new(20, 4);
+        let configured_scrollback = 32;
+        let mut emulator = TerminalEmulator::new(TerminalId::new(14), size, configured_scrollback);
+        for seq in 1..=200u64 {
+            emulator.apply(&output(seq, format!("before {seq}\r\n").as_bytes(), size));
+        }
+        emulator.scroll_by(10);
+        emulator.set_viewport_pinned(true);
+        let before = emulator.snapshot(None).visible_text();
+        for seq in 201..=2_000u64 {
+            emulator.apply(&output(seq, format!("during {seq}\r\n").as_bytes(), size));
+        }
+        assert_eq!(emulator.snapshot(None).visible_text(), before);
+        assert!(emulator.history_len() <= MAX_SCROLLBACK_LINES as i64);
+        emulator.scroll_to_bottom();
+        assert!(emulator.history_len() <= configured_scrollback as i64);
     }
 
     #[test]

@@ -2645,6 +2645,26 @@ impl WorkspaceView {
         }
     }
 
+    /// Releases per-terminal render state after the terminal left the model.
+    /// Called from the application's detach path for the removed connection's
+    /// projection; other connections keep their own projections.
+    pub(crate) fn forget_closed_terminal(&mut self, terminal_id: TerminalId) {
+        self.terminal_snapshots.remove(&terminal_id);
+        self.scroll_accumulators.remove(&terminal_id);
+        self.mouse_scroll_animations.remove(&terminal_id);
+        self.render_caches
+            .lock()
+            .expect("terminal render caches poisoned")
+            .remove(&terminal_id);
+        self.terminal_bounds
+            .lock()
+            .expect("terminal bounds poisoned")
+            .remove(&terminal_id);
+        if self.selection.as_ref().is_some_and(|selection| selection.terminal_id == terminal_id) {
+            self.selection = None;
+        }
+    }
+
     fn active_terminal_id(&self) -> Option<TerminalId> {
         let focused_pane = self.focused_pane?;
         let workspace = self.selected_workspace_dump()?;
