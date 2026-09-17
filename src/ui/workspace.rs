@@ -4229,8 +4229,8 @@ impl WorkspaceView {
             WorkspaceConnectionKind::Remote => "SSH",
         };
         // The host card is the one large rounded rectangle: the host title
-        // is a plain text row at its top, separated from the workspaces
-        // below by a hairline; no card of its own and no background. Clicking
+        // is a plain text row at its top, with the workspaces below. There is
+        // no nested card or background. Clicking
         // switches to the host, never collapses. Double click or the
         // right-click menu toggles the fold.
         let connection_key = format!("c\u{1f}{}", connection_id);
@@ -4299,19 +4299,9 @@ impl WorkspaceView {
             }))
             .child(header);
         if collapsed {
-            // Folded host: only the title row, no hairline.
+            // Folded host: only the title row.
             return card.into_any_element();
         }
-        // Hairline under the host title; the space between it and the first
-        // workspace row is the host/workspace gap. Both disappear together
-        // when the host is folded.
-        card = card.child(
-            div()
-                .w_full()
-                .h(px(1.))
-                .flex_none()
-                .bg(rgb(theme.inactive_pane_border)),
-        );
         let mut body = div()
             .w_full()
             .mt(px(self.config.ui.sidebar_host_workspace_gap))

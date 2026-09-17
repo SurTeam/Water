@@ -51,8 +51,8 @@ pub const DEFAULT_SIDEBAR_AGENT_ROW_GAP: f32 = 1.0;
 pub const DEFAULT_SIDEBAR_AGENT_PADDING: f32 = 4.0;
 pub const DEFAULT_SIDEBAR_AGENT_ROW_HEIGHT: f32 = 28.0;
 pub const DEFAULT_SIDEBAR_HOST_HEADER_HEIGHT: f32 = 28.0;
-/// Gap between the host title's bottom hairline and the first workspace row
-/// inside the host card (the card gap is not used there).
+/// Gap between the host title and the first workspace row inside the host card
+/// (the card gap is not used there).
 pub const DEFAULT_SIDEBAR_HOST_WORKSPACE_GAP: f32 = 6.0;
 pub const DEFAULT_SIDEBAR_AGENT_ROW_WIDTH: f32 = 0.8;
 pub const DEFAULT_SIDEBAR_WORKSPACE_GAP: f32 = 2.0;
@@ -540,8 +540,8 @@ pub struct UiConfig {
     /// Derived from the default UI font size (28 ≈ 2 × 14) but editable as
     /// a plain pixel value in the settings.
     pub sidebar_host_header_height: f32,
-    /// Vertical gap between the host title hairline and the first workspace
-    /// row inside the host card.
+    /// Vertical gap between the host title and the first workspace row inside
+    /// the host card.
     pub sidebar_host_workspace_gap: f32,
     /// Agent row width as a fraction of the workspace row width (1.0 for the
     /// same width); the row is centered on the workspace row.
