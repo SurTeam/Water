@@ -10,10 +10,12 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontFeatures, InputHandler, KeyDownEvent, Keystroke,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
-    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
-    WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window, anchored,
+    canvas, deferred, div, fill, font, outline, point, prelude::*, px, relative, rgb, rgba, size,
 };
+
+#[cfg(not(target_os = "macos"))]
+use gpui::WindowControlArea;
 
 use crate::agent::AgentKind;
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
@@ -56,9 +58,14 @@ const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 /// Pixels to move the sidebar per captured pointer move near an edge.
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
 /// Leading titlebar width used when the sidebar is collapsed. It keeps the
-/// tab strip from jumping all the way to the window edge when the controls
-/// still occupy the left side of the titlebar.
+/// tab strip clear of the native macOS traffic lights (or the fallback
+/// controls used on platforms without them).
 const COLLAPSED_TITLEBAR_LEADING_WIDTH: f32 = 112.0;
+/// Approximate width reserved for the three native macOS traffic lights.
+/// Native buttons are kept outside the GPUI layout, so this spacer prevents
+/// the sidebar toggle and first tab from being placed underneath them.
+#[cfg(target_os = "macos")]
+const NATIVE_TITLEBAR_CONTROLS_WIDTH: f32 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceConnectionKind {
@@ -380,6 +387,13 @@ struct TerminalSelection {
     terminal_id: TerminalId,
     anchor: TerminalSelectionEndpoint,
     head: TerminalSelectionEndpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalMultiClickState {
+    terminal_id: TerminalId,
+    position: TerminalCellPosition,
+    selection_level: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -999,6 +1013,7 @@ pub struct WorkspaceView {
     selection_autoscroll: Option<TerminalSelectionAutoscroll>,
     selection_autoscroll_frame_pending: bool,
     selection: Option<TerminalSelection>,
+    last_terminal_multi_click: Option<TerminalMultiClickState>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
     ime_selected_range: Range<usize>,
@@ -1132,6 +1147,7 @@ impl WorkspaceView {
             selection_autoscroll: None,
             selection_autoscroll_frame_pending: false,
             selection: None,
+            last_terminal_multi_click: None,
             ime_terminal: None,
             ime_marked_text: String::new(),
             ime_selected_range: 0..0,
@@ -3392,6 +3408,7 @@ impl WorkspaceView {
         terminal_id: TerminalId,
         position: Point<gpui::Pixels>,
         shift_held: bool,
+        click_count: usize,
         cx: &mut Context<Self>,
     ) {
         if !self.config.features.selection {
@@ -3400,15 +3417,64 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        let previous_multi_click = self.last_terminal_multi_click;
+        let same_multi_click_target = previous_multi_click.is_some_and(|state| {
+            state.terminal_id == terminal_id && state.position == endpoint.position
+        });
+        if click_count == 1 && (!same_multi_click_target || self.selection.is_none()) {
+            self.last_terminal_multi_click = None;
+        }
+        let selection_level = if click_count >= 2 {
+            let natural_level = terminal_selection_level_for_click_count(click_count);
+            if click_count % 2 == 0 && same_multi_click_target && self.selection.is_some() {
+                previous_multi_click
+                    .map(|state| state.selection_level.saturating_add(1))
+                    .unwrap_or(natural_level)
+                    .max(natural_level)
+            } else {
+                natural_level
+            }
+        } else {
+            0
+        };
         self.clear_ime();
-        self.selection = Some(terminal_selection_after_click(
-            self.selection,
-            terminal_id,
-            endpoint,
-            shift_held,
-        ));
+        self.selection = Some(if click_count >= 2 {
+            self.terminal_snapshot_for(terminal_id)
+                .map(|snapshot| {
+                    terminal_selection_after_double_click(
+                        snapshot,
+                        terminal_id,
+                        endpoint,
+                        selection_level,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    terminal_selection_after_click(
+                        self.selection,
+                        terminal_id,
+                        endpoint,
+                        shift_held,
+                    )
+                })
+        } else {
+            terminal_selection_after_click(self.selection, terminal_id, endpoint, shift_held)
+        });
         self.selection_autoscroll = None;
-        self.dragging_terminal = Some(terminal_id);
+        // A multi-click creates a complete local selection. Do not let a
+        // later press turn the following pointer movement into a drag; a
+        // fresh single click is still the way to begin a regular drag
+        // selection.
+        self.dragging_terminal = (click_count == 1).then_some(terminal_id);
+        if click_count >= 2 {
+            // The native click count may restart at one for a later double
+            // click. Keep the completed layer so that a new pair on the same
+            // cell continues expanding instead of starting over.
+            self.last_terminal_multi_click = Some(TerminalMultiClickState {
+                terminal_id,
+                position: endpoint.position,
+                selection_level,
+            });
+        }
         cx.notify();
     }
 
@@ -3448,6 +3514,7 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        let mut changed = false;
         if let Some(selection) = self
             .selection
             .as_mut()
@@ -3455,6 +3522,10 @@ impl WorkspaceView {
             && selection.head != endpoint
         {
             selection.head = endpoint;
+            changed = true;
+        }
+        if changed {
+            self.last_terminal_multi_click = None;
             cx.notify();
         }
     }
@@ -3600,6 +3671,7 @@ impl WorkspaceView {
             // final move event, so do not leave the copied range one cell
             // behind the pointer.
             selection.head = endpoint;
+            self.last_terminal_multi_click = None;
             cx.notify();
         }
         self.dragging_terminal = None;
@@ -5733,6 +5805,7 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn render_titlebar_control(
         &self,
         color: u32,
@@ -5904,24 +5977,35 @@ impl WorkspaceView {
     }
 
     fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        let controls = div()
+            .h_full()
+            .w(px(NATIVE_TITLEBAR_CONTROLS_WIDTH))
+            .flex_none()
+            .into_any_element();
+
+        #[cfg(not(target_os = "macos"))]
         let close = self.render_titlebar_control(
             0xff5f57,
             WindowControlArea::Close,
             |_, _event, window, _cx| window.remove_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let minimize = self.render_titlebar_control(
             0xfebc2e,
             WindowControlArea::Min,
             |_, _event, window, _cx| window.minimize_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let maximize = self.render_titlebar_control(
             0x28c840,
             WindowControlArea::Max,
             |_, _event, window, _cx| window.zoom_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let controls = div()
             .h_full()
             .gap(px(self.config.ui.titlebar_gap))
@@ -5998,9 +6082,10 @@ impl WorkspaceView {
             .px(px(0.))
             .items_center()
             .flex()
-            // The titlebar owns its drag gesture explicitly below. Only the
-            // three control hitboxes use WindowControlArea so they are not
-            // shadowed by a full-width Drag hitbox.
+            // The titlebar owns its drag gesture explicitly below. On macOS,
+            // the native traffic lights sit above this client-side surface;
+            // on other platforms the fallback controls stop propagation so
+            // they are not shadowed by the full-width drag hitbox.
             .bg(rgb(theme.chrome_background))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down_out(cx.listener(|this, _event, _window, _cx| {
@@ -6275,6 +6360,7 @@ impl WorkspaceView {
                                         terminal_id,
                                         event.position,
                                         event.modifiers.shift,
+                                        event.click_count,
                                         cx,
                                     );
                                 }
@@ -8072,6 +8158,336 @@ fn terminal_selection_after_click(
         anchor: endpoint,
         head: endpoint,
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSelectionWordClass {
+    Whitespace,
+    Cjk,
+    Alphanumeric,
+    Punctuation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalSelectionSegment {
+    start: usize,
+    end: usize,
+    class: TerminalSelectionWordClass,
+    contiguous_from_previous: bool,
+}
+
+/// Build the local selection produced by a terminal double-click.
+///
+/// Selection is deliberately local: whitespace, punctuation, alphanumeric
+/// text, and CJK text are separate runs. This keeps a double-click on an
+/// `ls` row from selecting the entire logical line, while still allowing a
+/// wrapped word to be selected across painted rows. Each subsequent
+/// multi-click expands across one more punctuation-separated segment.
+fn terminal_selection_after_double_click(
+    snapshot: &TerminalSnapshot,
+    terminal_id: TerminalId,
+    endpoint: TerminalSelectionEndpoint,
+    selection_level: usize,
+) -> TerminalSelection {
+    let selection = terminal_word_bounds(snapshot, endpoint.position, selection_level).and_then(
+        |(start, end)| {
+            let start = terminal_endpoint_at_linear_index(
+                start,
+                snapshot.size.columns,
+                TerminalSelectionSide::Left,
+            )?;
+            let head = terminal_endpoint_at_linear_index(
+                end.saturating_sub(1),
+                snapshot.size.columns,
+                TerminalSelectionSide::Right,
+            )?;
+            Some(TerminalSelection {
+                terminal_id,
+                anchor: start,
+                head,
+            })
+        },
+    );
+
+    selection.unwrap_or(TerminalSelection {
+        terminal_id,
+        anchor: endpoint,
+        head: endpoint,
+    })
+}
+
+fn terminal_selection_level_for_click_count(click_count: usize) -> usize {
+    click_count.saturating_sub(2) / 2
+}
+
+fn terminal_word_bounds(
+    snapshot: &TerminalSnapshot,
+    position: TerminalCellPosition,
+    selection_level: usize,
+) -> Option<(i64, i64)> {
+    let columns = snapshot.size.columns;
+    if columns == 0 {
+        return None;
+    }
+    let (first_row, last_row) = terminal_logical_line_rows(snapshot, position.row)?;
+    let line_start = i64::from(first_row) * columns as i64;
+    let line_end = (i64::from(last_row) + 1) * columns as i64;
+    let clicked = i64::from(position.row) * columns as i64 + position.column as i64;
+
+    let characters = (line_start..line_end)
+        .filter_map(|index| {
+            terminal_cell_at_linear_index(snapshot, index).and_then(|cell| {
+                terminal_selectable_cell_character(cell).map(|character| (index, character))
+            })
+        })
+        .collect::<Vec<_>>();
+    if characters.is_empty() {
+        return None;
+    }
+
+    let clicked_character = terminal_selection_character_index(snapshot, &characters, clicked)?;
+    let segments = terminal_selection_segments(snapshot, &characters);
+    let clicked_segment = segments
+        .iter()
+        .position(|segment| (segment.start..segment.end).contains(&clicked_character))?;
+
+    let mut first_segment = clicked_segment;
+    let mut last_segment = clicked_segment;
+    for _ in 0..selection_level {
+        let next_first = terminal_selection_expand_left(&segments, first_segment);
+        let next_last = terminal_selection_expand_right(&segments, last_segment);
+        if next_first.is_none() && next_last.is_none() {
+            break;
+        }
+        if let Some(next_first) = next_first {
+            first_segment = next_first;
+        }
+        if let Some(next_last) = next_last {
+            last_segment = next_last;
+        }
+    }
+
+    let start = characters[segments[first_segment].start].0;
+    let end = characters[segments[last_segment].end - 1]
+        .0
+        .saturating_add(1);
+    Some((start, end))
+}
+
+fn terminal_logical_line_rows(snapshot: &TerminalSnapshot, row: i32) -> Option<(i32, i32)> {
+    let first_available = -(snapshot.rows_before.len() as i32);
+    let last_available = i32::try_from(
+        snapshot
+            .size
+            .lines
+            .saturating_add(snapshot.rows_after.len()),
+    )
+    .ok()?
+    .checked_sub(1)?;
+    if !(first_available..=last_available).contains(&row) {
+        return None;
+    }
+
+    let mut first = row;
+    while first > first_available && terminal_row_wraps_to_next(snapshot, first - 1) {
+        first -= 1;
+    }
+    let mut last = row;
+    while last < last_available && terminal_row_wraps_to_next(snapshot, last) {
+        last += 1;
+    }
+    Some((first, last))
+}
+
+fn terminal_row_wraps_to_next(snapshot: &TerminalSnapshot, row: i32) -> bool {
+    snapshot
+        .relative_row(row)
+        .and_then(|cells| cells.last())
+        .is_some_and(|cell| cell.flags.wrapline())
+}
+
+fn terminal_selectable_cell_character(cell: &TerminalCell) -> Option<char> {
+    (cell.character != TERMINAL_IMAGE_PLACEHOLDER
+        && !cell.flags.wide_spacer()
+        && !cell.flags.leading_wide_spacer())
+    .then_some(cell.character)
+}
+
+fn terminal_selection_character_index(
+    snapshot: &TerminalSnapshot,
+    characters: &[(i64, char)],
+    clicked: i64,
+) -> Option<usize> {
+    if let Some(index) = characters.iter().position(|(index, _)| *index == clicked) {
+        return Some(index);
+    }
+
+    let clicked_cell = terminal_cell_at_linear_index(snapshot, clicked)?;
+    let adjacent = if clicked_cell.flags.wide_spacer() {
+        clicked.checked_sub(1)
+    } else if clicked_cell.flags.leading_wide_spacer() {
+        clicked.checked_add(1)
+    } else {
+        None
+    }?;
+    characters.iter().position(|(index, _)| *index == adjacent)
+}
+
+fn terminal_selection_segments(
+    snapshot: &TerminalSnapshot,
+    characters: &[(i64, char)],
+) -> Vec<TerminalSelectionSegment> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for end in 1..=characters.len() {
+        let split = end == characters.len()
+            || terminal_selection_word_class(characters[end - 1].1)
+                != terminal_selection_word_class(characters[end].1)
+            || !terminal_selection_cells_are_adjacent(
+                snapshot,
+                characters[end - 1].0,
+                characters[end].0,
+            );
+        if !split {
+            continue;
+        }
+
+        segments.push(TerminalSelectionSegment {
+            start,
+            end,
+            class: terminal_selection_word_class(characters[start].1),
+            contiguous_from_previous: start > 0
+                && terminal_selection_cells_are_adjacent(
+                    snapshot,
+                    characters[start - 1].0,
+                    characters[start].0,
+                ),
+        });
+        start = end;
+    }
+    segments
+}
+
+fn terminal_selection_expand_left(
+    segments: &[TerminalSelectionSegment],
+    first_segment: usize,
+) -> Option<usize> {
+    let current = segments.get(first_segment)?;
+    if current.class == TerminalSelectionWordClass::Whitespace {
+        return None;
+    }
+
+    if current.class == TerminalSelectionWordClass::Punctuation {
+        let previous_segment = first_segment
+            .checked_sub(1)
+            .and_then(|index| segments.get(index))?;
+        return (current.contiguous_from_previous
+            && terminal_selection_is_text_class(previous_segment.class))
+        .then_some(first_segment - 1);
+    }
+
+    let punctuation_index = first_segment.checked_sub(1)?;
+    let word_index = punctuation_index.checked_sub(1)?;
+    let punctuation = segments.get(punctuation_index)?;
+    let word = segments.get(word_index)?;
+    (current.contiguous_from_previous
+        && punctuation.contiguous_from_previous
+        && punctuation.class == TerminalSelectionWordClass::Punctuation
+        && terminal_selection_is_text_class(word.class))
+    .then_some(word_index)
+}
+
+fn terminal_selection_expand_right(
+    segments: &[TerminalSelectionSegment],
+    last_segment: usize,
+) -> Option<usize> {
+    let current = segments.get(last_segment)?;
+    if current.class == TerminalSelectionWordClass::Whitespace {
+        return None;
+    }
+
+    if current.class == TerminalSelectionWordClass::Punctuation {
+        let next_index = last_segment.checked_add(1)?;
+        let next = segments.get(next_index)?;
+        return (next.contiguous_from_previous && terminal_selection_is_text_class(next.class))
+            .then_some(next_index);
+    }
+
+    let punctuation_index = last_segment.checked_add(1)?;
+    let word_index = punctuation_index.checked_add(1)?;
+    let punctuation = segments.get(punctuation_index)?;
+    let word = segments.get(word_index)?;
+    (punctuation.class == TerminalSelectionWordClass::Punctuation
+        && word.contiguous_from_previous
+        && punctuation.contiguous_from_previous
+        && terminal_selection_is_text_class(word.class))
+    .then_some(word_index)
+}
+
+fn terminal_selection_is_text_class(class: TerminalSelectionWordClass) -> bool {
+    matches!(
+        class,
+        TerminalSelectionWordClass::Cjk | TerminalSelectionWordClass::Alphanumeric
+    )
+}
+
+fn terminal_selection_word_class(character: char) -> TerminalSelectionWordClass {
+    if character.is_whitespace() {
+        TerminalSelectionWordClass::Whitespace
+    } else if terminal_is_cjk_character(character) {
+        TerminalSelectionWordClass::Cjk
+    } else if character.is_alphanumeric() {
+        TerminalSelectionWordClass::Alphanumeric
+    } else {
+        TerminalSelectionWordClass::Punctuation
+    }
+}
+
+fn terminal_is_cjk_character(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x1100..=0x11ff
+            | 0x3040..=0x30ff
+            | 0x3130..=0x318f
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2fa1f
+    )
+}
+
+fn terminal_selection_cells_are_adjacent(
+    snapshot: &TerminalSnapshot,
+    left: i64,
+    right: i64,
+) -> bool {
+    match right.checked_sub(left) {
+        Some(1) => true,
+        Some(2) => left
+            .checked_add(1)
+            .and_then(|index| terminal_cell_at_linear_index(snapshot, index))
+            .is_some_and(|cell| cell.flags.wide_spacer() || cell.flags.leading_wide_spacer()),
+        _ => false,
+    }
+}
+
+fn terminal_endpoint_at_linear_index(
+    index: i64,
+    columns: usize,
+    side: TerminalSelectionSide,
+) -> Option<TerminalSelectionEndpoint> {
+    let columns = i64::try_from(columns).ok()?;
+    if columns == 0 {
+        return None;
+    }
+    Some(TerminalSelectionEndpoint {
+        position: TerminalCellPosition {
+            row: i32::try_from(index.div_euclid(columns)).ok()?,
+            column: usize::try_from(index.rem_euclid(columns)).ok()?,
+        },
+        side,
+    })
 }
 
 fn selection_bounds(
@@ -10488,6 +10904,136 @@ mod tests {
     }
 
     #[test]
+    fn double_click_selects_the_word_under_the_pointer() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(64, 1));
+        for (column, character) in "first sentence. second sentence!".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let first = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 4, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, first), "first");
+
+        let second = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 20, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, second), "second");
+
+        let punctuation = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 14, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, punctuation), ".");
+    }
+
+    #[test]
+    fn double_click_uses_spaces_cjk_boundaries_and_punctuation() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(32, 1));
+        for (column, character) in "中文English中文。".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let first = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 1, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, first), "中文");
+
+        let english = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 4, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, english), "English");
+
+        let second = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 10, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, second), "中文");
+
+        let punctuation = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 11, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, punctuation), "。");
+    }
+
+    #[test]
+    fn double_click_does_not_select_an_entire_ls_style_line() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(32, 1));
+        for (column, character) in "  echo hello world  ".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let selection = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 7, TerminalSelectionSide::Left),
+            0,
+        );
+        assert_eq!(selected_terminal_text(&snapshot, selection), "hello");
+    }
+
+    #[test]
+    fn repeated_double_click_expands_one_punctuation_layer_at_a_time() {
+        let terminal_id = TerminalId::new(1);
+        let line = "panther-cp1a.260405.005-factory-3d3f2f42.zip";
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(96, 1));
+        for (column, character) in line.chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+        let click_column = line.find("260405").unwrap() + 2;
+        let expected = [
+            "260405",
+            "cp1a.260405.005",
+            "panther-cp1a.260405.005-factory",
+            "panther-cp1a.260405.005-factory-3d3f2f42",
+            line,
+        ];
+
+        for (selection_level, expected) in expected.into_iter().enumerate() {
+            let selection = terminal_selection_after_double_click(
+                &snapshot,
+                terminal_id,
+                endpoint(0, click_column, TerminalSelectionSide::Left),
+                selection_level,
+            );
+            assert_eq!(selected_terminal_text(&snapshot, selection), expected);
+        }
+    }
+
+    #[test]
+    fn double_click_count_advances_selection_layer_per_pair() {
+        let expected_levels = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 1), (6, 2), (7, 2)];
+        for (click_count, expected_level) in expected_levels {
+            assert_eq!(
+                terminal_selection_level_for_click_count(click_count),
+                expected_level
+            );
+        }
+    }
+
+    #[test]
     fn selection_autoscroll_direction_is_edge_triggered() {
         assert_eq!(terminal_selection_autoscroll_direction(4.0, 200.0), Some(3));
         assert_eq!(
@@ -11532,7 +12078,7 @@ mod tests {
                     terminal_id,
                     Bounds::new(point(px(0.0), px(0.0)), size(px(640.0), px(384.0))),
                 );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -11633,7 +12179,7 @@ mod tests {
                 .entry(terminal_id)
                 .or_insert_with(|| TerminalScrollState::new(0))
                 .visual_unacked_rows = 2.5;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -11641,7 +12187,7 @@ mod tests {
                 selection.anchor.position.row, -2,
                 "a pixel in the shifted grid must map to the painted source row"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 -1,
@@ -11653,13 +12199,13 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 0.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 2,
                 "the mapping is viewport-relative without an unacked offset"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 1,
@@ -11672,7 +12218,7 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 2.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             assert!(
                 view.selection.unwrap().anchor.position.row < 0,
                 "a whole-row unacked offset must shift the mapping into history"

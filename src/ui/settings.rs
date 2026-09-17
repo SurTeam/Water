@@ -1,8 +1,10 @@
 use gpui::{
     AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Window, WindowControlArea, div, font, prelude::*,
-    px, rgb,
+    MouseMoveEvent, MouseUpEvent, SharedString, Window, div, font, prelude::*, px, rgb,
 };
+
+#[cfg(not(target_os = "macos"))]
+use gpui::WindowControlArea;
 
 use crate::agent::AgentKind;
 use crate::config::{AppConfig, ThemeConfig, is_valid_switch_tab_source, switch_tab_binding};
@@ -1249,24 +1251,31 @@ impl SettingsView {
         theme: crate::config::ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        let controls = div().h_full().w(px(60.)).flex_none().into_any_element();
+
+        #[cfg(not(target_os = "macos"))]
         let close = self.render_titlebar_control(
             0xff5f57,
             WindowControlArea::Close,
             |_, _event, window, _cx| window.remove_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let minimize = self.render_titlebar_control(
             0xfebc2e,
             WindowControlArea::Min,
             |_, _event, window, _cx| window.minimize_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let maximize = self.render_titlebar_control(
             0x28c840,
             WindowControlArea::Max,
             |_, _event, window, _cx| window.zoom_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let controls = div()
             .h_full()
             .gap(px(self.config.ui.titlebar_gap))
@@ -1406,6 +1415,7 @@ impl SettingsView {
             .into_any_element()
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn render_titlebar_control(
         &self,
         color: u32,

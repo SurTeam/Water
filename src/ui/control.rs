@@ -5,12 +5,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::control::ConnectionListResponse;
+
 const UI_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(crate) enum UiControlRequest {
     Click {
         position: (f32, f32),
+        click_count: usize,
         reply: Sender<Result<UiSnapshot, String>>,
     },
     Keystroke {
@@ -19,6 +22,9 @@ pub(crate) enum UiControlRequest {
     },
     Snapshot {
         reply: Sender<Result<UiSnapshot, String>>,
+    },
+    Connections {
+        reply: Sender<Result<ConnectionListResponse, String>>,
     },
     Screenshot {
         path: PathBuf,
@@ -83,9 +89,21 @@ pub fn ui_control_channel() -> (UiControlClient, UiControlReceiver) {
 
 impl UiControlClient {
     pub fn click(&self, position: (f32, f32)) -> Result<UiSnapshot, String> {
+        self.click_with_count(position, 1)
+    }
+
+    pub(crate) fn click_with_count(
+        &self,
+        position: (f32, f32),
+        click_count: usize,
+    ) -> Result<UiSnapshot, String> {
         let (reply, response) = mpsc::channel();
         self.sender
-            .send(UiControlRequest::Click { position, reply })
+            .send(UiControlRequest::Click {
+                position,
+                click_count,
+                reply,
+            })
             .map_err(|_| "UI control channel is unavailable".to_owned())?;
         response
             .recv_timeout(UI_CONTROL_TIMEOUT)
@@ -125,6 +143,16 @@ impl UiControlClient {
         let (reply, response) = mpsc::channel();
         self.sender
             .send(UiControlRequest::Snapshot { reply })
+            .map_err(|_| "UI control channel is unavailable".to_owned())?;
+        response
+            .recv_timeout(UI_CONTROL_TIMEOUT)
+            .map_err(|_| "timed out waiting for the GPUI thread".to_owned())?
+    }
+
+    pub fn connection_list(&self) -> Result<ConnectionListResponse, String> {
+        let (reply, response) = mpsc::channel();
+        self.sender
+            .send(UiControlRequest::Connections { reply })
             .map_err(|_| "UI control channel is unavailable".to_owned())?;
         response
             .recv_timeout(UI_CONTROL_TIMEOUT)

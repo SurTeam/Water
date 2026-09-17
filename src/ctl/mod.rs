@@ -15,7 +15,10 @@ use crate::command::{
     AppCommand, FocusDirection, OperationStatus, PaneCommand, SplitDirection, SurfaceCommand,
     TabCommand, TerminalCommand, WorkspaceCommand,
 };
-use crate::control::{ControlClient, default_socket_path};
+use crate::control::{
+    ClientInfoResponse, ConnectionListResponse, ControlClient, ControlInfoResponse,
+    default_socket_path,
+};
 use crate::ids::{PaneId, TabId, TerminalId, WorkspaceId};
 use crate::surface::{SurfaceKind, SurfaceState};
 use crate::terminal::{default_shell_args, default_shell_program};
@@ -25,6 +28,15 @@ use crate::terminal::{default_shell_args, default_shell_program};
 /// `main`.
 pub const SUBCOMMANDS: &[&str] = &[
     "state",
+    "info",
+    "version",
+    "--version",
+    "-V",
+    "client",
+    "connections",
+    "connection",
+    "sockets",
+    "socket",
     "ui",
     "server",
     "debug",
@@ -71,6 +83,12 @@ pub fn run(arguments: &[String]) -> Result<()> {
 fn dispatch(client: &ControlClient, arguments: &[String]) -> Result<()> {
     match arguments[0].as_str() {
         "state" => print_json(&client.state_dump().context("state request failed")?)?,
+        "info" => run_info(client)?,
+        "version" | "--version" | "-V" => print_json(&ClientInfoResponse::current())?,
+        "client" => run_client(client, &arguments[1..])?,
+        "connections" | "connection" | "sockets" | "socket" => {
+            run_connections(client, &arguments[1..])?
+        }
         "ui" => run_ui(client, &arguments[1..])?,
         "server" => run_server(client, &arguments[1..])?,
         "debug" => run_debug(client, &arguments[1..])?,
@@ -144,7 +162,15 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
             let y: f32 = optional_value(arguments, "--y")?
                 .context("ui click requires --y")?
                 .parse()?;
-            print_json(&client.ui_click(x, y).context("UI click failed")?)?;
+            let click_count = optional_value(arguments, "--click-count")?
+                .map(|value| value.parse::<usize>())
+                .transpose()?
+                .unwrap_or(1);
+            print_json(
+                &client
+                    .ui_click_with_count(x, y, click_count)
+                    .context("UI click failed")?,
+            )?;
         }
         Some(command) => bail!("unknown ui command: {command}"),
         None => bail!("ui requires key, state, screenshot, wheel, or click"),
@@ -165,12 +191,49 @@ fn run_debug(client: &ControlClient, arguments: &[String]) -> Result<()> {
 fn run_server(client: &ControlClient, arguments: &[String]) -> Result<()> {
     match arguments.first().map(String::as_str) {
         Some("info") => print_json(&client.server_info().context("server info request failed")?)?,
+        Some("version") => {
+            print_json(&client.server_info().context("server info request failed")?)?
+        }
+        Some("connections") | Some("connection") | Some("sockets") | Some("socket") => {
+            run_connections(client, &arguments[1..])?
+        }
         Some("shutdown") => {
             let _ = client.server_shutdown().context("server shutdown failed")?;
             println!("server shutdown requested");
         }
         Some(command) => bail!("unknown server command: {command}"),
         None => bail!("server requires info or shutdown"),
+    }
+    Ok(())
+}
+
+fn run_info(client: &ControlClient) -> Result<()> {
+    let server = client.server_info().context("server info request failed")?;
+    print_json(&ControlInfoResponse {
+        client: ClientInfoResponse::current(),
+        server,
+    })?;
+    Ok(())
+}
+
+fn run_client(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        None | Some("info") | Some("version") => print_json(&ClientInfoResponse::current())?,
+        Some("connections") | Some("connection") => run_connections(client, &arguments[1..])?,
+        Some(command) => bail!("unknown client command: {command}"),
+    }
+    Ok(())
+}
+
+fn run_connections(client: &ControlClient, arguments: &[String]) -> Result<()> {
+    match arguments.first().map(String::as_str) {
+        None | Some("list") => {
+            let connections: ConnectionListResponse = client
+                .connection_list()
+                .context("connection list request failed")?;
+            print_json(&connections)?;
+        }
+        Some(command) => bail!("unknown connection command: {command}"),
     }
     Ok(())
 }
@@ -897,11 +960,20 @@ fn print_usage() {
          The `ctl` prefix groups the control interface (a future `ctl2` prefix can\n\
          extend it). Every command also works without the prefix: `water state`,\n\
          `water ui key cmd-t`, ...\n\n\
+         Introspection:\n\
+           water ctl version\n\
+           water ctl client info\n\
+           water ctl server info\n\
+           water ctl info\n\
+           water ctl connections list\n\
+           water ctl socket list\n\
+\n\
          Examples:\n\
            water ctl state\n\
            water ctl ui key cmd-t\n\
            water ctl ui state\n\
            water ctl ui screenshot --output target/water.png\n\
+           water ctl ui click --x 240 --y 100 --click-count 2\n\
            water ctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
            water ctl workspace new\n\
            water ctl workspace rename --workspace 1 --title Dev\n\

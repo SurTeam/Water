@@ -63,6 +63,20 @@ fn run(socket: &Path, args: &[&str]) -> Output {
 
 #[test]
 fn ctl_prefix_and_bare_alias_both_reach_the_control_server() {
+    let version = run(
+        Path::new("/tmp/water-cli-version-no-server.sock"),
+        &["ctl", "version"],
+    );
+    assert!(version.status.success());
+    let version_json: serde_json::Value =
+        serde_json::from_slice(&version.stdout).expect("client version is JSON");
+    assert_eq!(version_json["client_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        version_json["protocol_version"],
+        water::control::PROTOCOL_VERSION
+    );
+    assert_eq!(version_json["api_signature"], water::control::API_SIGNATURE);
+
     let (socket, server) = start_fixture();
 
     for command in [
@@ -72,6 +86,8 @@ fn ctl_prefix_and_bare_alias_both_reach_the_control_server() {
         vec!["debug", "memory"],
         vec!["ctl", "workspace", "new"],
         vec!["workspace", "new"],
+        vec!["ctl", "connections", "list"],
+        vec!["ctl", "socket", "list"],
     ] {
         let output = run(&socket, &command);
         assert!(
@@ -81,6 +97,32 @@ fn ctl_prefix_and_bare_alias_both_reach_the_control_server() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+
+    let connections = run(&socket, &["ctl", "connections", "list"]);
+    assert!(connections.status.success());
+    let connections_json: serde_json::Value =
+        serde_json::from_slice(&connections.stdout).expect("connection list is JSON");
+    assert_eq!(connections_json["connections"][0]["name"], "Local");
+    assert_eq!(
+        connections_json["connections"][0]["socket_path"],
+        socket.display().to_string()
+    );
+
+    let info = run(&socket, &["ctl", "info"]);
+    assert!(info.status.success());
+    let info_json: serde_json::Value = serde_json::from_slice(&info.stdout).expect("info is JSON");
+    assert_eq!(
+        info_json["client"]["client_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(
+        info_json["server"]["server_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    assert_eq!(
+        info_json["server"]["api_signature"],
+        water::control::API_SIGNATURE
+    );
 
     // `ctl` with no arguments prints the usage help and exits cleanly.
     let help = run(&socket, &["ctl"]);

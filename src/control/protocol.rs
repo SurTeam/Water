@@ -7,18 +7,26 @@ use serde_json::Value;
 use crate::app::model::{AgentDump, MemoryStats, StateDump, WorkspaceDump};
 use crate::command::{AppCommand, CommandError, OperationSnapshot};
 use crate::event::AppEvent;
-use crate::ids::{OperationId, PaneId, TerminalId, WorkspaceId};
+use crate::ids::{ConnectionId, OperationId, PaneId, TerminalId, WorkspaceId};
 use crate::terminal::{TerminalReplay, TerminalSize, TerminalStreamEvent, WireTerminalEvent};
 use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
 /// Version 4 carries full 128-bit terminal IDs in binary frames. Control messages
 /// and bounded attach replay remain JSON for compatibility and debuggability.
 pub const PROTOCOL_VERSION: u32 = 4;
+/// Stable identifier for the control API surface. Bump this when the meaning
+/// of an existing control method changes without changing the frame format.
+pub const API_SIGNATURE: &str = "water-control/v4";
+pub const CONTROL_API_SIGNATURE: &str = API_SIGNATURE;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const TERMINAL_FRAME_PREFIX: &[u8; 4] = b"\0WT4";
 const TERMINAL_FRAME_OUTPUT: u8 = 1;
 const TERMINAL_FRAME_RESIZE: u8 = 2;
 const TERMINAL_FRAME_EXIT: u8 = 3;
+
+fn default_ui_click_count() -> usize {
+    1
+}
 
 /// Push frames the server sends on a GUI session connection.
 ///
@@ -227,7 +235,12 @@ pub enum RpcMethod {
     #[serde(rename = "ui.snapshot")]
     UiSnapshot,
     #[serde(rename = "ui.click")]
-    UiClick { x: f32, y: f32 },
+    UiClick {
+        x: f32,
+        y: f32,
+        #[serde(default = "default_ui_click_count")]
+        click_count: usize,
+    },
     #[serde(rename = "ui.screenshot")]
     UiScreenshot { path: String },
     #[serde(rename = "ui.wheel")]
@@ -247,6 +260,13 @@ pub enum RpcMethod {
     /// Server process metadata for attach/attach diagnostics.
     #[serde(rename = "server.info")]
     ServerInfo,
+    /// Lists the sockets currently projected by the connected GUI.
+    #[serde(
+        rename = "connection.list",
+        alias = "connections.list",
+        alias = "socket.list"
+    )]
+    ConnectionList,
     /// Requested graceful server shutdown (PTYs terminate with the model).
     #[serde(rename = "server.shutdown")]
     ServerShutdown,
@@ -356,6 +376,8 @@ pub struct SessionOpenResponse {
     pub protocol_version: u32,
     #[serde(default)]
     pub server_version: String,
+    #[serde(default)]
+    pub api_signature: String,
     pub socket_path: String,
 }
 
@@ -368,8 +390,57 @@ pub struct ServerInfoResponse {
     pub protocol_version: u32,
     #[serde(default)]
     pub server_version: String,
+    #[serde(default)]
+    pub api_signature: String,
     pub socket_path: String,
     pub ui_sessions: u32,
+}
+
+/// Metadata for the local `water` CLI/client binary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientInfoResponse {
+    pub build_variant: String,
+    pub client_version: String,
+    pub protocol_version: u32,
+    pub api_signature: String,
+}
+
+impl ClientInfoResponse {
+    pub fn current() -> Self {
+        Self {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
+            client_version: env!("CARGO_PKG_VERSION").to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            api_signature: API_SIGNATURE.to_owned(),
+        }
+    }
+}
+
+/// Combined client/server metadata returned by `water ctl info`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ControlInfoResponse {
+    pub client: ClientInfoResponse,
+    pub server: ServerInfoResponse,
+}
+
+/// A socket projected by the GUI's Local/Remote connection list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionInfo {
+    pub id: ConnectionId,
+    pub name: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_socket_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+/// Result of `connection.list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectionListResponse {
+    pub connections: Vec<ConnectionInfo>,
 }
 
 /// Parsed `push.terminal` frame.

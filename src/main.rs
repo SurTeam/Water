@@ -215,6 +215,7 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
         config,
         startup.config_path.clone(),
     );
+    ui_application.set_local_socket(socket_path.clone());
     if let (Some(destination), Some(tunnel)) = (startup.ssh_destination.clone(), ssh_tunnel) {
         ui_application.set_initial_remote_connection(destination, tunnel, socket_path.clone());
     }

@@ -19,9 +19,10 @@ use crate::terminal::{
 use crate::ui::{UiControlClient, UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 
 use super::protocol::{
-    PROTOCOL_VERSION, PUSH_SNAPSHOT_METHOD, PUSH_TERMINAL_METHOD, PUSH_UI_METHOD, RpcError,
-    RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse, SessionOpenResponse, SessionWireFrame,
-    TerminalAttachResponse, TerminalPush, WireMessage, read_frame, read_session_frame, write_frame,
+    ConnectionListResponse, PROTOCOL_VERSION, PUSH_SNAPSHOT_METHOD, PUSH_TERMINAL_METHOD,
+    PUSH_UI_METHOD, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
+    SessionOpenResponse, SessionWireFrame, TerminalAttachResponse, TerminalPush, WireMessage,
+    read_frame, read_session_frame, write_frame,
 };
 
 /// At the shared 64 KiB event limit this bounds decoded client backlog to
@@ -167,7 +168,15 @@ impl ControlClient {
         self.call(RpcMethod::UiSnapshot)
     }
     pub fn ui_click(&self, x: f32, y: f32) -> Result<UiSnapshot, ControlClientError> {
-        self.call(RpcMethod::UiClick { x, y })
+        self.ui_click_with_count(x, y, 1)
+    }
+    pub fn ui_click_with_count(
+        &self,
+        x: f32,
+        y: f32,
+        click_count: usize,
+    ) -> Result<UiSnapshot, ControlClientError> {
+        self.call(RpcMethod::UiClick { x, y, click_count })
     }
 
     pub fn ui_screenshot(
@@ -205,6 +214,10 @@ impl ControlClient {
 
     pub fn server_info(&self) -> Result<ServerInfoResponse, ControlClientError> {
         self.call(RpcMethod::ServerInfo)
+    }
+
+    pub fn connection_list(&self) -> Result<ConnectionListResponse, ControlClientError> {
+        self.call(RpcMethod::ConnectionList)
     }
 
     pub fn server_shutdown(&self) -> Result<bool, ControlClientError> {
@@ -1031,6 +1044,10 @@ fn session_reader_loop(
                         .snapshot()
                         .map_err(string_error)
                         .and_then(serialize_value),
+                    "connection.list" => ui_client
+                        .connection_list()
+                        .map_err(string_error)
+                        .and_then(serialize_value),
                     "ui.screenshot" => ui_client
                         .screenshot(
                             inner
@@ -1065,7 +1082,13 @@ fn session_reader_loop(
                                 .unwrap_or(0.) as f32
                         };
                         ui_client
-                            .click((point("x"), point("y")))
+                            .click_with_count(
+                                (point("x"), point("y")),
+                                inner
+                                    .get("click_count")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(1) as usize,
+                            )
                             .map_err(string_error)
                             .and_then(serialize_value)
                     }
@@ -1231,6 +1254,14 @@ impl ControlClient {
     pub fn ui_click(&self, _x: f32, _y: f32) -> Result<UiSnapshot, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
+    pub fn ui_click_with_count(
+        &self,
+        _x: f32,
+        _y: f32,
+        _click_count: usize,
+    ) -> Result<UiSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
 
     pub fn ui_screenshot(
         &self,
@@ -1250,6 +1281,10 @@ impl ControlClient {
     }
 
     pub fn ping(&self) -> Result<(), ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+
+    pub fn connection_list(&self) -> Result<ConnectionListResponse, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 }

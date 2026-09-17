@@ -14,9 +14,9 @@ use crate::app::{CommandClient, ModelSnapshot, ModelSnapshotReceiver};
 use crate::ui::UiControlClient;
 
 use super::protocol::{
-    PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
-    SessionOpenResponse, TerminalAttachResponse, WireMessage, read_frame, write_frame,
-    write_snapshot_frame, write_terminal_frame,
+    API_SIGNATURE, ConnectionInfo, ConnectionListResponse, PROTOCOL_VERSION, RpcError, RpcMethod,
+    RpcRequest, RpcResponse, ServerInfoResponse, SessionOpenResponse, TerminalAttachResponse,
+    WireMessage, read_frame, write_frame, write_snapshot_frame, write_terminal_frame,
 };
 
 /// How long the session writer waits for the first pending push before
@@ -719,12 +719,22 @@ fn handle_regular(
                 )
             },
         ),
-        RpcMethod::UiClick { x, y } => ui_request(
+        RpcMethod::UiClick { x, y, click_count } => ui_request(
             request.request_id,
             state,
-            |ui_client| ui_client.click((x, y)),
-            || ui_method_frame("ui.click", &serde_json::json!({ "x": x, "y": y })),
+            |ui_client| ui_client.click_with_count((x, y), click_count),
+            || {
+                ui_method_frame(
+                    "ui.click",
+                    &serde_json::json!({
+                        "x": x,
+                        "y": y,
+                        "click_count": click_count,
+                    }),
+                )
+            },
         ),
+        RpcMethod::ConnectionList => connection_list(request.request_id, state),
         RpcMethod::SessionOpen { .. } => unreachable!("handled by handle_request"),
         RpcMethod::ServerInfo => RpcResponse::success(
             request.request_id,
@@ -733,6 +743,7 @@ fn handle_regular(
                 server_pid: std::process::id(),
                 protocol_version: PROTOCOL_VERSION,
                 server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                api_signature: API_SIGNATURE.to_owned(),
                 socket_path: state.socket_path.display().to_string(),
                 ui_sessions: state.ui_session_count(),
             },
@@ -789,6 +800,7 @@ fn open_session(
             server_pid: std::process::id(),
             protocol_version: PROTOCOL_VERSION,
             server_version: env!("CARGO_PKG_VERSION").to_owned(),
+            api_signature: API_SIGNATURE.to_owned(),
             socket_path: state.socket_path.display().to_string(),
         },
     );
@@ -837,6 +849,40 @@ fn ui_request<T: serde::Serialize>(
             ),
         },
     }
+}
+
+/// Lists GUI-owned Local/Remote sockets. A detached server has no GUI state;
+/// in that case expose its own Local control socket so the command remains
+/// useful before a GUI attaches.
+#[cfg(unix)]
+fn connection_list(request_id: u64, state: &ServerState) -> RpcResponse {
+    let response = ui_request(
+        request_id,
+        state,
+        |ui_client| ui_client.connection_list(),
+        || ui_method_frame("connection.list", &serde_json::json!({})),
+    );
+    let unavailable = response
+        .error
+        .as_ref()
+        .is_some_and(|error| error.code == "UI_AUTOMATION_UNAVAILABLE");
+    if !unavailable {
+        return response;
+    }
+
+    RpcResponse::success(
+        request_id,
+        &ConnectionListResponse {
+            connections: vec![ConnectionInfo {
+                id: crate::ids::ConnectionId::new(1),
+                name: "Local".to_owned(),
+                kind: "local".to_owned(),
+                socket_path: Some(state.socket_path.display().to_string()),
+                remote_socket_path: None,
+                destination: None,
+            }],
+        },
+    )
 }
 
 /// Forwards a UI automation request to the first connected GUI session and

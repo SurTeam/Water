@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use crate::control::{ControlClient, PROTOCOL_VERSION};
+use crate::control::{API_SIGNATURE, ControlClient, PROTOCOL_VERSION};
 
 const REMOTE_START_TIMEOUT: Duration = Duration::from_secs(12);
 const REMOTE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
@@ -99,6 +99,10 @@ impl SshTunnel {
         &self.remote_socket
     }
 
+    pub fn destination(&self) -> &str {
+        &self.destination
+    }
+
     fn client(&self) -> ControlClient {
         ControlClient::new(self.local_socket.clone())
     }
@@ -106,6 +110,7 @@ impl SshTunnel {
     fn server_is_compatible(&self) -> bool {
         self.client().server_info().is_ok_and(|info| {
             info.protocol_version == PROTOCOL_VERSION
+                && info.api_signature == API_SIGNATURE
                 && info.server_version == env!("CARGO_PKG_VERSION")
                 && info.build_variant == crate::BUILD_VARIANT
         })
