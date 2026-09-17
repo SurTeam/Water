@@ -23,7 +23,7 @@ use crate::control::{
 use crate::ids::{ConnectionId, TerminalId};
 use crate::remote::SshTunnel;
 use crate::terminal::{
-    MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalStreamEvent, TerminalTheme,
+    MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalSnapshot, TerminalStreamEvent, TerminalTheme,
 };
 
 #[cfg(feature = "runtime-screenshot")]
@@ -1269,13 +1269,20 @@ impl WaterApplication {
                     match message {
                         TerminalEventMsg::Attached { snapshot, .. } => {
                             terminal.pending_attachments.remove(&terminal_id);
-                            latest_snapshot = Some(snapshot);
+                            // The live worker can publish a newer snapshot after replay
+                            // wakes the UI but before this batch is consumed. Keep that
+                            // snapshot instead of replacing it with the attach-time state.
+                            Self::merge_terminal_snapshot(&mut latest_snapshot, snapshot, true);
                         }
                         TerminalEventMsg::SnapshotReady { attachment, .. } => {
                             if let Some(snapshot) =
                                 terminal.event_sink.take_snapshot(terminal_id, &attachment)
                             {
-                                latest_snapshot = Some(snapshot);
+                                Self::merge_terminal_snapshot(
+                                    &mut latest_snapshot,
+                                    snapshot,
+                                    false,
+                                );
                             }
                         }
                         TerminalEventMsg::PtyWrites { writes, .. } => {
@@ -1337,6 +1344,16 @@ impl WaterApplication {
             }
         }
         self.state.views.replace(live_views);
+    }
+
+    fn merge_terminal_snapshot(
+        latest_snapshot: &mut Option<Arc<TerminalSnapshot>>,
+        snapshot: Arc<TerminalSnapshot>,
+        from_attach: bool,
+    ) {
+        if !from_attach || latest_snapshot.is_none() {
+            *latest_snapshot = Some(snapshot);
+        }
     }
 
     fn restart_terminal_attachment(&self, connection_id: ConnectionId, terminal_id: TerminalId) {
@@ -2595,6 +2612,33 @@ mod tests {
             .expect("latest snapshot slot");
         assert!(snapshot.visible_text().contains("seq 10000"));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn attach_snapshot_does_not_overwrite_live_snapshot_queued_before_ui_batch() {
+        let terminal_id = TerminalId::new(8);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+        let attached = Arc::new(emulator.snapshot(None));
+
+        emulator.start_live();
+        emulator.apply(&TerminalStreamEvent::Output {
+            seq: 1,
+            size,
+            bytes: Arc::from(b"shell prompt\r\n".as_slice()),
+        });
+        let live = Arc::new(emulator.snapshot(None));
+
+        let mut latest = Some(live.clone());
+        WaterApplication::merge_terminal_snapshot(&mut latest, attached.clone(), true);
+        assert!(Arc::ptr_eq(latest.as_ref().unwrap(), &live));
+
+        let mut fallback = None;
+        WaterApplication::merge_terminal_snapshot(&mut fallback, attached, true);
+        assert!(fallback.is_some());
+
+        WaterApplication::merge_terminal_snapshot(&mut fallback, live.clone(), false);
+        assert!(Arc::ptr_eq(fallback.as_ref().unwrap(), &live));
     }
 
     #[test]
