@@ -4642,9 +4642,16 @@ impl WorkspaceView {
             .track_scroll(&self.sidebar_scroll)
             .px(px(self.config.ui.sidebar_margin))
             .py(px(self.config.ui.sidebar_margin))
-            .flex_col()
-            .gap(px(self.config.ui.sidebar_card_gap));
-        for connection in &self.connections {
+            .flex_col();
+        for (index, connection) in self.connections.iter().enumerate() {
+            if index > 0 && self.config.ui.sidebar_card_gap > 0.0 {
+                list = list.child(
+                    div()
+                        .w_full()
+                        .h(px(self.config.ui.sidebar_card_gap))
+                        .flex_none(),
+                );
+            }
             list = list.child(self.render_sidebar_connection(connection, theme, cx));
         }
         let list_bounds = self.sidebar_scroll.bounds();

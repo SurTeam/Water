@@ -1885,7 +1885,7 @@ impl Render for SettingsView {
             self.render_setting(
                 SettingField::SidebarCardGap,
                 "侧边栏卡片间距",
-                "主机卡片之间以及卡片内部工作区之间的间距，逻辑像素",
+                "主机卡片之间的间距，逻辑像素",
                 ApplyKind::Immediate,
                 theme,
                 cx,
