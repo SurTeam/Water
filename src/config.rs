@@ -461,6 +461,9 @@ pub struct TerminalConfig {
     pub ligatures: bool,
     /// Enable opening OSC 8 hyperlinks from terminal cells.
     pub hyperlinks: bool,
+    /// Require the platform modifier (Cmd on macOS, Ctrl on other platforms)
+    /// when opening OSC 8 hyperlinks from terminal cells.
+    pub hyperlink_command_click: bool,
     /// Download remote file hyperlinks without asking first.
     pub remote_hyperlink_auto_download: bool,
     pub hyperlink_download_directory: String,
@@ -480,6 +483,7 @@ impl Default for TerminalConfig {
             line_height: DEFAULT_LINE_HEIGHT,
             ligatures: true,
             hyperlinks: true,
+            hyperlink_command_click: false,
             remote_hyperlink_auto_download: false,
             hyperlink_download_directory: "~/Downloads/Water".to_owned(),
         }
@@ -1160,6 +1164,9 @@ impl AppConfigOverrides {
             if let Some(value) = terminal.hyperlinks {
                 config.terminal.hyperlinks = value;
             }
+            if let Some(value) = terminal.hyperlink_command_click {
+                config.terminal.hyperlink_command_click = value;
+            }
             if let Some(value) = terminal.remote_hyperlink_auto_download {
                 config.terminal.remote_hyperlink_auto_download = value;
             }
@@ -1416,6 +1423,7 @@ pub struct TerminalConfigOverrides {
     pub line_height: Option<f32>,
     pub ligatures: Option<bool>,
     pub hyperlinks: Option<bool>,
+    pub hyperlink_command_click: Option<bool>,
     pub remote_hyperlink_auto_download: Option<bool>,
     pub hyperlink_download_directory: Option<String>,
 }
@@ -1816,6 +1824,7 @@ mod tests {
                 "terminal": {
                     "ligatures": false,
                     "hyperlinks": false,
+                    "hyperlink_command_click": true,
                     "remote_hyperlink_auto_download": true,
                     "hyperlink_download_directory": "/tmp/water-downloads"
                 },
@@ -1845,6 +1854,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         assert_eq!(config.ui.pane_corner_radius, 20.0);
         assert!(!config.terminal.hyperlinks);
+        assert!(config.terminal.hyperlink_command_click);
         assert!(config.terminal.remote_hyperlink_auto_download);
         assert_eq!(
             config.terminal.hyperlink_download_directory,

@@ -70,6 +70,7 @@
     "line_height": 18.0,
     "ligatures": true,
     "hyperlinks": true,
+    "hyperlink_command_click": false,
     "remote_hyperlink_auto_download": false,
     "hyperlink_download_directory": "~/Downloads/Water"
   },

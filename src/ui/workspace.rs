@@ -408,6 +408,10 @@ struct TerminalRenderOptions {
     metrics: TerminalMetrics,
     theme: ThemeColors,
     cursor_focused: bool,
+    /// The source cell currently under the pointer, when it contains an OSC 8
+    /// hyperlink. This is kept in the render options so only the affected
+    /// terminal row needs to be reshaped when the pointer moves.
+    hyperlink_hover: Option<TerminalCellPosition>,
     /// UI-local normal-screen viewport movement relative to the latest
     /// snapshot. Positive values reveal `rows_before`; negative values reveal
     /// `rows_after`.
@@ -677,6 +681,7 @@ struct TerminalRenderCacheKey {
     theme: ThemeColors,
     cursor_focused: bool,
     selection: Option<TerminalSelection>,
+    hyperlink_hover: Option<TerminalCellPosition>,
     bounds_origin_x_bits: u32,
     bounds_width_bits: u32,
 }
@@ -997,6 +1002,8 @@ pub struct WorkspaceView {
     dragging_terminal: Option<TerminalId>,
     reported_mouse: Option<(TerminalId, MouseButton)>,
     last_reported_mouse_cell: Option<(TerminalId, TerminalCellPosition)>,
+    /// Terminal cell under the pointer when it is an OSC 8 hyperlink.
+    hyperlink_hover: Option<(TerminalId, TerminalCellPosition)>,
     sidebar_collapsed: bool,
     collapsed_connections: BTreeSet<ConnectionId>,
     collapsed_workspaces: BTreeSet<(ConnectionId, WorkspaceId)>,
@@ -1128,6 +1135,7 @@ impl WorkspaceView {
             dragging_terminal: None,
             reported_mouse: None,
             last_reported_mouse_cell: None,
+            hyperlink_hover: None,
             sidebar_collapsed,
             terminal_snapshots: BTreeMap::new(),
             collapsed_connections: BTreeSet::new(),
@@ -1553,6 +1561,9 @@ impl WorkspaceView {
         let config = config.normalized();
         self.sidebar_width = config.ui.sidebar_width;
         self.sidebar_collapsed = !config.ui.sidebar_visible;
+        if !config.terminal.hyperlinks {
+            self.hyperlink_hover = None;
+        }
         self.config = config;
         cx.notify();
     }
@@ -2806,6 +2817,49 @@ impl WorkspaceView {
         self.terminal_snapshots
             .get(&terminal_id)
             .map(std::sync::Arc::as_ref)
+    }
+
+    fn update_hyperlink_hover(&mut self, position: Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let next = if self.config.terminal.hyperlinks {
+            let visible_terminal_ids = self.selected_workspace_dump().and_then(|workspace| {
+                workspace
+                    .active_tab
+                    .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
+                    .map(|tab| {
+                        let mut terminal_ids = BTreeSet::new();
+                        collect_terminal_ids(&tab.tree, &mut terminal_ids);
+                        terminal_ids
+                    })
+            });
+            let terminal_id = self
+                .terminal_bounds
+                .lock()
+                .expect("terminal bounds poisoned")
+                .iter()
+                .find_map(|(terminal_id, bounds)| {
+                    visible_terminal_ids
+                        .as_ref()
+                        .is_some_and(|ids| ids.contains(terminal_id))
+                        .then(|| bounds.contains(&position).then_some(*terminal_id))
+                        .flatten()
+                });
+            terminal_id.and_then(|terminal_id| {
+                let cell_position = self.terminal_cell_at(terminal_id, position)?;
+                let is_hyperlink = self
+                    .terminal_snapshot_for(terminal_id)
+                    .and_then(|snapshot| snapshot.relative_row(cell_position.row))
+                    .and_then(|row| row.get(cell_position.column))
+                    .is_some_and(|cell| cell.hyperlink.is_some());
+                is_hyperlink.then_some((terminal_id, cell_position))
+            })
+        } else {
+            None
+        };
+
+        if self.hyperlink_hover != next {
+            self.hyperlink_hover = next;
+            cx.notify();
+        }
     }
 
     /// Ensures the raw stream is attached and returns the locally rendered
@@ -6070,6 +6124,7 @@ impl WorkspaceView {
                     terminal_grid
                         .map(|snapshot| {
                             crate::metrics::inc(crate::metrics::terminal_renders());
+                            let snapshot_terminal_id = snapshot.terminal_id;
                             let ime_text = self.ime_marked_text_for(snapshot.terminal_id);
                             let scroll_offset_rows = if smooth_scroll {
                                 self.terminal_scroll_offset_for_snapshot(&snapshot)
@@ -6083,6 +6138,12 @@ impl WorkspaceView {
                                     metrics,
                                     theme,
                                     cursor_focused: active && window_active,
+                                    hyperlink_hover: self
+                                        .hyperlink_hover
+                                        .filter(|(hover_terminal_id, _)| {
+                                            *hover_terminal_id == snapshot_terminal_id
+                                        })
+                                        .map(|(_, cell)| cell),
                                     scroll_offset_rows,
                                 },
                                 self.config.ui.pane_corner_radius,
@@ -6194,8 +6255,10 @@ impl WorkspaceView {
                             if let Some(terminal_id) = terminal_id {
                                 if this.begin_reported_mouse(terminal_id, event, cx) {
                                     cx.stop_propagation();
-                                } else if !event.modifiers.shift
-                                    && event.click_count == 1
+                                } else if hyperlink_click_allowed(
+                                    this.config.terminal.hyperlink_command_click,
+                                    event.modifiers,
+                                ) && event.click_count == 1
                                     && this.activate_hyperlink(
                                         hyperlink_connection_id,
                                         terminal_id,
@@ -7280,6 +7343,7 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                     return;
                 }
                 let (handled, start_window_move) = move_entity.update(cx, |view, cx| {
+                    view.update_hyperlink_hover(event.position, cx);
                     if view.dragging_sidebar {
                         view.update_sidebar_width(event.position.x, cx);
                         (true, false)
@@ -7351,6 +7415,10 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
     .absolute()
     .inset_0()
     .into_any_element()
+}
+
+fn hyperlink_click_allowed(requires_platform_modifier: bool, modifiers: gpui::Modifiers) -> bool {
+    !modifiers.shift && (!requires_platform_modifier || modifiers.platform)
 }
 
 fn terminal_scroll_delta_rows(event: &ScrollWheelEvent, metrics: TerminalMetrics) -> f32 {
@@ -8320,6 +8388,7 @@ impl gpui::Element for TerminalRenderElement {
             theme: self.options.theme,
             cursor_focused: self.options.cursor_focused,
             selection: self.selection,
+            hyperlink_hover: self.options.hyperlink_hover,
             bounds_origin_x_bits: f32::from(bounds.origin.x).to_bits(),
             bounds_width_bits: f32::from(bounds.size.width).to_bits(),
         };
@@ -8355,6 +8424,8 @@ impl gpui::Element for TerminalRenderElement {
             let rows_compatible = previous_key
                 .as_ref()
                 .is_some_and(|previous| previous.rows_compatible_with(&cache_key));
+            let previous_hyperlink_hover =
+                previous_key.as_ref().and_then(|key| key.hyperlink_hover);
             let previous_rows = if rows_compatible {
                 std::mem::take(&mut cache.rows)
             } else {
@@ -8384,13 +8455,20 @@ impl gpui::Element for TerminalRenderElement {
                     previous_rows
                         .remove(&previous_source_row)
                         .filter(|previous| {
-                            terminal_cached_row_cursor_compatible(
-                                previous_key.as_ref().and_then(|key| key.focused_cursor),
-                                cache_key.focused_cursor,
-                                previous_source_row,
-                                source_row,
-                            ) && (Arc::ptr_eq(&previous.cells, cells)
-                                || previous.cells.as_ref() == cells.as_ref())
+                            let hyperlink_row_changed = previous_hyperlink_hover
+                                .is_some_and(|hover| hover.row == previous_source_row)
+                                || cache_key
+                                    .hyperlink_hover
+                                    .is_some_and(|hover| hover.row == source_row);
+                            !hyperlink_row_changed
+                                && terminal_cached_row_cursor_compatible(
+                                    previous_key.as_ref().and_then(|key| key.focused_cursor),
+                                    cache_key.focused_cursor,
+                                    previous_source_row,
+                                    source_row,
+                                )
+                                && (Arc::ptr_eq(&previous.cells, cells)
+                                    || previous.cells.as_ref() == cells.as_ref())
                         })
                 else {
                     continue;
@@ -8571,6 +8649,7 @@ impl gpui::Element for TerminalRenderElement {
             theme,
             cursor_focused,
             scroll_offset_rows,
+            ..
         } = self.options;
         let whole = scroll_offset_rows.trunc() as i32;
         let fraction = scroll_offset_rows - whole as f32;
@@ -8862,16 +8941,19 @@ fn terminal_row_data_for_cells(
             foreground_color
         };
         let color = rgb(foreground_color).into();
+        let hyperlink_hovered = options.hyperlink_hover
+            == Some(TerminalCellPosition { row, column })
+            && cell.hyperlink.is_some();
         let run = TextRun {
             len: character.len(),
             font: fonts[usize::from(cell.flags.italic()) + usize::from(cell.flags.bold()) * 2]
                 .clone(),
             color,
             background_color: None,
-            underline: cell.flags.underline().then(|| UnderlineStyle {
+            underline: (cell.flags.underline() || hyperlink_hovered).then(|| UnderlineStyle {
                 thickness: px(1.),
                 color: Some(color),
-                wavy: false,
+                wavy: hyperlink_hovered,
             }),
             strikethrough: cell.flags.strike().then(|| StrikethroughStyle {
                 thickness: px(1.),
@@ -10166,6 +10248,7 @@ mod tests {
             theme: AppConfig::default().theme.colors(),
             cursor_focused: false,
             selection: None,
+            hyperlink_hover: None,
             bounds_origin_x_bits: 0.0_f32.to_bits(),
             bounds_width_bits: 640.0_f32.to_bits(),
         };
@@ -10176,6 +10259,26 @@ mod tests {
 
         assert!(key != resized);
         assert!(!key.rows_compatible_with(&resized));
+    }
+
+    #[test]
+    fn hyperlink_click_mode_respects_platform_modifier_and_shift() {
+        let no_modifier = Modifiers::none();
+        assert!(hyperlink_click_allowed(false, no_modifier));
+        assert!(!hyperlink_click_allowed(true, no_modifier));
+
+        let platform_modifier = Modifiers {
+            platform: true,
+            ..Modifiers::none()
+        };
+        assert!(hyperlink_click_allowed(true, platform_modifier));
+
+        let shift_platform_modifier = Modifiers {
+            shift: true,
+            ..platform_modifier
+        };
+        assert!(!hyperlink_click_allowed(true, shift_platform_modifier));
+        assert!(!hyperlink_click_allowed(false, shift_platform_modifier));
     }
 
     #[test]
@@ -10677,6 +10780,7 @@ mod tests {
                 agent_colors: [21; 13],
             },
             cursor_focused: false,
+            hyperlink_hover: None,
             scroll_offset_rows: 0.0,
         };
         let (chunks, _) =
@@ -10691,6 +10795,30 @@ mod tests {
     }
 
     #[test]
+    fn hovered_hyperlink_cell_gets_a_wavy_underline_run() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(4, 1));
+        let cell = snapshot.cell_mut(0, 0).unwrap();
+        cell.character = 'x';
+        cell.hyperlink = Some("https://example.com".to_owned());
+        let options = TerminalRenderOptions {
+            metrics: TerminalMetrics::default(),
+            theme: AppConfig::default().theme.colors(),
+            cursor_focused: false,
+            hyperlink_hover: Some(TerminalCellPosition { row: 0, column: 0 }),
+            scroll_offset_rows: 0.0,
+        };
+
+        let (chunks, _) = terminal_row_data(&snapshot, 0, None, options, "monospace");
+        assert!(
+            chunks[0].runs[0]
+                .underline
+                .as_ref()
+                .is_some_and(|underline| underline.wavy)
+        );
+    }
+
+    #[test]
     fn isolated_unicode_does_not_force_ascii_neighbors_into_per_cell_shaping() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(6, 1));
@@ -10701,6 +10829,7 @@ mod tests {
             metrics: TerminalMetrics::default(),
             theme: AppConfig::default().theme.colors(),
             cursor_focused: false,
+            hyperlink_hover: None,
             scroll_offset_rows: 0.0,
         };
 

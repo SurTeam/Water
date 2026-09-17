@@ -48,6 +48,7 @@ enum SettingField {
     LineHeight,
     Ligatures,
     Hyperlinks,
+    HyperlinkCommandClick,
     RemoteHyperlinkAutoDownload,
     HyperlinkDownloadDirectory,
     MouseReporting,
@@ -171,6 +172,7 @@ impl SettingField {
             Self::LineHeight => "line-height",
             Self::Ligatures => "ligatures",
             Self::Hyperlinks => "hyperlinks",
+            Self::HyperlinkCommandClick => "hyperlink-command-click",
             Self::RemoteHyperlinkAutoDownload => "remote-hyperlink-auto-download",
             Self::HyperlinkDownloadDirectory => "hyperlink-download-directory",
             Self::MouseReporting => "mouse-reporting",
@@ -287,6 +289,7 @@ impl SettingField {
                 | Self::Selection
                 | Self::Ligatures
                 | Self::Hyperlinks
+                | Self::HyperlinkCommandClick
                 | Self::RemoteHyperlinkAutoDownload
                 | Self::SidebarVisible
                 | Self::SidebarShowAgentCount
@@ -437,6 +440,10 @@ impl SettingsView {
             }
             SettingField::Hyperlinks => {
                 self.config.terminal.hyperlinks = !self.config.terminal.hyperlinks
+            }
+            SettingField::HyperlinkCommandClick => {
+                self.config.terminal.hyperlink_command_click =
+                    !self.config.terminal.hyperlink_command_click
             }
             SettingField::RemoteHyperlinkAutoDownload => {
                 self.config.terminal.remote_hyperlink_auto_download =
@@ -673,6 +680,9 @@ impl SettingsView {
             SettingField::LineHeight => format_float(self.config.terminal.line_height),
             SettingField::Ligatures => self.config.terminal.ligatures.to_string(),
             SettingField::Hyperlinks => self.config.terminal.hyperlinks.to_string(),
+            SettingField::HyperlinkCommandClick => {
+                self.config.terminal.hyperlink_command_click.to_string()
+            }
             SettingField::RemoteHyperlinkAutoDownload => self
                 .config
                 .terminal
@@ -1030,6 +1040,7 @@ impl SettingsView {
             | SettingField::Selection
             | SettingField::Ligatures
             | SettingField::Hyperlinks
+            | SettingField::HyperlinkCommandClick
             | SettingField::RemoteHyperlinkAutoDownload
             | SettingField::SidebarVisible
             | SettingField::SidebarShowAgentCount
@@ -1053,6 +1064,9 @@ impl SettingsView {
             SettingField::Selection => on_off(self.config.features.selection),
             SettingField::Ligatures => on_off(self.config.terminal.ligatures),
             SettingField::Hyperlinks => on_off(self.config.terminal.hyperlinks),
+            SettingField::HyperlinkCommandClick => {
+                on_off(self.config.terminal.hyperlink_command_click)
+            }
             SettingField::RemoteHyperlinkAutoDownload => {
                 on_off(self.config.terminal.remote_hyperlink_auto_download)
             }
@@ -1452,6 +1466,7 @@ mod hyperlink_tests {
             cx.add_window_view(move |_, cx| SettingsView::new(application, cx.focus_handle()));
         view.update_in(cx, |view, _, cx| {
             assert!(view.config.terminal.hyperlinks);
+            assert!(!view.config.terminal.hyperlink_command_click);
             assert!(!view.config.terminal.remote_hyperlink_auto_download);
             assert_eq!(
                 view.config.terminal.hyperlink_download_directory,
@@ -1470,6 +1485,8 @@ mod hyperlink_tests {
                 view.config.terminal.hyperlink_download_directory,
                 "/tmp/water-downloads"
             );
+            view.toggle_field(SettingField::HyperlinkCommandClick, cx);
+            assert!(view.config.terminal.hyperlink_command_click);
             view.dirty = true;
             view.sync_hyperlink_preference(true, cx);
             assert!(view.config.terminal.remote_hyperlink_auto_download);
@@ -1671,6 +1688,14 @@ impl Render for SettingsView {
                 SettingField::Hyperlinks,
                 "终端超链接",
                 "点击终端超链接，用系统默认应用打开",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::HyperlinkCommandClick,
+                "超链接需要 Cmd/Ctrl 点击",
+                "开启后需按住 Cmd（macOS）或 Ctrl（其他平台）再点击",
                 ApplyKind::Immediate,
                 theme,
                 cx,
