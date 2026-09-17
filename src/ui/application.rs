@@ -44,6 +44,7 @@ actions!(
         IgnoreQuit,
         NewTerminalTab,
         NewWorkspace,
+        ConnectRemote,
         ToggleSidebar,
         RenameWorkspace,
         RenameTab,
@@ -841,6 +842,17 @@ impl WaterApplication {
         self.state.views.replace(live_views);
     }
 
+    pub(crate) fn sync_hyperlink_settings(&self, cx: &mut App) {
+        if let Some(window) = *self.state.settings_window.borrow() {
+            let enabled = self.config().terminal.remote_hyperlink_auto_download;
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |settings, _, cx| {
+                    settings.sync_hyperlink_preference(enabled, cx)
+                });
+            });
+        }
+    }
+
     /// Keep terminal output at display cadence. Upstream mailboxes already
     /// collapse intermediate revisions, so this is only a guard against
     /// applying multiple full snapshots within one fast display frame.
@@ -1332,11 +1344,7 @@ impl WaterApplication {
         for view in views {
             if view
                 .update(cx, |workspace, cx| {
-                    workspace.apply_terminal_events_for_connection(
-                        connection_id,
-                        &changed,
-                        cx,
-                    )
+                    workspace.apply_terminal_events_for_connection(connection_id, &changed, cx)
                 })
                 .is_ok()
             {
@@ -1475,9 +1483,8 @@ impl WaterApplication {
         };
         let spawn_result = std::thread::Builder::new()
             .name(format!("water-terminal-events-{terminal_id}"))
-            .spawn(move || {
-                match session.attach(terminal_id) {
-                    Ok((response, stream)) => {
+            .spawn(move || match session.attach(terminal_id) {
+                Ok((response, stream)) => {
                     let _allocator_cleanup = TerminalAttachmentCleanup;
                     if !attachment.is_active() {
                         return;
@@ -1607,7 +1614,9 @@ impl WaterApplication {
                         if terminal_debug_enabled() {
                             live_events += 1;
                             let bytes = event.output_bytes();
-                            if bytes > 0 && (live_events <= 5 || last_live_log.elapsed().as_secs() >= 1) {
+                            if bytes > 0
+                                && (live_events <= 5 || last_live_log.elapsed().as_secs() >= 1)
+                            {
                                 tracing::warn!(
                                     target: "water::terminal-debug",
                                     ?terminal_id, ?connection_id,
@@ -1686,7 +1695,6 @@ impl WaterApplication {
                             },
                         );
                     }
-                }
                 }
             });
         if spawn_result.is_err()
@@ -1982,6 +1990,10 @@ impl WaterApplication {
                         let result = cx.update(|cx| dispatch_controlled_wheel(position, delta, cx));
                         let _ = reply.send(result);
                     }
+                    UiControlRequest::Click { position, reply } => {
+                        let result = cx.update(|cx| dispatch_controlled_click(position, cx));
+                        let _ = reply.send(result);
+                    }
                     #[cfg(feature = "runtime-screenshot")]
                     UiControlRequest::Screenshot { path, reply } => {
                         let result = cx.update(capture_active_window);
@@ -2217,6 +2229,47 @@ fn dispatch_controlled_wheel(
     })
 }
 
+fn dispatch_controlled_click(position: (f32, f32), cx: &mut App) -> Result<UiSnapshot, String> {
+    if !position.0.is_finite() || !position.1.is_finite() {
+        return Err("click coordinates must be finite".into());
+    }
+    let window = cx
+        .active_window()
+        .or_else(|| {
+            cx.window_stack()
+                .and_then(|windows| windows.into_iter().next())
+        })
+        .or_else(|| cx.windows().into_iter().last())
+        .ok_or("Water has no open window")?;
+    window
+        .update(cx, |_, window, cx| {
+            let point = point(px(position.0), px(position.1));
+            window.dispatch_event(
+                PlatformInput::MouseDown(gpui::MouseDownEvent {
+                    button: gpui::MouseButton::Left,
+                    position: point,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+            window.dispatch_event(
+                PlatformInput::MouseUp(gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position: point,
+                    click_count: 1,
+                    ..Default::default()
+                }),
+                cx,
+            );
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(UiSnapshot {
+        window_count: cx.windows().len(),
+        has_active_window: cx.active_window().is_some(),
+    })
+}
+
 #[cfg(test)]
 pub(crate) fn window_key_bindings() -> Vec<KeyBinding> {
     configured_window_key_bindings(&AppConfig::default())
@@ -2232,6 +2285,7 @@ pub(crate) fn configured_window_key_bindings(config: &AppConfig) -> Vec<KeyBindi
         safe_key_binding(&shortcuts.ignore_quit, "cmd-q", IgnoreQuit),
         safe_key_binding(&shortcuts.new_terminal_tab, "cmd-t", NewTerminalTab),
         safe_key_binding(&shortcuts.new_workspace, "cmd-shift-n", NewWorkspace),
+        safe_key_binding(&shortcuts.connect_remote, "cmd-shift-k", ConnectRemote),
         safe_key_binding(&shortcuts.toggle_sidebar, "cmd-e", ToggleSidebar),
         safe_key_binding(&shortcuts.rename_workspace, "cmd-shift-e", RenameWorkspace),
         safe_key_binding(&shortcuts.rename_tab, "cmd-shift-t", RenameTab),

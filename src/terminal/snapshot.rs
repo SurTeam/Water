@@ -290,6 +290,8 @@ pub struct TerminalCell {
     pub flags: TerminalCellFlags,
     #[serde(default)]
     pub zerowidth: SmallVec<[char; 2]>,
+    #[serde(default)]
+    pub hyperlink: Option<String>,
 }
 
 thread_local! {
@@ -339,8 +341,9 @@ impl Serialize for TerminalCell {
                 + usize::from(!background_is_default)
                 + usize::from(!flags_are_default)
                 + usize::from(!zerowidth_is_default)
+                + usize::from(self.hyperlink.is_some())
         } else {
-            5
+            5 + usize::from(self.hyperlink.is_some())
         };
         let mut wire = serializer.serialize_struct("TerminalCell", field_count)?;
         if !compact || !character_is_default {
@@ -357,6 +360,9 @@ impl Serialize for TerminalCell {
         }
         if !compact || !zerowidth_is_default {
             wire.serialize_field("zerowidth", &self.zerowidth)?;
+        }
+        if self.hyperlink.is_some() {
+            wire.serialize_field("hyperlink", &self.hyperlink)?;
         }
         wire.end()
     }
@@ -382,6 +388,7 @@ impl Default for TerminalCell {
             bg: default_cell_background(),
             flags: TerminalCellFlags::default(),
             zerowidth: SmallVec::new(),
+            hyperlink: None,
         }
     }
 }
@@ -954,6 +961,7 @@ impl TerminalSnapshot {
             && snapshot.bg == color_from_alacritty(cell.bg)
             && snapshot.flags == TerminalCellFlags::from_alacritty(cell.flags)
             && snapshot.zerowidth.as_slice() == cell.zerowidth().unwrap_or_default()
+            && snapshot.hyperlink.as_deref() == cell.hyperlink().as_ref().map(|link| link.uri())
     }
 
     fn cell_from_alacritty(cell: &Cell) -> TerminalCell {
@@ -963,6 +971,7 @@ impl TerminalSnapshot {
             bg: color_from_alacritty(cell.bg),
             flags: TerminalCellFlags::from_alacritty(cell.flags),
             zerowidth: cell.zerowidth().into_iter().flatten().copied().collect(),
+            hyperlink: cell.hyperlink().map(|link| link.uri().to_owned()),
         }
     }
 }
@@ -1062,6 +1071,34 @@ mod tests {
         // is the distance to the newest materialized row and must equal
         // the rows_after overscan (never beyond it).
         assert_eq!(at_top.last_source_row, at_top.rows_after.len() as i64);
+    }
+
+    #[test]
+    fn osc8_hyperlinks_survive_projection_and_wire_roundtrip() {
+        let size = TerminalSize::new(12, 2);
+        let mut term = test_term(size, 8);
+        let mut processor = Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new();
+        processor.advance(
+            &mut term,
+            b"\x1b]8;;file:///tmp/a%20b\x1b\\link\x1b]8;;\x1b\\ plain",
+        );
+        let snapshot = TerminalSnapshot::from_term(
+            TerminalId::new(1),
+            &term,
+            TerminalProcessState::Running,
+            1,
+        );
+        assert_eq!(
+            snapshot.cell(0, 0).unwrap().hyperlink.as_deref(),
+            Some("file:///tmp/a%20b")
+        );
+        assert!(snapshot.cell(0, 5).unwrap().hyperlink.is_none());
+        let bytes = with_compact_terminal_cell_wire(|| serde_json::to_vec(&snapshot).unwrap());
+        let decoded: TerminalSnapshot = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decoded.cell(0, 0).unwrap().hyperlink,
+            snapshot.cell(0, 0).unwrap().hyperlink
+        );
     }
 
     #[test]

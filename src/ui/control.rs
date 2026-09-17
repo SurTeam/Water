@@ -9,6 +9,10 @@ const UI_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(crate) enum UiControlRequest {
+    Click {
+        position: (f32, f32),
+        reply: Sender<Result<UiSnapshot, String>>,
+    },
     Keystroke {
         keystroke: String,
         reply: Sender<Result<UiKeystrokeResult, String>>,
@@ -78,6 +82,15 @@ pub fn ui_control_channel() -> (UiControlClient, UiControlReceiver) {
 }
 
 impl UiControlClient {
+    pub fn click(&self, position: (f32, f32)) -> Result<UiSnapshot, String> {
+        let (reply, response) = mpsc::channel();
+        self.sender
+            .send(UiControlRequest::Click { position, reply })
+            .map_err(|_| "UI control channel is unavailable".to_owned())?;
+        response
+            .recv_timeout(UI_CONTROL_TIMEOUT)
+            .map_err(|_| "timed out waiting for the GPUI thread".to_owned())?
+    }
     pub fn dispatch_keystroke(
         &self,
         keystroke: impl Into<String>,

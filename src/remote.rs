@@ -156,6 +156,10 @@ pub fn validate_ssh_destination(destination: &str) -> Result<String, SshConnecti
     Ok(destination.to_owned())
 }
 
+pub(crate) fn control_master_socket(destination: &str) -> PathBuf {
+    connection_paths(destination, &remote_control_socket(destination)).1
+}
+
 fn connection_paths(destination: &str, remote_socket: &Path) -> (PathBuf, PathBuf) {
     let mut forward_hasher = std::collections::hash_map::DefaultHasher::new();
     destination.hash(&mut forward_hasher);
@@ -304,7 +308,11 @@ fn install_and_start_embedded_server(
     );
     // The on-disk program name carries the dev identity so ps/Activity
     // Monitor shows water-srv-dev without relying on setprogname.
-    let program_name = if variant == "dev" { "water-srv-dev" } else { "water-server" };
+    let program_name = if variant == "dev" {
+        "water-srv-dev"
+    } else {
+        "water-server"
+    };
     let quoted_directory = format!("\"$HOME/{relative_directory}\"");
     let quoted_program = format!("\"$HOME/{relative_directory}/{program_name}\"");
 

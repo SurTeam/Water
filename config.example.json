@@ -67,7 +67,12 @@
     "max_total_scrollback_bytes": 67108864,
     "font_family": "Sarasa Term SC Nerd Font",
     "font_size": 16.0,
-    "line_height": 18.0
+    "line_height": 18.0,
+    "ligatures": true,
+    "hyperlinks": true,
+    "hyperlink_command_click": false,
+    "remote_hyperlink_auto_download": false,
+    "hyperlink_download_directory": "~/Downloads/Water"
   },
   "server": {
     "detached": true,
@@ -113,6 +118,7 @@
     "ignore_quit": "cmd-q",
     "new_terminal_tab": "cmd-t",
     "new_workspace": "cmd-shift-n",
+    "connect_remote": "cmd-shift-k",
     "toggle_sidebar": "cmd-e",
     "switch_tab": "cmd-#",
     "next_tab": "cmd-]",

@@ -457,6 +457,16 @@ pub struct TerminalConfig {
     pub font_size: f32,
     /// Terminal row height in logical pixels.
     pub line_height: f32,
+    /// Whether terminal text shaping enables font ligatures.
+    pub ligatures: bool,
+    /// Enable opening OSC 8 hyperlinks from terminal cells.
+    pub hyperlinks: bool,
+    /// Require the platform modifier (Cmd on macOS, Ctrl on other platforms)
+    /// when opening OSC 8 hyperlinks from terminal cells.
+    pub hyperlink_command_click: bool,
+    /// Download remote file hyperlinks without asking first.
+    pub remote_hyperlink_auto_download: bool,
+    pub hyperlink_download_directory: String,
 }
 
 impl Default for TerminalConfig {
@@ -471,6 +481,11 @@ impl Default for TerminalConfig {
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
+            ligatures: true,
+            hyperlinks: true,
+            hyperlink_command_click: false,
+            remote_hyperlink_auto_download: false,
+            hyperlink_download_directory: "~/Downloads/Water".to_owned(),
         }
     }
 }
@@ -563,7 +578,7 @@ pub struct UiConfig {
     pub pane_divider_width: f32,
     /// Insets the sidebar card list and its bottom action row.
     pub sidebar_margin: f32,
-    /// Gap between sidebar connection cards and their nested workspace cards.
+    /// Vertical gap between adjacent sidebar connection cards.
     pub sidebar_card_gap: f32,
     /// Padding inside sidebar connection cards.
     pub sidebar_card_padding: f32,
@@ -683,6 +698,7 @@ pub struct ShortcutConfig {
     pub ignore_quit: String,
     pub new_terminal_tab: String,
     pub new_workspace: String,
+    pub connect_remote: String,
     pub toggle_sidebar: String,
     /// Template for tab-index bindings; # is replaced by 1..9 and 0.
     pub switch_tab: String,
@@ -716,6 +732,7 @@ impl Default for ShortcutConfig {
             ignore_quit: "cmd-q".to_owned(),
             new_terminal_tab: "cmd-t".to_owned(),
             new_workspace: "cmd-shift-n".to_owned(),
+            connect_remote: "cmd-shift-k".to_owned(),
             toggle_sidebar: "cmd-e".to_owned(),
             switch_tab: "cmd-#".to_owned(),
             next_tab: "cmd-]".to_owned(),
@@ -1141,6 +1158,21 @@ impl AppConfigOverrides {
             if let Some(value) = terminal.line_height {
                 config.terminal.line_height = value;
             }
+            if let Some(value) = terminal.ligatures {
+                config.terminal.ligatures = value;
+            }
+            if let Some(value) = terminal.hyperlinks {
+                config.terminal.hyperlinks = value;
+            }
+            if let Some(value) = terminal.hyperlink_command_click {
+                config.terminal.hyperlink_command_click = value;
+            }
+            if let Some(value) = terminal.remote_hyperlink_auto_download {
+                config.terminal.remote_hyperlink_auto_download = value;
+            }
+            if let Some(value) = &terminal.hyperlink_download_directory {
+                config.terminal.hyperlink_download_directory = value.clone();
+            }
         }
         if let Some(ui) = &self.ui {
             if let Some(value) = ui.font_size {
@@ -1389,6 +1421,11 @@ pub struct TerminalConfigOverrides {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
+    pub ligatures: Option<bool>,
+    pub hyperlinks: Option<bool>,
+    pub hyperlink_command_click: Option<bool>,
+    pub remote_hyperlink_auto_download: Option<bool>,
+    pub hyperlink_download_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1444,6 +1481,7 @@ pub struct ShortcutConfigOverrides {
     pub ignore_quit: Option<String>,
     pub new_terminal_tab: Option<String>,
     pub new_workspace: Option<String>,
+    pub connect_remote: Option<String>,
     pub toggle_sidebar: Option<String>,
     pub switch_tab: Option<String>,
     pub next_tab: Option<String>,
@@ -1482,6 +1520,7 @@ impl ShortcutConfigOverrides {
         apply!(ignore_quit);
         apply!(new_terminal_tab);
         apply!(new_workspace);
+        apply!(connect_remote);
         apply!(toggle_sidebar);
         apply!(switch_tab);
         apply!(next_tab);
@@ -1745,6 +1784,8 @@ mod tests {
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,
+                ligatures: true,
+                ..TerminalConfig::default()
             },
             ui: UiConfig {
                 font_size: 100.0,
@@ -1780,6 +1821,13 @@ mod tests {
     fn ui_geometry_overrides_cover_pane_and_chrome_spacing() {
         let path = write_temp_config(
             r#"{
+                "terminal": {
+                    "ligatures": false,
+                    "hyperlinks": false,
+                    "hyperlink_command_click": true,
+                    "remote_hyperlink_auto_download": true,
+                    "hyperlink_download_directory": "/tmp/water-downloads"
+                },
                 "ui": {
                     "pane_corner_radius": 20.0,
                     "pane_divider_width": 3.0,
@@ -1805,6 +1853,14 @@ mod tests {
         let config = AppConfig::load_from_path(&path).unwrap();
         std::fs::remove_file(path).unwrap();
         assert_eq!(config.ui.pane_corner_radius, 20.0);
+        assert!(!config.terminal.hyperlinks);
+        assert!(config.terminal.hyperlink_command_click);
+        assert!(config.terminal.remote_hyperlink_auto_download);
+        assert_eq!(
+            config.terminal.hyperlink_download_directory,
+            "/tmp/water-downloads"
+        );
+        assert!(!AppConfig::default().restart_required_for(&config));
         assert_eq!(config.ui.pane_divider_width, 3.0);
         assert_eq!(config.ui.window_padding, 9.0);
         assert_eq!(config.ui.sidebar_surface_margin, 3.0);
@@ -1818,6 +1874,7 @@ mod tests {
         assert_eq!(config.ui.sidebar_workspace_row_padding, 14.0);
         assert_eq!(config.ui.sidebar_agent_row_padding, 12.0);
         assert_eq!(config.ui.sidebar_agent_row_height, 26.0);
+        assert!(!config.terminal.ligatures);
         assert_eq!(config.ui.titlebar_padding, 12.0);
         assert_eq!(config.ui.titlebar_gap, 9.0);
         assert_eq!(config.ui.tab_gap, 4.0);

@@ -166,6 +166,9 @@ impl ControlClient {
     pub fn ui_snapshot(&self) -> Result<UiSnapshot, ControlClientError> {
         self.call(RpcMethod::UiSnapshot)
     }
+    pub fn ui_click(&self, x: f32, y: f32) -> Result<UiSnapshot, ControlClientError> {
+        self.call(RpcMethod::UiClick { x, y })
+    }
 
     pub fn ui_screenshot(
         &self,
@@ -1054,6 +1057,18 @@ fn session_reader_loop(
                             .map_err(string_error)
                             .and_then(serialize_value)
                     }
+                    "ui.click" => {
+                        let point = |key: &str| {
+                            inner
+                                .get(key)
+                                .and_then(serde_json::Value::as_f64)
+                                .unwrap_or(0.) as f32
+                        };
+                        ui_client
+                            .click((point("x"), point("y")))
+                            .map_err(string_error)
+                            .and_then(serialize_value)
+                    }
                     other => Err(RpcError::new(
                         "UNKNOWN_UI_METHOD",
                         format!("unknown UI method {other}"),
@@ -1211,6 +1226,9 @@ impl ControlClient {
     }
 
     pub fn ui_snapshot(&self) -> Result<UiSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+    pub fn ui_click(&self, _x: f32, _y: f32) -> Result<UiSnapshot, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 
