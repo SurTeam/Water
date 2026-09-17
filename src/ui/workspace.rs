@@ -11,6 +11,7 @@ use gpui::{
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
     TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
+    FontFeatures,
     WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
     relative, rgb, rgba, size,
 };
@@ -663,6 +664,7 @@ struct TerminalRenderCacheKey {
     focused_cursor: Option<(usize, usize)>,
     font_family: String,
     font_size_bits: u32,
+    ligatures: bool,
     metrics: TerminalMetrics,
     theme: ThemeColors,
     cursor_focused: bool,
@@ -677,6 +679,7 @@ impl TerminalRenderCacheKey {
             && self.size == other.size
             && self.font_family == other.font_family
             && self.font_size_bits == other.font_size_bits
+            && self.ligatures == other.ligatures
             && self.metrics == other.metrics
             && self.theme == other.theme
             && self.cursor_focused == other.cursor_focused
@@ -720,6 +723,7 @@ struct TerminalRenderElement {
     corner_radius: f32,
     font_family: String,
     font_size: f32,
+    ligatures: bool,
     ime_text: Option<String>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
     render_caches: TerminalRenderCaches,
@@ -4366,21 +4370,9 @@ impl WorkspaceView {
             .track_scroll(&self.sidebar_scroll)
             .px(px(self.config.ui.sidebar_margin))
             .py(px(self.config.ui.sidebar_margin))
-            .flex_col();
-        for (index, connection) in self.connections.iter().enumerate() {
-            if index > 0 {
-                // Hairline between host sections; each host is a plain title
-                // row above its own rounded card, so the divider separates
-                // the previous card from the next title.
-                list = list.child(
-                    div()
-                        .h(px(1.))
-                        .w_full()
-                        .my(px(self.config.ui.sidebar_card_gap))
-                        .bg(rgb(theme.inactive_pane_border))
-                        .flex_none(),
-                );
-            }
+            .flex_col()
+            .gap(px(self.config.ui.sidebar_card_gap));
+        for connection in &self.connections {
             list = list.child(self.render_sidebar_connection(connection, theme, cx));
         }
         let list_bounds = self.sidebar_scroll.bounds();
@@ -5814,6 +5806,7 @@ impl WorkspaceView {
                                 self.config.ui.pane_corner_radius,
                                 &self.config.terminal.font_family,
                                 self.config.terminal.font_size,
+                                self.config.terminal.ligatures,
                                 ime_text,
                                 self.terminal_bounds.clone(),
                                 self.render_caches.clone(),
@@ -7859,6 +7852,7 @@ fn render_terminal_snapshot(
     corner_radius: f32,
     font_family: &str,
     font_size: f32,
+    ligatures: bool,
     ime_text: Option<String>,
     terminal_bounds: Arc<Mutex<BTreeMap<TerminalId, Bounds<gpui::Pixels>>>>,
     render_caches: TerminalRenderCaches,
@@ -7871,6 +7865,7 @@ fn render_terminal_snapshot(
         corner_radius,
         font_family: font_family.to_owned(),
         font_size,
+        ligatures,
         ime_text,
         terminal_bounds,
         render_caches,
@@ -7888,11 +7883,14 @@ fn terminal_row_paint(
     options: TerminalRenderOptions,
     font_family: &str,
     font_size: f32,
+    ligatures: bool,
     bounds: Bounds<gpui::Pixels>,
     window: &mut Window,
 ) -> TerminalRowPaint {
     let (chunks, backgrounds) =
-        terminal_row_data_for_cells(snapshot, row, cells, selected_bounds, options, font_family);
+        terminal_row_data_for_cells(
+            snapshot, row, cells, selected_bounds, options, font_family, ligatures,
+        );
     let mut text = Vec::new();
     for chunk in chunks {
         let target_width = f32::from(
@@ -8019,6 +8017,7 @@ impl gpui::Element for TerminalRenderElement {
                 .then(|| terminal_cursor_position(&self.snapshot)),
             font_family: self.font_family.clone(),
             font_size_bits: self.font_size.to_bits(),
+            ligatures: self.ligatures,
             metrics: self.options.metrics,
             theme: self.options.theme,
             cursor_focused: self.options.cursor_focused,
@@ -8163,6 +8162,7 @@ impl gpui::Element for TerminalRenderElement {
                     self.options,
                     &self.font_family,
                     self.font_size,
+                    self.ligatures,
                     bounds,
                     window,
                 );
@@ -8444,6 +8444,7 @@ fn terminal_row_data(
         selected_bounds,
         options,
         font_family,
+        true,
     )
 }
 
@@ -8454,9 +8455,13 @@ fn terminal_row_data_for_cells(
     selected_bounds: Option<(TerminalCellPosition, TerminalCellPosition)>,
     options: TerminalRenderOptions,
     font_family: &str,
+    ligatures: bool,
 ) -> (Vec<TerminalTextChunk>, Vec<TerminalBackgroundSpan>) {
     let fonts = {
-        let normal = font(font_family.to_owned());
+        let mut normal = font(font_family.to_owned());
+        if !ligatures {
+            normal.features = FontFeatures::disable_ligatures();
+        }
         [
             normal.clone(),
             normal.clone().italic(),
@@ -9848,6 +9853,7 @@ mod tests {
             focused_cursor: None,
             font_family: "monospace".to_owned(),
             font_size_bits: 13.0_f32.to_bits(),
+            ligatures: true,
             metrics: TerminalMetrics::default(),
             theme: AppConfig::default().theme.colors(),
             cursor_focused: false,

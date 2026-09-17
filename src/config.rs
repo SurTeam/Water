@@ -457,6 +457,8 @@ pub struct TerminalConfig {
     pub font_size: f32,
     /// Terminal row height in logical pixels.
     pub line_height: f32,
+    /// Whether terminal text shaping enables font ligatures.
+    pub ligatures: bool,
 }
 
 impl Default for TerminalConfig {
@@ -471,6 +473,7 @@ impl Default for TerminalConfig {
             font_family: DEFAULT_FONT_FAMILY.to_owned(),
             font_size: DEFAULT_FONT_SIZE,
             line_height: DEFAULT_LINE_HEIGHT,
+            ligatures: true,
         }
     }
 }
@@ -563,7 +566,7 @@ pub struct UiConfig {
     pub pane_divider_width: f32,
     /// Insets the sidebar card list and its bottom action row.
     pub sidebar_margin: f32,
-    /// Gap between sidebar connection cards and their nested workspace cards.
+    /// Vertical gap between adjacent sidebar connection cards.
     pub sidebar_card_gap: f32,
     /// Padding inside sidebar connection cards.
     pub sidebar_card_padding: f32,
@@ -1141,6 +1144,9 @@ impl AppConfigOverrides {
             if let Some(value) = terminal.line_height {
                 config.terminal.line_height = value;
             }
+            if let Some(value) = terminal.ligatures {
+                config.terminal.ligatures = value;
+            }
         }
         if let Some(ui) = &self.ui {
             if let Some(value) = ui.font_size {
@@ -1389,6 +1395,7 @@ pub struct TerminalConfigOverrides {
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
     pub line_height: Option<f32>,
+    pub ligatures: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1745,6 +1752,7 @@ mod tests {
                 font_family: "   ".to_owned(),
                 font_size: 1.0,
                 line_height: 1000.0,
+                ligatures: true,
             },
             ui: UiConfig {
                 font_size: 100.0,
@@ -1795,6 +1803,7 @@ mod tests {
                     "sidebar_workspace_row_padding": 14.0,
                     "sidebar_agent_row_padding": 12.0,
                     "sidebar_agent_row_height": 26.0,
+                    "ligatures": false,
                     "titlebar_padding": 12.0,
                     "titlebar_gap": 9.0,
                     "tab_gap": 4.0,
@@ -1818,6 +1827,7 @@ mod tests {
         assert_eq!(config.ui.sidebar_workspace_row_padding, 14.0);
         assert_eq!(config.ui.sidebar_agent_row_padding, 12.0);
         assert_eq!(config.ui.sidebar_agent_row_height, 26.0);
+        assert!(!config.terminal.ligatures);
         assert_eq!(config.ui.titlebar_padding, 12.0);
         assert_eq!(config.ui.titlebar_gap, 9.0);
         assert_eq!(config.ui.tab_gap, 4.0);

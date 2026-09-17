@@ -67,7 +67,8 @@
     "max_total_scrollback_bytes": 67108864,
     "font_family": "Sarasa Term SC Nerd Font",
     "font_size": 16.0,
-    "line_height": 18.0
+    "line_height": 18.0,
+    "ligatures": true
   },
   "server": {
     "detached": true,

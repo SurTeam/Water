@@ -46,6 +46,7 @@ enum SettingField {
     FontFamily,
     FontSize,
     LineHeight,
+    Ligatures,
     MouseReporting,
     BracketedPaste,
     Selection,
@@ -164,6 +165,7 @@ impl SettingField {
             Self::FontFamily => "font-family",
             Self::FontSize => "font-size",
             Self::LineHeight => "line-height",
+            Self::Ligatures => "ligatures",
             Self::MouseReporting => "mouse-reporting",
             Self::BracketedPaste => "bracketed-paste",
             Self::Selection => "selection",
@@ -275,6 +277,7 @@ impl SettingField {
                 | Self::MouseReporting
                 | Self::BracketedPaste
                 | Self::Selection
+                | Self::Ligatures
                 | Self::SidebarVisible
                 | Self::SidebarShowAgentCount
                 | Self::TabBarVerticalWheelScroll
@@ -414,6 +417,9 @@ impl SettingsView {
             }
             SettingField::Selection => {
                 self.config.features.selection = !self.config.features.selection
+            }
+            SettingField::Ligatures => {
+                self.config.terminal.ligatures = !self.config.terminal.ligatures
             }
             SettingField::SidebarVisible => {
                 self.config.ui.sidebar_visible = !self.config.ui.sidebar_visible
@@ -644,6 +650,7 @@ impl SettingsView {
             SettingField::FontFamily => self.config.terminal.font_family.clone(),
             SettingField::FontSize => format_float(self.config.terminal.font_size),
             SettingField::LineHeight => format_float(self.config.terminal.line_height),
+            SettingField::Ligatures => self.config.terminal.ligatures.to_string(),
             SettingField::MouseReporting => self.config.features.mouse_reporting.to_string(),
             SettingField::BracketedPaste => self.config.features.bracketed_paste.to_string(),
             SettingField::Selection => self.config.features.selection.to_string(),
@@ -1004,6 +1011,7 @@ impl SettingsView {
             | SettingField::MouseReporting
             | SettingField::BracketedPaste
             | SettingField::Selection
+            | SettingField::Ligatures
             | SettingField::SidebarVisible
             | SettingField::SidebarShowAgentCount
             | SettingField::TabBarVerticalWheelScroll => {
@@ -1024,6 +1032,7 @@ impl SettingsView {
             SettingField::MouseReporting => on_off(self.config.features.mouse_reporting),
             SettingField::BracketedPaste => on_off(self.config.features.bracketed_paste),
             SettingField::Selection => on_off(self.config.features.selection),
+            SettingField::Ligatures => on_off(self.config.terminal.ligatures),
             SettingField::SidebarVisible => on_off(self.config.ui.sidebar_visible),
             SettingField::SidebarShowAgentCount => on_off(self.config.ui.sidebar_show_agent_count),
             SettingField::TabBarVerticalWheelScroll => {
@@ -1573,6 +1582,14 @@ impl Render for SettingsView {
                 SettingField::LineHeight,
                 "终端行高",
                 "逻辑像素，范围 8–64",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::Ligatures,
+                "终端连字渲染",
+                "是否将连续字符合并为字体连字",
                 ApplyKind::Immediate,
                 theme,
                 cx,
