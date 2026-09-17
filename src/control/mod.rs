@@ -7,8 +7,9 @@ pub use client::{
     spawn_state_polling_fallback,
 };
 pub use protocol::{
-    PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest, RpcResponse, ServerInfoResponse,
-    SessionOpenResponse, WireMessage, read_frame, write_frame,
+    API_SIGNATURE, CONTROL_API_SIGNATURE, ClientInfoResponse, ConnectionInfo,
+    ConnectionListResponse, ControlInfoResponse, PROTOCOL_VERSION, RpcError, RpcMethod, RpcRequest,
+    RpcResponse, ServerInfoResponse, SessionOpenResponse, WireMessage, read_frame, write_frame,
 };
 pub use server::{ControlServer, ControlServerHandle};
 

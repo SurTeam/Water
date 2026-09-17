@@ -59,6 +59,9 @@ fn server_rejects_other_variants_before_dispatch_or_session_open() {
         client.server_info().unwrap().build_variant,
         water::BUILD_VARIANT
     );
+    let info = client.server_info().unwrap();
+    assert_eq!(info.server_version, env!("CARGO_PKG_VERSION"));
+    assert_eq!(info.api_signature, water::control::API_SIGNATURE);
     let second = ControlServer::start(socket.clone(), host.client(), None, None);
     assert!(matches!(second, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse));
     client.ping().unwrap();
@@ -356,6 +359,21 @@ fn ui_wheel_uses_a_stable_wire_name() {
         decoded.method,
         RpcMethod::UiWheel { dy, .. } if (dy - 3.0).abs() < f32::EPSILON
     ));
+}
+
+#[test]
+fn connection_list_uses_a_stable_wire_name() {
+    let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 13,
+        method: RpcMethod::ConnectionList,
+    };
+    let value = serde_json::to_value(&request).expect("connection list request serializes");
+    assert_eq!(value["method"], "connection.list");
+    let decoded: RpcRequest =
+        serde_json::from_value(value).expect("connection list request decodes");
+    assert!(matches!(decoded.method, RpcMethod::ConnectionList));
 }
 
 #[test]

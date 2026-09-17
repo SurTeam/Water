@@ -17,8 +17,8 @@ use crate::app::model::AgentDump;
 use crate::app::{CommandTransport, ModelSnapshot};
 use crate::config::{AppConfig, switch_tab_binding};
 use crate::control::{
-    ControlClient, RemoteCommandClient, WaterSession, connect_water_session,
-    spawn_state_polling_fallback,
+    ConnectionInfo, ConnectionListResponse, ControlClient, RemoteCommandClient, WaterSession,
+    connect_water_session, spawn_state_polling_fallback,
 };
 use crate::ids::{ConnectionId, TerminalId};
 use crate::remote::SshTunnel;
@@ -579,6 +579,13 @@ impl WaterApplication {
         connection.local_socket = Some(local_socket);
     }
 
+    pub fn set_local_socket(&self, local_socket: PathBuf) {
+        let mut connections = self.state.connections.borrow_mut();
+        if let Some(connection) = connections.first_mut() {
+            connection.local_socket = Some(local_socket);
+        }
+    }
+
     fn connection_projections(&self) -> Vec<WorkspaceConnection> {
         self.state
             .connections
@@ -586,6 +593,34 @@ impl WaterApplication {
             .iter()
             .map(|connection| connection.projection.clone())
             .collect()
+    }
+
+    fn connection_list(&self) -> ConnectionListResponse {
+        let connections = self
+            .state
+            .connections
+            .borrow()
+            .iter()
+            .map(|connection| {
+                let remote = connection._tunnel.as_ref();
+                ConnectionInfo {
+                    id: connection.projection.id,
+                    name: connection.projection.title.clone(),
+                    kind: match connection.projection.kind {
+                        WorkspaceConnectionKind::Local => "local".to_owned(),
+                        WorkspaceConnectionKind::Remote => "remote".to_owned(),
+                    },
+                    socket_path: connection
+                        .local_socket
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    remote_socket_path: remote
+                        .map(|tunnel| tunnel.remote_socket().display().to_string()),
+                    destination: remote.map(|tunnel| tunnel.destination().to_owned()),
+                }
+            })
+            .collect();
+        ConnectionListResponse { connections }
     }
 
     pub(crate) fn connect_remote(
@@ -1949,6 +1984,7 @@ impl WaterApplication {
 
     fn spawn_ui_control_listener(&self, cx: &mut App, receiver: UiControlReceiver) -> Task<()> {
         let receiver = Arc::new(receiver);
+        let application = self.clone();
         cx.spawn(async move |cx| {
             loop {
                 let receiver_for_worker = receiver.clone();
@@ -1980,6 +2016,10 @@ impl WaterApplication {
                                 has_active_window: cx.active_window().is_some(),
                             })
                         });
+                        let _ = reply.send(result);
+                    }
+                    UiControlRequest::Connections { reply } => {
+                        let result = cx.update(|_| Ok(application.connection_list()));
                         let _ = reply.send(result);
                     }
                     UiControlRequest::Wheel {

@@ -109,6 +109,25 @@ them without touching the GUI surface; every command also works bare
 `startup.control_socket`, then the platform default
 (`/tmp/water-dev.sock` for dev, `/tmp/water.sock` for release).
 
+The introspection commands expose the client/server compatibility metadata and
+the sockets currently projected by the GUI. `water ctl info` combines the
+local client and connected server; `water ctl connections list` reports the
+GUI's `Local` and `Remote` entries, including the local forwarded socket and,
+for Remote entries, the remote server socket. `socket list` is an alias.
+
+```sh
+water ctl version                 # local client version/build/API signature
+water ctl server info             # connected server version/build/API signature
+water ctl info                    # client + server metadata
+water ctl connections list        # Local/Remote socket entries
+water ctl socket list             # alias
+```
+
+The JSON metadata uses `client_version`, `server_version`, `protocol_version`,
+and `api_signature`; the API signature is the stable control-API identifier
+(`water-control/v4`). When no GUI session is attached, the connection list
+still reports the server's own Local control socket.
+
 ```sh
 cargo run -- --socket /tmp/water.sock state
 # Dispatch a real GPUI keystroke through the focused native window/action tree.
