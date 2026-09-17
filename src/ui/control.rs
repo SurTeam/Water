@@ -11,6 +11,7 @@ const UI_CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) enum UiControlRequest {
     Click {
         position: (f32, f32),
+        click_count: usize,
         reply: Sender<Result<UiSnapshot, String>>,
     },
     Keystroke {
@@ -83,9 +84,21 @@ pub fn ui_control_channel() -> (UiControlClient, UiControlReceiver) {
 
 impl UiControlClient {
     pub fn click(&self, position: (f32, f32)) -> Result<UiSnapshot, String> {
+        self.click_with_count(position, 1)
+    }
+
+    pub(crate) fn click_with_count(
+        &self,
+        position: (f32, f32),
+        click_count: usize,
+    ) -> Result<UiSnapshot, String> {
         let (reply, response) = mpsc::channel();
         self.sender
-            .send(UiControlRequest::Click { position, reply })
+            .send(UiControlRequest::Click {
+                position,
+                click_count,
+                reply,
+            })
             .map_err(|_| "UI control channel is unavailable".to_owned())?;
         response
             .recv_timeout(UI_CONTROL_TIMEOUT)

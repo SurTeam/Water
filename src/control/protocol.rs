@@ -20,6 +20,10 @@ const TERMINAL_FRAME_OUTPUT: u8 = 1;
 const TERMINAL_FRAME_RESIZE: u8 = 2;
 const TERMINAL_FRAME_EXIT: u8 = 3;
 
+fn default_ui_click_count() -> usize {
+    1
+}
+
 /// Push frames the server sends on a GUI session connection.
 ///
 /// `push.snapshot` carries the next revisioned model state (at most one per
@@ -227,7 +231,12 @@ pub enum RpcMethod {
     #[serde(rename = "ui.snapshot")]
     UiSnapshot,
     #[serde(rename = "ui.click")]
-    UiClick { x: f32, y: f32 },
+    UiClick {
+        x: f32,
+        y: f32,
+        #[serde(default = "default_ui_click_count")]
+        click_count: usize,
+    },
     #[serde(rename = "ui.screenshot")]
     UiScreenshot { path: String },
     #[serde(rename = "ui.wheel")]

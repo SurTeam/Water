@@ -281,6 +281,41 @@ fn ui_automation_methods_use_stable_wire_names() {
 }
 
 #[test]
+fn ui_click_carries_a_double_click_count_and_keeps_legacy_defaults() {
+    let request = RpcRequest {
+        build_variant: water::BUILD_VARIANT.to_owned(),
+        protocol_version: PROTOCOL_VERSION,
+        request_id: 11,
+        method: RpcMethod::UiClick {
+            x: 240.0,
+            y: 100.0,
+            click_count: 2,
+        },
+    };
+    let value = serde_json::to_value(&request).expect("double click request serializes");
+    assert_eq!(value["method"], "ui.click");
+    assert_eq!(value["params"]["click_count"], 2);
+    let decoded: RpcRequest = serde_json::from_value(value).expect("double click request decodes");
+    assert!(matches!(
+        decoded.method,
+        RpcMethod::UiClick { click_count, .. } if click_count == 2
+    ));
+
+    let legacy = serde_json::json!({
+        "build_variant": water::BUILD_VARIANT,
+        "protocol_version": PROTOCOL_VERSION,
+        "request_id": 12,
+        "method": "ui.click",
+        "params": { "x": 240.0, "y": 100.0 }
+    });
+    let decoded: RpcRequest = serde_json::from_value(legacy).expect("legacy click decodes");
+    assert!(matches!(
+        decoded.method,
+        RpcMethod::UiClick { click_count, .. } if click_count == 1
+    ));
+}
+
+#[test]
 fn ui_screenshot_uses_a_stable_wire_name() {
     let request = RpcRequest {
         build_variant: water::BUILD_VARIANT.to_owned(),

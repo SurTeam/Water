@@ -1990,8 +1990,13 @@ impl WaterApplication {
                         let result = cx.update(|cx| dispatch_controlled_wheel(position, delta, cx));
                         let _ = reply.send(result);
                     }
-                    UiControlRequest::Click { position, reply } => {
-                        let result = cx.update(|cx| dispatch_controlled_click(position, cx));
+                    UiControlRequest::Click {
+                        position,
+                        click_count,
+                        reply,
+                    } => {
+                        let result =
+                            cx.update(|cx| dispatch_controlled_click(position, click_count, cx));
                         let _ = reply.send(result);
                     }
                     #[cfg(feature = "runtime-screenshot")]
@@ -2229,7 +2234,11 @@ fn dispatch_controlled_wheel(
     })
 }
 
-fn dispatch_controlled_click(position: (f32, f32), cx: &mut App) -> Result<UiSnapshot, String> {
+fn dispatch_controlled_click(
+    position: (f32, f32),
+    click_count: usize,
+    cx: &mut App,
+) -> Result<UiSnapshot, String> {
     if !position.0.is_finite() || !position.1.is_finite() {
         return Err("click coordinates must be finite".into());
     }
@@ -2248,7 +2257,7 @@ fn dispatch_controlled_click(position: (f32, f32), cx: &mut App) -> Result<UiSna
                 PlatformInput::MouseDown(gpui::MouseDownEvent {
                     button: gpui::MouseButton::Left,
                     position: point,
-                    click_count: 1,
+                    click_count: click_count.max(1),
                     ..Default::default()
                 }),
                 cx,
@@ -2257,7 +2266,7 @@ fn dispatch_controlled_click(position: (f32, f32), cx: &mut App) -> Result<UiSna
                 PlatformInput::MouseUp(gpui::MouseUpEvent {
                     button: gpui::MouseButton::Left,
                     position: point,
-                    click_count: 1,
+                    click_count: click_count.max(1),
                     ..Default::default()
                 }),
                 cx,

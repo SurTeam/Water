@@ -3392,6 +3392,7 @@ impl WorkspaceView {
         terminal_id: TerminalId,
         position: Point<gpui::Pixels>,
         shift_held: bool,
+        click_count: usize,
         cx: &mut Context<Self>,
     ) {
         if !self.config.features.selection {
@@ -3401,14 +3402,28 @@ impl WorkspaceView {
             return;
         };
         self.clear_ime();
-        self.selection = Some(terminal_selection_after_click(
-            self.selection,
-            terminal_id,
-            endpoint,
-            shift_held,
-        ));
+        self.selection = Some(if click_count >= 2 {
+            self.terminal_snapshot_for(terminal_id)
+                .map(|snapshot| {
+                    terminal_selection_after_double_click(snapshot, terminal_id, endpoint)
+                })
+                .unwrap_or_else(|| {
+                    terminal_selection_after_click(
+                        self.selection,
+                        terminal_id,
+                        endpoint,
+                        shift_held,
+                    )
+                })
+        } else {
+            terminal_selection_after_click(self.selection, terminal_id, endpoint, shift_held)
+        });
         self.selection_autoscroll = None;
-        self.dragging_terminal = Some(terminal_id);
+        // A double-click creates a complete local selection. Do not let the
+        // second press turn the following pointer movement into a drag from
+        // the sentence's start; a fresh single click is still the way to
+        // begin a regular drag selection.
+        self.dragging_terminal = (click_count == 1).then_some(terminal_id);
         cx.notify();
     }
 
@@ -6275,6 +6290,7 @@ impl WorkspaceView {
                                         terminal_id,
                                         event.position,
                                         event.modifiers.shift,
+                                        event.click_count,
                                         cx,
                                     );
                                 }
@@ -8072,6 +8088,204 @@ fn terminal_selection_after_click(
         anchor: endpoint,
         head: endpoint,
     }
+}
+
+/// Build the local selection produced by a terminal double-click.
+///
+/// A terminal line is often a wrapped shell command or log message, so the
+/// selection follows the logical line rather than stopping at the painted row
+/// where the pointer happens to land. When sentence punctuation is present,
+/// only the sentence under the pointer is selected; command lines without
+/// punctuation fall back to their non-padding text.
+fn terminal_selection_after_double_click(
+    snapshot: &TerminalSnapshot,
+    terminal_id: TerminalId,
+    endpoint: TerminalSelectionEndpoint,
+) -> TerminalSelection {
+    let selection =
+        terminal_sentence_bounds(snapshot, endpoint.position).and_then(|(start, end)| {
+            let start = terminal_endpoint_at_linear_index(
+                start,
+                snapshot.size.columns,
+                TerminalSelectionSide::Left,
+            )?;
+            let head = terminal_endpoint_at_linear_index(
+                end.saturating_sub(1),
+                snapshot.size.columns,
+                TerminalSelectionSide::Right,
+            )?;
+            Some(TerminalSelection {
+                terminal_id,
+                anchor: start,
+                head,
+            })
+        });
+
+    selection.unwrap_or(TerminalSelection {
+        terminal_id,
+        anchor: endpoint,
+        head: endpoint,
+    })
+}
+
+fn terminal_sentence_bounds(
+    snapshot: &TerminalSnapshot,
+    position: TerminalCellPosition,
+) -> Option<(i64, i64)> {
+    let columns = snapshot.size.columns;
+    if columns == 0 {
+        return None;
+    }
+    let (first_row, last_row) = terminal_logical_line_rows(snapshot, position.row)?;
+    let line_start = i64::from(first_row) * columns as i64;
+    let line_end = (i64::from(last_row) + 1) * columns as i64;
+    let clicked = i64::from(position.row) * columns as i64 + position.column as i64;
+
+    let characters = (line_start..line_end)
+        .filter_map(|index| {
+            terminal_cell_at_linear_index(snapshot, index).and_then(|cell| {
+                terminal_selectable_cell_character(cell).map(|character| (index, character))
+            })
+        })
+        .collect::<Vec<_>>();
+    if characters.is_empty() {
+        return None;
+    }
+
+    let mut spans = Vec::new();
+    let mut span_start = 0;
+    let mut index = 0;
+    while index < characters.len() {
+        let Some(end) = terminal_sentence_end(&characters, index) else {
+            index += 1;
+            continue;
+        };
+        if let Some(span) = terminal_trimmed_character_span(&characters, span_start, end) {
+            spans.push(span);
+        }
+        span_start = end;
+        index = end;
+    }
+    if let Some(span) = terminal_trimmed_character_span(&characters, span_start, characters.len()) {
+        spans.push(span);
+    }
+    if spans.is_empty() {
+        return None;
+    }
+
+    spans
+        .iter()
+        .copied()
+        .find(|(start, end)| (*start..*end).contains(&clicked))
+        .or_else(|| spans.iter().copied().find(|(_, end)| clicked < *end))
+        .or_else(|| spans.last().copied())
+}
+
+fn terminal_logical_line_rows(snapshot: &TerminalSnapshot, row: i32) -> Option<(i32, i32)> {
+    let first_available = -(snapshot.rows_before.len() as i32);
+    let last_available = i32::try_from(
+        snapshot
+            .size
+            .lines
+            .saturating_add(snapshot.rows_after.len()),
+    )
+    .ok()?
+    .checked_sub(1)?;
+    if !(first_available..=last_available).contains(&row) {
+        return None;
+    }
+
+    let mut first = row;
+    while first > first_available && terminal_row_wraps_to_next(snapshot, first - 1) {
+        first -= 1;
+    }
+    let mut last = row;
+    while last < last_available && terminal_row_wraps_to_next(snapshot, last) {
+        last += 1;
+    }
+    Some((first, last))
+}
+
+fn terminal_row_wraps_to_next(snapshot: &TerminalSnapshot, row: i32) -> bool {
+    snapshot
+        .relative_row(row)
+        .and_then(|cells| cells.last())
+        .is_some_and(|cell| cell.flags.wrapline())
+}
+
+fn terminal_selectable_cell_character(cell: &TerminalCell) -> Option<char> {
+    (cell.character != TERMINAL_IMAGE_PLACEHOLDER
+        && !cell.flags.wide_spacer()
+        && !cell.flags.leading_wide_spacer())
+    .then_some(cell.character)
+}
+
+fn terminal_sentence_end(characters: &[(i64, char)], index: usize) -> Option<usize> {
+    let character = characters.get(index)?.1;
+    let is_cjk_terminator = matches!(character, '。' | '！' | '？' | '｡' | '．');
+    let is_ascii_terminator = matches!(character, '.' | '!' | '?');
+    if !is_cjk_terminator && !is_ascii_terminator {
+        return None;
+    }
+
+    let mut end = index + 1;
+    while characters
+        .get(end)
+        .is_some_and(|(_, character)| terminal_sentence_closer(*character))
+    {
+        end += 1;
+    }
+    if is_ascii_terminator
+        && characters
+            .get(end)
+            .is_some_and(|(_, character)| !character.is_whitespace())
+    {
+        return None;
+    }
+    Some(end)
+}
+
+fn terminal_sentence_closer(character: char) -> bool {
+    matches!(
+        character,
+        '\'' | '"' | ')' | ']' | '}' | '»' | '」' | '』' | '”' | '’'
+    )
+}
+
+fn terminal_trimmed_character_span(
+    characters: &[(i64, char)],
+    start: usize,
+    end: usize,
+) -> Option<(i64, i64)> {
+    let first = (start..end).find(|&index| {
+        characters
+            .get(index)
+            .is_some_and(|(_, character)| !character.is_whitespace())
+    })?;
+    let last = (first..end).rev().find(|&index| {
+        characters
+            .get(index)
+            .is_some_and(|(_, character)| !character.is_whitespace())
+    })?;
+    Some((characters[first].0, characters[last].0 + 1))
+}
+
+fn terminal_endpoint_at_linear_index(
+    index: i64,
+    columns: usize,
+    side: TerminalSelectionSide,
+) -> Option<TerminalSelectionEndpoint> {
+    let columns = i64::try_from(columns).ok()?;
+    if columns == 0 {
+        return None;
+    }
+    Some(TerminalSelectionEndpoint {
+        position: TerminalCellPosition {
+            row: i32::try_from(index.div_euclid(columns)).ok()?,
+            column: usize::try_from(index.rem_euclid(columns)).ok()?,
+        },
+        side,
+    })
 }
 
 fn selection_bounds(
@@ -10488,6 +10702,74 @@ mod tests {
     }
 
     #[test]
+    fn double_click_selects_the_sentence_under_the_pointer() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(64, 1));
+        for (column, character) in "first sentence. second sentence!".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let first = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 4, TerminalSelectionSide::Left),
+        );
+        assert_eq!(selected_terminal_text(&snapshot, first), "first sentence.");
+
+        let second = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 20, TerminalSelectionSide::Left),
+        );
+        assert_eq!(
+            selected_terminal_text(&snapshot, second),
+            "second sentence!"
+        );
+    }
+
+    #[test]
+    fn double_click_uses_cjk_sentence_terminators() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(16, 1));
+        for (column, character) in "第一句。第二句！".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let first = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 1, TerminalSelectionSide::Left),
+        );
+        assert_eq!(selected_terminal_text(&snapshot, first), "第一句。");
+
+        let second = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 5, TerminalSelectionSide::Left),
+        );
+        assert_eq!(selected_terminal_text(&snapshot, second), "第二句！");
+    }
+
+    #[test]
+    fn double_click_without_punctuation_selects_the_trimmed_logical_line() {
+        let terminal_id = TerminalId::new(1);
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(32, 1));
+        for (column, character) in "  echo hello world  ".chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+
+        let selection = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 7, TerminalSelectionSide::Left),
+        );
+        assert_eq!(
+            selected_terminal_text(&snapshot, selection),
+            "echo hello world"
+        );
+    }
+
+    #[test]
     fn selection_autoscroll_direction_is_edge_triggered() {
         assert_eq!(terminal_selection_autoscroll_direction(4.0, 200.0), Some(3));
         assert_eq!(
@@ -11532,7 +11814,7 @@ mod tests {
                     terminal_id,
                     Bounds::new(point(px(0.0), px(0.0)), size(px(640.0), px(384.0))),
                 );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -11633,7 +11915,7 @@ mod tests {
                 .entry(terminal_id)
                 .or_insert_with(|| TerminalScrollState::new(0))
                 .visual_unacked_rows = 2.5;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             let selection = view
                 .selection
                 .expect("mouse selection must begin on the shown tab");
@@ -11641,7 +11923,7 @@ mod tests {
                 selection.anchor.position.row, -2,
                 "a pixel in the shifted grid must map to the painted source row"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(28.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 -1,
@@ -11653,13 +11935,13 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 0.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(36.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 2,
                 "the mapping is viewport-relative without an unacked offset"
             );
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             assert_eq!(
                 view.selection.unwrap().anchor.position.row,
                 1,
@@ -11672,7 +11954,7 @@ mod tests {
                 .get_mut(&terminal_id)
                 .unwrap()
                 .visual_unacked_rows = 2.0;
-            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, cx);
+            view.begin_terminal_selection(terminal_id, point(px(12.0), px(20.0)), false, 1, cx);
             assert!(
                 view.selection.unwrap().anchor.position.row < 0,
                 "a whole-row unacked offset must shift the mapping into history"

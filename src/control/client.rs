@@ -167,7 +167,15 @@ impl ControlClient {
         self.call(RpcMethod::UiSnapshot)
     }
     pub fn ui_click(&self, x: f32, y: f32) -> Result<UiSnapshot, ControlClientError> {
-        self.call(RpcMethod::UiClick { x, y })
+        self.ui_click_with_count(x, y, 1)
+    }
+    pub fn ui_click_with_count(
+        &self,
+        x: f32,
+        y: f32,
+        click_count: usize,
+    ) -> Result<UiSnapshot, ControlClientError> {
+        self.call(RpcMethod::UiClick { x, y, click_count })
     }
 
     pub fn ui_screenshot(
@@ -1065,7 +1073,13 @@ fn session_reader_loop(
                                 .unwrap_or(0.) as f32
                         };
                         ui_client
-                            .click((point("x"), point("y")))
+                            .click_with_count(
+                                (point("x"), point("y")),
+                                inner
+                                    .get("click_count")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(1) as usize,
+                            )
                             .map_err(string_error)
                             .and_then(serialize_value)
                     }
@@ -1229,6 +1243,14 @@ impl ControlClient {
         Err(ControlClientError::Unsupported)
     }
     pub fn ui_click(&self, _x: f32, _y: f32) -> Result<UiSnapshot, ControlClientError> {
+        Err(ControlClientError::Unsupported)
+    }
+    pub fn ui_click_with_count(
+        &self,
+        _x: f32,
+        _y: f32,
+        _click_count: usize,
+    ) -> Result<UiSnapshot, ControlClientError> {
         Err(ControlClientError::Unsupported)
     }
 

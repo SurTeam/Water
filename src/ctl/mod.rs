@@ -144,7 +144,15 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
             let y: f32 = optional_value(arguments, "--y")?
                 .context("ui click requires --y")?
                 .parse()?;
-            print_json(&client.ui_click(x, y).context("UI click failed")?)?;
+            let click_count = optional_value(arguments, "--click-count")?
+                .map(|value| value.parse::<usize>())
+                .transpose()?
+                .unwrap_or(1);
+            print_json(
+                &client
+                    .ui_click_with_count(x, y, click_count)
+                    .context("UI click failed")?,
+            )?;
         }
         Some(command) => bail!("unknown ui command: {command}"),
         None => bail!("ui requires key, state, screenshot, wheel, or click"),
@@ -902,6 +910,7 @@ fn print_usage() {
            water ctl ui key cmd-t\n\
            water ctl ui state\n\
            water ctl ui screenshot --output target/water.png\n\
+           water ctl ui click --x 240 --y 100 --click-count 2\n\
            water ctl ui wheel --x 120 --y 20 --dx 0 --dy 3\n\
            water ctl workspace new\n\
            water ctl workspace rename --workspace 1 --title Dev\n\
