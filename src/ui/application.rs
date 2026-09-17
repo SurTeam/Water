@@ -1352,21 +1352,46 @@ impl WaterApplication {
         self.ensure_terminal_attached(connection_id, terminal_id);
     }
 
+    /// Attaches every terminal projected by an authoritative model snapshot.
+    ///
+    /// Command RPCs return a fresh `state_dump()` before the asynchronous
+    /// `push.snapshot` stream necessarily reaches `WaterApplication`. Use the
+    /// command snapshot directly so newly-created remote panes can attach their
+    /// raw PTY stream even when the application-level projection is briefly stale.
+    pub(crate) fn ensure_terminals_attached_from_snapshot(
+        &self,
+        connection_id: ConnectionId,
+        snapshot: &ModelSnapshot,
+    ) {
+        for terminal_id in terminal_ids_in_snapshot(snapshot) {
+            self.ensure_terminal_attached_with_snapshot(connection_id, terminal_id, snapshot);
+        }
+    }
+
     /// Attaches the raw stream and starts its worker-owned emulator. Replay
     /// and live parsing both publish immutable snapshots; GPUI never mutates
     /// or waits on the emulator.
     pub fn ensure_terminal_attached(&self, connection_id: ConnectionId, terminal_id: TerminalId) {
-        let terminal_exists = self
+        let snapshot = self
             .state
             .connections
             .borrow()
             .iter()
             .find(|connection| connection.projection.id == connection_id)
-            .and_then(|connection| {
-                terminal_size_in_snapshot(&connection.projection.snapshot, terminal_id)
-            })
-            .is_some();
-        if !terminal_exists {
+            .map(|connection| connection.projection.snapshot.clone());
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        self.ensure_terminal_attached_with_snapshot(connection_id, terminal_id, &snapshot);
+    }
+
+    fn ensure_terminal_attached_with_snapshot(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        snapshot: &ModelSnapshot,
+    ) {
+        if terminal_size_in_snapshot(snapshot, terminal_id).is_none() {
             return;
         }
         let (
@@ -1385,8 +1410,7 @@ impl WaterApplication {
             else {
                 return;
             };
-            let scrollback_protected =
-                terminal_scrollback_protected(&connection.projection.snapshot, terminal_id);
+            let scrollback_protected = terminal_scrollback_protected(snapshot, terminal_id);
             let Some(terminal) = connection.terminal.as_mut() else {
                 return;
             };
@@ -1398,7 +1422,7 @@ impl WaterApplication {
             let attachment = Arc::new(TerminalAttachmentState::new());
             let (emulator_commands_tx, emulator_commands) = std::sync::mpsc::channel();
             let scrollback_lines = terminal_scrollback_lines(
-                &connection.projection.snapshot,
+                snapshot,
                 terminal_id,
                 terminal.scrollback_lines,
                 terminal.inactive_scrollback_lines,

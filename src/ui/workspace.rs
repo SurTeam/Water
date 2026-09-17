@@ -3943,10 +3943,16 @@ impl WorkspaceView {
             if let Ok(Some((snapshot, operation_result))) = result {
                 let _ = entity.update(cx, |view, cx| {
                     if view.active_connection == connection_id {
-                        view.install_snapshot(snapshot, cx);
+                        view.install_snapshot(snapshot.clone(), cx);
                         view.apply_operation_result(operation_result, cx);
                     } else {
-                        view.install_connection_snapshot(connection_id, snapshot, cx);
+                        view.install_connection_snapshot(connection_id, snapshot.clone(), cx);
+                    }
+                    if let Some(application) = view.application.clone() {
+                        application.ensure_terminals_attached_from_snapshot(
+                            connection_id,
+                            &snapshot,
+                        );
                     }
                 });
             } else if let Err(error) = result {
