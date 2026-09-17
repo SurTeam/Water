@@ -651,6 +651,10 @@ struct TerminalImagePaint {
 #[derive(Clone, PartialEq)]
 struct TerminalRenderCacheKey {
     terminal_id: TerminalId,
+    /// The grid dimensions can change during the initial size handshake
+    /// without changing the stream revision. They affect which rows need to
+    /// be prepared, including a newly exposed bottom prompt row.
+    size: TerminalSize,
     snapshot_revision: u64,
     viewport_position: i64,
     /// The focused cursor is baked into its row's colors. Keep its position
@@ -670,6 +674,7 @@ struct TerminalRenderCacheKey {
 impl TerminalRenderCacheKey {
     fn rows_compatible_with(&self, other: &Self) -> bool {
         self.terminal_id == other.terminal_id
+            && self.size == other.size
             && self.font_family == other.font_family
             && self.font_size_bits == other.font_size_bits
             && self.metrics == other.metrics
@@ -2583,20 +2588,42 @@ impl WorkspaceView {
 
     /// Refreshes the locally rendered snapshots for terminals whose raw
     /// stream advanced, then requests one repaint for the whole view.
-    pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
+    pub(crate) fn apply_terminal_events_for_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        changed: &[TerminalId],
+        cx: &mut Context<Self>,
+    ) {
         if changed.is_empty() {
             return;
         }
         let Some(application) = self.application.clone() else {
             return;
         };
-        let connection_id = self.active_connection;
+        // Use the event's connection for the snapshot lookup, not the
+        // workspace's active connection. A non-active remote connection's
+        // terminals would otherwise look up in the wrong projection.
         let mut displayed = BTreeSet::new();
-        if let Some(workspace) = self.selected_workspace_dump()
-            && let Some(active_tab) = workspace.active_tab
-            && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+        if connection_id == self.active_connection {
+            if let Some(workspace) = self.selected_workspace_dump()
+                && let Some(active_tab) = workspace.active_tab
+                && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+            {
+                collect_terminal_ids(&tab.tree, &mut displayed);
+            }
+        } else if let Some(connection) = self
+            .connections
+            .iter()
+            .find(|connection| connection.id == connection_id)
+            && let Some(workspace_id) = self.selected_workspace
         {
-            collect_terminal_ids(&tab.tree, &mut displayed);
+            if let Some(workspace) =
+                workspace_dump_for_snapshot(&connection.snapshot, workspace_id)
+                && let Some(active_tab) = workspace.active_tab
+                && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+            {
+                collect_terminal_ids(&tab.tree, &mut displayed);
+            }
         }
         let mut needs_notify = false;
         for &terminal_id in changed {
@@ -3938,10 +3965,16 @@ impl WorkspaceView {
             if let Ok(Some((snapshot, operation_result))) = result {
                 let _ = entity.update(cx, |view, cx| {
                     if view.active_connection == connection_id {
-                        view.install_snapshot(snapshot, cx);
+                        view.install_snapshot(snapshot.clone(), cx);
                         view.apply_operation_result(operation_result, cx);
                     } else {
-                        view.install_connection_snapshot(connection_id, snapshot, cx);
+                        view.install_connection_snapshot(connection_id, snapshot.clone(), cx);
+                    }
+                    if let Some(application) = view.application.clone() {
+                        application.ensure_terminals_attached_from_snapshot(
+                            connection_id,
+                            &snapshot,
+                        );
                     }
                 });
             } else if let Err(error) = result {
@@ -4196,8 +4229,8 @@ impl WorkspaceView {
             WorkspaceConnectionKind::Remote => "SSH",
         };
         // The host card is the one large rounded rectangle: the host title
-        // is a plain text row at its top, separated from the workspaces
-        // below by a hairline; no card of its own and no background. Clicking
+        // is a plain text row at its top, with the workspaces below. There is
+        // no nested card or background. Clicking
         // switches to the host, never collapses. Double click or the
         // right-click menu toggles the fold.
         let connection_key = format!("c\u{1f}{}", connection_id);
@@ -4266,19 +4299,9 @@ impl WorkspaceView {
             }))
             .child(header);
         if collapsed {
-            // Folded host: only the title row, no hairline.
+            // Folded host: only the title row.
             return card.into_any_element();
         }
-        // Hairline under the host title; the space between it and the first
-        // workspace row is the host/workspace gap. Both disappear together
-        // when the host is folded.
-        card = card.child(
-            div()
-                .w_full()
-                .h(px(1.))
-                .flex_none()
-                .bg(rgb(theme.inactive_pane_border)),
-        );
         let mut body = div()
             .w_full()
             .mt(px(self.config.ui.sidebar_host_workspace_gap))
@@ -5798,6 +5821,13 @@ impl WorkspaceView {
                             )
                         })
                         .unwrap_or_else(|| {
+                            if terminal_debug_enabled() {
+                                tracing::warn!(
+                                    target: "water::terminal-debug",
+                                    ?terminal_id,
+                                    "render: no local terminal snapshot (Starting terminal)"
+                                );
+                            }
                             div()
                                 .text_color(rgb(theme.terminal_foreground))
                                 .child("Starting terminal…")
@@ -7814,6 +7844,14 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Enables verbose terminal diagnostics (see WATER_DEBUG_TERMINAL). Mirrors
+/// the application-level helper; kept local so the workspace module stays
+/// self-contained.
+fn terminal_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WATER_DEBUG_TERMINAL").is_some())
+}
+
 fn render_terminal_snapshot(
     snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
@@ -7974,6 +8012,7 @@ impl gpui::Element for TerminalRenderElement {
             .and_then(|selection| selection_bounds(&self.snapshot, selection));
         let cache_key = TerminalRenderCacheKey {
             terminal_id: self.snapshot.terminal_id,
+            size: self.snapshot.size,
             snapshot_revision: self.snapshot.revision,
             viewport_position: self.snapshot.viewport_position,
             focused_cursor: (self.options.cursor_focused && self.snapshot.cursor.visible)
@@ -7999,6 +8038,19 @@ impl gpui::Element for TerminalRenderElement {
         let cache = caches.entry(self.snapshot.terminal_id).or_default();
         if cache.key.as_ref() != Some(&cache_key) {
             let previous_key = cache.key.clone();
+            if terminal_debug_enabled() {
+                let prev_size = previous_key.as_ref().map(|k| k.size);
+                tracing::warn!(
+                    target: "water::terminal-debug",
+                    terminal_id = ?self.snapshot.terminal_id,
+                    old_rev = previous_key.as_ref().map(|k| k.snapshot_revision),
+                    new_rev = self.snapshot.revision,
+                    old_size = ?prev_size, new_size = ?self.snapshot.size,
+                    viewport = self.snapshot.viewport_position,
+                    hist = self.snapshot.history_len,
+                    "render: cache key changed"
+                );
+            }
             let previous_viewport_position = previous_key
                 .as_ref()
                 .map(|key| key.viewport_position)
@@ -9784,6 +9836,32 @@ mod tests {
         assert_eq!(previous_cached_source_row(0, 11, 10), Some(-1));
         assert_eq!(previous_cached_source_row(5, 11, 10), Some(4));
         assert_eq!(previous_cached_source_row(-2, 9, 10), Some(-1));
+    }
+
+    #[test]
+    fn terminal_render_cache_invalidates_when_grid_size_changes() {
+        let key = TerminalRenderCacheKey {
+            terminal_id: TerminalId::new(1),
+            size: TerminalSize::new(80, 24),
+            snapshot_revision: 7,
+            viewport_position: 0,
+            focused_cursor: None,
+            font_family: "monospace".to_owned(),
+            font_size_bits: 13.0_f32.to_bits(),
+            metrics: TerminalMetrics::default(),
+            theme: AppConfig::default().theme.colors(),
+            cursor_focused: false,
+            selection: None,
+            bounds_origin_x_bits: 0.0_f32.to_bits(),
+            bounds_width_bits: 640.0_f32.to_bits(),
+        };
+        let resized = TerminalRenderCacheKey {
+            size: TerminalSize::new(80, 25),
+            ..key.clone()
+        };
+
+        assert!(key != resized);
+        assert!(!key.rows_compatible_with(&resized));
     }
 
     #[test]

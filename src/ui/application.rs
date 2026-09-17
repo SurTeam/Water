@@ -23,7 +23,7 @@ use crate::control::{
 use crate::ids::{ConnectionId, TerminalId};
 use crate::remote::SshTunnel;
 use crate::terminal::{
-    MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalStreamEvent, TerminalTheme,
+    MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalSnapshot, TerminalStreamEvent, TerminalTheme,
 };
 
 #[cfg(feature = "runtime-screenshot")]
@@ -424,6 +424,13 @@ fn try_publish_terminal_event(
     message: TerminalEventMsg,
 ) -> bool {
     sender.publish_control(attachment, message)
+}
+
+/// Enables verbose per-terminal attach/live diagnostics behind an env gate.
+/// Off by default so normal logging stays quiet; set WATER_DEBUG_TERMINAL=1.
+fn terminal_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WATER_DEBUG_TERMINAL").is_some())
 }
 
 fn apply_emulator_commands(
@@ -1262,13 +1269,20 @@ impl WaterApplication {
                     match message {
                         TerminalEventMsg::Attached { snapshot, .. } => {
                             terminal.pending_attachments.remove(&terminal_id);
-                            latest_snapshot = Some(snapshot);
+                            // The live worker can publish a newer snapshot after replay
+                            // wakes the UI but before this batch is consumed. Keep that
+                            // snapshot instead of replacing it with the attach-time state.
+                            Self::merge_terminal_snapshot(&mut latest_snapshot, snapshot, true);
                         }
                         TerminalEventMsg::SnapshotReady { attachment, .. } => {
                             if let Some(snapshot) =
                                 terminal.event_sink.take_snapshot(terminal_id, &attachment)
                             {
-                                latest_snapshot = Some(snapshot);
+                                Self::merge_terminal_snapshot(
+                                    &mut latest_snapshot,
+                                    snapshot,
+                                    false,
+                                );
                             }
                         }
                         TerminalEventMsg::PtyWrites { writes, .. } => {
@@ -1318,7 +1332,11 @@ impl WaterApplication {
         for view in views {
             if view
                 .update(cx, |workspace, cx| {
-                    workspace.apply_terminal_events(&changed, cx)
+                    workspace.apply_terminal_events_for_connection(
+                        connection_id,
+                        &changed,
+                        cx,
+                    )
                 })
                 .is_ok()
             {
@@ -1326,6 +1344,16 @@ impl WaterApplication {
             }
         }
         self.state.views.replace(live_views);
+    }
+
+    fn merge_terminal_snapshot(
+        latest_snapshot: &mut Option<Arc<TerminalSnapshot>>,
+        snapshot: Arc<TerminalSnapshot>,
+        from_attach: bool,
+    ) {
+        if !from_attach || latest_snapshot.is_none() {
+            *latest_snapshot = Some(snapshot);
+        }
     }
 
     fn restart_terminal_attachment(&self, connection_id: ConnectionId, terminal_id: TerminalId) {
@@ -1352,21 +1380,46 @@ impl WaterApplication {
         self.ensure_terminal_attached(connection_id, terminal_id);
     }
 
+    /// Attaches every terminal projected by an authoritative model snapshot.
+    ///
+    /// Command RPCs return a fresh `state_dump()` before the asynchronous
+    /// `push.snapshot` stream necessarily reaches `WaterApplication`. Use the
+    /// command snapshot directly so newly-created remote panes can attach their
+    /// raw PTY stream even when the application-level projection is briefly stale.
+    pub(crate) fn ensure_terminals_attached_from_snapshot(
+        &self,
+        connection_id: ConnectionId,
+        snapshot: &ModelSnapshot,
+    ) {
+        for terminal_id in terminal_ids_in_snapshot(snapshot) {
+            self.ensure_terminal_attached_with_snapshot(connection_id, terminal_id, snapshot);
+        }
+    }
+
     /// Attaches the raw stream and starts its worker-owned emulator. Replay
     /// and live parsing both publish immutable snapshots; GPUI never mutates
     /// or waits on the emulator.
     pub fn ensure_terminal_attached(&self, connection_id: ConnectionId, terminal_id: TerminalId) {
-        let terminal_exists = self
+        let snapshot = self
             .state
             .connections
             .borrow()
             .iter()
             .find(|connection| connection.projection.id == connection_id)
-            .and_then(|connection| {
-                terminal_size_in_snapshot(&connection.projection.snapshot, terminal_id)
-            })
-            .is_some();
-        if !terminal_exists {
+            .map(|connection| connection.projection.snapshot.clone());
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        self.ensure_terminal_attached_with_snapshot(connection_id, terminal_id, &snapshot);
+    }
+
+    fn ensure_terminal_attached_with_snapshot(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        snapshot: &ModelSnapshot,
+    ) {
+        if terminal_size_in_snapshot(snapshot, terminal_id).is_none() {
             return;
         }
         let (
@@ -1385,8 +1438,7 @@ impl WaterApplication {
             else {
                 return;
             };
-            let scrollback_protected =
-                terminal_scrollback_protected(&connection.projection.snapshot, terminal_id);
+            let scrollback_protected = terminal_scrollback_protected(snapshot, terminal_id);
             let Some(terminal) = connection.terminal.as_mut() else {
                 return;
             };
@@ -1398,7 +1450,7 @@ impl WaterApplication {
             let attachment = Arc::new(TerminalAttachmentState::new());
             let (emulator_commands_tx, emulator_commands) = std::sync::mpsc::channel();
             let scrollback_lines = terminal_scrollback_lines(
-                &connection.projection.snapshot,
+                snapshot,
                 terminal_id,
                 terminal.scrollback_lines,
                 terminal.inactive_scrollback_lines,
@@ -1423,8 +1475,9 @@ impl WaterApplication {
         };
         let spawn_result = std::thread::Builder::new()
             .name(format!("water-terminal-events-{terminal_id}"))
-            .spawn(move || match session.attach(terminal_id) {
-                Ok((response, stream)) => {
+            .spawn(move || {
+                match session.attach(terminal_id) {
+                    Ok((response, stream)) => {
                     let _allocator_cleanup = TerminalAttachmentCleanup;
                     if !attachment.is_active() {
                         return;
@@ -1501,11 +1554,22 @@ impl WaterApplication {
                     ) {
                         return;
                     }
+                    if terminal_debug_enabled() {
+                        tracing::warn!(
+                            target: "water::terminal-debug",
+                            ?terminal_id, ?connection_id,
+                            replay_applied = emulator.last_seq(),
+                            replay_rows = response.replay.len(),
+                            "attach: replay processed, entering live loop"
+                        );
+                    }
                     let mut stream = stream;
                     let mut pending_event = None;
                     let mut last_live_snapshot = std::time::Instant::now();
                     let mut last_snapshot: Option<crate::terminal::TerminalSnapshot> =
                         Some(emulator.snapshot(None));
+                    let mut live_events = 0u64;
+                    let mut last_live_log = std::time::Instant::now();
                     while attachment.is_active() {
                         let commands_changed =
                             apply_emulator_commands(&emulator_commands, &mut emulator);
@@ -1540,6 +1604,19 @@ impl WaterApplication {
                             crate::metrics::terminal_bytes_received(),
                             event.output_bytes(),
                         );
+                        if terminal_debug_enabled() {
+                            live_events += 1;
+                            let bytes = event.output_bytes();
+                            if bytes > 0 && (live_events <= 5 || last_live_log.elapsed().as_secs() >= 1) {
+                                tracing::warn!(
+                                    target: "water::terminal-debug",
+                                    ?terminal_id, ?connection_id,
+                                    live_events, seq = event.seq(), bytes,
+                                    "attach: live event received"
+                                );
+                                last_live_log = std::time::Instant::now();
+                            }
+                        }
                         let effects = emulator.apply(&event);
                         if effects.iter().any(|effect| {
                             matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
@@ -1609,6 +1686,7 @@ impl WaterApplication {
                             },
                         );
                     }
+                }
                 }
             });
         if spawn_result.is_err()
@@ -2534,6 +2612,33 @@ mod tests {
             .expect("latest snapshot slot");
         assert!(snapshot.visible_text().contains("seq 10000"));
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn attach_snapshot_does_not_overwrite_live_snapshot_queued_before_ui_batch() {
+        let terminal_id = TerminalId::new(8);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+        let attached = Arc::new(emulator.snapshot(None));
+
+        emulator.start_live();
+        emulator.apply(&TerminalStreamEvent::Output {
+            seq: 1,
+            size,
+            bytes: Arc::from(b"shell prompt\r\n".as_slice()),
+        });
+        let live = Arc::new(emulator.snapshot(None));
+
+        let mut latest = Some(live.clone());
+        WaterApplication::merge_terminal_snapshot(&mut latest, attached.clone(), true);
+        assert!(Arc::ptr_eq(latest.as_ref().unwrap(), &live));
+
+        let mut fallback = None;
+        WaterApplication::merge_terminal_snapshot(&mut fallback, attached, true);
+        assert!(fallback.is_some());
+
+        WaterApplication::merge_terminal_snapshot(&mut fallback, live.clone(), false);
+        assert!(Arc::ptr_eq(fallback.as_ref().unwrap(), &live));
     }
 
     #[test]
