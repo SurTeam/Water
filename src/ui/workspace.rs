@@ -5831,6 +5831,13 @@ impl WorkspaceView {
                             )
                         })
                         .unwrap_or_else(|| {
+                            if terminal_debug_enabled() {
+                                tracing::warn!(
+                                    target: "water::terminal-debug",
+                                    ?terminal_id,
+                                    "render: no local terminal snapshot (Starting terminal)"
+                                );
+                            }
                             div()
                                 .text_color(rgb(theme.terminal_foreground))
                                 .child("Starting terminal…")
@@ -7847,6 +7854,14 @@ fn selected_terminal_text(snapshot: &TerminalSnapshot, selection: TerminalSelect
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Enables verbose terminal diagnostics (see WATER_DEBUG_TERMINAL). Mirrors
+/// the application-level helper; kept local so the workspace module stays
+/// self-contained.
+fn terminal_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WATER_DEBUG_TERMINAL").is_some())
+}
+
 fn render_terminal_snapshot(
     snapshot: Arc<TerminalSnapshot>,
     selection: Option<TerminalSelection>,
@@ -8033,6 +8048,19 @@ impl gpui::Element for TerminalRenderElement {
         let cache = caches.entry(self.snapshot.terminal_id).or_default();
         if cache.key.as_ref() != Some(&cache_key) {
             let previous_key = cache.key.clone();
+            if terminal_debug_enabled() {
+                let prev_size = previous_key.as_ref().map(|k| k.size);
+                tracing::warn!(
+                    target: "water::terminal-debug",
+                    terminal_id = ?self.snapshot.terminal_id,
+                    old_rev = previous_key.as_ref().map(|k| k.snapshot_revision),
+                    new_rev = self.snapshot.revision,
+                    old_size = ?prev_size, new_size = ?self.snapshot.size,
+                    viewport = self.snapshot.viewport_position,
+                    hist = self.snapshot.history_len,
+                    "render: cache key changed"
+                );
+            }
             let previous_viewport_position = previous_key
                 .as_ref()
                 .map(|key| key.viewport_position)

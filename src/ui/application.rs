@@ -426,6 +426,13 @@ fn try_publish_terminal_event(
     sender.publish_control(attachment, message)
 }
 
+/// Enables verbose per-terminal attach/live diagnostics behind an env gate.
+/// Off by default so normal logging stays quiet; set WATER_DEBUG_TERMINAL=1.
+fn terminal_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("WATER_DEBUG_TERMINAL").is_some())
+}
+
 fn apply_emulator_commands(
     receiver: &std::sync::mpsc::Receiver<TerminalEmulatorCommand>,
     emulator: &mut TerminalEmulator,
@@ -1451,8 +1458,9 @@ impl WaterApplication {
         };
         let spawn_result = std::thread::Builder::new()
             .name(format!("water-terminal-events-{terminal_id}"))
-            .spawn(move || match session.attach(terminal_id) {
-                Ok((response, stream)) => {
+            .spawn(move || {
+                match session.attach(terminal_id) {
+                    Ok((response, stream)) => {
                     let _allocator_cleanup = TerminalAttachmentCleanup;
                     if !attachment.is_active() {
                         return;
@@ -1529,11 +1537,22 @@ impl WaterApplication {
                     ) {
                         return;
                     }
+                    if terminal_debug_enabled() {
+                        tracing::warn!(
+                            target: "water::terminal-debug",
+                            ?terminal_id, ?connection_id,
+                            replay_applied = emulator.last_seq(),
+                            replay_rows = response.replay.len(),
+                            "attach: replay processed, entering live loop"
+                        );
+                    }
                     let mut stream = stream;
                     let mut pending_event = None;
                     let mut last_live_snapshot = std::time::Instant::now();
                     let mut last_snapshot: Option<crate::terminal::TerminalSnapshot> =
                         Some(emulator.snapshot(None));
+                    let mut live_events = 0u64;
+                    let mut last_live_log = std::time::Instant::now();
                     while attachment.is_active() {
                         let commands_changed =
                             apply_emulator_commands(&emulator_commands, &mut emulator);
@@ -1568,6 +1587,19 @@ impl WaterApplication {
                             crate::metrics::terminal_bytes_received(),
                             event.output_bytes(),
                         );
+                        if terminal_debug_enabled() {
+                            live_events += 1;
+                            let bytes = event.output_bytes();
+                            if bytes > 0 && (live_events <= 5 || last_live_log.elapsed().as_secs() >= 1) {
+                                tracing::warn!(
+                                    target: "water::terminal-debug",
+                                    ?terminal_id, ?connection_id,
+                                    live_events, seq = event.seq(), bytes,
+                                    "attach: live event received"
+                                );
+                                last_live_log = std::time::Instant::now();
+                            }
+                        }
                         let effects = emulator.apply(&event);
                         if effects.iter().any(|effect| {
                             matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
@@ -1637,6 +1669,7 @@ impl WaterApplication {
                             },
                         );
                     }
+                }
                 }
             });
         if spawn_result.is_err()
