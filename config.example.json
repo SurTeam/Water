@@ -114,6 +114,7 @@
     "ignore_quit": "cmd-q",
     "new_terminal_tab": "cmd-t",
     "new_workspace": "cmd-shift-n",
+    "connect_remote": "cmd-shift-k",
     "toggle_sidebar": "cmd-e",
     "switch_tab": "cmd-#",
     "next_tab": "cmd-]",

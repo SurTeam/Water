@@ -37,7 +37,7 @@ use super::application::{
     ActivateTab7, ActivateTab8, ActivateTab9, ActivateTab10, HideWindow, IgnoreQuit,
     MinimizeWindow, NewTerminalTab, NewWorkspace, NextTab, NextWorkspace, PreviousTab,
     PreviousWorkspace, RenameTab, RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
-    WaterApplication, shortcut_matches_or_default,
+    ConnectRemote, WaterApplication, shortcut_matches_or_default,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
@@ -9129,6 +9129,16 @@ impl Render for WorkspaceView {
                     view.update(cx, |workspace, cx| {
                         if !workspace.has_transient_ui() {
                             workspace.dispatch_new_workspace(cx);
+                        }
+                    });
+                }
+            })
+            .on_action({
+                let view = action_view.clone();
+                move |_: &ConnectRemote, _window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        if !workspace.has_transient_ui() {
+                            workspace.begin_connect_remote(_window, cx);
                         }
                     });
                 }

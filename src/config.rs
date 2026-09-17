@@ -686,6 +686,7 @@ pub struct ShortcutConfig {
     pub ignore_quit: String,
     pub new_terminal_tab: String,
     pub new_workspace: String,
+    pub connect_remote: String,
     pub toggle_sidebar: String,
     /// Template for tab-index bindings; # is replaced by 1..9 and 0.
     pub switch_tab: String,
@@ -719,6 +720,7 @@ impl Default for ShortcutConfig {
             ignore_quit: "cmd-q".to_owned(),
             new_terminal_tab: "cmd-t".to_owned(),
             new_workspace: "cmd-shift-n".to_owned(),
+            connect_remote: "cmd-shift-k".to_owned(),
             toggle_sidebar: "cmd-e".to_owned(),
             switch_tab: "cmd-#".to_owned(),
             next_tab: "cmd-]".to_owned(),
@@ -1451,6 +1453,7 @@ pub struct ShortcutConfigOverrides {
     pub ignore_quit: Option<String>,
     pub new_terminal_tab: Option<String>,
     pub new_workspace: Option<String>,
+    pub connect_remote: Option<String>,
     pub toggle_sidebar: Option<String>,
     pub switch_tab: Option<String>,
     pub next_tab: Option<String>,
@@ -1489,6 +1492,7 @@ impl ShortcutConfigOverrides {
         apply!(ignore_quit);
         apply!(new_terminal_tab);
         apply!(new_workspace);
+        apply!(connect_remote);
         apply!(toggle_sidebar);
         apply!(switch_tab);
         apply!(next_tab);

@@ -122,6 +122,7 @@ enum SettingField {
     ShortcutIgnoreQuit,
     ShortcutNewTerminalTab,
     ShortcutNewWorkspace,
+    ShortcutConnectRemote,
     ShortcutToggleSidebar,
     ShortcutSwitchTab,
     ShortcutNextTab,
@@ -245,6 +246,7 @@ impl SettingField {
             Self::ShortcutIgnoreQuit => "shortcut-ignore-quit",
             Self::ShortcutNewTerminalTab => "shortcut-new-terminal-tab",
             Self::ShortcutNewWorkspace => "shortcut-new-workspace",
+            Self::ShortcutConnectRemote => "shortcut-connect-remote",
             Self::ShortcutToggleSidebar => "shortcut-toggle-sidebar",
             Self::ShortcutSwitchTab => "shortcut-switch-tab",
             Self::ShortcutNextTab => "shortcut-next-tab",
@@ -790,6 +792,7 @@ impl SettingsView {
             SettingField::ShortcutIgnoreQuit => self.config.shortcuts.ignore_quit.clone(),
             SettingField::ShortcutNewTerminalTab => self.config.shortcuts.new_terminal_tab.clone(),
             SettingField::ShortcutNewWorkspace => self.config.shortcuts.new_workspace.clone(),
+            SettingField::ShortcutConnectRemote => self.config.shortcuts.connect_remote.clone(),
             SettingField::ShortcutToggleSidebar => self.config.shortcuts.toggle_sidebar.clone(),
             SettingField::ShortcutSwitchTab => self.config.shortcuts.switch_tab.clone(),
             SettingField::ShortcutNextTab => self.config.shortcuts.next_tab.clone(),
@@ -2033,6 +2036,7 @@ impl Render for SettingsView {
             (SettingField::ShortcutIgnoreQuit, "忽略退出"),
             (SettingField::ShortcutNewTerminalTab, "新建终端标签"),
             (SettingField::ShortcutNewWorkspace, "新建工作区"),
+            (SettingField::ShortcutConnectRemote, "连接远程主机"),
             (SettingField::ShortcutToggleSidebar, "切换侧边栏"),
             (SettingField::ShortcutSwitchTab, "切换到指定标签"),
             (SettingField::ShortcutNextTab, "下一个标签"),
@@ -2190,6 +2194,7 @@ fn validate_shortcuts(shortcuts: &crate::config::ShortcutConfig) -> Result<(), S
         ("忽略退出", &shortcuts.ignore_quit),
         ("新建终端标签", &shortcuts.new_terminal_tab),
         ("新建工作区", &shortcuts.new_workspace),
+        ("连接远程主机", &shortcuts.connect_remote),
         ("切换侧边栏", &shortcuts.toggle_sidebar),
         ("切换标签", &shortcuts.switch_tab),
         ("下一个标签", &shortcuts.next_tab),
@@ -2241,6 +2246,7 @@ fn is_shortcut(field: SettingField) -> bool {
             | SettingField::ShortcutIgnoreQuit
             | SettingField::ShortcutNewTerminalTab
             | SettingField::ShortcutNewWorkspace
+            | SettingField::ShortcutConnectRemote
             | SettingField::ShortcutToggleSidebar
             | SettingField::ShortcutSwitchTab
             | SettingField::ShortcutNextTab
@@ -2327,6 +2333,7 @@ fn set_shortcut_field(
         SettingField::ShortcutIgnoreQuit => shortcuts.ignore_quit = value,
         SettingField::ShortcutNewTerminalTab => shortcuts.new_terminal_tab = value,
         SettingField::ShortcutNewWorkspace => shortcuts.new_workspace = value,
+        SettingField::ShortcutConnectRemote => shortcuts.connect_remote = value,
         SettingField::ShortcutToggleSidebar => shortcuts.toggle_sidebar = value,
         SettingField::ShortcutSwitchTab => shortcuts.switch_tab = value,
         SettingField::ShortcutNextTab => shortcuts.next_tab = value,
