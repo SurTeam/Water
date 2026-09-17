@@ -7,11 +7,10 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, Bounds, Context, CursorStyle, DispatchPhase, Entity, EntityInputHandler,
-    ExternalPaths, FocusHandle, Focusable, InputHandler, KeyDownEvent, Keystroke, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
+    ExternalPaths, FocusHandle, Focusable, FontFeatures, InputHandler, KeyDownEvent, Keystroke,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
     TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
-    FontFeatures,
     WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
     relative, rgb, rgba, size,
 };
@@ -34,10 +33,10 @@ use crate::terminal::{
 
 use super::application::{
     ActivateTab1, ActivateTab2, ActivateTab3, ActivateTab4, ActivateTab5, ActivateTab6,
-    ActivateTab7, ActivateTab8, ActivateTab9, ActivateTab10, HideWindow, IgnoreQuit,
+    ActivateTab7, ActivateTab8, ActivateTab9, ActivateTab10, ConnectRemote, HideWindow, IgnoreQuit,
     MinimizeWindow, NewTerminalTab, NewWorkspace, NextTab, NextWorkspace, PreviousTab,
     PreviousWorkspace, RenameTab, RenameWorkspace, SplitDown, SplitRight, ToggleSidebar,
-    ConnectRemote, WaterApplication, shortcut_matches_or_default,
+    WaterApplication, shortcut_matches_or_default,
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
@@ -612,6 +611,15 @@ struct TerminalTextCell {
     width_columns: usize,
 }
 
+#[derive(Clone)]
+struct HyperlinkPrompt {
+    uri: String,
+    destination: Option<String>,
+    remember: bool,
+    working: bool,
+    error: Option<String>,
+}
+
 struct TerminalTextChunk {
     start_column: usize,
     width_columns: usize,
@@ -1031,6 +1039,7 @@ pub struct WorkspaceView {
     remote_connection_pending: bool,
     context_menu: Option<ContextMenuState>,
     dialog: Option<DialogState>,
+    hyperlink_prompt: Option<HyperlinkPrompt>,
 }
 
 impl Drop for WorkspaceView {
@@ -1146,6 +1155,7 @@ impl WorkspaceView {
             remote_connection_pending: false,
             context_menu: None,
             dialog: None,
+            hyperlink_prompt: None,
         }
     }
 
@@ -1296,7 +1306,7 @@ impl WorkspaceView {
     }
 
     fn has_transient_ui(&self) -> bool {
-        self.context_menu.is_some() || self.dialog.is_some()
+        self.context_menu.is_some() || self.dialog.is_some() || self.hyperlink_prompt.is_some()
     }
 
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
@@ -2246,6 +2256,25 @@ impl WorkspaceView {
     }
 
     fn handle_dialog_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        if let Some(prompt) = &self.hyperlink_prompt {
+            if !prompt.working {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        self.hyperlink_prompt = None;
+                        cx.notify();
+                    }
+                    "enter" | "return" => self.confirm_hyperlink(cx),
+                    "space" if prompt.destination.is_some() => {
+                        if let Some(prompt) = self.hyperlink_prompt.as_mut() {
+                            prompt.remember = !prompt.remember;
+                            cx.notify();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return true;
+        }
         if self.dialog.is_none() {
             return false;
         }
@@ -2621,8 +2650,7 @@ impl WorkspaceView {
             .find(|connection| connection.id == connection_id)
             && let Some(workspace_id) = self.selected_workspace
         {
-            if let Some(workspace) =
-                workspace_dump_for_snapshot(&connection.snapshot, workspace_id)
+            if let Some(workspace) = workspace_dump_for_snapshot(&connection.snapshot, workspace_id)
                 && let Some(active_tab) = workspace.active_tab
                 && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
             {
@@ -2691,7 +2719,11 @@ impl WorkspaceView {
             .lock()
             .expect("terminal bounds poisoned")
             .remove(&terminal_id);
-        if self.selection.as_ref().is_some_and(|selection| selection.terminal_id == terminal_id) {
+        if self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.terminal_id == terminal_id)
+        {
             self.selection = None;
         }
     }
@@ -3054,6 +3086,248 @@ impl WorkspaceView {
             .map(|point| (terminal_id, point));
         cx.notify();
         true
+    }
+
+    fn activate_hyperlink(
+        &mut self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        position: Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.config.terminal.hyperlinks || self.has_transient_ui() {
+            return false;
+        }
+        if !self
+            .terminal_bounds_for(terminal_id)
+            .is_some_and(|bounds| bounds.contains(&position))
+        {
+            return false;
+        }
+        let Some(cell_position) = self.terminal_cell_at(terminal_id, position) else {
+            return false;
+        };
+        let Some(uri) = self
+            .terminal_snapshot_for(terminal_id)
+            .and_then(|snapshot| snapshot.relative_row(cell_position.row))
+            .and_then(|row| row.get(cell_position.column))
+            .and_then(|cell| cell.hyperlink.clone())
+        else {
+            return false;
+        };
+        let Some(connection) = self
+            .connections
+            .iter()
+            .find(|connection| connection.id == connection_id)
+        else {
+            return false;
+        };
+        let destination = (connection.kind == WorkspaceConnectionKind::Remote
+            && uri.starts_with("file://"))
+        .then(|| connection.title.clone());
+        let ask = destination.is_some() && !self.config.terminal.remote_hyperlink_auto_download;
+        self.hyperlink_prompt = Some(HyperlinkPrompt {
+            uri,
+            destination,
+            remember: false,
+            working: false,
+            error: None,
+        });
+        if !ask {
+            self.confirm_hyperlink(cx);
+        }
+        cx.notify();
+        true
+    }
+
+    fn confirm_hyperlink(&mut self, cx: &mut Context<Self>) {
+        let Some(prompt) = self.hyperlink_prompt.as_mut() else {
+            return;
+        };
+        if prompt.working {
+            return;
+        }
+        prompt.working = true;
+        prompt.error = None;
+        let prompt = prompt.clone();
+        let application = self.application.clone();
+        let mut config = application
+            .as_ref()
+            .map(|app| app.config())
+            .unwrap_or_else(|| self.config.clone());
+        let save_path = application.as_ref().map(|app| app.config_path());
+        cx.spawn(async move |entity, cx| {
+            let (saved, result) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut saved = None;
+                    if prompt.remember && prompt.destination.is_some() {
+                        config.terminal.remote_hyperlink_auto_download = true;
+                        let result = save_path
+                            .ok_or_else(|| "无法保存下载偏好".to_owned())
+                            .and_then(|path| {
+                                config
+                                    .save_to_path(&path)
+                                    .map_err(|error| error.to_string())
+                            });
+                        if let Err(error) = result {
+                            return (None, Err(error));
+                        }
+                        saved = Some(config.clone());
+                    }
+                    let result = if let Some(destination) = prompt.destination {
+                        crate::hyperlink::download_remote(
+                            &destination,
+                            &prompt.uri,
+                            &config.terminal.hyperlink_download_directory,
+                        )
+                        .and_then(|path| crate::hyperlink::open_path(&path))
+                    } else {
+                        crate::hyperlink::open_target(&prompt.uri)
+                    };
+                    (saved, result)
+                })
+                .await;
+            let _ = entity.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => view.hyperlink_prompt = None,
+                    Err(error) => {
+                        if let Some(prompt) = view.hyperlink_prompt.as_mut() {
+                            prompt.working = false;
+                            prompt.error = Some(error);
+                        }
+                    }
+                }
+                if let (Some(application), Some(config)) = (application, saved) {
+                    cx.defer(move |cx| {
+                        application.apply_config(config, cx);
+                        application.sync_hyperlink_settings(cx);
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn render_hyperlink_prompt(
+        &self,
+        prompt: &HyperlinkPrompt,
+        theme: ThemeColors,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut panel = div()
+            .id("hyperlink-download-dialog")
+            .w(px(460.))
+            .p(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .bg(rgb(theme.chrome_background))
+            .border_1()
+            .border_color(rgb(theme.active_pane_border))
+            .rounded(px(12.))
+            .child(if prompt.working {
+                "正在处理超链接…"
+            } else if prompt.destination.is_some() {
+                "下载远程文件并打开？"
+            } else {
+                "打开超链接"
+            })
+            .child(
+                div()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(SharedString::from(prompt.uri.clone())),
+            );
+        if prompt.destination.is_some() {
+            panel = panel
+                .child(SharedString::from(format!(
+                    "下载到 {}",
+                    self.config.terminal.hyperlink_download_directory
+                )))
+                .child(
+                    div()
+                        .id("hyperlink-remember-download")
+                        .cursor_pointer()
+                        .child(if prompt.remember {
+                            "☑ 以后默认下载并打开"
+                        } else {
+                            "☐ 以后默认下载并打开"
+                        })
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                if let Some(prompt) = this.hyperlink_prompt.as_mut() {
+                                    if !prompt.working {
+                                        prompt.remember = !prompt.remember;
+                                        cx.notify();
+                                    }
+                                }
+                                cx.stop_propagation();
+                            }),
+                        ),
+                );
+        }
+        if let Some(error) = &prompt.error {
+            panel = panel.child(SharedString::from(error.clone()));
+        }
+        if !prompt.working {
+            panel = panel.child(
+                div()
+                    .flex()
+                    .gap(px(16.))
+                    .justify_end()
+                    .child(
+                        div()
+                            .id("hyperlink-cancel")
+                            .cursor_pointer()
+                            .child("取消")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.hyperlink_prompt = None;
+                                    cx.notify();
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("hyperlink-confirm")
+                            .cursor_pointer()
+                            .child(if prompt.destination.is_some() {
+                                "下载并打开"
+                            } else {
+                                "重试打开"
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                    this.confirm_hyperlink(cx);
+                                    cx.stop_propagation();
+                                }),
+                            ),
+                    ),
+            );
+        }
+        deferred(
+            div()
+                .absolute()
+                .inset_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(DIALOG_SCRIM))
+                .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation()
+                })
+                .child(panel),
+        )
+        .with_priority(20)
+        .into_any_element()
     }
 
     fn begin_terminal_selection(
@@ -3975,10 +4249,8 @@ impl WorkspaceView {
                         view.install_connection_snapshot(connection_id, snapshot.clone(), cx);
                     }
                     if let Some(application) = view.application.clone() {
-                        application.ensure_terminals_attached_from_snapshot(
-                            connection_id,
-                            &snapshot,
-                        );
+                        application
+                            .ensure_terminals_attached_from_snapshot(connection_id, &snapshot);
                     }
                 });
             } else if let Err(error) = result {
@@ -4809,6 +5081,9 @@ impl WorkspaceView {
     }
 
     fn render_dialog(&self, theme: ThemeColors, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(prompt) = &self.hyperlink_prompt {
+            return Some(self.render_hyperlink_prompt(prompt, theme, cx));
+        }
         let dialog = self.dialog?;
         if dialog == DialogState::ConnectRemote {
             return Some(self.render_connect_remote_dialog(theme, cx));
@@ -5833,6 +6108,7 @@ impl WorkspaceView {
                         .into_any_element()
                 };
                 let is_terminal_surface = matches!(surface_state, SurfaceState::Terminal(_));
+                let hyperlink_connection_id = self.active_connection;
                 let mut content = match surface_state {
                     SurfaceState::Terminal(terminal) => div()
                         .size_full()
@@ -5910,6 +6186,16 @@ impl WorkspaceView {
                                 this.terminal_id_for_pane_in_active_connection(pane_id);
                             if let Some(terminal_id) = terminal_id {
                                 if this.begin_reported_mouse(terminal_id, event, cx) {
+                                    cx.stop_propagation();
+                                } else if !event.modifiers.shift
+                                    && event.click_count == 1
+                                    && this.activate_hyperlink(
+                                        hyperlink_connection_id,
+                                        terminal_id,
+                                        event.position,
+                                        cx,
+                                    )
+                                {
                                     cx.stop_propagation();
                                 } else {
                                     this.begin_terminal_selection(
@@ -7887,10 +8173,15 @@ fn terminal_row_paint(
     bounds: Bounds<gpui::Pixels>,
     window: &mut Window,
 ) -> TerminalRowPaint {
-    let (chunks, backgrounds) =
-        terminal_row_data_for_cells(
-            snapshot, row, cells, selected_bounds, options, font_family, ligatures,
-        );
+    let (chunks, backgrounds) = terminal_row_data_for_cells(
+        snapshot,
+        row,
+        cells,
+        selected_bounds,
+        options,
+        font_family,
+        ligatures,
+    );
     let mut text = Vec::new();
     for chunk in chunks {
         let target_width = f32::from(
@@ -11493,6 +11784,35 @@ mod tests {
             is_held: false,
             prefer_character_input: false,
         }
+    }
+
+    #[gpui::test]
+    fn hyperlink_prompt_remember_keyboard_and_cancel(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client: Arc<dyn CommandTransport> = Arc::new(host.client());
+        let snapshot = host.client().state_dump().unwrap();
+        let (view, cx) = cx
+            .add_window_view(move |_, cx| WorkspaceView::new(client, snapshot, cx.focus_handle()));
+        view.update_in(cx, |view, _, cx| {
+            view.hyperlink_prompt = Some(HyperlinkPrompt {
+                uri: "file:///tmp/test".into(),
+                destination: Some("test-host".into()),
+                remember: false,
+                working: false,
+                error: None,
+            });
+            assert!(view.handle_dialog_key(&dialog_key_event("space", None), cx));
+            assert!(view.hyperlink_prompt.as_ref().unwrap().remember);
+            view.handle_dialog_key(&dialog_key_event("space", None), cx);
+            assert!(!view.hyperlink_prompt.as_ref().unwrap().remember);
+            view.hyperlink_prompt.as_mut().unwrap().working = true;
+            view.handle_dialog_key(&dialog_key_event("space", None), cx);
+            assert!(!view.hyperlink_prompt.as_ref().unwrap().remember);
+            view.hyperlink_prompt.as_mut().unwrap().working = false;
+            view.handle_dialog_key(&dialog_key_event("escape", None), cx);
+            assert!(view.hyperlink_prompt.is_none());
+        });
+        host.shutdown();
     }
 
     #[gpui::test]

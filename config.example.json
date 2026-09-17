@@ -68,7 +68,10 @@
     "font_family": "Sarasa Term SC Nerd Font",
     "font_size": 16.0,
     "line_height": 18.0,
-    "ligatures": true
+    "ligatures": true,
+    "hyperlinks": true,
+    "remote_hyperlink_auto_download": false,
+    "hyperlink_download_directory": "~/Downloads/Water"
   },
   "server": {
     "detached": true,

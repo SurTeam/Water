@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, SharedString, Window, WindowControlArea, div, font,
-    prelude::*, px, rgb,
+    MouseMoveEvent, MouseUpEvent, SharedString, Window, WindowControlArea, div, font, prelude::*,
+    px, rgb,
 };
 
 use crate::agent::AgentKind;
@@ -47,6 +47,9 @@ enum SettingField {
     FontSize,
     LineHeight,
     Ligatures,
+    Hyperlinks,
+    RemoteHyperlinkAutoDownload,
+    HyperlinkDownloadDirectory,
     MouseReporting,
     BracketedPaste,
     Selection,
@@ -167,6 +170,9 @@ impl SettingField {
             Self::FontSize => "font-size",
             Self::LineHeight => "line-height",
             Self::Ligatures => "ligatures",
+            Self::Hyperlinks => "hyperlinks",
+            Self::RemoteHyperlinkAutoDownload => "remote-hyperlink-auto-download",
+            Self::HyperlinkDownloadDirectory => "hyperlink-download-directory",
             Self::MouseReporting => "mouse-reporting",
             Self::BracketedPaste => "bracketed-paste",
             Self::Selection => "selection",
@@ -280,6 +286,8 @@ impl SettingField {
                 | Self::BracketedPaste
                 | Self::Selection
                 | Self::Ligatures
+                | Self::Hyperlinks
+                | Self::RemoteHyperlinkAutoDownload
                 | Self::SidebarVisible
                 | Self::SidebarShowAgentCount
                 | Self::TabBarVerticalWheelScroll
@@ -339,6 +347,10 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
+    pub(crate) fn sync_hyperlink_preference(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.config.terminal.remote_hyperlink_auto_download = enabled;
+        cx.notify();
+    }
     pub(crate) fn new(application: WaterApplication, focus_handle: FocusHandle) -> Self {
         Self {
             config: application.config(),
@@ -422,6 +434,13 @@ impl SettingsView {
             }
             SettingField::Ligatures => {
                 self.config.terminal.ligatures = !self.config.terminal.ligatures
+            }
+            SettingField::Hyperlinks => {
+                self.config.terminal.hyperlinks = !self.config.terminal.hyperlinks
+            }
+            SettingField::RemoteHyperlinkAutoDownload => {
+                self.config.terminal.remote_hyperlink_auto_download =
+                    !self.config.terminal.remote_hyperlink_auto_download
             }
             SettingField::SidebarVisible => {
                 self.config.ui.sidebar_visible = !self.config.ui.sidebar_visible
@@ -653,6 +672,15 @@ impl SettingsView {
             SettingField::FontSize => format_float(self.config.terminal.font_size),
             SettingField::LineHeight => format_float(self.config.terminal.line_height),
             SettingField::Ligatures => self.config.terminal.ligatures.to_string(),
+            SettingField::Hyperlinks => self.config.terminal.hyperlinks.to_string(),
+            SettingField::RemoteHyperlinkAutoDownload => self
+                .config
+                .terminal
+                .remote_hyperlink_auto_download
+                .to_string(),
+            SettingField::HyperlinkDownloadDirectory => {
+                self.config.terminal.hyperlink_download_directory.clone()
+            }
             SettingField::MouseReporting => self.config.features.mouse_reporting.to_string(),
             SettingField::BracketedPaste => self.config.features.bracketed_paste.to_string(),
             SettingField::Selection => self.config.features.selection.to_string(),
@@ -684,29 +712,19 @@ impl SettingsView {
             SettingField::PaneDividerWidth => format_float(self.config.ui.pane_divider_width),
             SettingField::SidebarMargin => format_float(self.config.ui.sidebar_margin),
             SettingField::SidebarCardGap => format_float(self.config.ui.sidebar_card_gap),
-            SettingField::SidebarCardPadding => {
-                format_float(self.config.ui.sidebar_card_padding)
-            }
+            SettingField::SidebarCardPadding => format_float(self.config.ui.sidebar_card_padding),
             SettingField::SidebarRowPadding => format_float(self.config.ui.sidebar_row_padding),
             SettingField::TitlebarPadding => format_float(self.config.ui.titlebar_padding),
             SettingField::TitlebarGap => format_float(self.config.ui.titlebar_gap),
             SettingField::TabGap => format_float(self.config.ui.tab_gap),
             SettingField::TabPadding => format_float(self.config.ui.tab_padding),
-            SettingField::WindowCornerRadius => {
-                format_float(self.config.ui.window_corner_radius)
-            }
-            SettingField::SidebarCardRadius => {
-                format_float(self.config.ui.sidebar_card_radius)
-            }
+            SettingField::WindowCornerRadius => format_float(self.config.ui.window_corner_radius),
+            SettingField::SidebarCardRadius => format_float(self.config.ui.sidebar_card_radius),
             SettingField::SidebarWorkspaceRadius => {
                 format_float(self.config.ui.sidebar_workspace_radius)
             }
-            SettingField::SidebarAgentRowGap => {
-                format_float(self.config.ui.sidebar_agent_row_gap)
-            }
-            SettingField::SidebarAgentPadding => {
-                format_float(self.config.ui.sidebar_agent_padding)
-            }
+            SettingField::SidebarAgentRowGap => format_float(self.config.ui.sidebar_agent_row_gap),
+            SettingField::SidebarAgentPadding => format_float(self.config.ui.sidebar_agent_padding),
             SettingField::SidebarHostHeaderHeight => {
                 format_float(self.config.ui.sidebar_host_header_height)
             }
@@ -725,9 +743,7 @@ impl SettingsView {
             SettingField::SidebarAgentRowHeight => {
                 format_float(self.config.ui.sidebar_agent_row_height)
             }
-            SettingField::SidebarWorkspaceGap => {
-                format_float(self.config.ui.sidebar_workspace_gap)
-            }
+            SettingField::SidebarWorkspaceGap => format_float(self.config.ui.sidebar_workspace_gap),
             SettingField::ThemeTerminalBackground => self.config.theme.terminal_background.clone(),
             SettingField::ThemeTerminalForeground => self.config.theme.terminal_foreground.clone(),
             SettingField::ThemeSelectionBackground => {
@@ -880,6 +896,14 @@ impl SettingsView {
             SettingField::LineHeight => {
                 self.config.terminal.line_height = parse_float(&value, "行高")?
             }
+            SettingField::HyperlinkDownloadDirectory => {
+                let directory = value.trim();
+                if directory.is_empty() || directory.chars().any(char::is_control) {
+                    return Err("下载目录不能为空或包含控制字符".to_owned());
+                }
+                crate::hyperlink::download_directory(directory)?;
+                self.config.terminal.hyperlink_download_directory = directory.to_owned();
+            }
             SettingField::UiFontSize => {
                 self.config.ui.font_size = parse_float(&value, "界面字体大小")?
             }
@@ -913,8 +937,7 @@ impl SettingsView {
                 self.config.ui.window_padding = parse_float(&value, "窗口主体内边距")?
             }
             SettingField::SidebarSurfaceMargin => {
-                self.config.ui.sidebar_surface_margin =
-                    parse_float(&value, "侧边栏主体外边距")?
+                self.config.ui.sidebar_surface_margin = parse_float(&value, "侧边栏主体外边距")?
             }
             SettingField::PanePadding => {
                 self.config.ui.pane_padding = parse_float(&value, "面板内边距")?
@@ -948,51 +971,42 @@ impl SettingsView {
                 self.config.ui.tab_padding = parse_float(&value, "标签内边距")?
             }
             SettingField::WindowCornerRadius => {
-                self.config.ui.window_corner_radius =
-                    parse_float(&value, "窗口圆角")?
+                self.config.ui.window_corner_radius = parse_float(&value, "窗口圆角")?
             }
             SettingField::SidebarCardRadius => {
                 self.config.ui.sidebar_card_radius = parse_float(&value, "侧边栏卡片圆角")?
             }
             SettingField::SidebarWorkspaceRadius => {
-                self.config.ui.sidebar_workspace_radius =
-                    parse_float(&value, "工作区卡片圆角")?
+                self.config.ui.sidebar_workspace_radius = parse_float(&value, "工作区卡片圆角")?
             }
             SettingField::SidebarAgentRowGap => {
-                self.config.ui.sidebar_agent_row_gap =
-                    parse_float(&value, "Agent 行间距")?
+                self.config.ui.sidebar_agent_row_gap = parse_float(&value, "Agent 行间距")?
             }
             SettingField::SidebarAgentPadding => {
-                self.config.ui.sidebar_agent_padding =
-                    parse_float(&value, "Agent 区域上下边距")?
+                self.config.ui.sidebar_agent_padding = parse_float(&value, "Agent 区域上下边距")?
             }
             SettingField::SidebarHostHeaderHeight => {
-                self.config.ui.sidebar_host_header_height =
-                    parse_float(&value, "主机标题高度")?
+                self.config.ui.sidebar_host_header_height = parse_float(&value, "主机标题高度")?
             }
             SettingField::SidebarHostWorkspaceGap => {
                 self.config.ui.sidebar_host_workspace_gap =
                     parse_float(&value, "主机标题与首个工作区间距")?
             }
             SettingField::SidebarAgentRowWidth => {
-                self.config.ui.sidebar_agent_row_width =
-                    parse_float(&value, "Agent 行宽度")?
+                self.config.ui.sidebar_agent_row_width = parse_float(&value, "Agent 行宽度")?
             }
             SettingField::SidebarWorkspaceRowPadding => {
                 self.config.ui.sidebar_workspace_row_padding =
                     parse_float(&value, "工作区行左内边距")?
             }
             SettingField::SidebarAgentRowPadding => {
-                self.config.ui.sidebar_agent_row_padding =
-                    parse_float(&value, "Agent 行左内边距")?
+                self.config.ui.sidebar_agent_row_padding = parse_float(&value, "Agent 行左内边距")?
             }
             SettingField::SidebarAgentRowHeight => {
-                self.config.ui.sidebar_agent_row_height =
-                    parse_float(&value, "Agent 行高度")?
+                self.config.ui.sidebar_agent_row_height = parse_float(&value, "Agent 行高度")?
             }
             SettingField::SidebarWorkspaceGap => {
-                self.config.ui.sidebar_workspace_gap =
-                    parse_float(&value, "工作区间距")?
+                self.config.ui.sidebar_workspace_gap = parse_float(&value, "工作区间距")?
             }
             field if field.is_color() => {
                 if !ThemeConfig::is_valid_color(&value) {
@@ -1015,6 +1029,8 @@ impl SettingsView {
             | SettingField::BracketedPaste
             | SettingField::Selection
             | SettingField::Ligatures
+            | SettingField::Hyperlinks
+            | SettingField::RemoteHyperlinkAutoDownload
             | SettingField::SidebarVisible
             | SettingField::SidebarShowAgentCount
             | SettingField::TabBarVerticalWheelScroll => {
@@ -1036,6 +1052,10 @@ impl SettingsView {
             SettingField::BracketedPaste => on_off(self.config.features.bracketed_paste),
             SettingField::Selection => on_off(self.config.features.selection),
             SettingField::Ligatures => on_off(self.config.terminal.ligatures),
+            SettingField::Hyperlinks => on_off(self.config.terminal.hyperlinks),
+            SettingField::RemoteHyperlinkAutoDownload => {
+                on_off(self.config.terminal.remote_hyperlink_auto_download)
+            }
             SettingField::SidebarVisible => on_off(self.config.ui.sidebar_visible),
             SettingField::SidebarShowAgentCount => on_off(self.config.ui.sidebar_show_agent_count),
             SettingField::TabBarVerticalWheelScroll => {
@@ -1416,6 +1436,53 @@ impl SettingsView {
     }
 }
 
+#[cfg(test)]
+mod hyperlink_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn hyperlink_settings_validate_and_sync_without_losing_edits(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let application = WaterApplication::new(
+            std::sync::Arc::new(host.client()),
+            host.client().state_dump().unwrap(),
+            AppConfig::default(),
+        );
+        let (view, cx) =
+            cx.add_window_view(move |_, cx| SettingsView::new(application, cx.focus_handle()));
+        view.update_in(cx, |view, _, cx| {
+            assert!(view.config.terminal.hyperlinks);
+            assert!(!view.config.terminal.remote_hyperlink_auto_download);
+            assert_eq!(
+                view.config.terminal.hyperlink_download_directory,
+                "~/Downloads/Water"
+            );
+            view.set_field(
+                SettingField::HyperlinkDownloadDirectory,
+                "/tmp/water-downloads".into(),
+            )
+            .unwrap();
+            assert!(
+                view.set_field(SettingField::HyperlinkDownloadDirectory, "relative".into())
+                    .is_err()
+            );
+            assert_eq!(
+                view.config.terminal.hyperlink_download_directory,
+                "/tmp/water-downloads"
+            );
+            view.dirty = true;
+            view.sync_hyperlink_preference(true, cx);
+            assert!(view.config.terminal.remote_hyperlink_auto_download);
+            assert!(view.dirty);
+            assert_eq!(
+                view.config.terminal.hyperlink_download_directory,
+                "/tmp/water-downloads"
+            );
+        });
+        host.shutdown();
+    }
+}
+
 impl Focusable for SettingsView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
@@ -1599,6 +1666,33 @@ impl Render for SettingsView {
             ),
         ];
         content = content.child(self.render_section("终端", terminal_rows, theme));
+        let hyperlink_rows = vec![
+            self.render_setting(
+                SettingField::Hyperlinks,
+                "终端超链接",
+                "点击终端超链接，用系统默认应用打开",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::HyperlinkDownloadDirectory,
+                "远程超链接下载目录",
+                "下载到本机的目录，支持 ~/，默认 ~/Downloads/Water",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::RemoteHyperlinkAutoDownload,
+                "自动下载远程超链接",
+                "点击远程文件时直接下载并打开，关闭后每次询问",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+        ];
+        content = content.child(self.render_section("超链接", hyperlink_rows, theme));
 
         let feature_rows = vec![
             self.render_setting(

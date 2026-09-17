@@ -137,8 +137,17 @@ fn run_ui(client: &ControlClient, arguments: &[String]) -> Result<()> {
             let dy = coordinate("--dy", 0.0)?;
             print_json(&client.ui_wheel(x, y, dx, dy).context("UI wheel failed")?)?;
         }
+        Some("click") => {
+            let x: f32 = optional_value(arguments, "--x")?
+                .context("ui click requires --x")?
+                .parse()?;
+            let y: f32 = optional_value(arguments, "--y")?
+                .context("ui click requires --y")?
+                .parse()?;
+            print_json(&client.ui_click(x, y).context("UI click failed")?)?;
+        }
         Some(command) => bail!("unknown ui command: {command}"),
-        None => bail!("ui requires key, state, screenshot, or wheel"),
+        None => bail!("ui requires key, state, screenshot, wheel, or click"),
     }
     Ok(())
 }

@@ -719,6 +719,12 @@ fn handle_regular(
                 )
             },
         ),
+        RpcMethod::UiClick { x, y } => ui_request(
+            request.request_id,
+            state,
+            |ui_client| ui_client.click((x, y)),
+            || ui_method_frame("ui.click", &serde_json::json!({ "x": x, "y": y })),
+        ),
         RpcMethod::SessionOpen { .. } => unreachable!("handled by handle_request"),
         RpcMethod::ServerInfo => RpcResponse::success(
             request.request_id,

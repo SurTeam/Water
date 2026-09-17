@@ -44,6 +44,10 @@ toolchain other than `stable`.
 
 ## Remote servers
 
+OSC 8 terminal hyperlinks (for example, `ls --color=auto --hyperlink=auto`) open with the local system's default application when clicked. Enable or disable this in Settings → 超链接 (`terminal.hyperlinks`). Shift-click retains terminal selection behavior, and applications using terminal mouse reporting receive their normal mouse events.
+
+File hyperlinks produced by a remote Water connection ask before downloading and opening the file or directory. Settings exposes the local download directory (`terminal.hyperlink_download_directory`, default `~/Downloads/Water`) and automatic downloading (`terminal.remote_hyperlink_auto_download`, default off). Selecting “以后默认下载并打开” in the confirmation saves the same setting and skips subsequent confirmations. Downloads use the clicked terminal's SSH connection and receive a separate directory under the configured download folder to avoid overwriting previous files. HTTP, HTTPS, and mail links open locally even when emitted by a remote terminal.
+
 Choose **Connect Remote…** in the sidebar and enter an OpenSSH host/config
 alias such as `build-box` or `alice@example.com`. The connection appears in
 the current window as its own collapsible server group alongside **Local**;

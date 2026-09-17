@@ -16,6 +16,8 @@ pub mod ctl;
 #[cfg(feature = "gui")]
 mod embedded_servers;
 pub mod event;
+#[cfg(feature = "gui")]
+pub mod hyperlink;
 pub mod ids;
 pub mod metrics;
 pub mod pane;

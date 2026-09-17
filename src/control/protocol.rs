@@ -226,6 +226,8 @@ pub enum RpcMethod {
     UiKeystroke { keystroke: String },
     #[serde(rename = "ui.snapshot")]
     UiSnapshot,
+    #[serde(rename = "ui.click")]
+    UiClick { x: f32, y: f32 },
     #[serde(rename = "ui.screenshot")]
     UiScreenshot { path: String },
     #[serde(rename = "ui.wheel")]
