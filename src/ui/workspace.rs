@@ -390,6 +390,13 @@ struct TerminalSelection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalMultiClickState {
+    terminal_id: TerminalId,
+    position: TerminalCellPosition,
+    selection_level: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TerminalMouseReportKind {
     Press,
     Release,
@@ -1006,6 +1013,7 @@ pub struct WorkspaceView {
     selection_autoscroll: Option<TerminalSelectionAutoscroll>,
     selection_autoscroll_frame_pending: bool,
     selection: Option<TerminalSelection>,
+    last_terminal_multi_click: Option<TerminalMultiClickState>,
     ime_terminal: Option<TerminalId>,
     ime_marked_text: String,
     ime_selected_range: Range<usize>,
@@ -1139,6 +1147,7 @@ impl WorkspaceView {
             selection_autoscroll: None,
             selection_autoscroll_frame_pending: false,
             selection: None,
+            last_terminal_multi_click: None,
             ime_terminal: None,
             ime_marked_text: String::new(),
             ime_selected_range: 0..0,
@@ -3408,11 +3417,36 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        let previous_multi_click = self.last_terminal_multi_click;
+        let same_multi_click_target = previous_multi_click.is_some_and(|state| {
+            state.terminal_id == terminal_id && state.position == endpoint.position
+        });
+        if click_count == 1 && (!same_multi_click_target || self.selection.is_none()) {
+            self.last_terminal_multi_click = None;
+        }
+        let selection_level = if click_count >= 2 {
+            let natural_level = terminal_selection_level_for_click_count(click_count);
+            if click_count % 2 == 0 && same_multi_click_target && self.selection.is_some() {
+                previous_multi_click
+                    .map(|state| state.selection_level.saturating_add(1))
+                    .unwrap_or(natural_level)
+                    .max(natural_level)
+            } else {
+                natural_level
+            }
+        } else {
+            0
+        };
         self.clear_ime();
         self.selection = Some(if click_count >= 2 {
             self.terminal_snapshot_for(terminal_id)
                 .map(|snapshot| {
-                    terminal_selection_after_double_click(snapshot, terminal_id, endpoint)
+                    terminal_selection_after_double_click(
+                        snapshot,
+                        terminal_id,
+                        endpoint,
+                        selection_level,
+                    )
                 })
                 .unwrap_or_else(|| {
                     terminal_selection_after_click(
@@ -3426,11 +3460,21 @@ impl WorkspaceView {
             terminal_selection_after_click(self.selection, terminal_id, endpoint, shift_held)
         });
         self.selection_autoscroll = None;
-        // A double-click creates a complete local selection. Do not let the
-        // second press turn the following pointer movement into a drag from
-        // the sentence's start; a fresh single click is still the way to
-        // begin a regular drag selection.
+        // A multi-click creates a complete local selection. Do not let a
+        // later press turn the following pointer movement into a drag; a
+        // fresh single click is still the way to begin a regular drag
+        // selection.
         self.dragging_terminal = (click_count == 1).then_some(terminal_id);
+        if click_count >= 2 {
+            // The native click count may restart at one for a later double
+            // click. Keep the completed layer so that a new pair on the same
+            // cell continues expanding instead of starting over.
+            self.last_terminal_multi_click = Some(TerminalMultiClickState {
+                terminal_id,
+                position: endpoint.position,
+                selection_level,
+            });
+        }
         cx.notify();
     }
 
@@ -3470,6 +3514,7 @@ impl WorkspaceView {
         let Some(endpoint) = self.terminal_selection_endpoint_at(terminal_id, position) else {
             return;
         };
+        let mut changed = false;
         if let Some(selection) = self
             .selection
             .as_mut()
@@ -3477,6 +3522,10 @@ impl WorkspaceView {
             && selection.head != endpoint
         {
             selection.head = endpoint;
+            changed = true;
+        }
+        if changed {
+            self.last_terminal_multi_click = None;
             cx.notify();
         }
     }
@@ -3622,6 +3671,7 @@ impl WorkspaceView {
             // final move event, so do not leave the copied range one cell
             // behind the pointer.
             selection.head = endpoint;
+            self.last_terminal_multi_click = None;
             cx.notify();
         }
         self.dragging_terminal = None;
@@ -8118,34 +8168,46 @@ enum TerminalSelectionWordClass {
     Punctuation,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalSelectionSegment {
+    start: usize,
+    end: usize,
+    class: TerminalSelectionWordClass,
+    contiguous_from_previous: bool,
+}
+
 /// Build the local selection produced by a terminal double-click.
 ///
 /// Selection is deliberately local: whitespace, punctuation, alphanumeric
 /// text, and CJK text are separate runs. This keeps a double-click on an
 /// `ls` row from selecting the entire logical line, while still allowing a
-/// wrapped word to be selected across painted rows.
+/// wrapped word to be selected across painted rows. Each subsequent
+/// multi-click expands across one more punctuation-separated segment.
 fn terminal_selection_after_double_click(
     snapshot: &TerminalSnapshot,
     terminal_id: TerminalId,
     endpoint: TerminalSelectionEndpoint,
+    selection_level: usize,
 ) -> TerminalSelection {
-    let selection = terminal_word_bounds(snapshot, endpoint.position).and_then(|(start, end)| {
-        let start = terminal_endpoint_at_linear_index(
-            start,
-            snapshot.size.columns,
-            TerminalSelectionSide::Left,
-        )?;
-        let head = terminal_endpoint_at_linear_index(
-            end.saturating_sub(1),
-            snapshot.size.columns,
-            TerminalSelectionSide::Right,
-        )?;
-        Some(TerminalSelection {
-            terminal_id,
-            anchor: start,
-            head,
-        })
-    });
+    let selection = terminal_word_bounds(snapshot, endpoint.position, selection_level).and_then(
+        |(start, end)| {
+            let start = terminal_endpoint_at_linear_index(
+                start,
+                snapshot.size.columns,
+                TerminalSelectionSide::Left,
+            )?;
+            let head = terminal_endpoint_at_linear_index(
+                end.saturating_sub(1),
+                snapshot.size.columns,
+                TerminalSelectionSide::Right,
+            )?;
+            Some(TerminalSelection {
+                terminal_id,
+                anchor: start,
+                head,
+            })
+        },
+    );
 
     selection.unwrap_or(TerminalSelection {
         terminal_id,
@@ -8154,9 +8216,14 @@ fn terminal_selection_after_double_click(
     })
 }
 
+fn terminal_selection_level_for_click_count(click_count: usize) -> usize {
+    click_count.saturating_sub(2) / 2
+}
+
 fn terminal_word_bounds(
     snapshot: &TerminalSnapshot,
     position: TerminalCellPosition,
+    selection_level: usize,
 ) -> Option<(i64, i64)> {
     let columns = snapshot.size.columns;
     if columns == 0 {
@@ -8179,38 +8246,32 @@ fn terminal_word_bounds(
     }
 
     let clicked_character = terminal_selection_character_index(snapshot, &characters, clicked)?;
-    let class = terminal_selection_word_class(characters[clicked_character].1);
+    let segments = terminal_selection_segments(snapshot, &characters);
+    let clicked_segment = segments
+        .iter()
+        .position(|segment| (segment.start..segment.end).contains(&clicked_character))?;
 
-    let mut start = clicked_character;
-    while start > 0 {
-        let previous = start - 1;
-        if terminal_selection_word_class(characters[previous].1) != class
-            || !terminal_selection_cells_are_adjacent(
-                snapshot,
-                characters[previous].0,
-                characters[start].0,
-            )
-        {
+    let mut first_segment = clicked_segment;
+    let mut last_segment = clicked_segment;
+    for _ in 0..selection_level {
+        let next_first = terminal_selection_expand_left(&segments, first_segment);
+        let next_last = terminal_selection_expand_right(&segments, last_segment);
+        if next_first.is_none() && next_last.is_none() {
             break;
         }
-        start = previous;
-    }
-
-    let mut end = clicked_character + 1;
-    while end < characters.len() {
-        if terminal_selection_word_class(characters[end].1) != class
-            || !terminal_selection_cells_are_adjacent(
-                snapshot,
-                characters[end - 1].0,
-                characters[end].0,
-            )
-        {
-            break;
+        if let Some(next_first) = next_first {
+            first_segment = next_first;
         }
-        end += 1;
+        if let Some(next_last) = next_last {
+            last_segment = next_last;
+        }
     }
 
-    Some((characters[start].0, characters[end - 1].0.saturating_add(1)))
+    let start = characters[segments[first_segment].start].0;
+    let end = characters[segments[last_segment].end - 1]
+        .0
+        .saturating_add(1);
+    Some((start, end))
 }
 
 fn terminal_logical_line_rows(snapshot: &TerminalSnapshot, row: i32) -> Option<(i32, i32)> {
@@ -8270,6 +8331,104 @@ fn terminal_selection_character_index(
         None
     }?;
     characters.iter().position(|(index, _)| *index == adjacent)
+}
+
+fn terminal_selection_segments(
+    snapshot: &TerminalSnapshot,
+    characters: &[(i64, char)],
+) -> Vec<TerminalSelectionSegment> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for end in 1..=characters.len() {
+        let split = end == characters.len()
+            || terminal_selection_word_class(characters[end - 1].1)
+                != terminal_selection_word_class(characters[end].1)
+            || !terminal_selection_cells_are_adjacent(
+                snapshot,
+                characters[end - 1].0,
+                characters[end].0,
+            );
+        if !split {
+            continue;
+        }
+
+        segments.push(TerminalSelectionSegment {
+            start,
+            end,
+            class: terminal_selection_word_class(characters[start].1),
+            contiguous_from_previous: start > 0
+                && terminal_selection_cells_are_adjacent(
+                    snapshot,
+                    characters[start - 1].0,
+                    characters[start].0,
+                ),
+        });
+        start = end;
+    }
+    segments
+}
+
+fn terminal_selection_expand_left(
+    segments: &[TerminalSelectionSegment],
+    first_segment: usize,
+) -> Option<usize> {
+    let current = segments.get(first_segment)?;
+    if current.class == TerminalSelectionWordClass::Whitespace {
+        return None;
+    }
+
+    if current.class == TerminalSelectionWordClass::Punctuation {
+        let previous_segment = first_segment
+            .checked_sub(1)
+            .and_then(|index| segments.get(index))?;
+        return (current.contiguous_from_previous
+            && terminal_selection_is_text_class(previous_segment.class))
+        .then_some(first_segment - 1);
+    }
+
+    let punctuation_index = first_segment.checked_sub(1)?;
+    let word_index = punctuation_index.checked_sub(1)?;
+    let punctuation = segments.get(punctuation_index)?;
+    let word = segments.get(word_index)?;
+    (current.contiguous_from_previous
+        && punctuation.contiguous_from_previous
+        && punctuation.class == TerminalSelectionWordClass::Punctuation
+        && terminal_selection_is_text_class(word.class))
+    .then_some(word_index)
+}
+
+fn terminal_selection_expand_right(
+    segments: &[TerminalSelectionSegment],
+    last_segment: usize,
+) -> Option<usize> {
+    let current = segments.get(last_segment)?;
+    if current.class == TerminalSelectionWordClass::Whitespace {
+        return None;
+    }
+
+    if current.class == TerminalSelectionWordClass::Punctuation {
+        let next_index = last_segment.checked_add(1)?;
+        let next = segments.get(next_index)?;
+        return (next.contiguous_from_previous && terminal_selection_is_text_class(next.class))
+            .then_some(next_index);
+    }
+
+    let punctuation_index = last_segment.checked_add(1)?;
+    let word_index = punctuation_index.checked_add(1)?;
+    let punctuation = segments.get(punctuation_index)?;
+    let word = segments.get(word_index)?;
+    (punctuation.class == TerminalSelectionWordClass::Punctuation
+        && word.contiguous_from_previous
+        && punctuation.contiguous_from_previous
+        && terminal_selection_is_text_class(word.class))
+    .then_some(word_index)
+}
+
+fn terminal_selection_is_text_class(class: TerminalSelectionWordClass) -> bool {
+    matches!(
+        class,
+        TerminalSelectionWordClass::Cjk | TerminalSelectionWordClass::Alphanumeric
+    )
 }
 
 fn terminal_selection_word_class(character: char) -> TerminalSelectionWordClass {
@@ -10756,6 +10915,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 4, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, first), "first");
 
@@ -10763,6 +10923,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 20, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, second), "second");
 
@@ -10770,6 +10931,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 14, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, punctuation), ".");
     }
@@ -10786,6 +10948,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 1, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, first), "中文");
 
@@ -10793,6 +10956,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 4, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, english), "English");
 
@@ -10800,6 +10964,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 10, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, second), "中文");
 
@@ -10807,6 +10972,7 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 11, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, punctuation), "。");
     }
@@ -10823,8 +10989,48 @@ mod tests {
             &snapshot,
             terminal_id,
             endpoint(0, 7, TerminalSelectionSide::Left),
+            0,
         );
         assert_eq!(selected_terminal_text(&snapshot, selection), "hello");
+    }
+
+    #[test]
+    fn repeated_double_click_expands_one_punctuation_layer_at_a_time() {
+        let terminal_id = TerminalId::new(1);
+        let line = "panther-cp1a.260405.005-factory-3d3f2f42.zip";
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(96, 1));
+        for (column, character) in line.chars().enumerate() {
+            snapshot.cell_mut(0, column).unwrap().character = character;
+        }
+        let click_column = line.find("260405").unwrap() + 2;
+        let expected = [
+            "260405",
+            "cp1a.260405.005",
+            "panther-cp1a.260405.005-factory",
+            "panther-cp1a.260405.005-factory-3d3f2f42",
+            line,
+        ];
+
+        for (selection_level, expected) in expected.into_iter().enumerate() {
+            let selection = terminal_selection_after_double_click(
+                &snapshot,
+                terminal_id,
+                endpoint(0, click_column, TerminalSelectionSide::Left),
+                selection_level,
+            );
+            assert_eq!(selected_terminal_text(&snapshot, selection), expected);
+        }
+    }
+
+    #[test]
+    fn double_click_count_advances_selection_layer_per_pair() {
+        let expected_levels = [(1, 0), (2, 0), (3, 0), (4, 1), (5, 1), (6, 2), (7, 2)];
+        for (click_count, expected_level) in expected_levels {
+            assert_eq!(
+                terminal_selection_level_for_click_count(click_count),
+                expected_level
+            );
+        }
     }
 
     #[test]
