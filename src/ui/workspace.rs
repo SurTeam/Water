@@ -10,10 +10,12 @@ use gpui::{
     ExternalPaths, FocusHandle, Focusable, FontFeatures, InputHandler, KeyDownEvent, Keystroke,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Point, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, ShapedLine, SharedString, StrikethroughStyle, TextAlign,
-    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window,
-    WindowControlArea, anchored, canvas, deferred, div, fill, font, outline, point, prelude::*, px,
-    relative, rgb, rgba, size,
+    TextInputConfiguration, TextRun, TouchPhase, UTF16Selection, UnderlineStyle, Window, anchored,
+    canvas, deferred, div, fill, font, outline, point, prelude::*, px, relative, rgb, rgba, size,
 };
+
+#[cfg(not(target_os = "macos"))]
+use gpui::WindowControlArea;
 
 use crate::agent::AgentKind;
 use crate::app::model::{AgentDump, PaneTreeDump, TabDump, WorkspaceDump};
@@ -56,9 +58,14 @@ const SIDEBAR_AUTOSCROLL_EDGE_PX: f32 = 24.0;
 /// Pixels to move the sidebar per captured pointer move near an edge.
 const SIDEBAR_AUTOSCROLL_STEP_PX: f32 = 24.0;
 /// Leading titlebar width used when the sidebar is collapsed. It keeps the
-/// tab strip from jumping all the way to the window edge when the controls
-/// still occupy the left side of the titlebar.
+/// tab strip clear of the native macOS traffic lights (or the fallback
+/// controls used on platforms without them).
 const COLLAPSED_TITLEBAR_LEADING_WIDTH: f32 = 112.0;
+/// Approximate width reserved for the three native macOS traffic lights.
+/// Native buttons are kept outside the GPUI layout, so this spacer prevents
+/// the sidebar toggle and first tab from being placed underneath them.
+#[cfg(target_os = "macos")]
+const NATIVE_TITLEBAR_CONTROLS_WIDTH: f32 = 60.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkspaceConnectionKind {
@@ -5748,6 +5755,7 @@ impl WorkspaceView {
             .into_any_element()
     }
 
+    #[cfg(not(target_os = "macos"))]
     fn render_titlebar_control(
         &self,
         color: u32,
@@ -5919,24 +5927,35 @@ impl WorkspaceView {
     }
 
     fn render_titlebar(&self, theme: ThemeColors, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(target_os = "macos")]
+        let controls = div()
+            .h_full()
+            .w(px(NATIVE_TITLEBAR_CONTROLS_WIDTH))
+            .flex_none()
+            .into_any_element();
+
+        #[cfg(not(target_os = "macos"))]
         let close = self.render_titlebar_control(
             0xff5f57,
             WindowControlArea::Close,
             |_, _event, window, _cx| window.remove_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let minimize = self.render_titlebar_control(
             0xfebc2e,
             WindowControlArea::Min,
             |_, _event, window, _cx| window.minimize_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let maximize = self.render_titlebar_control(
             0x28c840,
             WindowControlArea::Max,
             |_, _event, window, _cx| window.zoom_window(),
             cx,
         );
+        #[cfg(not(target_os = "macos"))]
         let controls = div()
             .h_full()
             .gap(px(self.config.ui.titlebar_gap))
@@ -6013,9 +6032,10 @@ impl WorkspaceView {
             .px(px(0.))
             .items_center()
             .flex()
-            // The titlebar owns its drag gesture explicitly below. Only the
-            // three control hitboxes use WindowControlArea so they are not
-            // shadowed by a full-width Drag hitbox.
+            // The titlebar owns its drag gesture explicitly below. On macOS,
+            // the native traffic lights sit above this client-side surface;
+            // on other platforms the fallback controls stop propagation so
+            // they are not shadowed by the full-width drag hitbox.
             .bg(rgb(theme.chrome_background))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down_out(cx.listener(|this, _event, _window, _cx| {

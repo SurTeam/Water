@@ -1052,14 +1052,9 @@ impl WaterApplication {
         match cx.open_window(water_window_options(bounds, min_size), move |window, cx| {
             window.activate_window();
             window.focus(&focus_handle, cx);
-            // AppKit may not have attached the native traffic lights when
-            // `open_window` returns. Hide them once this window has rendered
-            // so custom controls cannot be covered by the native buttons.
-            window.on_next_frame(|_, _| hide_native_window_buttons());
             root
         }) {
             Ok(_) => {
-                hide_native_window_buttons();
                 self.state.views.borrow_mut().push(weak_root);
             }
             Err(error) => tracing::error!(
@@ -1094,12 +1089,10 @@ impl WaterApplication {
             move |window, cx| {
                 window.activate_window();
                 window.focus(&focus_handle, cx);
-                window.on_next_frame(|_, _| hide_native_window_buttons());
                 root
             },
         ) {
             Ok(window) => {
-                hide_native_window_buttons();
                 self.state.settings_window.replace(Some(window));
             }
             Err(error) => tracing::error!(
@@ -2109,101 +2102,17 @@ fn save_screenshot(image: image::RgbaImage, path: PathBuf) -> Result<UiScreensho
     })
 }
 
-/// Hide the native window buttons on every window owned by this process.
-///
-/// Water draws its own integrated window controls, but the transparent
-/// titlebar required for the AppKit resize style mask also creates native
-/// traffic-light buttons. gpui's only knob for those buttons is a position
-/// (it has no hide API), and negative positions are not a supported way to
-/// make them vanish, so they are hidden directly through the ObjC runtime.
-/// The hidden state persists across later layout passes because the button
-/// views themselves stay hidden; only the system fullscreen chrome can
-/// still draw its own close control.
-#[cfg(target_os = "macos")]
-fn hide_native_window_buttons() {
-    use std::ffi::{c_char, c_void};
-
-    // NSWindowButton raw values: CloseButton, MiniaturizeButton, ZoomButton.
-    const STANDARD_BUTTONS: [usize; 3] = [1, 2, 3];
-
-    unsafe extern "C" {
-        fn objc_getClass(name: *const c_char) -> *mut c_void;
-        fn sel_registerName(name: *const c_char) -> *mut c_void;
-        fn objc_msgSend();
-    }
-    type Get = unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void;
-    type GetIndexed = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void;
-    type Count = unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize;
-    type SetHidden = unsafe extern "C" fn(*mut c_void, *mut c_void, i8);
-
-    fn sel(name: &str) -> *mut c_void {
-        // `sel_registerName` copies the name, so the temporary CString may
-        // drop immediately after registration.
-        let name = std::ffi::CString::new(name).expect("selectors never contain NUL");
-        unsafe { sel_registerName(name.as_ptr()) }
-    }
-
-    // SAFETY: all messages below are scalar-argumented ObjC sends on the
-    // main thread (window creation happens on the GPUI application
-    // thread). `objc_msgSend` is cast to the concrete signatures AppKit
-    // declares; a missing NSApplication class or a nil receiver is handled
-    // by the null checks, and sending messages to nil is an ObjC no-op.
-    unsafe {
-        let app_class = objc_getClass(c"NSApplication".as_ptr());
-        if app_class.is_null() {
-            return;
-        }
-        let shared: Get = std::mem::transmute(objc_msgSend as *const c_void);
-        let app = shared(app_class, sel("sharedApplication"));
-        if app.is_null() {
-            return;
-        }
-        let windows = shared(app, sel("windows"));
-        if windows.is_null() {
-            return;
-        }
-        let count: Count = std::mem::transmute(objc_msgSend as *const c_void);
-        let count = count(windows, sel("count"));
-        let object_at: GetIndexed = std::mem::transmute(objc_msgSend as *const c_void);
-        let button_at: GetIndexed = std::mem::transmute(objc_msgSend as *const c_void);
-        let set_hidden: SetHidden = std::mem::transmute(objc_msgSend as *const c_void);
-        let button_sel = sel("standardWindowButton:");
-        let hidden_sel = sel("setHidden:");
-        for index in 0..count {
-            let window = object_at(windows, sel("objectAtIndex:"), index);
-            if window.is_null() {
-                continue;
-            }
-            for button in STANDARD_BUTTONS {
-                let view = button_at(window, button_sel, button);
-                if !view.is_null() {
-                    set_hidden(view, hidden_sel, 1);
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn hide_native_window_buttons() {}
-
 fn water_window_options(
     bounds: Bounds<gpui::Pixels>,
     min_size: Size<gpui::Pixels>,
 ) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        // Water renders the complete titlebar, including window controls,
-        // inside its views, so the native titlebar must stay invisible.
-        // gpui only grants the resizable/closable/miniaturizable AppKit
-        // style masks through an explicit (transparent) titlebar; a bare
-        // `titlebar: None` window cannot be resized at all. The native
-        // traffic lights are hidden through AppKit right after the window
-        // is created (`hide_native_window_buttons`); gpui itself only
-        // supports *repositioning* them, and negative off-screen
-        // positions are an undefined-geometry hack, so nothing is parked
-        // here. (System fullscreen chrome may still surface a close
-        // control on top of the window.)
+        // Keep AppKit's titlebar transparent so Water can draw its tab strip
+        // and drag surface, while leaving the native traffic-light buttons
+        // visible in their system-managed position. A bare `titlebar: None`
+        // window cannot be resized on macOS because it does not receive the
+        // required window style mask.
         titlebar: Some(TitlebarOptions {
             title: None,
             appears_transparent: true,
@@ -2785,7 +2694,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_titlebar_window_options_keep_the_window_freely_resizable() {
+    fn native_titlebar_window_options_keep_the_window_freely_resizable() {
         let min_size = size(px(400.), px(260.));
         let options = water_window_options(Bounds::default(), min_size);
         assert!(options.is_resizable, "the window must be freely resizable");
@@ -2799,8 +2708,7 @@ mod tests {
         assert!(titlebar.title.is_none());
         assert!(
             titlebar.traffic_light_position.is_none(),
-            "native buttons are hidden through AppKit after creation; gpui \
-             positioning must not be abused as an off-screen hack"
+            "native buttons should keep AppKit's system-managed position"
         );
     }
 
