@@ -1318,7 +1318,11 @@ impl WaterApplication {
         for view in views {
             if view
                 .update(cx, |workspace, cx| {
-                    workspace.apply_terminal_events(&changed, cx)
+                    workspace.apply_terminal_events_for_connection(
+                        connection_id,
+                        &changed,
+                        cx,
+                    )
                 })
                 .is_ok()
             {

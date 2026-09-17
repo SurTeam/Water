@@ -2588,20 +2588,42 @@ impl WorkspaceView {
 
     /// Refreshes the locally rendered snapshots for terminals whose raw
     /// stream advanced, then requests one repaint for the whole view.
-    pub(crate) fn apply_terminal_events(&mut self, changed: &[TerminalId], cx: &mut Context<Self>) {
+    pub(crate) fn apply_terminal_events_for_connection(
+        &mut self,
+        connection_id: ConnectionId,
+        changed: &[TerminalId],
+        cx: &mut Context<Self>,
+    ) {
         if changed.is_empty() {
             return;
         }
         let Some(application) = self.application.clone() else {
             return;
         };
-        let connection_id = self.active_connection;
+        // Use the event's connection for the snapshot lookup, not the
+        // workspace's active connection. A non-active remote connection's
+        // terminals would otherwise look up in the wrong projection.
         let mut displayed = BTreeSet::new();
-        if let Some(workspace) = self.selected_workspace_dump()
-            && let Some(active_tab) = workspace.active_tab
-            && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+        if connection_id == self.active_connection {
+            if let Some(workspace) = self.selected_workspace_dump()
+                && let Some(active_tab) = workspace.active_tab
+                && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+            {
+                collect_terminal_ids(&tab.tree, &mut displayed);
+            }
+        } else if let Some(connection) = self
+            .connections
+            .iter()
+            .find(|connection| connection.id == connection_id)
+            && let Some(workspace_id) = self.selected_workspace
         {
-            collect_terminal_ids(&tab.tree, &mut displayed);
+            if let Some(workspace) =
+                workspace_dump_for_snapshot(&connection.snapshot, workspace_id)
+                && let Some(active_tab) = workspace.active_tab
+                && let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == active_tab)
+            {
+                collect_terminal_ids(&tab.tree, &mut displayed);
+            }
         }
         let mut needs_notify = false;
         for &terminal_id in changed {
