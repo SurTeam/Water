@@ -8110,36 +8110,42 @@ fn terminal_selection_after_click(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalSelectionWordClass {
+    Whitespace,
+    Cjk,
+    Alphanumeric,
+    Punctuation,
+}
+
 /// Build the local selection produced by a terminal double-click.
 ///
-/// A terminal line is often a wrapped shell command or log message, so the
-/// selection follows the logical line rather than stopping at the painted row
-/// where the pointer happens to land. When sentence punctuation is present,
-/// only the sentence under the pointer is selected; command lines without
-/// punctuation fall back to their non-padding text.
+/// Selection is deliberately local: whitespace, punctuation, alphanumeric
+/// text, and CJK text are separate runs. This keeps a double-click on an
+/// `ls` row from selecting the entire logical line, while still allowing a
+/// wrapped word to be selected across painted rows.
 fn terminal_selection_after_double_click(
     snapshot: &TerminalSnapshot,
     terminal_id: TerminalId,
     endpoint: TerminalSelectionEndpoint,
 ) -> TerminalSelection {
-    let selection =
-        terminal_sentence_bounds(snapshot, endpoint.position).and_then(|(start, end)| {
-            let start = terminal_endpoint_at_linear_index(
-                start,
-                snapshot.size.columns,
-                TerminalSelectionSide::Left,
-            )?;
-            let head = terminal_endpoint_at_linear_index(
-                end.saturating_sub(1),
-                snapshot.size.columns,
-                TerminalSelectionSide::Right,
-            )?;
-            Some(TerminalSelection {
-                terminal_id,
-                anchor: start,
-                head,
-            })
-        });
+    let selection = terminal_word_bounds(snapshot, endpoint.position).and_then(|(start, end)| {
+        let start = terminal_endpoint_at_linear_index(
+            start,
+            snapshot.size.columns,
+            TerminalSelectionSide::Left,
+        )?;
+        let head = terminal_endpoint_at_linear_index(
+            end.saturating_sub(1),
+            snapshot.size.columns,
+            TerminalSelectionSide::Right,
+        )?;
+        Some(TerminalSelection {
+            terminal_id,
+            anchor: start,
+            head,
+        })
+    });
 
     selection.unwrap_or(TerminalSelection {
         terminal_id,
@@ -8148,7 +8154,7 @@ fn terminal_selection_after_double_click(
     })
 }
 
-fn terminal_sentence_bounds(
+fn terminal_word_bounds(
     snapshot: &TerminalSnapshot,
     position: TerminalCellPosition,
 ) -> Option<(i64, i64)> {
@@ -8172,33 +8178,39 @@ fn terminal_sentence_bounds(
         return None;
     }
 
-    let mut spans = Vec::new();
-    let mut span_start = 0;
-    let mut index = 0;
-    while index < characters.len() {
-        let Some(end) = terminal_sentence_end(&characters, index) else {
-            index += 1;
-            continue;
-        };
-        if let Some(span) = terminal_trimmed_character_span(&characters, span_start, end) {
-            spans.push(span);
+    let clicked_character = terminal_selection_character_index(snapshot, &characters, clicked)?;
+    let class = terminal_selection_word_class(characters[clicked_character].1);
+
+    let mut start = clicked_character;
+    while start > 0 {
+        let previous = start - 1;
+        if terminal_selection_word_class(characters[previous].1) != class
+            || !terminal_selection_cells_are_adjacent(
+                snapshot,
+                characters[previous].0,
+                characters[start].0,
+            )
+        {
+            break;
         }
-        span_start = end;
-        index = end;
-    }
-    if let Some(span) = terminal_trimmed_character_span(&characters, span_start, characters.len()) {
-        spans.push(span);
-    }
-    if spans.is_empty() {
-        return None;
+        start = previous;
     }
 
-    spans
-        .iter()
-        .copied()
-        .find(|(start, end)| (*start..*end).contains(&clicked))
-        .or_else(|| spans.iter().copied().find(|(_, end)| clicked < *end))
-        .or_else(|| spans.last().copied())
+    let mut end = clicked_character + 1;
+    while end < characters.len() {
+        if terminal_selection_word_class(characters[end].1) != class
+            || !terminal_selection_cells_are_adjacent(
+                snapshot,
+                characters[end - 1].0,
+                characters[end].0,
+            )
+        {
+            break;
+        }
+        end += 1;
+    }
+
+    Some((characters[start].0, characters[end - 1].0.saturating_add(1)))
 }
 
 fn terminal_logical_line_rows(snapshot: &TerminalSnapshot, row: i32) -> Option<(i32, i32)> {
@@ -8240,54 +8252,65 @@ fn terminal_selectable_cell_character(cell: &TerminalCell) -> Option<char> {
     .then_some(cell.character)
 }
 
-fn terminal_sentence_end(characters: &[(i64, char)], index: usize) -> Option<usize> {
-    let character = characters.get(index)?.1;
-    let is_cjk_terminator = matches!(character, '。' | '！' | '？' | '｡' | '．');
-    let is_ascii_terminator = matches!(character, '.' | '!' | '?');
-    if !is_cjk_terminator && !is_ascii_terminator {
-        return None;
+fn terminal_selection_character_index(
+    snapshot: &TerminalSnapshot,
+    characters: &[(i64, char)],
+    clicked: i64,
+) -> Option<usize> {
+    if let Some(index) = characters.iter().position(|(index, _)| *index == clicked) {
+        return Some(index);
     }
 
-    let mut end = index + 1;
-    while characters
-        .get(end)
-        .is_some_and(|(_, character)| terminal_sentence_closer(*character))
-    {
-        end += 1;
-    }
-    if is_ascii_terminator
-        && characters
-            .get(end)
-            .is_some_and(|(_, character)| !character.is_whitespace())
-    {
-        return None;
-    }
-    Some(end)
+    let clicked_cell = terminal_cell_at_linear_index(snapshot, clicked)?;
+    let adjacent = if clicked_cell.flags.wide_spacer() {
+        clicked.checked_sub(1)
+    } else if clicked_cell.flags.leading_wide_spacer() {
+        clicked.checked_add(1)
+    } else {
+        None
+    }?;
+    characters.iter().position(|(index, _)| *index == adjacent)
 }
 
-fn terminal_sentence_closer(character: char) -> bool {
+fn terminal_selection_word_class(character: char) -> TerminalSelectionWordClass {
+    if character.is_whitespace() {
+        TerminalSelectionWordClass::Whitespace
+    } else if terminal_is_cjk_character(character) {
+        TerminalSelectionWordClass::Cjk
+    } else if character.is_alphanumeric() {
+        TerminalSelectionWordClass::Alphanumeric
+    } else {
+        TerminalSelectionWordClass::Punctuation
+    }
+}
+
+fn terminal_is_cjk_character(character: char) -> bool {
     matches!(
-        character,
-        '\'' | '"' | ')' | ']' | '}' | '»' | '」' | '』' | '”' | '’'
+        character as u32,
+        0x1100..=0x11ff
+            | 0x3040..=0x30ff
+            | 0x3130..=0x318f
+            | 0x3400..=0x4dbf
+            | 0x4e00..=0x9fff
+            | 0xac00..=0xd7af
+            | 0xf900..=0xfaff
+            | 0x20000..=0x2fa1f
     )
 }
 
-fn terminal_trimmed_character_span(
-    characters: &[(i64, char)],
-    start: usize,
-    end: usize,
-) -> Option<(i64, i64)> {
-    let first = (start..end).find(|&index| {
-        characters
-            .get(index)
-            .is_some_and(|(_, character)| !character.is_whitespace())
-    })?;
-    let last = (first..end).rev().find(|&index| {
-        characters
-            .get(index)
-            .is_some_and(|(_, character)| !character.is_whitespace())
-    })?;
-    Some((characters[first].0, characters[last].0 + 1))
+fn terminal_selection_cells_are_adjacent(
+    snapshot: &TerminalSnapshot,
+    left: i64,
+    right: i64,
+) -> bool {
+    match right.checked_sub(left) {
+        Some(1) => true,
+        Some(2) => left
+            .checked_add(1)
+            .and_then(|index| terminal_cell_at_linear_index(snapshot, index))
+            .is_some_and(|cell| cell.flags.wide_spacer() || cell.flags.leading_wide_spacer()),
+        _ => false,
+    }
 }
 
 fn terminal_endpoint_at_linear_index(
@@ -10722,7 +10745,7 @@ mod tests {
     }
 
     #[test]
-    fn double_click_selects_the_sentence_under_the_pointer() {
+    fn double_click_selects_the_word_under_the_pointer() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(64, 1));
         for (column, character) in "first sentence. second sentence!".chars().enumerate() {
@@ -10734,24 +10757,28 @@ mod tests {
             terminal_id,
             endpoint(0, 4, TerminalSelectionSide::Left),
         );
-        assert_eq!(selected_terminal_text(&snapshot, first), "first sentence.");
+        assert_eq!(selected_terminal_text(&snapshot, first), "first");
 
         let second = terminal_selection_after_double_click(
             &snapshot,
             terminal_id,
             endpoint(0, 20, TerminalSelectionSide::Left),
         );
-        assert_eq!(
-            selected_terminal_text(&snapshot, second),
-            "second sentence!"
+        assert_eq!(selected_terminal_text(&snapshot, second), "second");
+
+        let punctuation = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 14, TerminalSelectionSide::Left),
         );
+        assert_eq!(selected_terminal_text(&snapshot, punctuation), ".");
     }
 
     #[test]
-    fn double_click_uses_cjk_sentence_terminators() {
+    fn double_click_uses_spaces_cjk_boundaries_and_punctuation() {
         let terminal_id = TerminalId::new(1);
-        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(16, 1));
-        for (column, character) in "第一句。第二句！".chars().enumerate() {
+        let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(32, 1));
+        for (column, character) in "中文English中文。".chars().enumerate() {
             snapshot.cell_mut(0, column).unwrap().character = character;
         }
 
@@ -10760,18 +10787,32 @@ mod tests {
             terminal_id,
             endpoint(0, 1, TerminalSelectionSide::Left),
         );
-        assert_eq!(selected_terminal_text(&snapshot, first), "第一句。");
+        assert_eq!(selected_terminal_text(&snapshot, first), "中文");
+
+        let english = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 4, TerminalSelectionSide::Left),
+        );
+        assert_eq!(selected_terminal_text(&snapshot, english), "English");
 
         let second = terminal_selection_after_double_click(
             &snapshot,
             terminal_id,
-            endpoint(0, 5, TerminalSelectionSide::Left),
+            endpoint(0, 10, TerminalSelectionSide::Left),
         );
-        assert_eq!(selected_terminal_text(&snapshot, second), "第二句！");
+        assert_eq!(selected_terminal_text(&snapshot, second), "中文");
+
+        let punctuation = terminal_selection_after_double_click(
+            &snapshot,
+            terminal_id,
+            endpoint(0, 11, TerminalSelectionSide::Left),
+        );
+        assert_eq!(selected_terminal_text(&snapshot, punctuation), "。");
     }
 
     #[test]
-    fn double_click_without_punctuation_selects_the_trimmed_logical_line() {
+    fn double_click_does_not_select_an_entire_ls_style_line() {
         let terminal_id = TerminalId::new(1);
         let mut snapshot = TerminalSnapshot::empty(terminal_id, TerminalSize::new(32, 1));
         for (column, character) in "  echo hello world  ".chars().enumerate() {
@@ -10783,10 +10824,7 @@ mod tests {
             terminal_id,
             endpoint(0, 7, TerminalSelectionSide::Left),
         );
-        assert_eq!(
-            selected_terminal_text(&snapshot, selection),
-            "echo hello world"
-        );
+        assert_eq!(selected_terminal_text(&snapshot, selection), "hello");
     }
 
     #[test]
