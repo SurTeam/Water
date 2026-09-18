@@ -27,6 +27,7 @@ use super::stream::{TerminalSeq, TerminalStreamEvent};
 
 const CLEAR_SCROLLBACK_SEQUENCE: &[u8] = b"\x1b[3J";
 const PRIMARY_DEVICE_ATTRIBUTES_RESPONSE: &[u8] = b"\x1b[?6;22c";
+#[cfg(feature = "gui")]
 const DEFAULT_GRAPHICS_CELL_SIZE: (u16, u16) = (8, 16);
 /// Browsing may temporarily retain more history than the normal configured
 /// limit, but it must remain finite so a pinned viewport cannot turn output

@@ -4837,6 +4837,10 @@ impl WorkspaceView {
                     .text_color(rgb(connection_status_color))
                     .child(kind_label),
             )
+            // GPUI's overflow mask is rectangular, so the card cannot clip
+            // this child background to its rounded top corners. Round the
+            // header itself to keep the host color inside the card outline.
+            .rounded_t(px((self.config.ui.sidebar_card_radius - 1.0).max(0.)))
             .bg(rgb(connection_background))
             .on_mouse_down(MouseButton::Left, header_activate);
         if connection.kind == WorkspaceConnectionKind::Remote {
@@ -6386,18 +6390,12 @@ impl WorkspaceView {
                 } else {
                     theme.pane_background
                 };
-                // GPUI applies a parent opacity to custom render elements after
-                // compositing them over the pane background. Pre-dim the
-                // terminal's base color as well, otherwise an inactive pane's
-                // terminal background is lighter than its padding.
-                let terminal_theme = if self.config.ui.dim_inactive_panes && !active {
-                    ThemeColors {
-                        terminal_background: dim_terminal_color(theme.terminal_background),
-                        ..theme
-                    }
-                } else {
-                    theme
-                };
+                // TerminalRenderElement is painted inside this div and
+                // inherits its opacity through GPUI's element-opacity stack.
+                // Keep the terminal and its padding on the same base color;
+                // pre-dimming the custom element would dim it twice and leave
+                // a visible mismatch around inactive panes.
+                let terminal_theme = theme;
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",

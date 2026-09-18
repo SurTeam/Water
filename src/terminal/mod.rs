@@ -77,6 +77,7 @@ pub fn default_shell_args(program: &str) -> Vec<String> {
 pub use emulator::{EmulatorEffect, TerminalEmulator, snapshot_from_replay};
 #[cfg(feature = "gui")]
 pub use graphics::{TERMINAL_IMAGE_PLACEHOLDER, TerminalImage};
+#[cfg(feature = "gui")]
 pub(crate) use model::release_allocator_pressure;
 pub use model::{
     TerminalAttachment, TerminalError, TerminalLimits, TerminalManager, TerminalRegistry,
