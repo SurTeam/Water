@@ -1125,6 +1125,7 @@ impl CommandDispatcher {
             lines: size.lines,
             agent,
             agent_label: None,
+            agent_label_from_title: false,
         });
         if let Err(message) = self
             .model
@@ -1534,6 +1535,7 @@ mod tests {
                         active: true,
                     }),
                     agent_label: None,
+                    agent_label_from_title: false,
                 }),
             )
             .unwrap();
@@ -2123,6 +2125,7 @@ mod tests {
                     lines: 24,
                     agent: None,
                     agent_label: None,
+                    agent_label_from_title: false,
                 }),
             )
             .unwrap();

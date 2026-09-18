@@ -150,14 +150,144 @@ impl AgentKind {
             ],
         }
     }
+
+    /// Extract a likely session name from a terminal title emitted by an
+    /// agent. Agent titles commonly combine status, thread/session name, and
+    /// project name; only the first non-generic segment is useful in the
+    /// sidebar.
+    pub(crate) fn session_name_from_terminal_title(self, title: &str, cwd: &str) -> Option<String> {
+        let title = normalize_display_title(title)?;
+        let cwd_parts = cwd
+            .split(['/', '\\'])
+            .filter(|part| !part.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        let candidate = title
+            .split(" · ")
+            .flat_map(|part| part.split(" | "))
+            .flat_map(|part| part.split(" — "))
+            .map(str::trim)
+            .filter(|part| !part.is_empty() && !is_generic_title_part(self, part, &cwd_parts))
+            .next()?;
+        Some(candidate.to_owned())
+    }
+}
+
+const MAX_AGENT_SESSION_NAME_CHARS: usize = 80;
+
+fn normalize_display_title(title: &str) -> Option<String> {
+    let mut normalized = String::new();
+    let mut pending_space = false;
+    for character in title.chars() {
+        if character.is_control() {
+            continue;
+        }
+        if character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        if pending_space {
+            if normalized.chars().count() >= MAX_AGENT_SESSION_NAME_CHARS {
+                break;
+            }
+            normalized.push(' ');
+            pending_space = false;
+        }
+        if normalized.chars().count() >= MAX_AGENT_SESSION_NAME_CHARS {
+            break;
+        }
+        normalized.push(character);
+    }
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+fn is_generic_title_part(kind: AgentKind, part: &str, cwd_parts: &[String]) -> bool {
+    let lower = part.to_ascii_lowercase();
+    let lower = lower
+        .trim_start_matches(|character| {
+            matches!(
+                character,
+                '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏' | '●'
+            )
+        })
+        .trim();
+    if lower.is_empty()
+        || lower.contains('/')
+        || lower.contains('\\')
+        || cwd_parts.iter().any(|cwd_part| cwd_part == lower)
+    {
+        return true;
+    }
+
+    let compact = lower
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>();
+    if AgentKind::all().iter().any(|candidate| {
+        compact == candidate.config_key().replace('_', "")
+            || compact == candidate.label().to_ascii_lowercase().replace(' ', "")
+            || candidate
+                .names()
+                .iter()
+                .any(|name| compact == name.replace('-', ""))
+    }) {
+        return true;
+    }
+
+    let status = [
+        "working",
+        "thinking",
+        "starting",
+        "processing",
+        "generating",
+        "waiting",
+        "waiting for input",
+        "action required",
+        "ready",
+        "idle",
+        "done",
+        "finished",
+        "completed",
+    ];
+    if status
+        .iter()
+        .any(|marker| lower == *marker || lower.starts_with(&format!("{marker} ")))
+    {
+        return true;
+    }
+
+    // A version-only title is emitted by some agent releases instead of the
+    // session name. Do not turn it into a persistent sidebar label.
+    if lower
+        .chars()
+        .all(|character| character.is_ascii_digit() || matches!(character, '.' | '-' | '_'))
+        && lower.chars().any(|character| character.is_ascii_digit())
+    {
+        return true;
+    }
+
+    // Avoid retaining the agent's own generic prefix when it is followed by a
+    // version, e.g. "Codex 0.154.0".
+    let kind_prefix = kind.label().to_ascii_lowercase();
+    if lower.starts_with(&kind_prefix)
+        && lower[kind_prefix.len()..]
+            .trim()
+            .chars()
+            .all(|character| character.is_ascii_digit() || matches!(character, '.' | '-' | '_'))
+    {
+        return true;
+    }
+
+    false
 }
 
 /// A detected coding agent attached to the terminal surface that runs it.
 ///
-/// `active` reflects recent PTY output (the agent produced something within
-/// the worker's activity window); it is the first "running state" Water
-/// exposes and is the hook where richer per-agent states (waiting for input,
-/// tool running, ...) from future adapters should attach.
+/// `active` reflects recent PTY output that was not attributable to an
+/// unsubmitted local input buffer (the agent produced something within the
+/// worker's activity window); it is the first "running state" Water exposes
+/// and is the hook where richer per-agent states (waiting for input, tool
+/// running, ...) from future adapters should attach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DetectedAgent {
     pub kind: AgentKind,
@@ -303,6 +433,29 @@ mod tests {
         assert_eq!(
             detect_agent("Claude", &args(&["/usr/local/bin/Claude"])),
             Some(AgentKind::ClaudeCode)
+        );
+    }
+
+    #[test]
+    fn session_names_ignore_status_and_project_title_parts() {
+        assert_eq!(
+            AgentKind::Codex
+                .session_name_from_terminal_title("⠋ Working · Fix auth · water", "/repo/water",),
+            Some("Fix auth".to_owned())
+        );
+        assert_eq!(
+            AgentKind::Codex
+                .session_name_from_terminal_title("Waiting for input · water", "/repo/water",),
+            None
+        );
+        assert_eq!(
+            AgentKind::ClaudeCode
+                .session_name_from_terminal_title("project-in-progress", "/repo/water"),
+            Some("project-in-progress".to_owned())
+        );
+        assert_eq!(
+            AgentKind::ClaudeCode.session_name_from_terminal_title("2.1.132", "/repo/water"),
+            None
         );
     }
 }
