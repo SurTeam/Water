@@ -6281,6 +6281,15 @@ impl WorkspaceView {
                 } else {
                     1.0
                 };
+                // TerminalRenderElement paints the terminal background itself.
+                // Use the same base color for the inactive pane's padding so
+                // the dimming layer does not leave a visible halo around the
+                // terminal when pane_background is configured differently.
+                let pane_background = if self.config.ui.dim_inactive_panes && !active {
+                    theme.terminal_background
+                } else {
+                    theme.pane_background
+                };
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",
@@ -6428,7 +6437,7 @@ impl WorkspaceView {
                     .border_1()
                     .border_color(border)
                     .rounded(px(self.config.ui.pane_corner_radius))
-                    .bg(rgb(theme.pane_background))
+                    .bg(rgb(pane_background))
                     .opacity(pane_opacity)
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
