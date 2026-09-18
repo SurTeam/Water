@@ -114,6 +114,7 @@ struct TerminalConnection {
     emulator_commands:
         std::collections::BTreeMap<TerminalId, std::sync::mpsc::Sender<TerminalEmulatorCommand>>,
     snapshots: std::collections::BTreeMap<TerminalId, Arc<crate::terminal::TerminalSnapshot>>,
+    pending_frame_requests: std::collections::BTreeSet<TerminalId>,
     pending_attachments: std::collections::BTreeSet<TerminalId>,
     attachments: std::collections::BTreeMap<TerminalId, Arc<TerminalAttachmentState>>,
     cell_sizes: std::collections::BTreeMap<TerminalId, (u16, u16)>,
@@ -143,7 +144,14 @@ enum TerminalEmulatorCommand {
     SetPinned(bool),
     SetScrollbackLines(usize),
     SetScrollbackProtected(bool),
-    SetCellSize { cell_width: u16, cell_height: u16 },
+    SetCellSize {
+        cell_width: u16,
+        cell_height: u16,
+    },
+    /// One visible window presentation demand. The worker may have processed
+    /// any number of PTY events since the demand was queued; it publishes the
+    /// newest emulator state once and keeps parsing independently.
+    Present,
 }
 
 struct TerminalAttachmentState {
@@ -183,6 +191,13 @@ enum TerminalEventMsg {
         attachment: Arc<TerminalAttachmentState>,
         snapshot: Arc<crate::terminal::TerminalSnapshot>,
     },
+    /// The emulator advanced visual state but has not materialized a render
+    /// snapshot yet. A visible WorkspaceView turns this into one
+    /// Window::on_next_frame callback; the worker keeps parsing meanwhile.
+    FrameNeeded {
+        terminal_id: TerminalId,
+        attachment: Arc<TerminalAttachmentState>,
+    },
     SnapshotReady {
         terminal_id: TerminalId,
         attachment: Arc<TerminalAttachmentState>,
@@ -209,7 +224,17 @@ enum TerminalEventMsg {
 const MAX_TERMINAL_BYTES_PER_UI_TURN: usize = MAX_OUTPUT_EVENT_BYTES;
 const MAX_TERMINAL_MESSAGES_PER_UI_TURN: usize = 64;
 const TERMINAL_UI_YIELD: std::time::Duration = std::time::Duration::from_millis(1);
-const TERMINAL_SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+/// Replay can publish bounded progress while a terminal is attaching. Live
+/// presentation never uses a time interval: it is driven by a real GPUI
+/// presentation demand from the visible window.
+const TERMINAL_REPLAY_SNAPSHOT_MIN_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(16);
+/// Keep live emulator work bounded without waiting for a future event. Output
+/// is still drained at full speed across consecutive batches; this is only a
+/// scheduling yield for the worker and never a data-loss boundary.
+const MAX_LIVE_EMULATOR_EVENTS_PER_BATCH: usize = 64;
+const MAX_LIVE_EMULATOR_BYTES_PER_BATCH: usize = 256 * 1024;
+const TERMINAL_WORKER_IDLE_WAIT: std::time::Duration = std::time::Duration::from_millis(8);
 /// Keep the control/wakeup mailbox small. Full render snapshots live in a
 /// per-terminal latest-value slot, so a slow UI cannot accumulate historical
 /// frames and a full mailbox cannot discard the final state.
@@ -219,6 +244,7 @@ impl TerminalEventMsg {
     fn terminal_id(&self) -> TerminalId {
         match self {
             Self::Attached { terminal_id, .. }
+            | Self::FrameNeeded { terminal_id, .. }
             | Self::SnapshotReady { terminal_id, .. }
             | Self::PtyWrites { terminal_id, .. }
             | Self::Restart { terminal_id, .. }
@@ -229,6 +255,7 @@ impl TerminalEventMsg {
     fn attachment(&self) -> &TerminalAttachmentState {
         match self {
             Self::Attached { attachment, .. }
+            | Self::FrameNeeded { attachment, .. }
             | Self::SnapshotReady { attachment, .. }
             | Self::PtyWrites { attachment, .. }
             | Self::Restart { attachment, .. }
@@ -247,11 +274,74 @@ impl TerminalEventMsg {
         match self {
             Self::SnapshotReady { .. } => MAX_TERMINAL_BYTES_PER_UI_TURN,
             Self::Attached { .. }
+            | Self::FrameNeeded { .. }
             | Self::PtyWrites { .. }
             | Self::Restart { .. }
             | Self::Detached { .. } => 0,
         }
     }
+}
+
+/// Presentation state is deliberately separate from emulator progress. The
+/// worker can keep applying PTY events while one frame request is outstanding;
+/// the next presentation consumes the newest dirty state only once.
+#[derive(Debug, Default)]
+struct TerminalPresentationGate {
+    dirty: bool,
+    frame_requested: bool,
+}
+
+impl TerminalPresentationGate {
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Arms one frame demand for the current dirty state. Repeated output
+    /// before that frame is coalesced here rather than becoming more wakeups.
+    fn request_frame(&mut self) -> bool {
+        if self.dirty && !self.frame_requested {
+            self.frame_requested = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A frame request has arrived. Returns whether a new snapshot is needed.
+    fn take_for_presentation(&mut self) -> bool {
+        self.frame_requested = false;
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn take_for_final_flush(&mut self) -> bool {
+        self.take_for_presentation()
+    }
+}
+
+/// Drains a finite live-emulator batch after the first event has already been
+/// received. An event that would cross the byte/event budget remains pending
+/// for the next call, preserving both stream order and every event.
+fn drain_live_terminal_batch(
+    first: TerminalStreamEvent,
+    mut try_recv: impl FnMut() -> Result<TerminalStreamEvent, std::sync::mpsc::TryRecvError>,
+) -> (Vec<TerminalStreamEvent>, Option<TerminalStreamEvent>) {
+    let mut bytes = first.output_bytes();
+    let mut batch = vec![first];
+    while batch.len() < MAX_LIVE_EMULATOR_EVENTS_PER_BATCH {
+        let Ok(event) = try_recv() else {
+            break;
+        };
+        let event_bytes = event.output_bytes();
+        if bytes > 0
+            && event_bytes > 0
+            && bytes.saturating_add(event_bytes) > MAX_LIVE_EMULATOR_BYTES_PER_BATCH
+        {
+            return (batch, Some(event));
+        }
+        bytes = bytes.saturating_add(event_bytes);
+        batch.push(event);
+    }
+    (batch, None)
 }
 
 struct PendingTerminalSnapshot {
@@ -417,19 +507,24 @@ fn publish_replay_progress(
     emulator: &mut TerminalEmulator,
     events: &mut Vec<TerminalStreamEvent>,
     publish_snapshot: bool,
-) -> bool {
+) -> Result<Option<Arc<crate::terminal::TerminalSnapshot>>, ()> {
     if events.is_empty() {
-        return attachment.is_active();
+        return attachment.is_active().then_some(None).ok_or(());
     }
     emulator.apply_batch(events);
     events.clear();
     if !attachment.is_active() {
-        return false;
+        return Err(());
     }
     if !publish_snapshot {
-        return true;
+        return Ok(None);
     }
-    sender.publish_snapshot(terminal_id, attachment, Arc::new(emulator.snapshot(None)))
+    let snapshot = Arc::new(emulator.snapshot(None));
+    if sender.publish_snapshot(terminal_id, attachment, snapshot.clone()) {
+        Ok(Some(snapshot))
+    } else {
+        Err(())
+    }
 }
 
 /// Publishes a lifecycle/control event without silently dropping it. A slow
@@ -450,11 +545,17 @@ fn terminal_debug_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("WATER_DEBUG_TERMINAL").is_some())
 }
 
+#[derive(Default)]
+struct EmulatorCommandState {
+    visual_changed: bool,
+    present: bool,
+}
+
 fn apply_emulator_commands(
     receiver: &std::sync::mpsc::Receiver<TerminalEmulatorCommand>,
     emulator: &mut TerminalEmulator,
-) -> bool {
-    let mut changed = false;
+) -> EmulatorCommandState {
+    let mut state = EmulatorCommandState::default();
     while let Ok(command) = receiver.try_recv() {
         match command {
             TerminalEmulatorCommand::ScrollBy(delta) => emulator.scroll_by(delta),
@@ -470,10 +571,14 @@ fn apply_emulator_commands(
                 cell_width,
                 cell_height,
             } => emulator.set_cell_size(cell_width, cell_height),
+            TerminalEmulatorCommand::Present => {
+                state.present = true;
+                continue;
+            }
         }
-        changed = true;
+        state.visual_changed = true;
     }
-    changed
+    state
 }
 
 fn terminal_scrollback_protected(snapshot: &ModelSnapshot, terminal_id: TerminalId) -> bool {
@@ -484,19 +589,18 @@ fn terminal_scrollback_protected(snapshot: &ModelSnapshot, terminal_id: Terminal
     })
 }
 
-fn publish_live_snapshot(
+/// Flushes terminal protocol replies independently of render presentation.
+/// Query responses must not wait for a display frame: DA/DSR/OSC and graphics
+/// probes are part of the PTY protocol timing, not visual output.
+fn flush_emulator_pty_writes(
     sender: &TerminalEventSink,
     terminal_id: TerminalId,
     attachment: &Arc<TerminalAttachmentState>,
-    emulator: &mut TerminalEmulator,
-    previous: Option<&crate::terminal::TerminalSnapshot>,
+    emulator: &TerminalEmulator,
 ) -> bool {
-    if !attachment.is_active() {
-        return false;
-    }
     let pty_writes = emulator.pty_writes();
-    if !pty_writes.is_empty()
-        && !try_publish_terminal_event(
+    pty_writes.is_empty()
+        || try_publish_terminal_event(
             sender,
             attachment,
             TerminalEventMsg::PtyWrites {
@@ -505,14 +609,25 @@ fn publish_live_snapshot(
                 writes: pty_writes,
             },
         )
-    {
-        return false;
+}
+
+/// Materializes exactly one immutable render snapshot for a presentation
+/// state. The returned Arc is the same value stored in the latest-value
+/// mailbox, so the worker's next `previous` snapshot preserves row Arc reuse.
+fn publish_live_snapshot(
+    sender: &TerminalEventSink,
+    terminal_id: TerminalId,
+    attachment: &Arc<TerminalAttachmentState>,
+    emulator: &TerminalEmulator,
+    previous: Option<&crate::terminal::TerminalSnapshot>,
+) -> Option<Arc<crate::terminal::TerminalSnapshot>> {
+    if !attachment.is_active() {
+        return None;
     }
-    sender.publish_snapshot(
-        terminal_id,
-        attachment,
-        Arc::new(emulator.snapshot(previous)),
-    )
+    let snapshot = Arc::new(emulator.snapshot(previous));
+    sender
+        .publish_snapshot(terminal_id, attachment, snapshot.clone())
+        .then_some(snapshot)
 }
 
 struct RemoteConnectionSetup {
@@ -1562,6 +1677,7 @@ impl WaterApplication {
             session: Arc::new(session),
             emulator_commands: std::collections::BTreeMap::new(),
             snapshots: std::collections::BTreeMap::new(),
+            pending_frame_requests: std::collections::BTreeSet::new(),
             pending_attachments: std::collections::BTreeSet::new(),
             attachments: std::collections::BTreeMap::new(),
             cell_sizes: std::collections::BTreeMap::new(),
@@ -1623,6 +1739,7 @@ impl WaterApplication {
         use crate::command::{AppCommand, TerminalCommand};
 
         let mut changed = std::collections::BTreeSet::new();
+        let mut frame_needed = std::collections::BTreeSet::new();
         let mut resync = Vec::new();
         {
             let mut connections = self.state.connections.borrow_mut();
@@ -1647,21 +1764,33 @@ impl WaterApplication {
             }
             for (terminal_id, messages) in grouped {
                 let mut latest_snapshot = None;
+                let mut snapshot_seen = false;
+                let mut frame_needed_before_snapshot = false;
+                let mut frame_needed_after_snapshot = false;
                 let mut detached = false;
                 let mut detached_attachment = None;
                 for message in messages {
                     match message {
                         TerminalEventMsg::Attached { snapshot, .. } => {
                             terminal.pending_attachments.remove(&terminal_id);
+                            snapshot_seen = true;
                             // The live worker can publish a newer snapshot after replay
                             // wakes the UI but before this batch is consumed. Keep that
                             // snapshot instead of replacing it with the attach-time state.
                             Self::merge_terminal_snapshot(&mut latest_snapshot, snapshot, true);
                         }
+                        TerminalEventMsg::FrameNeeded { .. } => {
+                            if snapshot_seen {
+                                frame_needed_after_snapshot = true;
+                            } else {
+                                frame_needed_before_snapshot = true;
+                            }
+                        }
                         TerminalEventMsg::SnapshotReady { attachment, .. } => {
                             if let Some(snapshot) =
                                 terminal.event_sink.take_snapshot(terminal_id, &attachment)
                             {
+                                snapshot_seen = true;
                                 Self::merge_terminal_snapshot(
                                     &mut latest_snapshot,
                                     snapshot,
@@ -1679,6 +1808,17 @@ impl WaterApplication {
                         }
                     }
                 }
+                let terminal_needs_frame = if latest_snapshot.is_some() {
+                    frame_needed_after_snapshot
+                } else {
+                    frame_needed_before_snapshot
+                };
+                if terminal_needs_frame {
+                    frame_needed.insert(terminal_id);
+                    terminal.pending_frame_requests.insert(terminal_id);
+                } else if latest_snapshot.is_some() {
+                    terminal.pending_frame_requests.remove(&terminal_id);
+                }
                 if let Some(snapshot) = latest_snapshot {
                     terminal.snapshots.insert(terminal_id, snapshot);
                     changed.insert(terminal_id);
@@ -1691,7 +1831,7 @@ impl WaterApplication {
                     terminal.attachments.remove(&terminal_id);
                     terminal.emulator_commands.remove(&terminal_id);
                     terminal.cell_sizes.remove(&terminal_id);
-                    terminal.snapshots.remove(&terminal_id);
+                    terminal.pending_frame_requests.remove(&terminal_id);
                     changed.insert(terminal_id);
                 }
             }
@@ -1707,16 +1847,23 @@ impl WaterApplication {
         for terminal_id in resync {
             self.restart_terminal_attachment(connection_id, terminal_id);
         }
-        if changed.is_empty() {
+        if changed.is_empty() && frame_needed.is_empty() {
             return;
         }
         let changed = changed.into_iter().collect::<Vec<_>>();
+        let frame_needed = frame_needed.into_iter().collect::<Vec<_>>();
         let views = self.state.views.borrow().clone();
         let mut live_views = Vec::with_capacity(views.len());
         for view in views {
             if view
-                .update(cx, |workspace, cx| {
-                    workspace.apply_terminal_events_for_connection(connection_id, &changed, cx)
+                .update_in(cx, |workspace, window, cx| {
+                    workspace.apply_terminal_events_for_connection(
+                        connection_id,
+                        &changed,
+                        &frame_needed,
+                        window,
+                        cx,
+                    )
                 })
                 .is_ok()
             {
@@ -1753,6 +1900,7 @@ impl WaterApplication {
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
+            terminal.pending_frame_requests.remove(&terminal_id);
             terminal.desired_scrollback.remove(&terminal_id);
             terminal.session.clone()
         };
@@ -1872,6 +2020,8 @@ impl WaterApplication {
                     let mut replay_events = Vec::new();
                     let mut replay_bytes = 0usize;
                     let mut last_replay_snapshot = std::time::Instant::now();
+                    let mut last_replay_published: Option<Arc<crate::terminal::TerminalSnapshot>> =
+                        None;
                     for wire in &response.replay {
                         let Some(event) = TerminalStreamEvent::from_wire(wire, tracked_size) else {
                             continue;
@@ -1888,9 +2038,9 @@ impl WaterApplication {
                         if replay_bytes >= MAX_TERMINAL_BYTES_PER_UI_TURN
                             || replay_events.len() >= MAX_TERMINAL_MESSAGES_PER_UI_TURN
                         {
-                            let publish_snapshot =
-                                last_replay_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;
-                            if !publish_replay_progress(
+                            let publish_snapshot = last_replay_snapshot.elapsed()
+                                >= TERMINAL_REPLAY_SNAPSHOT_MIN_INTERVAL;
+                            let progress = match publish_replay_progress(
                                 &event_sink,
                                 terminal_id,
                                 &attachment,
@@ -1898,7 +2048,11 @@ impl WaterApplication {
                                 &mut replay_events,
                                 publish_snapshot,
                             ) {
-                                return;
+                                Ok(progress) => progress,
+                                Err(()) => return,
+                            };
+                            if let Some(snapshot) = progress {
+                                last_replay_published = Some(snapshot);
                             }
                             if publish_snapshot {
                                 last_replay_snapshot = std::time::Instant::now();
@@ -1908,7 +2062,7 @@ impl WaterApplication {
                             replay_bytes = 0;
                         }
                     }
-                    if !publish_replay_progress(
+                    let replay_snapshot = match publish_replay_progress(
                         &event_sink,
                         terminal_id,
                         &attachment,
@@ -1916,19 +2070,26 @@ impl WaterApplication {
                         &mut replay_events,
                         true,
                     ) {
-                        return;
-                    }
+                        Ok(snapshot) => snapshot.or(last_replay_published),
+                        Err(()) => return,
+                    };
                     emulator.start_live();
                     if !attachment.is_active() {
                         return;
                     }
+                    // Reuse the final replay snapshot for both the attach
+                    // notification and the worker's first live `previous`
+                    // value. This preserves row Arc identity across the
+                    // replay -> live handoff.
+                    let attached_snapshot =
+                        replay_snapshot.unwrap_or_else(|| Arc::new(emulator.snapshot(None)));
                     if !try_publish_terminal_event(
                         &event_sink,
                         &attachment,
                         TerminalEventMsg::Attached {
                             terminal_id,
                             attachment: attachment.clone(),
-                            snapshot: Arc::new(emulator.snapshot(None)),
+                            snapshot: attached_snapshot.clone(),
                         },
                     ) {
                         return;
@@ -1943,102 +2104,142 @@ impl WaterApplication {
                         );
                     }
                     let mut stream = stream;
-                    let mut pending_event = None;
-                    let mut last_live_snapshot = std::time::Instant::now();
-                    let mut last_snapshot: Option<crate::terminal::TerminalSnapshot> =
-                        Some(emulator.snapshot(None));
+                    let mut pending_event: Option<TerminalStreamEvent> = None;
+                    let mut last_snapshot: Option<Arc<crate::terminal::TerminalSnapshot>> =
+                        Some(attached_snapshot);
+                    let mut presentation = TerminalPresentationGate::default();
                     let mut live_events = 0u64;
                     let mut last_live_log = std::time::Instant::now();
                     while attachment.is_active() {
-                        let commands_changed =
-                            apply_emulator_commands(&emulator_commands, &mut emulator);
+                        let commands = apply_emulator_commands(&emulator_commands, &mut emulator);
+                        let mut request_frame = false;
+                        if commands.visual_changed && emulator.take_dirty() {
+                            presentation.mark_dirty();
+                            request_frame |= presentation.request_frame();
+                        }
                         let received = match pending_event.take() {
                             Some(event) => Ok(event),
-                            None => stream.recv_timeout(std::time::Duration::from_millis(8)),
+                            None => stream.recv_timeout(TERMINAL_WORKER_IDLE_WAIT),
                         };
-                        let event = match received {
-                            Ok(event) => event,
-                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                if commands_changed {
-                                    let prev = last_snapshot.as_ref();
-                                    if !publish_live_snapshot(
-                                        &event_sink,
-                                        terminal_id,
-                                        &attachment,
-                                        &mut emulator,
-                                        prev,
-                                    ) {
-                                        return;
-                                    }
-                                    last_live_snapshot = std::time::Instant::now();
+                        let final_event = match received {
+                            Ok(first_event) => {
+                                if !attachment.is_active() {
+                                    break;
                                 }
-                                continue;
+                                let (events, next_pending) =
+                                    drain_live_terminal_batch(first_event, || stream.try_recv());
+                                pending_event = next_pending;
+                                for event in &events {
+                                    crate::metrics::add(
+                                        crate::metrics::terminal_bytes_received(),
+                                        event.output_bytes(),
+                                    );
+                                    if terminal_debug_enabled() {
+                                        live_events += 1;
+                                        let bytes = event.output_bytes();
+                                        if bytes > 0
+                                            && (live_events <= 5
+                                                || last_live_log.elapsed().as_secs() >= 1)
+                                        {
+                                            tracing::warn!(
+                                                target: "water::terminal-debug",
+                                                ?terminal_id, ?connection_id,
+                                                live_events, seq = event.seq(), bytes,
+                                                "attach: live event received"
+                                            );
+                                            last_live_log = std::time::Instant::now();
+                                        }
+                                    }
+                                }
+                                let effects = emulator.apply_batch(&events);
+                                if !flush_emulator_pty_writes(
+                                    &event_sink,
+                                    terminal_id,
+                                    &attachment,
+                                    &emulator,
+                                ) {
+                                    return;
+                                }
+                                if effects.iter().any(|effect| {
+                                    matches!(
+                                        effect,
+                                        crate::terminal::EmulatorEffect::SequenceGap { .. }
+                                    )
+                                }) {
+                                    let _ = try_publish_terminal_event(
+                                        &event_sink,
+                                        &attachment,
+                                        TerminalEventMsg::Restart {
+                                            terminal_id,
+                                            attachment: attachment.clone(),
+                                        },
+                                    );
+                                    return;
+                                }
+                                if emulator.take_dirty() {
+                                    presentation.mark_dirty();
+                                    request_frame |= presentation.request_frame();
+                                }
+                                events
+                                    .iter()
+                                    .any(|event| matches!(event, TerminalStreamEvent::Exit { .. }))
                             }
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                         };
-                        if !attachment.is_active() {
-                            break;
-                        }
-                        crate::metrics::add(
-                            crate::metrics::terminal_bytes_received(),
-                            event.output_bytes(),
-                        );
-                        if terminal_debug_enabled() {
-                            live_events += 1;
-                            let bytes = event.output_bytes();
-                            if bytes > 0
-                                && (live_events <= 5 || last_live_log.elapsed().as_secs() >= 1)
-                            {
-                                tracing::warn!(
-                                    target: "water::terminal-debug",
-                                    ?terminal_id, ?connection_id,
-                                    live_events, seq = event.seq(), bytes,
-                                    "attach: live event received"
-                                );
-                                last_live_log = std::time::Instant::now();
+
+                        // A frame demand or an ordered Exit may publish the
+                        // newest state. Normal output never gets here without
+                        // a GPUI frame demand, so snapshot construction cannot
+                        // outrun the display cadence.
+                        if commands.present || final_event {
+                            if presentation.take_for_presentation() {
+                                let previous = last_snapshot.as_deref();
+                                let Some(snapshot) = publish_live_snapshot(
+                                    &event_sink,
+                                    terminal_id,
+                                    &attachment,
+                                    &emulator,
+                                    previous,
+                                ) else {
+                                    return;
+                                };
+                                last_snapshot = Some(snapshot);
                             }
-                        }
-                        let effects = emulator.apply(&event);
-                        if effects.iter().any(|effect| {
-                            matches!(effect, crate::terminal::EmulatorEffect::SequenceGap { .. })
-                        }) {
-                            let _ = try_publish_terminal_event(
+                        } else if request_frame
+                            && !try_publish_terminal_event(
                                 &event_sink,
                                 &attachment,
-                                TerminalEventMsg::Restart {
+                                TerminalEventMsg::FrameNeeded {
                                     terminal_id,
                                     attachment: attachment.clone(),
                                 },
-                            );
+                            )
+                        {
                             return;
                         }
-                        let stream_backlogged = match stream.try_recv() {
-                            Ok(event) => {
-                                pending_event = Some(event);
-                                true
-                            }
-                            Err(std::sync::mpsc::TryRecvError::Empty) => false,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
-                        };
-                        let publish_snapshot = commands_changed
-                            || !stream_backlogged
-                            || last_live_snapshot.elapsed() >= TERMINAL_SNAPSHOT_MIN_INTERVAL;
-                        if publish_snapshot {
-                            let prev = last_snapshot.as_ref();
-                            if !publish_live_snapshot(
-                                &event_sink,
-                                terminal_id,
-                                &attachment,
-                                &mut emulator,
-                                prev,
-                            ) {
-                                return;
-                            }
-                            last_snapshot = Some(emulator.snapshot(prev));
-                            last_live_snapshot = std::time::Instant::now();
+
+                        if final_event {
+                            break;
                         }
                     }
                     if attachment.is_active() {
+                        // If the stream stopped between presentation demands,
+                        // do not strand the last emulator mutation behind a
+                        // frame callback that will never be requested again.
+                        if presentation.take_for_final_flush() {
+                            let previous = last_snapshot.as_deref();
+                            let Some(snapshot) = publish_live_snapshot(
+                                &event_sink,
+                                terminal_id,
+                                &attachment,
+                                &emulator,
+                                previous,
+                            ) else {
+                                return;
+                            };
+                            let _ = snapshot;
+                        }
                         let _ = try_publish_terminal_event(
                             &event_sink,
                             &attachment,
@@ -2081,6 +2282,7 @@ impl WaterApplication {
             terminal.pending_attachments.remove(&terminal_id);
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
+            terminal.pending_frame_requests.remove(&terminal_id);
             terminal.desired_scrollback.remove(&terminal_id);
             terminal.event_sink.remove(terminal_id);
             if let Some(attachment) = terminal.attachments.remove(&terminal_id) {
@@ -2126,6 +2328,7 @@ impl WaterApplication {
             terminal.emulator_commands.remove(&terminal_id);
             terminal.cell_sizes.remove(&terminal_id);
             terminal.desired_scrollback.remove(&terminal_id);
+            terminal.pending_frame_requests.remove(&terminal_id);
             terminal.snapshots.remove(&terminal_id);
             terminal.session.clone()
         };
@@ -2151,6 +2354,45 @@ impl WaterApplication {
             .find(|connection| connection.projection.id == connection_id)?;
         let terminal = connection.terminal.as_ref()?;
         terminal.snapshots.get(&terminal_id).cloned()
+    }
+
+    /// Delivers one visual presentation demand to the owning emulator worker.
+    /// This is intentionally separate from PTY input and viewport commands:
+    /// the worker keeps consuming the ordered stream while this request waits
+    /// for the next real GPUI display frame.
+    pub(crate) fn terminal_present_frame(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+    ) -> bool {
+        let connections = self.state.connections.borrow();
+        let Some(connection) = connections
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+        else {
+            return false;
+        };
+        let Some(terminal) = connection.terminal.as_ref() else {
+            return false;
+        };
+        terminal
+            .emulator_commands
+            .get(&terminal_id)
+            .is_some_and(|commands| commands.send(TerminalEmulatorCommand::Present).is_ok())
+    }
+
+    pub(crate) fn terminal_frame_pending(
+        &self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+    ) -> bool {
+        self.state
+            .connections
+            .borrow()
+            .iter()
+            .find(|connection| connection.projection.id == connection_id)
+            .and_then(|connection| connection.terminal.as_ref())
+            .is_some_and(|terminal| terminal.pending_frame_requests.contains(&terminal_id))
     }
 
     /// Updates the local emulator's physical cell size. The cache keeps the
@@ -2863,27 +3105,33 @@ mod tests {
             size,
             bytes: Arc::from(b"first replay row\r\n".as_slice()),
         }];
-        assert!(publish_replay_progress(
-            &sink,
-            terminal_id,
-            &attachment,
-            &mut emulator,
-            &mut events,
-            true,
-        ));
+        assert!(
+            publish_replay_progress(
+                &sink,
+                terminal_id,
+                &attachment,
+                &mut emulator,
+                &mut events,
+                true,
+            )
+            .is_ok()
+        );
         events.push(TerminalStreamEvent::Output {
             seq: 2,
             size,
             bytes: Arc::from(b"second replay row\r\n".as_slice()),
         });
-        assert!(publish_replay_progress(
-            &sink,
-            terminal_id,
-            &attachment,
-            &mut emulator,
-            &mut events,
-            true,
-        ));
+        assert!(
+            publish_replay_progress(
+                &sink,
+                terminal_id,
+                &attachment,
+                &mut emulator,
+                &mut events,
+                true,
+            )
+            .is_ok()
+        );
 
         let (batch, pending) = recv_terminal_event_batch(&receiver, None).unwrap();
         assert_eq!(batch.len(), 1);
@@ -2918,16 +3166,242 @@ mod tests {
             bytes: Arc::from(b"coalesced replay row\r\n".as_slice()),
         }];
 
-        assert!(publish_replay_progress(
+        assert!(
+            publish_replay_progress(
+                &sink,
+                terminal_id,
+                &attachment,
+                &mut emulator,
+                &mut events,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(events.is_empty());
+        assert_eq!(emulator.last_seq(), 1);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn live_batch_preserves_output_resize_exit_order() {
+        let terminal_id = TerminalId::new(60);
+        let old_size = crate::terminal::TerminalSize::new(20, 4);
+        let new_size = crate::terminal::TerminalSize::new(30, 5);
+        let events = vec![
+            TerminalStreamEvent::Output {
+                seq: 1,
+                size: old_size,
+                bytes: Arc::from(b"A".as_slice()),
+            },
+            TerminalStreamEvent::Output {
+                seq: 2,
+                size: old_size,
+                bytes: Arc::from(b"B".as_slice()),
+            },
+            TerminalStreamEvent::Resize {
+                seq: 3,
+                size: new_size,
+            },
+            TerminalStreamEvent::Output {
+                seq: 4,
+                size: new_size,
+                bytes: Arc::from(b"C".as_slice()),
+            },
+            TerminalStreamEvent::Exit {
+                seq: 5,
+                code: Some(0),
+            },
+        ];
+        let (sender, receiver) = std::sync::mpsc::sync_channel(events.len());
+        for event in events.iter().skip(1) {
+            sender.send(event.clone()).unwrap();
+        }
+        let first = events[0].clone();
+        let (batch, pending) = drain_live_terminal_batch(first, || receiver.try_recv());
+        assert_eq!(batch, events);
+        assert!(pending.is_none());
+
+        let mut batched = TerminalEmulator::new(terminal_id, old_size, 100);
+        let mut sequential = TerminalEmulator::new(terminal_id, old_size, 100);
+        batched.start_live();
+        sequential.start_live();
+        let effects = batched.apply_batch(&batch);
+        for event in &events {
+            sequential.apply(event);
+        }
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, crate::terminal::EmulatorEffect::Exited { .. }))
+        );
+        let batched_snapshot = batched.snapshot(None);
+        let sequential_snapshot = sequential.snapshot(None);
+        assert_eq!(batched.last_seq(), sequential.last_seq());
+        assert_eq!(batched_snapshot.size, sequential_snapshot.size);
+        assert_eq!(batched_snapshot.process, sequential_snapshot.process);
+        assert_eq!(
+            batched_snapshot.visible_text(),
+            sequential_snapshot.visible_text()
+        );
+    }
+
+    #[test]
+    fn live_batch_keeps_event_pending_when_the_byte_budget_would_be_crossed() {
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let first = TerminalStreamEvent::Output {
+            seq: 1,
+            size,
+            bytes: Arc::from(vec![b'a'; MAX_LIVE_EMULATOR_BYTES_PER_BATCH - 1]),
+        };
+        let second = TerminalStreamEvent::Output {
+            seq: 2,
+            size,
+            bytes: Arc::from(vec![b'b'; 2]),
+        };
+        let third = TerminalStreamEvent::Resize { seq: 3, size };
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        sender.send(second.clone()).unwrap();
+        sender.send(third.clone()).unwrap();
+
+        let (batch, pending) = drain_live_terminal_batch(first, || receiver.try_recv());
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch[0].seq(), 1);
+        assert_eq!(pending.as_ref().map(TerminalStreamEvent::seq), Some(2));
+
+        let (next_batch, pending) =
+            drain_live_terminal_batch(pending.expect("event must remain pending"), || {
+                receiver.try_recv()
+            });
+        assert_eq!(
+            next_batch
+                .iter()
+                .map(TerminalStreamEvent::seq)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn presentation_gate_coalesces_dirty_state_until_the_next_frame() {
+        let mut gate = TerminalPresentationGate::default();
+        gate.mark_dirty();
+        assert!(gate.request_frame());
+        gate.mark_dirty();
+        assert!(!gate.request_frame());
+        assert!(gate.take_for_presentation());
+        assert!(!gate.take_for_presentation());
+
+        gate.mark_dirty();
+        assert!(gate.request_frame());
+        assert!(gate.take_for_presentation());
+        assert!(!gate.request_frame());
+    }
+
+    #[test]
+    fn final_frame_flush_publishes_output_before_exit() {
+        let terminal_id = TerminalId::new(61);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let attachment = Arc::new(TerminalAttachmentState::new());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let sink = TerminalEventSink::new(sender);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+        emulator.start_live();
+        let events = vec![
+            TerminalStreamEvent::Output {
+                seq: 1,
+                size,
+                bytes: Arc::from(b"final output\r\n".as_slice()),
+            },
+            TerminalStreamEvent::Exit {
+                seq: 2,
+                code: Some(7),
+            },
+        ];
+        let effects = emulator.apply_batch(&events);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, crate::terminal::EmulatorEffect::Exited { .. }))
+        );
+        let mut gate = TerminalPresentationGate::default();
+        assert!(emulator.take_dirty());
+        gate.mark_dirty();
+        assert!(gate.request_frame());
+        assert!(gate.take_for_final_flush());
+        let snapshot = publish_live_snapshot(&sink, terminal_id, &attachment, &emulator, None)
+            .expect("final snapshot publication");
+        assert!(snapshot.visible_text().contains("final output"));
+        assert_eq!(
+            snapshot.process,
+            crate::terminal::TerminalProcessState::Exited { code: Some(7) }
+        );
+        assert!(matches!(
+            receiver.recv().unwrap(),
+            TerminalEventMsg::SnapshotReady { .. }
+        ));
+    }
+
+    #[test]
+    fn published_live_snapshot_is_the_worker_previous_arc() {
+        let terminal_id = TerminalId::new(63);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let attachment = Arc::new(TerminalAttachmentState::new());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let sink = TerminalEventSink::new(sender);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+        emulator.start_live();
+        emulator.apply_batch(&[TerminalStreamEvent::Output {
+            seq: 1,
+            size,
+            bytes: Arc::from(b"one render state\r\n".as_slice()),
+        }]);
+
+        let published = publish_live_snapshot(&sink, terminal_id, &attachment, &emulator, None)
+            .expect("live snapshot publication");
+        let previous_for_next_apply = published.clone();
+        let TerminalEventMsg::SnapshotReady {
+            terminal_id,
+            attachment,
+        } = receiver.recv().unwrap()
+        else {
+            panic!("expected snapshot notification")
+        };
+        let installed = sink
+            .take_snapshot(terminal_id, &attachment)
+            .expect("published snapshot slot");
+        assert!(Arc::ptr_eq(&published, &previous_for_next_apply));
+        assert!(Arc::ptr_eq(&published, &installed));
+    }
+
+    #[test]
+    fn pty_query_replies_are_flushed_without_a_presentation_frame() {
+        let terminal_id = TerminalId::new(62);
+        let size = crate::terminal::TerminalSize::new(80, 24);
+        let attachment = Arc::new(TerminalAttachmentState::new());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let sink = TerminalEventSink::new(sender);
+        let mut emulator = TerminalEmulator::new(terminal_id, size, 100);
+        emulator.start_live();
+        emulator.apply_batch(&[TerminalStreamEvent::Output {
+            seq: 1,
+            size,
+            bytes: Arc::from(b"\x1b[6n".as_slice()),
+        }]);
+
+        assert!(flush_emulator_pty_writes(
             &sink,
             terminal_id,
             &attachment,
-            &mut emulator,
-            &mut events,
-            false,
+            &emulator,
         ));
-        assert!(events.is_empty());
-        assert_eq!(emulator.last_seq(), 1);
+        let TerminalEventMsg::PtyWrites { writes, .. } = receiver.recv().unwrap() else {
+            panic!("query response was not flushed immediately")
+        };
+        assert!(!writes.is_empty());
         assert!(matches!(
             receiver.try_recv(),
             Err(std::sync::mpsc::TryRecvError::Empty)
@@ -3033,7 +3507,7 @@ mod tests {
         });
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         sender.send(TerminalEmulatorCommand::ScrollBy(1)).unwrap();
-        assert!(apply_emulator_commands(&receiver, &mut emulator));
+        assert!(apply_emulator_commands(&receiver, &mut emulator).visual_changed);
         assert_eq!(emulator.viewport_position(), 1);
     }
 

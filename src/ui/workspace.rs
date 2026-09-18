@@ -1025,6 +1025,11 @@ pub struct WorkspaceView {
     /// Locally rendered terminal snapshots, built from this connection's
     /// local emulators (the server projects control-plane metadata only).
     terminal_snapshots: BTreeMap<TerminalId, std::sync::Arc<TerminalSnapshot>>,
+    /// Frame demands received while a terminal is visible or hidden. Hidden
+    /// terminals keep parsing, but do not create a display frame until they
+    /// become visible again.
+    pending_terminal_frames: BTreeSet<(ConnectionId, TerminalId)>,
+    terminal_frame_callbacks: BTreeSet<(ConnectionId, TerminalId)>,
     active_trackpad_scrolls: BTreeSet<TerminalId>,
     mouse_scroll_animations: BTreeMap<TerminalId, TerminalMouseScrollAnimation>,
     mouse_scroll_frame_pending: bool,
@@ -1176,6 +1181,8 @@ impl WorkspaceView {
             hyperlink_hover: None,
             sidebar_collapsed,
             terminal_snapshots: BTreeMap::new(),
+            pending_terminal_frames: BTreeSet::new(),
+            terminal_frame_callbacks: BTreeSet::new(),
             collapsed_connections: BTreeSet::new(),
             collapsed_workspaces: BTreeSet::new(),
             sidebar_row_press: None,
@@ -1245,6 +1252,8 @@ impl WorkspaceView {
         self.active_trackpad_scrolls.clear();
         self.mouse_scroll_animations.clear();
         self.terminal_snapshots.clear();
+        self.pending_terminal_frames.clear();
+        self.terminal_frame_callbacks.clear();
         self.render_caches
             .lock()
             .expect("terminal render caches poisoned")
@@ -2700,14 +2709,17 @@ impl WorkspaceView {
     }
 
     /// Refreshes the locally rendered snapshots for terminals whose raw
-    /// stream advanced, then requests one repaint for the whole view.
+    /// stream advanced. A frame demand is scheduled through GPUI's actual
+    /// next-display-frame callback; it does not make the emulator wait.
     pub(crate) fn apply_terminal_events_for_connection(
         &mut self,
         connection_id: ConnectionId,
         changed: &[TerminalId],
+        frame_needed: &[TerminalId],
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if changed.is_empty() {
+        if changed.is_empty() && frame_needed.is_empty() {
             return;
         }
         let Some(application) = self.application.clone() else {
@@ -2737,6 +2749,18 @@ impl WorkspaceView {
                 collect_terminal_ids(&tab.tree, &mut displayed);
             }
         }
+
+        for &terminal_id in frame_needed {
+            let key = (connection_id, terminal_id);
+            self.pending_terminal_frames.insert(key);
+            // Only a terminal in the active window may create frame demand.
+            // Hidden terminals remain fully parsed and retain their pending
+            // demand until the user makes them visible.
+            if connection_id == self.active_connection && displayed.contains(&terminal_id) {
+                self.schedule_terminal_presentation(connection_id, terminal_id, window, cx);
+            }
+        }
+
         let mut needs_notify = false;
         for &terminal_id in changed {
             if !displayed.contains(&terminal_id) {
@@ -2784,11 +2808,75 @@ impl WorkspaceView {
         }
     }
 
+    fn schedule_terminal_presentation(
+        &mut self,
+        connection_id: ConnectionId,
+        terminal_id: TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (connection_id, terminal_id);
+        if !self.terminal_frame_callbacks.insert(key) {
+            return;
+        }
+        let application = self.application.clone();
+        let view = cx.entity();
+        window.on_next_frame(move |_window, cx| {
+            if let Some(application) = application {
+                let _ = application.terminal_present_frame(connection_id, terminal_id);
+            }
+            let _ = view.update(cx, |workspace, _cx| {
+                workspace.terminal_frame_callbacks.remove(&key);
+                workspace.pending_terminal_frames.remove(&key);
+            });
+        });
+    }
+
+    /// Re-checks deferred frame demands at the beginning of a render. This is
+    /// what wakes a terminal that was hidden when its worker first became
+    /// dirty, without running a frame loop for hidden output.
+    fn schedule_pending_terminal_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.selected_workspace_dump() else {
+            return;
+        };
+        let Some(tab_id) = workspace.active_tab else {
+            return;
+        };
+        let Some(tab) = workspace.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let mut visible = BTreeSet::new();
+        collect_terminal_ids(&tab.tree, &mut visible);
+        if let Some(application) = self.application.clone() {
+            for &terminal_id in &visible {
+                if application.terminal_frame_pending(self.active_connection, terminal_id) {
+                    self.pending_terminal_frames
+                        .insert((self.active_connection, terminal_id));
+                }
+            }
+        }
+        let pending = self
+            .pending_terminal_frames
+            .iter()
+            .copied()
+            .filter(|(connection_id, terminal_id)| {
+                *connection_id == self.active_connection && visible.contains(terminal_id)
+            })
+            .collect::<Vec<_>>();
+        for (connection_id, terminal_id) in pending {
+            self.schedule_terminal_presentation(connection_id, terminal_id, window, cx);
+        }
+    }
+
     /// Releases per-terminal render state after the terminal left the model.
     /// Called from the application's detach path for the removed connection's
     /// projection; other connections keep their own projections.
     pub(crate) fn forget_closed_terminal(&mut self, terminal_id: TerminalId) {
         self.terminal_snapshots.remove(&terminal_id);
+        self.pending_terminal_frames
+            .retain(|(_, id)| *id != terminal_id);
+        self.terminal_frame_callbacks
+            .retain(|(_, id)| *id != terminal_id);
         self.scroll_accumulators.remove(&terminal_id);
         self.mouse_scroll_animations.remove(&terminal_id);
         self.render_caches
@@ -9905,6 +9993,7 @@ fn indexed_color(index: u8) -> u32 {
 
 impl Render for WorkspaceView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.schedule_pending_terminal_frames(window, cx);
         let metrics = self.measured_terminal_metrics(window);
         self.terminal_metrics = metrics;
         self.input_handler_terminal = self

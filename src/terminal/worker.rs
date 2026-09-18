@@ -957,7 +957,11 @@ fn spawn_pty_reader(
     let mut reader_file = pty.file().try_clone()?;
     let reader_poller = Arc::new(Poller::new()?);
     unsafe {
-        reader_poller.add_with_mode(&reader_file, PollEvent::readable(0), PollMode::Edge)?;
+        reader_poller.add_with_mode(
+            &reader_file,
+            PollEvent::readable(PTY_READ_WRITE_KEY),
+            PollMode::Edge,
+        )?;
     }
     let reader_poller_for_shutdown = reader_poller.clone();
     let shutdown = Arc::new(move || {
