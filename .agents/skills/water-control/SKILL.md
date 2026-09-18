@@ -56,6 +56,64 @@ water ctl ping
 water ctl server info
 ~~~
 
+'water ctl server info' reports 'build_variant', 'server_version',
+'protocol_version', and 'api_signature'. When a local client talks to a
+server of a different build (dev vs release), expect identity mismatches and
+report them instead of forcing the connection.
+
+## Remote connections (SSH)
+
+Water GUI can attach to a remote Water server over an OpenSSH tunnel. This is
+a first-class GUI capability; 'water ctl' commands then run against the
+remote server through the local tunnel socket.
+
+Discover active connections (and their sockets) with:
+
+~~~sh
+water ctl connections list
+~~~
+
+Each connection entry carries 'kind' ('local' or 'remote'), 'status',
+'socket_path' (the local Unix socket you control through),
+'remote_socket_path' (the socket path on the remote host), and 'destination'
+(the SSH destination). A remote connection's 'socket_path' is a local
+'/tmp/water-ssh-<uid>-<hash>.sock' created by the tunnel.
+
+To control a remote server from the CLI, use its local tunnel socket:
+
+~~~sh
+water ctl --socket /tmp/water-ssh-<uid>-<hash>.sock state
+~~~
+
+(Discover the exact path from 'connections list'; the hash is stable per
+destination+variant, so it persists across reconnects.)
+
+Starting a GUI attached to a remote host:
+
+~~~sh
+water --ssh <DESTINATION>
+~~~
+The GUI also has a 'Connect remote' dialog (shortcut configured in Settings
+under 'connect-remote'). Remote connection is not a ctl subcommand; the CLI
+only observes it via 'connections list'.
+
+Remote mechanics (needed for debugging):
+
+- The tunnel reuses an OpenSSH ControlMaster at
+  '/tmp/water-ssh-<uid>-<hash>.ctl' (persisted up to 10 min via
+  ControlPersist). Dropping a GUI connection cancels only Water's forward;
+  the SSH master and the remote server stay alive.
+- On first attach, the remote server is started automatically from the GUI's
+  bundled payload (cached under '~/.cache/<namespace>/server/' on the remote,
+  running as 'water-server' or 'water-srv-dev' there). Set
+  'WATER_REMOTE_SERVER_COMMAND' to use a specific remote binary instead.
+- The remote control socket is versioned:
+  '/tmp/<namespace>-v<version>-p<protocol>-<hash>.sock'. A client only
+  auto-starts a remote server when no compatible server owns that socket;
+  it refuses to replace a socket owned by a different version/protocol.
+- Override knobs: 'WATER_REMOTE_CONTROL_SOCKET' (remote socket path),
+  'WATER_SSH_PROGRAM', 'WATER_SSH_CONFIG' (ssh -F config file).
+
 ## Discover the current tab and its panes
 
 Run 'state' once and parse the JSON; do not rely on screen position or a stale
@@ -146,13 +204,18 @@ native desktop automation.
 
 | Group | Commands |
 | --- | --- |
-| Connection/state | 'ping', 'server info', 'state' |
-| UI | 'ui state', 'ui key', 'ui wheel', 'ui screenshot' |
-| Workspace/tab | 'workspace list/new/activate/rename/close', 'tab activate/new/rename/close' |
-| Pane | 'pane content/input/focus/split/resize/close', 'pane rename-agent', 'pane move-to-workspace' |
-| Terminal | 'terminal send/spawn/contains/snapshot/wait-exit/resize/scroll' |
+| Introspection | 'version', 'client info', 'server info', 'info', 'connections list', 'socket list' |
+| Connection/state | 'ping', 'state' |
+| UI | 'ui state', 'ui key', 'ui wheel', 'ui screenshot', 'ui click' |
+| Workspace/tab | 'workspace list/new/activate/rename/reorder/close', 'tab activate/new/rename/close' |
+| Pane | 'pane content/input/focus/split/resize/resize-split/close', 'pane rename-agent', 'pane move-to-workspace' |
+| Terminal | 'terminal send/send-bytes/spawn/contains/snapshot/wait-exit/resize/scroll' |
 | Async operations | 'operation get', 'operation wait' |
 | Repeatable tests | 'scenario run <PATH>' |
+
+Every command also works without the 'ctl' prefix ('water state', 'water ui
+key cmd-t', ...). IDs are bare positional arguments or '--<kind>' flags; the
+usage text shows both forms.
 
 Dispatch commands return JSON with an operation/result status. Check the CLI
 exit status and the returned status; do not treat printed JSON alone as proof
@@ -174,10 +237,19 @@ expected to be replayed.
 
 Stop and report the smallest useful diagnosis for these cases:
 
-- CLI executable not found: resolve the app-bundle executable;
+- CLI executable not found: resolve the app-bundle executable ('water-dev' for dev);
+- a remote connection exists but ping on its tunnel socket fails: the tunnel
+  forward may have been dropped; the GUI will reconnect, do not start a new
+  instance;
 - ping/socket failure: check the explicit socket/config, but do not launch or
   kill Water;
 - state has no matching active tab or target pane: report the discovered IDs;
 - pane is not a terminal or its terminal has exited: do not send input;
 - dispatch/contains/wait times out or returns an error: preserve the error and
-  avoid unbounded retries.
+  avoid unbounded retries;
+- remote connection refused to attach (socket owned by an incompatible
+  server): report the versions from both 'server info' responses; do not kill
+  the remote server to fix it;
+- after a test GUI/server that owns a remote tunnel, 'server shutdown' on the
+  tunnel socket ends the remote server; the local '/tmp/water-ssh-*' forward
+  socket disappears when the GUI drops the tunnel.
