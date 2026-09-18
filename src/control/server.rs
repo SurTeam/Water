@@ -877,6 +877,7 @@ fn connection_list(request_id: u64, state: &ServerState) -> RpcResponse {
                 id: crate::ids::ConnectionId::new(1),
                 name: "Local".to_owned(),
                 kind: "local".to_owned(),
+                status: "connected".to_owned(),
                 socket_path: Some(state.socket_path.display().to_string()),
                 remote_socket_path: None,
                 destination: None,

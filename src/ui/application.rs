@@ -26,14 +26,16 @@ use crate::terminal::{
     MAX_OUTPUT_EVENT_BYTES, TerminalEmulator, TerminalSnapshot, TerminalStreamEvent, TerminalTheme,
 };
 
+use super::UiControlClient;
 #[cfg(feature = "runtime-screenshot")]
 use super::control::UiScreenshot;
 use super::control::{
     UiControlReceiver, UiControlRequest, UiKeystrokeResult, UiSnapshot, UiWheelResult,
 };
 use super::settings::SettingsView;
-use super::workspace::{WorkspaceConnection, WorkspaceConnectionKind};
-use super::{UiControlClient, WorkspaceView};
+use super::workspace::{
+    WorkspaceConnection, WorkspaceConnectionKind, WorkspaceConnectionStatus, WorkspaceView,
+};
 
 actions!(
     water,
@@ -97,6 +99,8 @@ struct ManagedConnection {
     projection: WorkspaceConnection,
     _tunnel: Option<SshTunnel>,
     local_socket: Option<PathBuf>,
+    destination: Option<String>,
+    generation: u64,
     last_snapshot_apply: std::time::Instant,
     /// Raw-stream terminal plane: session handle plus worker-owned emulator
     /// controllers and immutable snapshots consumed by GPUI.
@@ -119,6 +123,18 @@ struct TerminalConnection {
     inactive_scrollback_lines: usize,
     max_total_scrollback_bytes: usize,
     theme: TerminalTheme,
+}
+
+impl Drop for TerminalConnection {
+    fn drop(&mut self) {
+        // Attachment workers hold clones of the event sink and session. Stop
+        // them before releasing this connection so a replaced/disconnected
+        // remote connection cannot continue publishing into a later one that
+        // happens to reuse the same terminal IDs.
+        for attachment in self.attachments.values() {
+            attachment.cancel();
+        }
+    }
 }
 
 enum TerminalEmulatorCommand {
@@ -509,6 +525,45 @@ struct RemoteConnectionSetup {
     local_socket: PathBuf,
 }
 
+fn prepare_remote_connection(
+    destination: String,
+    ui_control_client: UiControlClient,
+) -> Result<RemoteConnectionSetup, String> {
+    let tunnel = SshTunnel::connect(&destination).map_err(|error| error.to_string())?;
+    let local_socket = tunnel.local_socket().to_path_buf();
+    let client: Arc<dyn CommandTransport> =
+        Arc::new(RemoteCommandClient::connect(&local_socket).map_err(|error| error.to_string())?);
+    let snapshot = client.state_dump().map_err(|error| error.to_string())?;
+    let (snapshot_receiver, terminal_session) =
+        match connect_water_session(&local_socket, ui_control_client) {
+            Ok(session) => (session.snapshot_stream().clone(), Some(session)),
+            Err(error) => {
+                tracing::warn!(
+                    target: "water::workspace",
+                    ?error,
+                    destination = %destination,
+                    "remote session push unavailable; falling back to state polling"
+                );
+                (spawn_state_polling_fallback(client.clone()), None)
+            }
+        };
+    Ok(RemoteConnectionSetup {
+        destination,
+        client,
+        snapshot,
+        snapshot_receiver,
+        terminal_session,
+        tunnel,
+        local_socket,
+    })
+}
+
+fn drop_remote_tunnel(tunnel: SshTunnel) {
+    let _ = std::thread::Builder::new()
+        .name("water-ssh-tunnel-cleanup".to_owned())
+        .spawn(move || drop(tunnel));
+}
+
 impl WaterApplication {
     pub fn new(
         client: std::sync::Arc<dyn CommandTransport>,
@@ -529,6 +584,7 @@ impl WaterApplication {
             id: ConnectionId::new(1),
             title: "Local".to_owned(),
             kind: WorkspaceConnectionKind::Local,
+            status: WorkspaceConnectionStatus::Connected,
             client,
             snapshot,
         };
@@ -542,6 +598,8 @@ impl WaterApplication {
                     projection: local_connection,
                     _tunnel: None,
                     local_socket: None,
+                    destination: None,
+                    generation: 0,
                     last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
                     terminal: None,
                 }]),
@@ -575,6 +633,8 @@ impl WaterApplication {
         };
         connection.projection.title = destination;
         connection.projection.kind = WorkspaceConnectionKind::Remote;
+        connection.projection.status = WorkspaceConnectionStatus::Connected;
+        connection.destination = Some(connection.projection.title.clone());
         connection._tunnel = Some(tunnel);
         connection.local_socket = Some(local_socket);
     }
@@ -610,13 +670,17 @@ impl WaterApplication {
                         WorkspaceConnectionKind::Local => "local".to_owned(),
                         WorkspaceConnectionKind::Remote => "remote".to_owned(),
                     },
+                    status: connection.projection.status.wire_name().to_owned(),
                     socket_path: connection
                         .local_socket
                         .as_ref()
                         .map(|path| path.display().to_string()),
                     remote_socket_path: remote
                         .map(|tunnel| tunnel.remote_socket().display().to_string()),
-                    destination: remote.map(|tunnel| tunnel.destination().to_owned()),
+                    destination: connection
+                        .destination
+                        .clone()
+                        .or_else(|| remote.map(|tunnel| tunnel.destination().to_owned())),
                 }
             })
             .collect();
@@ -657,41 +721,9 @@ impl WaterApplication {
         };
         let application = self.clone();
         cx.spawn(async move |cx| {
-            let connection_destination = destination.clone();
             let setup = cx
                 .background_executor()
-                .spawn(async move {
-                    let tunnel = SshTunnel::connect(&connection_destination)
-                        .map_err(|error| error.to_string())?;
-                    let local_socket = tunnel.local_socket().to_path_buf();
-                    let client: Arc<dyn CommandTransport> = Arc::new(
-                        RemoteCommandClient::connect(&local_socket)
-                            .map_err(|error| error.to_string())?,
-                    );
-                    let snapshot = client.state_dump().map_err(|error| error.to_string())?;
-                    let (snapshot_receiver, terminal_session) =
-                        match connect_water_session(&local_socket, ui_control_client) {
-                            Ok(session) => (session.snapshot_stream().clone(), Some(session)),
-                            Err(error) => {
-                                tracing::warn!(
-                                    target: "water::workspace",
-                                    ?error,
-                                    destination = %connection_destination,
-                                    "remote session push unavailable; falling back to state polling"
-                                );
-                                (spawn_state_polling_fallback(client.clone()), None)
-                            }
-                        };
-                    Ok::<_, String>(RemoteConnectionSetup {
-                        destination: connection_destination,
-                        client,
-                        snapshot,
-                        snapshot_receiver,
-                        terminal_session,
-                        tunnel,
-                        local_socket,
-                    })
-                })
+                .spawn(async move { prepare_remote_connection(destination, ui_control_client) })
                 .await;
 
             let result = match setup {
@@ -721,13 +753,16 @@ impl WaterApplication {
             })
             .map(|connection| connection.projection.id)
         {
+            drop_remote_tunnel(setup.tunnel);
             return existing;
         }
         let connection_id = ConnectionId::from(uuid::Uuid::new_v4());
+        let destination = setup.destination.clone();
         let projection = WorkspaceConnection {
             id: connection_id,
-            title: setup.destination,
+            title: destination.clone(),
             kind: WorkspaceConnectionKind::Remote,
+            status: WorkspaceConnectionStatus::Connected,
             client: setup.client,
             snapshot: setup.snapshot,
         };
@@ -738,6 +773,8 @@ impl WaterApplication {
             projection: projection.clone(),
             _tunnel: Some(setup.tunnel),
             local_socket: Some(setup.local_socket),
+            destination: Some(destination),
+            generation: 0,
             last_snapshot_apply: std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL,
             terminal,
         });
@@ -757,9 +794,290 @@ impl WaterApplication {
             }
         }
         self.state.views.replace(live_views);
-        self.spawn_snapshot_listener(cx, connection_id, setup.snapshot_receiver)
+        self.spawn_snapshot_listener(cx, connection_id, 0, setup.snapshot_receiver)
+            .detach();
+        self.spawn_connection_health_monitor(cx, connection_id, 0)
             .detach();
         connection_id
+    }
+
+    /// Starts a reconnect without blocking the GPUI callback that opened the
+    /// host menu. The old connection remains in the sidebar while the new SSH
+    /// tunnel and session are negotiated in the background.
+    pub(crate) fn reconnect_connection(&self, connection_id: ConnectionId, cx: &mut App) {
+        let application = self.clone();
+        cx.defer(move |cx| application.start_reconnect_connection(connection_id, cx));
+    }
+
+    fn start_reconnect_connection(&self, connection_id: ConnectionId, cx: &mut App) {
+        let Some(ui_control_client) = self.state.ui_control_client.borrow().clone() else {
+            self.finish_reconnect_failure(
+                connection_id,
+                None,
+                "Water UI control session is not ready".to_owned(),
+                cx,
+            );
+            return;
+        };
+        let (destination, generation) = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(connection) = connections.iter_mut().find(|connection| {
+                connection.projection.id == connection_id
+                    && connection.projection.kind == WorkspaceConnectionKind::Remote
+            }) else {
+                return;
+            };
+            if connection.projection.status != WorkspaceConnectionStatus::Disconnected {
+                return;
+            }
+            let Some(destination) = connection
+                .destination
+                .clone()
+                .or_else(|| Some(connection.projection.title.clone()))
+            else {
+                return;
+            };
+            connection.generation = connection.generation.wrapping_add(1);
+            connection.projection.status = WorkspaceConnectionStatus::Connecting;
+            (destination, connection.generation)
+        };
+        self.update_connection_status_views(
+            connection_id,
+            WorkspaceConnectionStatus::Connecting,
+            cx,
+        );
+
+        let application = self.clone();
+        cx.spawn(async move |cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { prepare_remote_connection(destination, ui_control_client) })
+                .await;
+            match result {
+                Ok(setup) => {
+                    let _ = cx.update(|cx| {
+                        application.finish_reconnected_connection(
+                            connection_id,
+                            generation,
+                            setup,
+                            cx,
+                        )
+                    });
+                }
+                Err(error) => {
+                    let _ = cx.update(|cx| {
+                        application.finish_reconnect_failure(
+                            connection_id,
+                            Some(generation),
+                            error,
+                            cx,
+                        )
+                    });
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn finish_reconnected_connection(
+        &self,
+        connection_id: ConnectionId,
+        generation: u64,
+        setup: RemoteConnectionSetup,
+        cx: &mut App,
+    ) {
+        let RemoteConnectionSetup {
+            destination,
+            client,
+            snapshot,
+            snapshot_receiver,
+            terminal_session,
+            tunnel,
+            local_socket,
+        } = setup;
+        let current = self.state.connections.borrow().iter().any(|connection| {
+            connection.projection.id == connection_id
+                && connection.generation == generation
+                && connection.projection.status == WorkspaceConnectionStatus::Connecting
+        });
+        if !current {
+            drop_remote_tunnel(tunnel);
+            return;
+        }
+
+        let terminal = terminal_session
+            .map(|session| self.build_terminal_connection(cx, connection_id, session));
+        let (old_tunnel, old_terminal, projection) = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(connection) = connections.iter_mut().find(|connection| {
+                connection.projection.id == connection_id
+                    && connection.generation == generation
+                    && connection.projection.status == WorkspaceConnectionStatus::Connecting
+            }) else {
+                drop_remote_tunnel(tunnel);
+                return;
+            };
+            let old_tunnel = connection._tunnel.take();
+            let old_terminal = connection.terminal.take();
+            connection.projection.client = client;
+            connection.projection.snapshot = snapshot;
+            connection.projection.status = WorkspaceConnectionStatus::Connected;
+            connection._tunnel = Some(tunnel);
+            connection.local_socket = Some(local_socket);
+            connection.destination = Some(destination);
+            connection.last_snapshot_apply =
+                std::time::Instant::now() - Self::SNAPSHOT_MIN_INTERVAL;
+            connection.terminal = terminal;
+            (old_tunnel, old_terminal, connection.projection.clone())
+        };
+        drop(old_terminal);
+        if let Some(old_tunnel) = old_tunnel {
+            drop_remote_tunnel(old_tunnel);
+        }
+
+        for terminal_id in terminal_ids_in_snapshot(&projection.snapshot) {
+            self.ensure_terminal_attached(connection_id, terminal_id);
+        }
+        self.update_connection_views(projection, cx);
+        self.spawn_snapshot_listener(cx, connection_id, generation, snapshot_receiver)
+            .detach();
+        self.spawn_connection_health_monitor(cx, connection_id, generation)
+            .detach();
+    }
+
+    fn finish_reconnect_failure(
+        &self,
+        connection_id: ConnectionId,
+        generation: Option<u64>,
+        error: String,
+        cx: &mut App,
+    ) {
+        tracing::warn!(
+            target: "water::workspace",
+            %connection_id,
+            ?generation,
+            %error,
+            "remote connection reconnect failed"
+        );
+        if let Some(generation) = generation {
+            self.mark_connection_disconnected(connection_id, generation, cx);
+        }
+    }
+
+    fn update_connection_views(&self, projection: WorkspaceConnection, cx: &mut App) {
+        let views = self.state.views.borrow().clone();
+        let mut live_views = Vec::with_capacity(views.len());
+        for view in views {
+            if view
+                .update(cx, |workspace, cx| {
+                    workspace.install_connection(projection.clone(), cx);
+                })
+                .is_ok()
+            {
+                live_views.push(view);
+            }
+        }
+        self.state.views.replace(live_views);
+    }
+
+    fn update_connection_status_views(
+        &self,
+        connection_id: ConnectionId,
+        status: WorkspaceConnectionStatus,
+        cx: &mut App,
+    ) {
+        let views = self.state.views.borrow().clone();
+        let mut live_views = Vec::with_capacity(views.len());
+        for view in views {
+            if view
+                .update(cx, |workspace, cx| {
+                    workspace.update_connection_status(connection_id, status, cx);
+                })
+                .is_ok()
+            {
+                live_views.push(view);
+            }
+        }
+        self.state.views.replace(live_views);
+    }
+
+    fn mark_connection_disconnected(
+        &self,
+        connection_id: ConnectionId,
+        generation: u64,
+        cx: &mut App,
+    ) {
+        let (old_tunnel, old_terminal) = {
+            let mut connections = self.state.connections.borrow_mut();
+            let Some(connection) = connections.iter_mut().find(|connection| {
+                connection.projection.id == connection_id
+                    && connection.projection.kind == WorkspaceConnectionKind::Remote
+                    && connection.generation == generation
+            }) else {
+                return;
+            };
+            if connection.projection.status == WorkspaceConnectionStatus::Disconnected {
+                return;
+            }
+            connection.projection.status = WorkspaceConnectionStatus::Disconnected;
+            connection.local_socket = None;
+            (connection._tunnel.take(), connection.terminal.take())
+        };
+        drop(old_terminal);
+        if let Some(old_tunnel) = old_tunnel {
+            drop_remote_tunnel(old_tunnel);
+        }
+        self.update_connection_status_views(
+            connection_id,
+            WorkspaceConnectionStatus::Disconnected,
+            cx,
+        );
+    }
+
+    fn spawn_connection_health_monitor(
+        &self,
+        cx: &mut App,
+        connection_id: ConnectionId,
+        generation: u64,
+    ) -> Task<()> {
+        let state = self.state.clone();
+        let application = self.clone();
+        cx.spawn(async move |cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Self::CONNECTION_HEALTH_INTERVAL)
+                    .await;
+                let Some(client) = state
+                    .connections
+                    .borrow()
+                    .iter()
+                    .find(|connection| {
+                        connection.projection.id == connection_id
+                            && connection.generation == generation
+                            && connection.projection.status == WorkspaceConnectionStatus::Connected
+                    })
+                    .map(|connection| connection.projection.client.clone())
+                else {
+                    break;
+                };
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { client.health_check(Self::CONNECTION_HEALTH_TIMEOUT) })
+                    .await;
+                if let Err(error) = result {
+                    tracing::warn!(
+                        target: "water::workspace",
+                        %connection_id,
+                        ?error,
+                        "remote connection health check failed"
+                    );
+                    let _ = cx.update(|cx| {
+                        application.mark_connection_disconnected(connection_id, generation, cx)
+                    });
+                    break;
+                }
+            }
+        })
     }
 
     pub(crate) fn disconnect_connection(&self, connection_id: ConnectionId, cx: &mut App) {
@@ -892,6 +1210,10 @@ impl WaterApplication {
     /// collapse intermediate revisions, so this is only a guard against
     /// applying multiple full snapshots within one fast display frame.
     const SNAPSHOT_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(8);
+    /// A state dump is a cheap, bounded liveness probe for remote transports
+    /// whose snapshot stream may not report a half-open network connection.
+    const CONNECTION_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    const CONNECTION_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
     pub fn install(
         &self,
@@ -956,8 +1278,21 @@ impl WaterApplication {
                 self.ensure_terminal_attached(ConnectionId::new(1), terminal_id);
             }
         }
-        self.spawn_snapshot_listener(cx, ConnectionId::new(1), snapshot_receiver)
+        self.spawn_snapshot_listener(cx, ConnectionId::new(1), 0, snapshot_receiver)
             .detach();
+        let initial_connection_is_remote = self
+            .state
+            .connections
+            .borrow()
+            .iter()
+            .find(|connection| connection.projection.id == ConnectionId::new(1))
+            .is_some_and(|connection| {
+                connection.projection.kind == WorkspaceConnectionKind::Remote
+            });
+        if initial_connection_is_remote {
+            self.spawn_connection_health_monitor(cx, ConnectionId::new(1), 0)
+                .detach();
+        }
         self.spawn_ui_control_listener(cx, ui_control_receiver)
             .detach();
         self.open_window(cx);
@@ -1107,6 +1442,7 @@ impl WaterApplication {
         &self,
         cx: &mut App,
         connection_id: ConnectionId,
+        generation: u64,
         receiver: crate::app::SnapshotStream,
     ) -> Task<()> {
         let receiver = std::sync::Arc::new(receiver);
@@ -1129,7 +1465,11 @@ impl WaterApplication {
                     .connections
                     .borrow()
                     .iter()
-                    .find(|connection| connection.projection.id == connection_id)
+                    .find(|connection| {
+                        connection.projection.id == connection_id
+                            && connection.generation == generation
+                            && connection.projection.status == WorkspaceConnectionStatus::Connected
+                    })
                     .map(|connection| connection.last_snapshot_apply.elapsed())
                 else {
                     break;
@@ -1143,10 +1483,11 @@ impl WaterApplication {
                 }
                 let (installed, previous_snapshot) = {
                     let mut connections = state.connections.borrow_mut();
-                    let Some(connection) = connections
-                        .iter_mut()
-                        .find(|connection| connection.projection.id == connection_id)
-                    else {
+                    let Some(connection) = connections.iter_mut().find(|connection| {
+                        connection.projection.id == connection_id
+                            && connection.generation == generation
+                            && connection.projection.status == WorkspaceConnectionStatus::Connected
+                    }) else {
                         break;
                     };
                     let previous_snapshot = connection.projection.snapshot.clone();
@@ -1194,6 +1535,9 @@ impl WaterApplication {
                 }
                 state.views.replace(live_views);
             }
+            let _ = cx.update(|cx| {
+                application.mark_connection_disconnected(connection_id, generation, cx);
+            });
         })
     }
 
@@ -2784,11 +3128,14 @@ mod tests {
                     id: remote_id,
                     title: "test-remote".to_owned(),
                     kind: WorkspaceConnectionKind::Remote,
+                    status: WorkspaceConnectionStatus::Connected,
                     client,
                     snapshot,
                 },
                 _tunnel: None,
                 local_socket: None,
+                destination: None,
+                generation: 0,
                 last_snapshot_apply: std::time::Instant::now()
                     - WaterApplication::SNAPSHOT_MIN_INTERVAL,
                 terminal: None,
@@ -2826,6 +3173,67 @@ mod tests {
             vec![ConnectionId::new(1)]
         );
         assert_eq!(application.state.views.borrow().len(), 1);
+        host.shutdown();
+    }
+
+    #[gpui::test]
+    fn remote_disconnect_updates_all_workspace_projections(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client: Arc<dyn CommandTransport> = Arc::new(host.client());
+        let snapshot = host.client().state_dump().unwrap();
+        let application =
+            WaterApplication::new(client.clone(), snapshot.clone(), AppConfig::default());
+        let remote_id = ConnectionId::new(2);
+        application
+            .state
+            .connections
+            .borrow_mut()
+            .push(ManagedConnection {
+                projection: WorkspaceConnection {
+                    id: remote_id,
+                    title: "test-remote".to_owned(),
+                    kind: WorkspaceConnectionKind::Remote,
+                    status: WorkspaceConnectionStatus::Connected,
+                    client,
+                    snapshot,
+                },
+                _tunnel: None,
+                local_socket: None,
+                destination: Some("test-remote".to_owned()),
+                generation: 7,
+                last_snapshot_apply: std::time::Instant::now()
+                    - WaterApplication::SNAPSHOT_MIN_INTERVAL,
+                terminal: None,
+            });
+
+        let connections = application.connection_projections();
+        let application_for_view = application.clone();
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                Some(application_for_view),
+                connections,
+                ConnectionId::new(1),
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+        application.state.views.borrow_mut().push(view.downgrade());
+
+        cx.update(|_, cx| application.mark_connection_disconnected(remote_id, 7, cx));
+        assert_eq!(
+            application
+                .state
+                .connections
+                .borrow()
+                .iter()
+                .find(|connection| connection.projection.id == remote_id)
+                .map(|connection| connection.projection.status),
+            Some(WorkspaceConnectionStatus::Disconnected)
+        );
+        assert_eq!(
+            view.update_in(cx, |view, _, _| { view.connection_status(remote_id) }),
+            Some(WorkspaceConnectionStatus::Disconnected)
+        );
         host.shutdown();
     }
 

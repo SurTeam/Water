@@ -527,6 +527,8 @@ pub struct UiConfig {
     pub sidebar_visible: bool,
     /// Whether workspace rows show a count of currently running agents.
     pub sidebar_show_agent_count: bool,
+    /// Whether panes other than the focused pane are rendered dimmed.
+    pub dim_inactive_panes: bool,
     /// Whether a vertical mouse wheel over the tab strip scrolls it
     /// horizontally. Trackpad horizontal deltas always scroll the strip.
     pub tab_bar_vertical_wheel_scroll: bool,
@@ -608,6 +610,7 @@ impl Default for UiConfig {
             font_family: String::new(),
             sidebar_visible: true,
             sidebar_show_agent_count: true,
+            dim_inactive_panes: true,
             tab_bar_vertical_wheel_scroll: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_min_width: DEFAULT_SIDEBAR_MIN_WIDTH,
@@ -842,6 +845,8 @@ pub struct ThemeConfig {
     pub sidebar_connection_background: String,
     /// Background of the selected host (connection) header row.
     pub sidebar_connection_active_background: String,
+    /// Border color of the selected host (connection) card.
+    pub sidebar_connection_active_border: String,
     /// Background of an unselected workspace row in the sidebar.
     pub sidebar_workspace_background: String,
     /// Background of an unselected agent row in the sidebar.
@@ -882,6 +887,7 @@ impl Default for ThemeConfig {
             sidebar_background: "#000000".to_owned(),
             sidebar_connection_background: "#000000".to_owned(),
             sidebar_connection_active_background: "#000000".to_owned(),
+            sidebar_connection_active_border: "#339966".to_owned(),
             sidebar_workspace_background: "#000000".to_owned(),
             sidebar_agent_background: "#000000".to_owned(),
             sidebar_workspace_active_background: "#339966".to_owned(),
@@ -927,6 +933,7 @@ pub struct ThemeColors {
     pub sidebar_background: u32,
     pub sidebar_connection_background: u32,
     pub sidebar_connection_active_background: u32,
+    pub sidebar_connection_active_border: u32,
     pub sidebar_workspace_background: u32,
     pub sidebar_agent_background: u32,
     pub sidebar_workspace_active_background: u32,
@@ -972,6 +979,10 @@ impl ThemeConfig {
             sidebar_connection_active_background: parse_color(
                 &self.sidebar_connection_active_background,
                 0x000000,
+            ),
+            sidebar_connection_active_border: parse_color(
+                &self.sidebar_connection_active_border,
+                0x339966,
             ),
             sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x000000),
             sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x000000),
@@ -1187,6 +1198,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.sidebar_show_agent_count {
                 config.ui.sidebar_show_agent_count = value;
             }
+            if let Some(value) = ui.dim_inactive_panes {
+                config.ui.dim_inactive_panes = value;
+            }
             if let Some(value) = ui.tab_bar_vertical_wheel_scroll {
                 config.ui.tab_bar_vertical_wheel_scroll = value;
             }
@@ -1357,6 +1371,7 @@ pub struct ThemeConfigOverrides {
     pub sidebar_background: Option<String>,
     pub sidebar_connection_background: Option<String>,
     pub sidebar_connection_active_background: Option<String>,
+    pub sidebar_connection_active_border: Option<String>,
     pub sidebar_workspace_background: Option<String>,
     pub sidebar_agent_background: Option<String>,
     pub sidebar_workspace_active_background: Option<String>,
@@ -1395,6 +1410,7 @@ impl ThemeConfigOverrides {
         apply!(sidebar_background);
         apply!(sidebar_connection_background);
         apply!(sidebar_connection_active_background);
+        apply!(sidebar_connection_active_border);
         apply!(sidebar_workspace_background);
         apply!(sidebar_agent_background);
         apply!(sidebar_workspace_active_background);
@@ -1435,6 +1451,7 @@ pub struct UiConfigOverrides {
     pub font_family: Option<String>,
     pub sidebar_visible: Option<bool>,
     pub sidebar_show_agent_count: Option<bool>,
+    pub dim_inactive_panes: Option<bool>,
     pub tab_bar_vertical_wheel_scroll: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_min_width: Option<f32>,
@@ -1573,6 +1590,10 @@ mod tests {
             config.theme.colors().sidebar_connection_active_background,
             0x000000
         );
+        assert_eq!(
+            config.theme.colors().sidebar_connection_active_border,
+            0x339966
+        );
         assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
         assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
         assert_eq!(
@@ -1589,6 +1610,7 @@ mod tests {
             0xd97757
         );
         assert!(config.ui.sidebar_show_agent_count);
+        assert!(config.ui.dim_inactive_panes);
         assert_eq!(config.shortcuts.switch_tab, "cmd-#");
         assert_eq!(config.shortcuts.next_tab, "cmd-]");
         assert_eq!(config.shortcuts.previous_tab, "cmd-[");
@@ -1661,7 +1683,8 @@ mod tests {
         let path = write_temp_config(
             r##"{
                 "theme": {
-                    "sidebar_drag_indicator_color": "#abcdef"
+                    "sidebar_drag_indicator_color": "#abcdef",
+                    "sidebar_connection_active_border": "#123456"
                 }
             }"##,
         );
@@ -1676,6 +1699,11 @@ mod tests {
         std::fs::remove_file(round_trip_path).unwrap();
         assert_eq!(loaded.theme.sidebar_drag_indicator_color, "#abcdef");
         assert_eq!(loaded.theme.colors().sidebar_drag_indicator, 0xabcdef);
+        assert_eq!(loaded.theme.sidebar_connection_active_border, "#123456");
+        assert_eq!(
+            loaded.theme.colors().sidebar_connection_active_border,
+            0x123456
+        );
     }
 
     #[test]
@@ -1839,6 +1867,7 @@ mod tests {
                     "sidebar_row_padding": 11.0,
                     "sidebar_header_height": 30.0,
                     "sidebar_host_header_height": 32.0,
+                    "dim_inactive_panes": false,
                     "sidebar_agent_row_width": 0.75,
                     "sidebar_workspace_row_padding": 14.0,
                     "sidebar_agent_row_padding": 12.0,
@@ -1870,6 +1899,7 @@ mod tests {
         assert_eq!(config.ui.sidebar_row_padding, 11.0);
         assert_eq!(config.ui.sidebar_header_height, 30.0);
         assert_eq!(config.ui.sidebar_host_header_height, 32.0);
+        assert!(!config.ui.dim_inactive_panes);
         assert_eq!(config.ui.sidebar_agent_row_width, 0.75);
         assert_eq!(config.ui.sidebar_workspace_row_padding, 14.0);
         assert_eq!(config.ui.sidebar_agent_row_padding, 12.0);

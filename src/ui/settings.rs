@@ -60,6 +60,7 @@ enum SettingField {
     UiFontFamily,
     SidebarVisible,
     SidebarShowAgentCount,
+    DimInactivePanes,
     TabBarVerticalWheelScroll,
     SidebarWidth,
     SidebarMinWidth,
@@ -115,6 +116,7 @@ enum SettingField {
     ThemeSidebarBackground,
     ThemeSidebarConnectionBackground,
     ThemeSidebarConnectionActiveBackground,
+    ThemeSidebarConnectionActiveBorder,
     ThemeSidebarWorkspaceBackground,
     ThemeSidebarAgentBackground,
     ThemeSidebarWorkspaceActiveBackground,
@@ -184,6 +186,7 @@ impl SettingField {
             Self::UiFontFamily => "ui-font-family",
             Self::SidebarVisible => "sidebar-visible",
             Self::SidebarShowAgentCount => "sidebar-show-agent-count",
+            Self::DimInactivePanes => "dim-inactive-panes",
             Self::TabBarVerticalWheelScroll => "tab-bar-vertical-wheel-scroll",
             Self::SidebarWidth => "sidebar-width",
             Self::SidebarMinWidth => "sidebar-min-width",
@@ -241,6 +244,7 @@ impl SettingField {
             Self::ThemeSidebarConnectionActiveBackground => {
                 "theme-sidebar-connection-active-background"
             }
+            Self::ThemeSidebarConnectionActiveBorder => "theme-sidebar-connection-active-border",
             Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
             Self::ThemeSidebarAgentBackground => "theme-sidebar-agent-background",
             Self::ThemeSidebarWorkspaceActiveBackground => {
@@ -295,6 +299,7 @@ impl SettingField {
                 | Self::RemoteHyperlinkAutoDownload
                 | Self::SidebarVisible
                 | Self::SidebarShowAgentCount
+                | Self::DimInactivePanes
                 | Self::TabBarVerticalWheelScroll
         )
     }
@@ -323,6 +328,7 @@ impl SettingField {
                 | Self::ThemeSidebarBackground
                 | Self::ThemeSidebarConnectionBackground
                 | Self::ThemeSidebarConnectionActiveBackground
+                | Self::ThemeSidebarConnectionActiveBorder
                 | Self::ThemeSidebarWorkspaceBackground
                 | Self::ThemeSidebarAgentBackground
                 | Self::ThemeSidebarWorkspaceActiveBackground
@@ -456,6 +462,9 @@ impl SettingsView {
             }
             SettingField::SidebarShowAgentCount => {
                 self.config.ui.sidebar_show_agent_count = !self.config.ui.sidebar_show_agent_count
+            }
+            SettingField::DimInactivePanes => {
+                self.config.ui.dim_inactive_panes = !self.config.ui.dim_inactive_panes
             }
             SettingField::TabBarVerticalWheelScroll => {
                 self.config.ui.tab_bar_vertical_wheel_scroll =
@@ -702,6 +711,7 @@ impl SettingsView {
             SettingField::SidebarShowAgentCount => {
                 self.config.ui.sidebar_show_agent_count.to_string()
             }
+            SettingField::DimInactivePanes => self.config.ui.dim_inactive_panes.to_string(),
             SettingField::TabBarVerticalWheelScroll => {
                 self.config.ui.tab_bar_vertical_wheel_scroll.to_string()
             }
@@ -789,6 +799,9 @@ impl SettingsView {
                 .theme
                 .sidebar_connection_active_background
                 .clone(),
+            SettingField::ThemeSidebarConnectionActiveBorder => {
+                self.config.theme.sidebar_connection_active_border.clone()
+            }
             SettingField::ThemeSidebarWorkspaceBackground => {
                 self.config.theme.sidebar_workspace_background.clone()
             }
@@ -1046,6 +1059,7 @@ impl SettingsView {
             | SettingField::RemoteHyperlinkAutoDownload
             | SettingField::SidebarVisible
             | SettingField::SidebarShowAgentCount
+            | SettingField::DimInactivePanes
             | SettingField::TabBarVerticalWheelScroll => {
                 return Err("布尔项请直接点击开关".to_owned());
             }
@@ -1074,6 +1088,7 @@ impl SettingsView {
             }
             SettingField::SidebarVisible => on_off(self.config.ui.sidebar_visible),
             SettingField::SidebarShowAgentCount => on_off(self.config.ui.sidebar_show_agent_count),
+            SettingField::DimInactivePanes => on_off(self.config.ui.dim_inactive_panes),
             SettingField::TabBarVerticalWheelScroll => {
                 on_off(self.config.ui.tab_bar_vertical_wheel_scroll)
             }
@@ -1792,6 +1807,14 @@ impl Render for SettingsView {
                 cx,
             ),
             self.render_setting(
+                SettingField::DimInactivePanes,
+                "变暗非活动 pane",
+                "让未聚焦的 pane 降低亮度，便于识别当前活动 pane",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
                 SettingField::TabBarVerticalWheelScroll,
                 "纵向滚轮滚动标签栏",
                 "默认关闭；开启后在标签栏上滚动鼠标滚轮可横向滚动标签（触控板横向滑动始终可用）",
@@ -2105,6 +2128,10 @@ impl Render for SettingsView {
             (
                 SettingField::ThemeSidebarConnectionActiveBackground,
                 "选中主机背景色",
+            ),
+            (
+                SettingField::ThemeSidebarConnectionActiveBorder,
+                "选中主机边框色",
             ),
             (
                 SettingField::ThemeSidebarWorkspaceBackground,
@@ -2430,6 +2457,9 @@ fn set_theme_field(
         SettingField::ThemeSidebarConnectionActiveBackground => {
             theme.sidebar_connection_active_background = value
         }
+        SettingField::ThemeSidebarConnectionActiveBorder => {
+            theme.sidebar_connection_active_border = value
+        }
         SettingField::ThemeSidebarWorkspaceBackground => theme.sidebar_workspace_background = value,
         SettingField::ThemeSidebarAgentBackground => theme.sidebar_agent_background = value,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {
@@ -2517,6 +2547,7 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         SettingField::ThemeSidebarConnectionActiveBackground => {
             colors.sidebar_connection_active_background
         }
+        SettingField::ThemeSidebarConnectionActiveBorder => colors.sidebar_connection_active_border,
         SettingField::ThemeSidebarWorkspaceBackground => colors.sidebar_workspace_background,
         SettingField::ThemeSidebarAgentBackground => colors.sidebar_agent_background,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {

@@ -73,11 +73,29 @@ pub(crate) enum WorkspaceConnectionKind {
     Remote,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkspaceConnectionStatus {
+    Connected,
+    Connecting,
+    Disconnected,
+}
+
+impl WorkspaceConnectionStatus {
+    pub(crate) fn wire_name(self) -> &'static str {
+        match self {
+            Self::Connected => "connected",
+            Self::Connecting => "connecting",
+            Self::Disconnected => "disconnected",
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct WorkspaceConnection {
     pub(crate) id: ConnectionId,
     pub(crate) title: String,
     pub(crate) kind: WorkspaceConnectionKind,
+    pub(crate) status: WorkspaceConnectionStatus,
     pub(crate) client: Arc<dyn CommandTransport>,
     pub(crate) snapshot: ModelSnapshot,
 }
@@ -1095,6 +1113,7 @@ impl WorkspaceView {
                 id: connection_id,
                 title: "Local".to_owned(),
                 kind: WorkspaceConnectionKind::Local,
+                status: WorkspaceConnectionStatus::Connected,
                 client,
                 snapshot,
             }],
@@ -1203,6 +1222,15 @@ impl WorkspaceView {
             .find(|connection| connection.id == connection_id)
     }
 
+    #[cfg(test)]
+    pub(crate) fn connection_status(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Option<WorkspaceConnectionStatus> {
+        self.connection_by_id(connection_id)
+            .map(|connection| connection.status)
+    }
+
     fn reset_active_connection_projection(&mut self, connection: WorkspaceConnection) {
         self.active_connection = connection.id;
         self.client = connection.client;
@@ -1216,6 +1244,7 @@ impl WorkspaceView {
         self.scroll_accumulators.clear();
         self.active_trackpad_scrolls.clear();
         self.mouse_scroll_animations.clear();
+        self.terminal_snapshots.clear();
         self.render_caches
             .lock()
             .expect("terminal render caches poisoned")
@@ -1248,16 +1277,37 @@ impl WorkspaceView {
         connection: WorkspaceConnection,
         cx: &mut Context<Self>,
     ) {
+        let active = self.active_connection == connection.id;
         if let Some(existing) = self
             .connections
             .iter_mut()
             .find(|existing| existing.id == connection.id)
         {
-            *existing = connection;
+            *existing = connection.clone();
         } else {
-            self.connections.push(connection);
+            self.connections.push(connection.clone());
+        }
+        if active {
+            self.reset_active_connection_projection(connection);
         }
         cx.notify();
+    }
+
+    pub(crate) fn update_connection_status(
+        &mut self,
+        connection_id: ConnectionId,
+        status: WorkspaceConnectionStatus,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(connection) = self
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == connection_id)
+            && connection.status != status
+        {
+            connection.status = status;
+            cx.notify();
+        }
     }
 
     pub(crate) fn install_connection_snapshot(
@@ -4419,10 +4469,12 @@ impl WorkspaceView {
             .flex()
             .flex_none()
             .cursor_pointer()
-            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .bg(rgb(background))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title));
+        if self.context_menu.is_none() {
+            tab = tab.hover(|style| style.bg(rgb(theme.tab_add_background)));
+        }
         tab = tab.rounded(px((self.config.ui.tab_height / 4.).max(4.)));
         tab.on_mouse_down(
             MouseButton::Left,
@@ -4512,6 +4564,7 @@ impl WorkspaceView {
         } else {
             theme.tab_add_background
         };
+        let workspace_hover_enabled = self.context_menu.is_none();
         let _workspace_active_pane = workspace
             .active_tab
             .and_then(|tab_id| workspace.tabs.iter().find(|tab| tab.id == tab_id))
@@ -4561,7 +4614,6 @@ impl WorkspaceView {
             .overflow_hidden()
             .rounded(px(self.config.ui.sidebar_workspace_radius))
             .bg(workspace_background)
-            .hover(|style| style.bg(rgb(workspace_hover_background)))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, workspace_activate)
             .on_mouse_down(
@@ -4588,6 +4640,9 @@ impl WorkspaceView {
                     .truncate()
                     .child(SharedString::from(workspace.title.clone())),
             );
+        if workspace_hover_enabled {
+            workspace_row = workspace_row.hover(|style| style.bg(rgb(workspace_hover_background)));
+        }
         if self.config.ui.sidebar_show_agent_count && running_agent_count > 0 {
             workspace_row = workspace_row.child(
                 div()
@@ -4629,9 +4684,23 @@ impl WorkspaceView {
         let collapsed = self.collapsed_connections.contains(&connection_id);
         let selected = self.active_connection == connection_id;
         let title = connection.title.clone();
-        let kind_label = match connection.kind {
-            WorkspaceConnectionKind::Local => "LOCAL",
-            WorkspaceConnectionKind::Remote => "SSH",
+        let kind_label = match connection.status {
+            WorkspaceConnectionStatus::Connected => match connection.kind {
+                WorkspaceConnectionKind::Local => "LOCAL",
+                WorkspaceConnectionKind::Remote => "SSH",
+            },
+            WorkspaceConnectionStatus::Connecting => "CONNECTING",
+            WorkspaceConnectionStatus::Disconnected => "OFFLINE",
+        };
+        let connection_background = if selected {
+            theme.sidebar_connection_active_background
+        } else {
+            theme.sidebar_connection_background
+        };
+        let connection_border = if selected {
+            theme.sidebar_connection_active_border
+        } else {
+            theme.inactive_pane_border
         };
         // The host card is the one large rounded rectangle: the host title
         // is a plain text row at its top, with the workspaces below. There is
@@ -4672,6 +4741,7 @@ impl WorkspaceView {
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(kind_label),
             )
+            .bg(rgb(connection_background))
             .on_mouse_down(MouseButton::Left, header_activate);
         if connection.kind == WorkspaceConnectionKind::Remote {
             header = header.on_mouse_down(
@@ -4696,13 +4766,16 @@ impl WorkspaceView {
             .overflow_hidden()
             .rounded(px(self.config.ui.sidebar_card_radius))
             .border_1()
-            .border_color(rgb(theme.inactive_pane_border))
+            .border_color(rgb(connection_border))
             .pb(px(if collapsed {
                 0.
             } else {
                 self.config.ui.sidebar_card_padding
             }))
             .child(header);
+        if connection.status != WorkspaceConnectionStatus::Connected {
+            card = card.opacity(0.58);
+        }
         if collapsed {
             // Folded host: only the title row.
             return card.into_any_element();
@@ -4819,7 +4892,7 @@ impl WorkspaceView {
         // back to truncation at very narrow widths.
         let connect_label_size =
             ((label_width - 16.).max(0.) / 7.).clamp(8., self.config.ui.font_size.min(11.));
-        let connect_remote_button = div()
+        let mut connect_remote_button = div()
             .id("connect-remote")
             .h(px(32.))
             .w_full()
@@ -4833,7 +4906,6 @@ impl WorkspaceView {
             .border_1()
             .border_color(rgb(theme.inactive_pane_border))
             .rounded(px(self.config.ui.sidebar_card_radius))
-            .hover(|style| style.bg(rgb(theme.tab_add_background)))
             .child(div().flex_none().child("＋"))
             .child(
                 div()
@@ -4850,6 +4922,10 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             );
+        if self.context_menu.is_none() {
+            connect_remote_button =
+                connect_remote_button.hover(|style| style.bg(rgb(theme.tab_add_background)));
+        }
         let connect_remote = div()
             .w_full()
             .min_w(px(0.))
@@ -4980,7 +5056,6 @@ impl WorkspaceView {
             } else {
                 theme.sidebar_agent_background
             }))
-            .hover(move |style| style.bg(rgb(hover_background)))
             .text_color(rgb(theme.ui_foreground))
             .on_mouse_down(MouseButton::Left, agent_activate)
             .child(
@@ -5004,6 +5079,9 @@ impl WorkspaceView {
                     .text_color(rgb(theme.inactive_pane_border))
                     .child(SharedString::from(project)),
             );
+        if self.context_menu.is_none() {
+            row = row.hover(move |style| style.bg(rgb(hover_background)));
+        }
         if matches!(agent.status, crate::surface::TerminalStatus::Running) {
             row = row.on_mouse_down(
                 MouseButton::Right,
@@ -5144,21 +5222,38 @@ impl WorkspaceView {
         }
         if let ContextMenuTarget::Connection(connection_id) = target {
             let collapsed = self.collapsed_connections.contains(&connection_id);
-            menu = menu
-                .child(self.render_context_menu_item(
-                    if collapsed {
-                        "Expand host"
-                    } else {
-                        "Collapse host"
-                    },
+            menu = menu.child(self.render_context_menu_item(
+                if collapsed {
+                    "Expand host"
+                } else {
+                    "Collapse host"
+                },
+                theme,
+                move |this, _event, _window, cx| {
+                    this.context_menu = None;
+                    this.toggle_connection_collapsed(connection_id, cx);
+                },
+                cx,
+            ));
+            let disconnected = self
+                .connection_by_id(connection_id)
+                .is_some_and(|connection| {
+                    connection.status == WorkspaceConnectionStatus::Disconnected
+                });
+            if disconnected {
+                menu = menu.child(self.render_context_menu_item(
+                    "Reconnect",
                     theme,
                     move |this, _event, _window, cx| {
                         this.context_menu = None;
-                        this.toggle_connection_collapsed(connection_id, cx);
+                        if let Some(application) = this.application.clone() {
+                            application.reconnect_connection(connection_id, cx);
+                        }
                     },
                     cx,
-                ))
-                .child(self.render_context_menu_item(
+                ));
+            } else {
+                menu = menu.child(self.render_context_menu_item(
                     "Disconnect",
                     theme,
                     move |this, _event, _window, cx| {
@@ -5168,18 +5263,19 @@ impl WorkspaceView {
                         }
                     },
                     cx,
-                ))
-                .child(self.render_context_menu_item(
-                    "Kill Server",
-                    theme,
-                    move |this, _event, _window, cx| {
-                        this.context_menu = None;
-                        if let Some(application) = this.application.clone() {
-                            application.kill_connection(connection_id, cx);
-                        }
-                    },
-                    cx,
                 ));
+            }
+            menu = menu.child(self.render_context_menu_item(
+                "Kill Server",
+                theme,
+                move |this, _event, _window, cx| {
+                    this.context_menu = None;
+                    if let Some(application) = this.application.clone() {
+                        application.kill_connection(connection_id, cx);
+                    }
+                },
+                cx,
+            ));
         }
         let position = context_menu.position;
         Some(
@@ -6180,6 +6276,11 @@ impl WorkspaceView {
                 } else {
                     rgb(theme.inactive_pane_border)
                 };
+                let pane_opacity = if self.config.ui.dim_inactive_panes && !active {
+                    0.66
+                } else {
+                    1.0
+                };
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",
@@ -6328,6 +6429,7 @@ impl WorkspaceView {
                     .border_color(border)
                     .rounded(px(self.config.ui.pane_corner_radius))
                     .bg(rgb(theme.pane_background))
+                    .opacity(pane_opacity)
                     .text_color(rgb(theme.terminal_foreground))
                     .child(content)
                     .on_mouse_down(
@@ -11323,6 +11425,7 @@ mod tests {
                 sidebar_background: 16,
                 sidebar_connection_background: 16,
                 sidebar_connection_active_background: 16,
+                sidebar_connection_active_border: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
                 sidebar_drag_indicator: 19,
@@ -11498,6 +11601,7 @@ mod tests {
                 id: local_id,
                 title: "Local".to_owned(),
                 kind: WorkspaceConnectionKind::Local,
+                status: WorkspaceConnectionStatus::Connected,
                 client: local_client,
                 snapshot: local_host.client().state_dump().unwrap(),
             },
@@ -11505,6 +11609,7 @@ mod tests {
                 id: remote_id,
                 title: "build-box".to_owned(),
                 kind: WorkspaceConnectionKind::Remote,
+                status: WorkspaceConnectionStatus::Connected,
                 client: remote_client,
                 snapshot: remote_host.client().state_dump().unwrap(),
             },
@@ -11591,6 +11696,7 @@ mod tests {
             id: connection_id,
             title: "Local".to_owned(),
             kind: WorkspaceConnectionKind::Local,
+            status: WorkspaceConnectionStatus::Connected,
             client: client.clone(),
             snapshot: client.state_dump().unwrap(),
         };
@@ -12331,6 +12437,7 @@ mod tests {
                 id: local_id,
                 title: "Local".to_owned(),
                 kind: WorkspaceConnectionKind::Local,
+                status: WorkspaceConnectionStatus::Connected,
                 client: local_client,
                 snapshot: local_host.client().state_dump().unwrap(),
             },
@@ -12338,6 +12445,7 @@ mod tests {
                 id: remote_id,
                 title: "build-box".to_owned(),
                 kind: WorkspaceConnectionKind::Remote,
+                status: WorkspaceConnectionStatus::Connected,
                 client: remote_client,
                 snapshot: remote_host.client().state_dump().unwrap(),
             },
@@ -12426,6 +12534,7 @@ mod tests {
                 id: local_id,
                 title: "Local".to_owned(),
                 kind: WorkspaceConnectionKind::Local,
+                status: WorkspaceConnectionStatus::Connected,
                 client: local_client,
                 snapshot: local_host.client().state_dump().unwrap(),
             },
@@ -12433,6 +12542,7 @@ mod tests {
                 id: remote_id,
                 title: "build-box".to_owned(),
                 kind: WorkspaceConnectionKind::Remote,
+                status: WorkspaceConnectionStatus::Connected,
                 client: remote_client,
                 snapshot: remote_host.client().state_dump().unwrap(),
             },
