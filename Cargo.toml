@@ -1,6 +1,6 @@
 [package]
 name = "water"
-version = "0.2.17"
+version = "0.2.18"
 edition = "2024"
 default-run = "water"
 description = "A native Rust desktop development workbench."
