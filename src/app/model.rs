@@ -103,8 +103,9 @@ fn default_workspace_dump_title() -> String {
 pub struct AgentDump {
     pub kind: AgentKind,
     pub label: String,
-    /// Optional user-defined display label. `label` remains the detected kind
-    /// label for wire compatibility.
+    /// Optional display label from the agent's session title or an explicit
+    /// user rename. `label` remains the detected kind label for wire
+    /// compatibility.
     #[serde(default)]
     pub custom_label: Option<String>,
     #[serde(default)]
@@ -852,8 +853,31 @@ impl ApplicationModel {
             if let SurfaceState::Terminal(terminal) = surface
                 && terminal.terminal_id == terminal_id
             {
-                terminal.title = if title.is_empty() { None } else { Some(title) };
-                return true;
+                let next_title = if title.is_empty() { None } else { Some(title) };
+                let title_changed = terminal.title != next_title;
+                terminal.title = next_title;
+
+                // Agent CLIs commonly expose their current session/thread name
+                // through OSC 0/2. Treat that as an automatic label only while
+                // the user has not explicitly renamed the sidebar row.
+                let label_changed = terminal
+                    .agent
+                    .filter(|_| terminal.agent_label.is_none() || terminal.agent_label_from_title)
+                    .and_then(|agent| {
+                        terminal.title.as_deref().and_then(|title| {
+                            agent
+                                .kind
+                                .session_name_from_terminal_title(title, &terminal.cwd)
+                        })
+                    })
+                    .is_some_and(|label| {
+                        let changed = terminal.agent_label.as_deref() != Some(label.as_str())
+                            || !terminal.agent_label_from_title;
+                        terminal.agent_label = Some(label);
+                        terminal.agent_label_from_title = true;
+                        changed
+                    });
+                return title_changed || label_changed;
             }
         }
         false
@@ -898,11 +922,10 @@ impl ApplicationModel {
         }
         let label = label.trim();
         let label = (!label.is_empty()).then(|| label.to_owned());
-        if terminal.agent_label == label {
-            return Ok(false);
-        }
+        let changed = terminal.agent_label != label || terminal.agent_label_from_title;
         terminal.agent_label = label;
-        Ok(true)
+        terminal.agent_label_from_title = false;
+        Ok(changed)
     }
 
     /// Updates worker-owned terminal metadata and returns the affected pane if
@@ -937,6 +960,7 @@ impl ApplicationModel {
             if let Some(SurfaceState::Terminal(terminal)) = self.surfaces.get_mut(&pane.surface) {
                 if previous_kind != next_kind {
                     terminal.agent_label = None;
+                    terminal.agent_label_from_title = false;
                 }
                 terminal.process_name = process_name;
                 terminal.cwd = cwd;
@@ -1177,6 +1201,7 @@ mod tests {
                     lines: 24,
                     agent: None,
                     agent_label: None,
+                    agent_label_from_title: false,
                 }),
             )
             .unwrap();
@@ -1286,6 +1311,62 @@ mod tests {
                 false,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn agent_session_title_becomes_an_automatic_label_without_overriding_manual_names() {
+        let (mut model, pane_id, terminal_id, ..) = model_with_terminal_pane();
+        assert_eq!(
+            model.set_terminal_process(
+                terminal_id,
+                "codex".to_owned(),
+                "/repo/water".to_owned(),
+                vec!["codex".to_owned()],
+                false,
+            ),
+            Some(pane_id)
+        );
+
+        assert!(model.set_terminal_title(terminal_id, "⠋ Working · Fix auth · water".to_owned()));
+        let terminal = model.terminal_surface(terminal_id).unwrap();
+        assert_eq!(terminal.agent_label.as_deref(), Some("Fix auth"));
+        assert!(terminal.agent_label_from_title);
+
+        assert!(
+            model.set_terminal_title(terminal_id, "Thinking · Update tests · water".to_owned())
+        );
+        assert_eq!(
+            model
+                .terminal_surface(terminal_id)
+                .unwrap()
+                .agent_label
+                .as_deref(),
+            Some("Update tests")
+        );
+
+        assert!(
+            model
+                .rename_agent(pane_id, "Pinned name".to_owned())
+                .unwrap()
+        );
+        assert!(
+            !model
+                .terminal_surface(terminal_id)
+                .unwrap()
+                .agent_label_from_title
+        );
+        assert!(model.set_terminal_title(
+            terminal_id,
+            "Working · A different session · water".to_owned()
+        ));
+        assert_eq!(
+            model
+                .terminal_surface(terminal_id)
+                .unwrap()
+                .agent_label
+                .as_deref(),
+            Some("Pinned name")
         );
     }
 

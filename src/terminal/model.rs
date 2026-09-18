@@ -136,8 +136,9 @@ pub(crate) enum TerminalManagerEvent {
         cwd: String,
         /// Bounded foreground argv used by the model for agent detection.
         cmdline: Vec<String>,
-        /// True while the PTY has produced output within the worker's
-        /// activity window; drives the agent busy/idle indicator.
+        /// True while the PTY has produced output not attributable to an
+        /// unsubmitted local input buffer within the worker's activity
+        /// window; drives the agent busy/idle indicator.
         active: bool,
     },
     TitleChanged {

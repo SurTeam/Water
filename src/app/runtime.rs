@@ -397,6 +397,15 @@ pub trait CommandTransport: Send + Sync {
 
     fn state_dump(&self) -> Result<crate::app::model::ModelSnapshot, DispatchError>;
 
+    /// Performs a bounded liveness probe. In-process transports use their
+    /// normal state dump; socket transports override this to bound I/O so a
+    /// half-open network connection cannot leave the health monitor waiting
+    /// forever.
+    fn health_check(&self, timeout: Duration) -> Result<(), DispatchError> {
+        let _ = timeout;
+        self.state_dump().map(|_| ())
+    }
+
     fn memory_stats(&self) -> Result<crate::app::model::MemoryStats, DispatchError>;
 
     fn events_since(&self, sequence: u64) -> Result<Vec<AppEvent>, DispatchError>;

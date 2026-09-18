@@ -96,6 +96,13 @@ impl ControlClient {
         self.call(RpcMethod::StateDump)
     }
 
+    pub fn state_dump_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<StateDump, ControlClientError> {
+        self.call_with_timeout(RpcMethod::StateDump, timeout)
+    }
+
     pub fn events_since(&self, sequence: u64) -> Result<Vec<AppEvent>, ControlClientError> {
         self.call(RpcMethod::EventList {
             after_sequence: Some(sequence),
@@ -259,6 +266,36 @@ impl ControlClient {
         })?;
         Ok(serde_json::from_value(value)?)
     }
+
+    fn call_with_timeout<T: DeserializeOwned>(
+        &self,
+        method: RpcMethod,
+        timeout: Duration,
+    ) -> Result<T, ControlClientError> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        let request = RpcRequest {
+            build_variant: crate::BUILD_VARIANT.to_owned(),
+            protocol_version: PROTOCOL_VERSION,
+            request_id,
+            method,
+        };
+        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket_path)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        write_frame(&mut stream, &request)?;
+        let response: RpcResponse = read_frame(&mut stream)?;
+        if let Some(error) = response.error {
+            return Err(ControlClientError::Remote {
+                code: error.code,
+                message: error.message,
+            });
+        }
+        let value = response.result.ok_or_else(|| ControlClientError::Remote {
+            code: "EMPTY_RESPONSE".to_owned(),
+            message: "control response did not contain a result".to_owned(),
+        })?;
+        Ok(serde_json::from_value(value)?)
+    }
 }
 
 #[cfg(unix)]
@@ -390,6 +427,13 @@ impl crate::app::CommandTransport for RemoteCommandClient {
 
     fn state_dump(&self) -> Result<crate::app::model::ModelSnapshot, DispatchError> {
         self.inner.state_dump().map_err(into_dispatch_error)
+    }
+
+    fn health_check(&self, timeout: Duration) -> Result<(), DispatchError> {
+        self.inner
+            .state_dump_with_timeout(timeout)
+            .map(|_| ())
+            .map_err(into_dispatch_error)
     }
 
     fn memory_stats(&self) -> Result<crate::app::model::MemoryStats, DispatchError> {

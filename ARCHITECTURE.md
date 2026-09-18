@@ -56,7 +56,7 @@ PTY → replay ring + 有序 Output / Resize / Exit
 
 GUI 控制目前提供 keystroke、wheel、snapshot 和 screenshot 请求；screenshot 需要 `runtime-screenshot` feature。它们经 UI channel 到 GPUI 的交互处理路径，不意味着已经有通用 click/drag 自动化接口。窗口局部操作不必产生 AppCommand；涉及应用模型时才派发对应命令。
 
-Agent 检测基于前台进程名及 argv，由模型派生绑定，侧栏和状态查询消费同一 workspace/tab/pane/terminal 路径。退出时清除绑定；类型切换产生 started/stopped 事件，只有活动标志改变不产生该事件。PTY 活跃只说明近期输出，不代表语义上的“工具运行”或“等待输入”。
+Agent 检测基于前台进程名及 argv，由模型派生绑定，侧栏和状态查询消费同一 workspace/tab/pane/terminal 路径。退出时清除绑定；类型切换产生 started/stopped 事件，只有活动标志改变不产生该事件。PTY 活跃只说明排除未提交本地输入回显后的近期输出，不代表语义上的“工具运行”或“等待输入”。
 
 ## 配置与构建
 

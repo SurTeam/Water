@@ -429,12 +429,20 @@ pub struct ConnectionInfo {
     pub id: ConnectionId,
     pub name: String,
     pub kind: String,
+    /// GUI connection lifecycle state. Older clients omit this field and are
+    /// treated as connected by the serde default.
+    #[serde(default = "default_connection_status")]
+    pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_socket_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
+}
+
+fn default_connection_status() -> String {
+    "connected".to_owned()
 }
 
 /// Result of `connection.list`.
@@ -714,6 +722,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_info_without_status_defaults_to_connected() {
+        let info: ConnectionInfo = serde_json::from_value(serde_json::json!({
+            "id": "00000000-0000-0000-0000-000000000001",
+            "name": "Local",
+            "kind": "local"
+        }))
+        .unwrap();
+        assert_eq!(info.status, "connected");
+    }
 
     #[test]
     fn direct_snapshot_frame_preserves_the_wire_shape() {
