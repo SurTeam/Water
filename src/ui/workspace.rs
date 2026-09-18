@@ -4699,7 +4699,7 @@ impl WorkspaceView {
             theme.sidebar_connection_background
         };
         let connection_border = if offline {
-            theme.sidebar_connection_offline
+            theme.sidebar_connection_offline_border
         } else if selected {
             theme.sidebar_connection_active_border
         } else {
@@ -11456,6 +11456,7 @@ mod tests {
                 sidebar_connection_active_background: 16,
                 sidebar_connection_active_border: 16,
                 sidebar_connection_offline: 16,
+                sidebar_connection_offline_border: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
                 sidebar_drag_indicator: 19,

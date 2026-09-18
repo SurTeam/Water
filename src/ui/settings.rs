@@ -118,6 +118,7 @@ enum SettingField {
     ThemeSidebarConnectionActiveBackground,
     ThemeSidebarConnectionActiveBorder,
     ThemeSidebarConnectionOffline,
+    ThemeSidebarConnectionOfflineBorder,
     ThemeSidebarWorkspaceBackground,
     ThemeSidebarAgentBackground,
     ThemeSidebarWorkspaceActiveBackground,
@@ -247,6 +248,7 @@ impl SettingField {
             }
             Self::ThemeSidebarConnectionActiveBorder => "theme-sidebar-connection-active-border",
             Self::ThemeSidebarConnectionOffline => "theme-sidebar-connection-offline",
+            Self::ThemeSidebarConnectionOfflineBorder => "theme-sidebar-connection-offline-border",
             Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
             Self::ThemeSidebarAgentBackground => "theme-sidebar-agent-background",
             Self::ThemeSidebarWorkspaceActiveBackground => {
@@ -332,6 +334,7 @@ impl SettingField {
                 | Self::ThemeSidebarConnectionActiveBackground
                 | Self::ThemeSidebarConnectionActiveBorder
                 | Self::ThemeSidebarConnectionOffline
+                | Self::ThemeSidebarConnectionOfflineBorder
                 | Self::ThemeSidebarWorkspaceBackground
                 | Self::ThemeSidebarAgentBackground
                 | Self::ThemeSidebarWorkspaceActiveBackground
@@ -807,6 +810,9 @@ impl SettingsView {
             }
             SettingField::ThemeSidebarConnectionOffline => {
                 self.config.theme.sidebar_connection_offline_color.clone()
+            }
+            SettingField::ThemeSidebarConnectionOfflineBorder => {
+                self.config.theme.sidebar_connection_offline_border.clone()
             }
             SettingField::ThemeSidebarWorkspaceBackground => {
                 self.config.theme.sidebar_workspace_background.clone()
@@ -2139,7 +2145,14 @@ impl Render for SettingsView {
                 SettingField::ThemeSidebarConnectionActiveBorder,
                 "选中主机边框色",
             ),
-            (SettingField::ThemeSidebarConnectionOffline, "离线主机颜色"),
+            (
+                SettingField::ThemeSidebarConnectionOffline,
+                "OFFLINE 标识颜色",
+            ),
+            (
+                SettingField::ThemeSidebarConnectionOfflineBorder,
+                "离线主机边框色",
+            ),
             (
                 SettingField::ThemeSidebarWorkspaceBackground,
                 "未选中工作区背景色",
@@ -2470,6 +2483,9 @@ fn set_theme_field(
         SettingField::ThemeSidebarConnectionOffline => {
             theme.sidebar_connection_offline_color = value
         }
+        SettingField::ThemeSidebarConnectionOfflineBorder => {
+            theme.sidebar_connection_offline_border = value
+        }
         SettingField::ThemeSidebarWorkspaceBackground => theme.sidebar_workspace_background = value,
         SettingField::ThemeSidebarAgentBackground => theme.sidebar_agent_background = value,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {
@@ -2559,6 +2575,9 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
         }
         SettingField::ThemeSidebarConnectionActiveBorder => colors.sidebar_connection_active_border,
         SettingField::ThemeSidebarConnectionOffline => colors.sidebar_connection_offline,
+        SettingField::ThemeSidebarConnectionOfflineBorder => {
+            colors.sidebar_connection_offline_border
+        }
         SettingField::ThemeSidebarWorkspaceBackground => colors.sidebar_workspace_background,
         SettingField::ThemeSidebarAgentBackground => colors.sidebar_agent_background,
         SettingField::ThemeSidebarWorkspaceActiveBackground => {
