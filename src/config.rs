@@ -847,6 +847,8 @@ pub struct ThemeConfig {
     pub sidebar_connection_active_background: String,
     /// Border color of the selected host (connection) card.
     pub sidebar_connection_active_border: String,
+    /// Color used for an offline host's status label and card border.
+    pub sidebar_connection_offline_color: String,
     /// Background of an unselected workspace row in the sidebar.
     pub sidebar_workspace_background: String,
     /// Background of an unselected agent row in the sidebar.
@@ -888,6 +890,7 @@ impl Default for ThemeConfig {
             sidebar_connection_background: "#000000".to_owned(),
             sidebar_connection_active_background: "#000000".to_owned(),
             sidebar_connection_active_border: "#339966".to_owned(),
+            sidebar_connection_offline_color: "#ff5555".to_owned(),
             sidebar_workspace_background: "#000000".to_owned(),
             sidebar_agent_background: "#000000".to_owned(),
             sidebar_workspace_active_background: "#339966".to_owned(),
@@ -934,6 +937,7 @@ pub struct ThemeColors {
     pub sidebar_connection_background: u32,
     pub sidebar_connection_active_background: u32,
     pub sidebar_connection_active_border: u32,
+    pub sidebar_connection_offline: u32,
     pub sidebar_workspace_background: u32,
     pub sidebar_agent_background: u32,
     pub sidebar_workspace_active_background: u32,
@@ -983,6 +987,10 @@ impl ThemeConfig {
             sidebar_connection_active_border: parse_color(
                 &self.sidebar_connection_active_border,
                 0x339966,
+            ),
+            sidebar_connection_offline: parse_color(
+                &self.sidebar_connection_offline_color,
+                0xff5555,
             ),
             sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x000000),
             sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x000000),
@@ -1372,6 +1380,7 @@ pub struct ThemeConfigOverrides {
     pub sidebar_connection_background: Option<String>,
     pub sidebar_connection_active_background: Option<String>,
     pub sidebar_connection_active_border: Option<String>,
+    pub sidebar_connection_offline_color: Option<String>,
     pub sidebar_workspace_background: Option<String>,
     pub sidebar_agent_background: Option<String>,
     pub sidebar_workspace_active_background: Option<String>,
@@ -1411,6 +1420,7 @@ impl ThemeConfigOverrides {
         apply!(sidebar_connection_background);
         apply!(sidebar_connection_active_background);
         apply!(sidebar_connection_active_border);
+        apply!(sidebar_connection_offline_color);
         apply!(sidebar_workspace_background);
         apply!(sidebar_agent_background);
         apply!(sidebar_workspace_active_background);
@@ -1594,6 +1604,7 @@ mod tests {
             config.theme.colors().sidebar_connection_active_border,
             0x339966
         );
+        assert_eq!(config.theme.colors().sidebar_connection_offline, 0xff5555);
         assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
         assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
         assert_eq!(
@@ -1684,7 +1695,8 @@ mod tests {
             r##"{
                 "theme": {
                     "sidebar_drag_indicator_color": "#abcdef",
-                    "sidebar_connection_active_border": "#123456"
+                    "sidebar_connection_active_border": "#123456",
+                    "sidebar_connection_offline_color": "#cc0000"
                 }
             }"##,
         );
@@ -1704,6 +1716,8 @@ mod tests {
             loaded.theme.colors().sidebar_connection_active_border,
             0x123456
         );
+        assert_eq!(loaded.theme.sidebar_connection_offline_color, "#cc0000");
+        assert_eq!(loaded.theme.colors().sidebar_connection_offline, 0xcc0000);
     }
 
     #[test]

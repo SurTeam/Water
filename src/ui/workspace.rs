@@ -4692,13 +4692,21 @@ impl WorkspaceView {
             WorkspaceConnectionStatus::Connecting => "CONNECTING",
             WorkspaceConnectionStatus::Disconnected => "OFFLINE",
         };
+        let offline = connection.status == WorkspaceConnectionStatus::Disconnected;
         let connection_background = if selected {
             theme.sidebar_connection_active_background
         } else {
             theme.sidebar_connection_background
         };
-        let connection_border = if selected {
+        let connection_border = if offline {
+            theme.sidebar_connection_offline
+        } else if selected {
             theme.sidebar_connection_active_border
+        } else {
+            theme.inactive_pane_border
+        };
+        let connection_status_color = if offline {
+            theme.sidebar_connection_offline
         } else {
             theme.inactive_pane_border
         };
@@ -4738,7 +4746,7 @@ impl WorkspaceView {
                 div()
                     .flex_shrink_0()
                     .text_size(px(9.))
-                    .text_color(rgb(theme.inactive_pane_border))
+                    .text_color(rgb(connection_status_color))
                     .child(kind_label),
             )
             .bg(rgb(connection_background))
@@ -11447,6 +11455,7 @@ mod tests {
                 sidebar_connection_background: 16,
                 sidebar_connection_active_background: 16,
                 sidebar_connection_active_border: 16,
+                sidebar_connection_offline: 16,
                 sidebar_workspace_background: 17,
                 sidebar_agent_background: 18,
                 sidebar_drag_indicator: 19,
