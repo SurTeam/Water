@@ -78,10 +78,11 @@ const READER_EMPTY_BACKOFF_AFTER_WAKE: u32 = 2;
 /// reader blocked forever in `SyncSender::send`.
 const READER_BACKPRESSURE_WAIT: Duration = Duration::from_millis(1);
 const PROCESS_METADATA_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-/// PTY output within this window marks the foreground process as active for
-/// agent-status purposes. The flip to quiet is observed on the regular
-/// metadata refresh cycle, so it adds at most one event per output burst.
-const PROCESS_ACTIVE_WINDOW: Duration = Duration::from_millis(2000);
+/// PTY output not attributable to an unsubmitted local input buffer within
+/// this window marks the foreground process as active for agent-status
+/// purposes. The flip to quiet is observed on the regular metadata refresh
+/// cycle, so it adds at most one event per output burst.
+const PROCESS_ACTIVE_WINDOW: Duration = Duration::from_secs(5);
 /// Bound the argv probe so a pathological command line cannot inflate
 /// metadata events or the model's detection input.
 const MAX_CMDLINE_TOKENS: usize = 12;
@@ -98,6 +99,11 @@ const MAX_CMDLINE_TOKEN_BYTES: usize = 256;
 const INPUT_COALESCE_GAP: Duration = Duration::from_millis(60);
 const INPUT_COALESCE_MAX_WAIT: Duration = Duration::from_millis(24);
 const INPUT_COALESCE_MAX_BYTES: usize = 4096;
+/// Give the PTY a short interval to echo a submitted key/line before its
+/// output can be treated as agent activity. This only filters the immediate
+/// echo; output after the grace period still starts the normal activity
+/// window.
+const INPUT_ECHO_GRACE: Duration = Duration::from_millis(100);
 /// Bound for OSC title payloads; longer titles are ignored.
 const MAX_TITLE_BYTES: usize = 1024;
 
@@ -338,7 +344,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
 
     let (metadata_result_tx, metadata_result_rx) = mpsc::channel();
     let mut metadata_probe_in_flight = false;
-    let mut last_output_at = Instant::now();
+    // No output has been observed at startup. Keeping this as an Option is
+    // important: initializing it to `Instant::now()` would report every idle
+    // agent as active once, then emit a false idle transition a few seconds
+    // later.
+    let mut last_output_at: Option<Instant> = None;
+    let mut user_input = UserInputActivity::default();
     let mut last_title: Option<String> = None;
     let mut last_process_metadata_request = Instant::now();
     let mut stop_requested = false;
@@ -383,6 +394,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             let effect = match command {
                 TerminalWorkerCommand::SendText(bytes)
                 | TerminalWorkerCommand::SendBytes(bytes) => {
+                    user_input.record(&bytes, Instant::now());
                     let now = Instant::now();
                     let coalescing = !pending_input.is_empty()
                         || last_input_at.is_some_and(|at| {
@@ -432,7 +444,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                             event_wakeup.as_ref(),
                         );
                         batch.clear();
-                        last_output_at = Instant::now();
+                        if !user_input.suppresses_output_activity(Instant::now()) {
+                            last_output_at = Some(Instant::now());
+                        }
                     }
                     if matches!(drain_result, Ok(ReadEffect::Eof)) {
                         reader_eof.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -563,7 +577,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                     batch.clear();
                 }
                 if had_output {
-                    last_output_at = Instant::now();
+                    if !user_input.suppresses_output_activity(Instant::now()) {
+                        last_output_at = Some(Instant::now());
+                    }
                 }
             }
             let poll_result = poller.wait(&mut events, Some(poll_timeout));
@@ -629,7 +645,9 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 batch.clear();
             }
             if had_output {
-                last_output_at = Instant::now();
+                if !user_input.suppresses_output_activity(Instant::now()) {
+                    last_output_at = Some(Instant::now());
+                }
             }
 
             let mut metadata_changed = apply_process_metadata_result(
@@ -640,7 +658,7 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             // The worker owns the activity signal: probe results carry it
             // through unchanged, and it flips on output-burst edges without
             // waiting for the next probe round trip.
-            let output_active = last_output_at.elapsed() < PROCESS_ACTIVE_WINDOW;
+            let output_active = output_is_active(last_output_at, Instant::now());
             if output_active != process_metadata.active {
                 process_metadata.active = output_active;
                 metadata_changed = true;
@@ -1155,6 +1173,94 @@ enum ReadEffect {
     Eof,
 }
 
+/// Gates PTY activity updates while the user is editing an unsubmitted line.
+/// Interactive shells and TUIs echo each key through the PTY, but that echo is
+/// not evidence that the agent is doing work. A submitted line (or an
+/// interrupt/EOF) re-arms output-based activity tracking after a short echo
+/// grace interval.
+#[derive(Debug, Default, Clone, Copy)]
+struct UserInputActivity {
+    editing: bool,
+    escape: InputEscape,
+    echo_suppressed_until: Option<Instant>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+enum InputEscape {
+    #[default]
+    Ground,
+    Escape,
+    Csi,
+    Osc,
+    OscEscape,
+}
+
+impl UserInputActivity {
+    fn record(&mut self, bytes: &[u8], now: Instant) {
+        for &byte in bytes {
+            match self.escape {
+                InputEscape::Ground => {
+                    if byte == 0x1b {
+                        self.escape = InputEscape::Escape;
+                    } else {
+                        self.record_ground_byte(byte, now);
+                    }
+                }
+                InputEscape::Escape => match byte {
+                    b'[' | b'O' => self.escape = InputEscape::Csi,
+                    b']' => self.escape = InputEscape::Osc,
+                    0x1b => self.escape = InputEscape::Escape,
+                    _ => {
+                        self.escape = InputEscape::Ground;
+                        self.record_ground_byte(byte, now);
+                    }
+                },
+                InputEscape::Csi => {
+                    if byte == 0x1b {
+                        self.escape = InputEscape::Escape;
+                    } else if (0x40..=0x7e).contains(&byte) {
+                        self.escape = InputEscape::Ground;
+                    }
+                }
+                InputEscape::Osc => {
+                    if byte == 0x07 || matches!(byte, 0x18 | 0x1a) {
+                        self.escape = InputEscape::Ground;
+                    } else if byte == 0x1b {
+                        self.escape = InputEscape::OscEscape;
+                    }
+                }
+                InputEscape::OscEscape => {
+                    self.escape = if byte == b'\\' {
+                        InputEscape::Ground
+                    } else if byte == 0x1b {
+                        InputEscape::OscEscape
+                    } else {
+                        InputEscape::Osc
+                    };
+                }
+            }
+        }
+    }
+
+    fn record_ground_byte(&mut self, byte: u8, now: Instant) {
+        // These controls submit or cancel the current input rather than
+        // leaving an editable line whose echo should be ignored.
+        if matches!(byte, b'\r' | b'\n' | 0x03 | 0x04 | 0x1a | 0x1c) {
+            self.editing = false;
+            self.echo_suppressed_until = now.checked_add(INPUT_ECHO_GRACE);
+        } else {
+            // Other controls (backspace, word erase, clear-line, etc.) and
+            // printable bytes can redraw or extend the current input.
+            self.editing = true;
+            self.echo_suppressed_until = None;
+        }
+    }
+
+    fn suppresses_output_activity(self, now: Instant) -> bool {
+        self.editing || self.echo_suppressed_until.is_some_and(|until| now < until)
+    }
+}
+
 #[derive(Debug)]
 struct ProcessMetadataFallback {
     process_name: String,
@@ -1168,8 +1274,9 @@ struct ProcessMetadata {
     cwd: String,
     /// Foreground process argv (bounded) used for coding-agent detection.
     cmdline: Vec<String>,
-    /// True while the PTY has produced output inside PROCESS_ACTIVE_WINDOW.
-    /// Computed on the worker thread, never by the metadata probe.
+    /// True while the PTY has produced output not attributable to an
+    /// unsubmitted local input buffer inside PROCESS_ACTIVE_WINDOW. Computed
+    /// on the worker thread, never by the metadata probe.
     active: bool,
 }
 
@@ -1441,6 +1548,10 @@ fn apply_process_metadata_result(
     true
 }
 
+fn output_is_active(last_output_at: Option<Instant>, now: Instant) -> bool {
+    last_output_at.is_some_and(|at| now.saturating_duration_since(at) < PROCESS_ACTIVE_WINDOW)
+}
+
 fn emit_process_metadata(
     event_tx: &Sender<TerminalManagerEvent>,
     event_wakeup: Option<&WakeupCallback>,
@@ -1623,6 +1734,34 @@ fn title_from_params(params: &[Vec<u8>]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_input_activity_ignores_unsubmitted_echo_and_escape_sequences() {
+        let mut input = UserInputActivity::default();
+        let now = Instant::now();
+        input.record(b"\x1b[", now);
+        input.record(b"D", now);
+        assert!(!input.suppresses_output_activity(now));
+
+        input.record(b"\x1b[200~typed text\x1b[201~", now);
+        assert!(input.suppresses_output_activity(now));
+
+        input.record(b"\n", now);
+        assert!(input.suppresses_output_activity(now));
+        assert!(!input.suppresses_output_activity(now + INPUT_ECHO_GRACE));
+
+        input.record(b"another prompt", now);
+        assert!(input.suppresses_output_activity(now));
+        input.record(b"\x03", now);
+        assert!(!input.suppresses_output_activity(now + INPUT_ECHO_GRACE));
+    }
+
+    #[test]
+    fn output_activity_requires_observed_output() {
+        let now = Instant::now();
+        assert!(!output_is_active(None, now));
+        assert!(output_is_active(Some(now), now));
+    }
 
     #[test]
     fn title_scanner_finds_osc_titles() {
