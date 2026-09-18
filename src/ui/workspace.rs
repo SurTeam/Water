@@ -6290,6 +6290,18 @@ impl WorkspaceView {
                 } else {
                     theme.pane_background
                 };
+                // GPUI applies a parent opacity to custom render elements after
+                // compositing them over the pane background. Pre-dim the
+                // terminal's base color as well, otherwise an inactive pane's
+                // terminal background is lighter than its padding.
+                let terminal_theme = if self.config.ui.dim_inactive_panes && !active {
+                    ThemeColors {
+                        terminal_background: dim_terminal_color(theme.terminal_background),
+                        ..theme
+                    }
+                } else {
+                    theme
+                };
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",
@@ -6334,7 +6346,7 @@ impl WorkspaceView {
                                 self.selection,
                                 TerminalRenderOptions {
                                     metrics,
-                                    theme,
+                                    theme: terminal_theme,
                                     cursor_focused: active && window_active,
                                     hyperlink_hover: self
                                         .hyperlink_hover
