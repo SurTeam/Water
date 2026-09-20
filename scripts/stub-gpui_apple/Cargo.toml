@@ -28,7 +28,6 @@ collections = { git = "https://github.com/zed-industries/zed.git", rev = "ce4846
 core-foundation = "0.10"
 core-video = { version = "0.5.2", features = ["metal"] }
 derive_more = { version = "2.1.1", features = ["add", "add_assign", "deref", "deref_mut", "display", "from", "from_str", "mul", "mul_assign", "not"] }
-dispatch2 = "0.3.1"
 etagere = "0.2"
 foreign-types = "0.5"
 image = { version = "0.25.1", default-features = false, features = ["png"] }

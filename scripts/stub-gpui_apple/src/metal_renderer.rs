@@ -6,7 +6,6 @@ use cocoa::{
     foundation::{NSSize, NSUInteger},
     quartzcore::AutoresizingMask,
 };
-use dispatch2::DispatchQueue;
 use gpui::{
     AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, PaintSurface, Path, Point,
     PrimitiveBatch, ScaledPixels, Scene, Size, point, size,
@@ -23,21 +22,10 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
     CAMetalLayer, CommandQueue, MTLGPUFamily, MTLPixelFormat, MTLResourceOptions, NSRange,
 };
-use objc::{self, msg_send, sel, sel_impl};
+use objc::{self, msg_send, rc::autoreleasepool, sel, sel_impl};
 use parking_lot::Mutex;
 
-use std::{
-    cell::Cell,
-    ffi::c_void,
-    mem,
-    mem::MaybeUninit,
-    ops::Range,
-    ptr, slice,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{cell::Cell, ffi::c_void, mem, mem::MaybeUninit, ops::Range, ptr, slice, sync::Arc};
 
 // Exported to metal
 pub(crate) type PointF = gpui::Point<f32>;
@@ -124,11 +112,6 @@ impl InstanceBufferPool {
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
-    /// Last drawable size applied to the layer. The first size update happens
-    /// during window creation and should not schedule a pool reset.
-    last_drawable_size: Option<(f64, f64)>,
-    /// Coalesces asynchronous drawable-pool resets onto the main queue.
-    drawable_release_scheduled: Arc<AtomicBool>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -349,8 +332,6 @@ impl MetalRenderer {
         Self {
             device,
             layer: layer.clone(),
-            last_drawable_size: None,
-            drawable_release_scheduled: Arc::new(AtomicBool::new(false)),
             presents_with_transaction: false,
             is_apple_gpu,
             is_unified_memory,
@@ -399,55 +380,25 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        let ns_size = NSSize {
-            width: size.width.0 as f64,
-            height: size.height.0 as f64,
-        };
-        let changed = self
-            .last_drawable_size
-            .map(|(w, h)| w != ns_size.width || h != ns_size.height)
-            .unwrap_or(true);
-        if let Some(layer) = &self.layer {
-            unsafe {
-                let _: () = msg_send![
-                    layer.as_ref(),
-                    setDrawableSize: ns_size
-                ];
+        autoreleasepool(|| {
+            let ns_size = NSSize {
+                width: size.width.0 as f64,
+                height: size.height.0 as f64,
+            };
+            if let Some(layer) = &self.layer {
+                // Keep Core Animation's public drawable pool bounded. The
+                // layer creates and retires drawables as they are presented;
+                // drawable objects themselves are released by the autorelease
+                // pool around each render pass.
+                layer.set_maximum_drawable_count(3);
+                unsafe {
+                    let _: () = msg_send![
+                        layer.as_ref(),
+                        setDrawableSize: ns_size
+                    ];
+                }
             }
-            if changed && self.last_drawable_size.is_some() {
-                self.schedule_drawable_release(layer);
-            }
-        }
-        self.last_drawable_size = Some((ns_size.width, ns_size.height));
-        self.update_path_intermediate_textures(size);
-    }
-
-    /// Release stale CAMetalLayer drawable pools after the synchronous AppKit
-    /// resize callback has returned. Calling `releaseDrawables` from
-    /// `setFrameSize:` can abort through Rust's `extern "C"` callback, while
-    /// an async main-queue block runs as a separate event-loop turn.
-    fn schedule_drawable_release(&self, layer: &metal::MetalLayer) {
-        if self
-            .drawable_release_scheduled
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-
-        let layer_ptr = layer.as_ptr() as usize;
-        unsafe {
-            let _: *mut CAMetalLayer = msg_send![layer.as_ref(), retain];
-        }
-        let scheduled = self.drawable_release_scheduled.clone();
-        DispatchQueue::main().exec_async(move || {
-            let layer = layer_ptr as *mut CAMetalLayer;
-            unsafe {
-                let _: () = msg_send![layer, setMaximumDrawableCount: 3usize];
-                let _: () = msg_send![layer, releaseDrawables];
-                let _: () = msg_send![layer, release];
-            }
-            scheduled.store(false, Ordering::Release);
+            self.update_path_intermediate_textures(size);
         });
     }
 
@@ -501,6 +452,10 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        autoreleasepool(|| self.draw_in_autorelease_pool(scene));
+    }
+
+    fn draw_in_autorelease_pool(&mut self, scene: &Scene) {
         let layer = match &self.layer {
             Some(l) => l.clone(),
             None => {
@@ -595,6 +550,11 @@ impl MetalRenderer {
     /// use `render_scene_to_image()` instead.
     #[cfg(any(test, feature = "test-support"))]
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+        autoreleasepool(|| self.render_to_image_in_autorelease_pool(scene))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn render_to_image_in_autorelease_pool(&mut self, scene: &Scene) -> Result<RgbaImage> {
         let layer = self
             .layer
             .clone()
