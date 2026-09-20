@@ -2161,6 +2161,7 @@ dependencies = [
  "core-foundation 0.10.1",
  "core-video",
  "derive_more",
+ "dispatch2",
  "etagere",
  "foreign-types",
  "gpui",
@@ -5989,7 +5990,7 @@ dependencies = [
 
 [[package]]
 name = "water"
-version = "0.2.23"
+version = "0.2.24"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
