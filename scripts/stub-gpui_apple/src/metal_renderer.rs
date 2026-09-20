@@ -112,6 +112,10 @@ impl InstanceBufferPool {
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
+    /// Last drawable size actually applied to the layer; used to detect a
+    /// real size change in `update_drawable_size` without relying on
+    /// `layer.drawable_size()` before the first `setDrawableSize`.
+    last_drawable_size: Option<(f64, f64)>,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -160,6 +164,20 @@ impl MetalRenderer {
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
+        // CAMetalLayer keeps a drawable pool of its *current* size, but on
+        // macOS it also retains drawables of previous sizes after
+        // setDrawableSize: until they are consumed and released.
+        // Zed's window resizes (incl. during window-drag live resizing)
+        // without consuming pending drawables, so one pool per size
+        // accumulates (~11-21MB each at Retina sizes; we observed 21
+        // accumulated pools / ~290MB in a long-running session).
+        // Dropping the old drawable pool on each size change bounds memory
+        // to one pool at the current size. We already redraw on resize,
+        // and `allowsNextDrawableTimeout = NO` makes `next_drawable` block
+        // when no fresh drawable is available, so discarding the pending
+        // ones costs no visible frames.
+        // https://stackoverflow.com/questions/75798736/cametallayer-leaks-memory-during-resize
+        // (drawables are released on size change in `update_drawable_size`)
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
@@ -331,7 +349,8 @@ impl MetalRenderer {
 
         Self {
             device,
-            layer,
+            layer: layer.clone(),
+            last_drawable_size: None,
             presents_with_transaction: false,
             is_apple_gpu,
             is_unified_memory,
@@ -380,11 +399,35 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
+        let ns_size = NSSize {
+            width: size.width.0 as f64,
+            height: size.height.0 as f64,
+        };
+        let changed = self
+            .last_drawable_size
+            .map(|(w, h)| w != ns_size.width || h != ns_size.height)
+            .unwrap_or(true);
         if let Some(layer) = &self.layer {
-            let ns_size = NSSize {
-                width: size.width.0 as f64,
-                height: size.height.0 as f64,
-            };
+            // `releaseDrawables` is a no-op when the size does not change;
+            // on a change it discards the current pool, which also drops the
+            // retained pools of earlier sizes. See the comment in `new()`.
+            // Re-assert the drawable cap on every real change: it is applied
+            // lazily and can be lost after the first size change (the base
+            // build grew a 6+-drawable pool at the smaller size after 24
+            // resize cycles).
+            layer.set_maximum_drawable_count(3);
+            if changed {
+                unsafe {
+                    // Skip the release on the very first size application:
+                    // AppKit fires viewDidChangeBackingProperties during
+                    // window creation, before the first render, and calling
+                    // releaseDrawables: at that point can abort inside the
+                    // AppKit callback (which cannot unwind Rust panics).
+                    if self.last_drawable_size.is_some() {
+                        let _: () = msg_send![layer.as_ref(), releaseDrawables];
+                    }
+                }
+            }
             unsafe {
                 let _: () = msg_send![
                     layer.as_ref(),
@@ -392,6 +435,7 @@ impl MetalRenderer {
                 ];
             }
         }
+        self.last_drawable_size = Some((ns_size.width, ns_size.height));
         self.update_path_intermediate_textures(size);
     }
 
