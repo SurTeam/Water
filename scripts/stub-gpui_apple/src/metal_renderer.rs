@@ -112,15 +112,6 @@ impl InstanceBufferPool {
 pub struct MetalRenderer {
     device: metal::Device,
     layer: Option<metal::MetalLayer>,
-    /// Last drawable size actually applied to the layer; used to detect a
-    /// real size change in `update_drawable_size` without relying on
-    /// `layer.drawable_size()` before the first `setDrawableSize`.
-    last_drawable_size: Option<(f64, f64)>,
-    /// Whether the stale drawable pools should be released before the next
-    /// frame requests a drawable. Releasing from `setFrameSize:` is unsafe:
-    /// AppKit invokes that method synchronously during live window resizing,
-    /// and an Objective-C callback cannot unwind a Rust panic.
-    release_drawables_on_next_draw: bool,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -169,20 +160,6 @@ impl MetalRenderer {
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
         layer.set_maximum_drawable_count(3);
-        // CAMetalLayer keeps a drawable pool of its *current* size, but on
-        // macOS it also retains drawables of previous sizes after
-        // setDrawableSize: until they are consumed and released.
-        // Zed's window resizes (incl. during window-drag live resizing)
-        // without consuming pending drawables, so one pool per size
-        // accumulates (~11-21MB each at Retina sizes; we observed 21
-        // accumulated pools / ~290MB in a long-running session).
-        // Dropping the old drawable pool on each size change bounds memory
-        // to one pool at the current size. We already redraw on resize,
-        // and `allowsNextDrawableTimeout = NO` makes `next_drawable` block
-        // when no fresh drawable is available, so discarding the pending
-        // ones costs no visible frames.
-        // https://stackoverflow.com/questions/75798736/cametallayer-leaks-memory-during-resize
-        // (`update_drawable_size` schedules the release before the next draw)
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
@@ -355,8 +332,6 @@ impl MetalRenderer {
         Self {
             device,
             layer: layer.clone(),
-            last_drawable_size: None,
-            release_drawables_on_next_draw: false,
             presents_with_transaction: false,
             is_apple_gpu,
             is_unified_memory,
@@ -405,27 +380,11 @@ impl MetalRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        let ns_size = NSSize {
-            width: size.width.0 as f64,
-            height: size.height.0 as f64,
-        };
-        let changed = self
-            .last_drawable_size
-            .map(|(w, h)| w != ns_size.width || h != ns_size.height)
-            .unwrap_or(true);
         if let Some(layer) = &self.layer {
-            // Re-assert the drawable cap on every real change: it is applied
-            // lazily and can be lost after the first size change (the base
-            // build grew a 6+-drawable pool at the smaller size after 24
-            // resize cycles).
-            layer.set_maximum_drawable_count(3);
-            // AppKit may call this method from `setFrameSize:` while it is
-            // synchronously processing a live resize. Defer the Objective-C
-            // release until `draw`, after the size has been applied and just
-            // before the next drawable is requested.
-            if changed && self.last_drawable_size.is_some() {
-                self.release_drawables_on_next_draw = true;
-            }
+            let ns_size = NSSize {
+                width: size.width.0 as f64,
+                height: size.height.0 as f64,
+            };
             unsafe {
                 let _: () = msg_send![
                     layer.as_ref(),
@@ -433,7 +392,6 @@ impl MetalRenderer {
                 ];
             }
         }
-        self.last_drawable_size = Some((ns_size.width, ns_size.height));
         self.update_path_intermediate_textures(size);
     }
 
@@ -501,12 +459,6 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        if self.release_drawables_on_next_draw {
-            unsafe {
-                let _: () = msg_send![layer.as_ref(), releaseDrawables];
-            }
-            self.release_drawables_on_next_draw = false;
-        }
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
