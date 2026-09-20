@@ -693,7 +693,7 @@ struct TerminalImagePaint {
     image: Arc<gpui::RenderImage>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 struct TerminalRenderCacheKey {
     terminal_id: TerminalId,
     /// The grid dimensions can change during the initial size handshake
@@ -701,6 +701,12 @@ struct TerminalRenderCacheKey {
     /// be prepared, including a newly exposed bottom prompt row.
     size: TerminalSize,
     snapshot_revision: u64,
+    /// Excluded from PartialEq: a viewport ACK rebases row coordinates but
+    /// does not change the visual content of any row. The incremental shape
+    /// path in prepaint maps new source rows back to prior cached rows via
+    /// `previous_cached_source_row` and reuses the paint when cell content
+    /// matches. Including viewport_position here would invalidate the entire
+    /// row map on every scroll, defeating the incremental cache.
     viewport_position: i64,
     /// The focused cursor is baked into its row's colors. Keep its position
     /// out of whole-cache compatibility, then invalidate only the old/new
@@ -718,6 +724,30 @@ struct TerminalRenderCacheKey {
     hyperlink_hover_uri: Option<String>,
     bounds_origin_x_bits: u32,
     bounds_width_bits: u32,
+}
+
+impl PartialEq for TerminalRenderCacheKey {
+    fn eq(&self, other: &Self) -> bool {
+        // viewport_position is deliberately excluded: the incremental shape
+        // path handles viewport rebasing via previous_cached_source_row +
+        // cell content comparison. Including it here would clear the row
+        // cache on every viewport scroll, forcing a full re-shape of all
+        // prepared rows even when their visual content is unchanged.
+        self.terminal_id == other.terminal_id
+            && self.size == other.size
+            && self.snapshot_revision == other.snapshot_revision
+            && self.focused_cursor == other.focused_cursor
+            && self.font_family == other.font_family
+            && self.font_size_bits == other.font_size_bits
+            && self.ligatures == other.ligatures
+            && self.metrics == other.metrics
+            && self.theme == other.theme
+            && self.cursor_focused == other.cursor_focused
+            && self.selection == other.selection
+            && self.hyperlink_hover_uri == other.hyperlink_hover_uri
+            && self.bounds_origin_x_bits == other.bounds_origin_x_bits
+            && self.bounds_width_bits == other.bounds_width_bits
+    }
 }
 
 impl TerminalRenderCacheKey {
