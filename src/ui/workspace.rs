@@ -9074,7 +9074,11 @@ impl gpui::Element for TerminalRenderElement {
             terminal_visible_source_rows(self.snapshot.size.lines, scroll_offset_rows);
         let mut caches = self.render_caches.lock().expect("terminal cache poisoned");
         let cache = caches.entry(self.snapshot.terminal_id).or_default();
-        if cache.key.as_ref() != Some(&cache_key) {
+        let viewport_changed = cache
+            .key
+            .as_ref()
+            .is_some_and(|previous| previous.viewport_position != cache_key.viewport_position);
+        if cache.key.as_ref() != Some(&cache_key) || viewport_changed {
             let previous_key = cache.key.clone();
             if terminal_debug_enabled() {
                 let prev_size = previous_key.as_ref().map(|k| k.size);
@@ -10903,7 +10907,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_render_cache_invalidates_when_grid_size_changes() {
+    fn terminal_render_cache_handles_resize_and_viewport_rebase() {
         let key = TerminalRenderCacheKey {
             terminal_id: TerminalId::new(1),
             size: TerminalSize::new(80, 24),
@@ -10928,6 +10932,13 @@ mod tests {
 
         assert!(key != resized);
         assert!(!key.rows_compatible_with(&resized));
+
+        let scrolled = TerminalRenderCacheKey {
+            viewport_position: 1,
+            ..key.clone()
+        };
+        assert!(key == scrolled);
+        assert!(key.rows_compatible_with(&scrolled));
     }
 
     #[test]
