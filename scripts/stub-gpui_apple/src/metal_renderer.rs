@@ -116,6 +116,11 @@ pub struct MetalRenderer {
     /// real size change in `update_drawable_size` without relying on
     /// `layer.drawable_size()` before the first `setDrawableSize`.
     last_drawable_size: Option<(f64, f64)>,
+    /// Whether the stale drawable pools should be released before the next
+    /// frame requests a drawable. Releasing from `setFrameSize:` is unsafe:
+    /// AppKit invokes that method synchronously during live window resizing,
+    /// and an Objective-C callback cannot unwind a Rust panic.
+    release_drawables_on_next_draw: bool,
     is_apple_gpu: bool,
     is_unified_memory: bool,
     presents_with_transaction: bool,
@@ -177,7 +182,7 @@ impl MetalRenderer {
         // when no fresh drawable is available, so discarding the pending
         // ones costs no visible frames.
         // https://stackoverflow.com/questions/75798736/cametallayer-leaks-memory-during-resize
-        // (drawables are released on size change in `update_drawable_size`)
+        // (`update_drawable_size` schedules the release before the next draw)
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
@@ -351,6 +356,7 @@ impl MetalRenderer {
             device,
             layer: layer.clone(),
             last_drawable_size: None,
+            release_drawables_on_next_draw: false,
             presents_with_transaction: false,
             is_apple_gpu,
             is_unified_memory,
@@ -408,25 +414,17 @@ impl MetalRenderer {
             .map(|(w, h)| w != ns_size.width || h != ns_size.height)
             .unwrap_or(true);
         if let Some(layer) = &self.layer {
-            // `releaseDrawables` is a no-op when the size does not change;
-            // on a change it discards the current pool, which also drops the
-            // retained pools of earlier sizes. See the comment in `new()`.
             // Re-assert the drawable cap on every real change: it is applied
             // lazily and can be lost after the first size change (the base
             // build grew a 6+-drawable pool at the smaller size after 24
             // resize cycles).
             layer.set_maximum_drawable_count(3);
-            if changed {
-                unsafe {
-                    // Skip the release on the very first size application:
-                    // AppKit fires viewDidChangeBackingProperties during
-                    // window creation, before the first render, and calling
-                    // releaseDrawables: at that point can abort inside the
-                    // AppKit callback (which cannot unwind Rust panics).
-                    if self.last_drawable_size.is_some() {
-                        let _: () = msg_send![layer.as_ref(), releaseDrawables];
-                    }
-                }
+            // AppKit may call this method from `setFrameSize:` while it is
+            // synchronously processing a live resize. Defer the Objective-C
+            // release until `draw`, after the size has been applied and just
+            // before the next drawable is requested.
+            if changed && self.last_drawable_size.is_some() {
+                self.release_drawables_on_next_draw = true;
             }
             unsafe {
                 let _: () = msg_send![
@@ -503,6 +501,12 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
+        if self.release_drawables_on_next_draw {
+            unsafe {
+                let _: () = msg_send![layer.as_ref(), releaseDrawables];
+            }
+            self.release_drawables_on_next_draw = false;
+        }
         let drawable = if let Some(drawable) = layer.next_drawable() {
             drawable
         } else {
