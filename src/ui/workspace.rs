@@ -184,6 +184,7 @@ struct SidebarDrag {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SidebarDropPreview {
     Connection {
+        connection_id: ConnectionId,
         y: f32,
         index: usize,
     },
@@ -191,18 +192,31 @@ enum SidebarDropPreview {
         connection_id: ConnectionId,
         y: f32,
         index: usize,
+        left: f32,
+        right: f32,
     },
     Agent {
         connection_id: ConnectionId,
         y: f32,
         target_workspace_id: WorkspaceId,
+        left: f32,
+        right: f32,
+    },
+    AgentOrder {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        y: f32,
+        index: usize,
+        left: f32,
+        right: f32,
     },
 }
 
 #[derive(Debug, Default, Clone)]
 struct SidebarGeometry {
-    connections: BTreeMap<ConnectionId, SidebarGroupGeometry>,
-    workspaces: BTreeMap<(ConnectionId, WorkspaceId), SidebarGroupGeometry>,
+    connections: BTreeMap<ConnectionId, SidebarRect>,
+    workspaces: BTreeMap<(ConnectionId, WorkspaceId), SidebarRect>,
+    agents: BTreeMap<(ConnectionId, WorkspaceId, PaneId), SidebarRect>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +225,11 @@ enum SidebarGeometryTarget {
     Workspace {
         connection_id: ConnectionId,
         workspace_id: WorkspaceId,
+    },
+    Agent {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
     },
 }
 
@@ -221,7 +240,9 @@ fn sidebar_geometry_canvas(
     canvas(
         |_bounds, _window, _cx| (),
         move |bounds, _, _window, _cx| {
-            let value = SidebarGroupGeometry {
+            let value = SidebarRect {
+                left: f32::from(bounds.left()),
+                right: f32::from(bounds.right()),
                 top: f32::from(bounds.top()),
                 bottom: f32::from(bounds.bottom()),
             };
@@ -239,6 +260,15 @@ fn sidebar_geometry_canvas(
                     geometry
                         .workspaces
                         .insert((connection_id, workspace_id), value);
+                }
+                SidebarGeometryTarget::Agent {
+                    connection_id,
+                    workspace_id,
+                    pane_id,
+                } => {
+                    geometry
+                        .agents
+                        .insert((connection_id, workspace_id, pane_id), value);
                 }
             }
         },
@@ -1158,6 +1188,10 @@ pub struct WorkspaceView {
     window_drag_start: Option<Point<gpui::Pixels>>,
     sidebar_drag: Option<SidebarDrag>,
     sidebar_drop_preview: Option<SidebarDropPreview>,
+    /// View-local ordering for Agent rows. The model exposes agents in pane
+    /// tree order, while the sidebar may present them in the user's chosen
+    /// order without changing the terminal layout itself.
+    sidebar_agent_order: BTreeMap<(ConnectionId, WorkspaceId), Vec<PaneId>>,
     sidebar_geometry: Arc<Mutex<SidebarGeometry>>,
     split_bounds: SplitBounds,
     split_drag: Option<SplitDrag>,
@@ -1287,6 +1321,7 @@ impl WorkspaceView {
             window_drag_start: None,
             sidebar_drag: None,
             sidebar_drop_preview: None,
+            sidebar_agent_order: BTreeMap::new(),
             sidebar_geometry: Arc::new(Mutex::new(SidebarGeometry::default())),
             split_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             split_drag: None,
@@ -1444,6 +1479,8 @@ impl WorkspaceView {
         self.collapsed_connections.remove(&connection_id);
         self.collapsed_workspaces
             .retain(|(id, _)| *id != connection_id);
+        self.sidebar_agent_order
+            .retain(|(id, _), _| *id != connection_id);
         if self.active_connection == connection_id
             && let Some(connection) = self.connections.first().cloned()
         {
@@ -1822,7 +1859,7 @@ impl WorkspaceView {
         &self,
         connection_id: ConnectionId,
         geometry: &SidebarGeometry,
-    ) -> Vec<(WorkspaceId, SidebarGroupGeometry)> {
+    ) -> Vec<(WorkspaceId, SidebarRect)> {
         let Some(connection) = self.connection_by_id(connection_id) else {
             return Vec::new();
         };
@@ -1853,10 +1890,114 @@ impl WorkspaceView {
             .collect()
     }
 
+    fn sidebar_agents_in_order<'a>(
+        &self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        agents: &[&'a AgentDump],
+    ) -> Vec<&'a AgentDump> {
+        let available = agents.iter().map(|agent| agent.pane_id).collect::<Vec<_>>();
+        let order = self
+            .sidebar_agent_order
+            .get(&(connection_id, workspace_id))
+            .map(Vec::as_slice);
+        sidebar_ordered_pane_ids(&available, order)
+            .into_iter()
+            .filter_map(|pane_id| {
+                agents
+                    .iter()
+                    .copied()
+                    .find(|agent| agent.pane_id == pane_id)
+            })
+            .collect()
+    }
+
+    fn sidebar_agent_targets(
+        &self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        geometry: &SidebarGeometry,
+    ) -> Vec<(PaneId, SidebarRect)> {
+        let Some(connection) = self.connection_by_id(connection_id) else {
+            return Vec::new();
+        };
+        let agents = connection
+            .snapshot
+            .agents
+            .iter()
+            .filter(|agent| agent.workspace_id == workspace_id)
+            .collect::<Vec<_>>();
+        self.sidebar_agents_in_order(connection_id, workspace_id, &agents)
+            .into_iter()
+            .filter_map(|agent| {
+                geometry
+                    .agents
+                    .get(&(connection_id, workspace_id, agent.pane_id))
+                    .copied()
+                    .map(|bounds| (agent.pane_id, bounds))
+            })
+            .collect()
+    }
+
+    fn reorder_sidebar_agent(
+        &mut self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+        index: usize,
+    ) -> bool {
+        let pane_ids = {
+            let Some(connection) = self.connection_by_id(connection_id) else {
+                return false;
+            };
+            let agents = connection
+                .snapshot
+                .agents
+                .iter()
+                .filter(|agent| agent.workspace_id == workspace_id)
+                .collect::<Vec<_>>();
+            self.sidebar_agents_in_order(connection_id, workspace_id, &agents)
+                .into_iter()
+                .map(|agent| agent.pane_id)
+                .collect::<Vec<_>>()
+        };
+        let Some(source_index) = pane_ids.iter().position(|id| *id == pane_id) else {
+            return false;
+        };
+        if pane_ids.len() < 2 {
+            return false;
+        }
+        let final_index = index.min(pane_ids.len() - 1);
+        if final_index == source_index {
+            return false;
+        }
+        let mut next = pane_ids;
+        let pane_id = next.remove(source_index);
+        next.insert(final_index, pane_id);
+        self.sidebar_agent_order
+            .insert((connection_id, workspace_id), next);
+        true
+    }
+
+    fn remember_sidebar_agent_in_workspace(
+        &mut self,
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+        pane_id: PaneId,
+    ) {
+        let order = self
+            .sidebar_agent_order
+            .entry((connection_id, workspace_id))
+            .or_default();
+        if !order.contains(&pane_id) {
+            order.push(pane_id);
+        }
+    }
+
     fn sidebar_remote_connection_targets(
         &self,
         geometry: &SidebarGeometry,
-    ) -> Vec<(ConnectionId, SidebarGroupGeometry)> {
+    ) -> Vec<(ConnectionId, SidebarRect)> {
         self.connections
             .iter()
             .filter(|connection| connection.kind == WorkspaceConnectionKind::Remote)
@@ -1965,7 +2106,7 @@ impl WorkspaceView {
                     let targets = self.sidebar_remote_connection_targets(&geometry);
                     let group_bounds = targets
                         .iter()
-                        .map(|(_, bounds)| *bounds)
+                        .map(|(_, bounds)| bounds.group())
                         .collect::<Vec<_>>();
                     sidebar_drop_boundary(
                         y,
@@ -1975,13 +2116,20 @@ impl WorkspaceView {
                         SIDEBAR_DROP_TOLERANCE_PX,
                     )
                     .and_then(|(boundary, line_y)| {
+                        let target_connection_id = targets
+                            .get(boundary)
+                            .or_else(|| targets.last())
+                            .map(|(connection_id, _)| *connection_id)?;
                         let source_index = targets
                             .iter()
                             .position(|(connection_id, _)| *connection_id == source_id)?;
                         let index =
                             sidebar_reorder_final_index(source_index, boundary, targets.len());
-                        (index != source_index)
-                            .then_some(SidebarDropPreview::Connection { y: line_y, index })
+                        (index != source_index).then_some(SidebarDropPreview::Connection {
+                            connection_id: target_connection_id,
+                            y: line_y,
+                            index,
+                        })
                     })
                 }
                 SidebarDragSource::Workspace {
@@ -1991,7 +2139,7 @@ impl WorkspaceView {
                     let targets = self.sidebar_workspace_targets(connection_id, &geometry);
                     let group_bounds = targets
                         .iter()
-                        .map(|(_, bounds)| *bounds)
+                        .map(|(_, bounds)| bounds.group())
                         .collect::<Vec<_>>();
                     sidebar_drop_boundary(
                         y,
@@ -2001,6 +2149,10 @@ impl WorkspaceView {
                         SIDEBAR_DROP_TOLERANCE_PX,
                     )
                     .and_then(|(boundary, line_y)| {
+                        let line_bounds = targets
+                            .get(boundary)
+                            .or_else(|| targets.last())
+                            .map(|(_, bounds)| *bounds)?;
                         let source_index = targets
                             .iter()
                             .position(|(workspace_id, _)| *workspace_id == source_id)?;
@@ -2010,24 +2162,71 @@ impl WorkspaceView {
                             connection_id,
                             y: line_y,
                             index,
+                            left: line_bounds.left,
+                            right: line_bounds.right,
                         })
                     })
                 }
                 SidebarDragSource::Agent {
                     connection_id,
                     workspace_id: source_workspace_id,
-                    ..
-                } => self
-                    .sidebar_workspace_targets(connection_id, &geometry)
-                    .into_iter()
-                    .find(|(workspace_id, bounds)| {
-                        *workspace_id != source_workspace_id && y >= bounds.top && y < bounds.bottom
+                    pane_id,
+                } => {
+                    let source_targets =
+                        self.sidebar_agent_targets(connection_id, source_workspace_id, &geometry);
+                    let source_group_bounds = source_targets
+                        .iter()
+                        .map(|(_, bounds)| bounds.group())
+                        .collect::<Vec<_>>();
+                    let order_preview = sidebar_drop_boundary(
+                        y,
+                        &source_group_bounds,
+                        f32::from(viewport.top()),
+                        f32::from(viewport.bottom()),
+                        SIDEBAR_DROP_TOLERANCE_PX,
+                    )
+                    .and_then(|(boundary, line_y)| {
+                        let source_index = source_targets
+                            .iter()
+                            .position(|(target_pane_id, _)| *target_pane_id == pane_id)?;
+                        let index = sidebar_reorder_final_index(
+                            source_index,
+                            boundary,
+                            source_targets.len(),
+                        );
+                        if index == source_index {
+                            return None;
+                        }
+                        let line_bounds = source_targets
+                            .get(boundary)
+                            .or_else(|| source_targets.last())
+                            .map(|(_, bounds)| *bounds)?;
+                        Some(SidebarDropPreview::AgentOrder {
+                            connection_id,
+                            workspace_id: source_workspace_id,
+                            y: line_y,
+                            index,
+                            left: line_bounds.left,
+                            right: line_bounds.right,
+                        })
+                    });
+                    order_preview.or_else(|| {
+                        self.sidebar_workspace_targets(connection_id, &geometry)
+                            .into_iter()
+                            .find(|(workspace_id, bounds)| {
+                                *workspace_id != source_workspace_id
+                                    && y >= bounds.top
+                                    && y < bounds.bottom
+                            })
+                            .map(|(target_workspace_id, bounds)| SidebarDropPreview::Agent {
+                                connection_id,
+                                y: bounds.bottom,
+                                target_workspace_id,
+                                left: bounds.left,
+                                right: bounds.right,
+                            })
                     })
-                    .map(|(target_workspace_id, bounds)| SidebarDropPreview::Agent {
-                        connection_id,
-                        y: bounds.bottom,
-                        target_workspace_id,
-                    }),
+                }
             }
         } else {
             None
@@ -2110,6 +2309,33 @@ impl WorkspaceView {
                     }),
                     cx,
                 );
+                self.remember_sidebar_agent_in_workspace(
+                    connection_id,
+                    target_workspace_id,
+                    pane_id,
+                );
+            }
+            (
+                SidebarDragSource::Agent {
+                    connection_id,
+                    pane_id,
+                    workspace_id,
+                },
+                Some(SidebarDropPreview::AgentOrder {
+                    connection_id: target_connection_id,
+                    workspace_id: target_workspace_id,
+                    index,
+                    ..
+                }),
+            ) if connection_id == target_connection_id
+                && workspace_id == target_workspace_id
+                && self
+                    .agent_by_pane_id_in(connection_id, pane_id)
+                    .is_some_and(|agent| agent.workspace_id == workspace_id) =>
+            {
+                if self.reorder_sidebar_agent(connection_id, workspace_id, pane_id, index) {
+                    cx.notify();
+                }
             }
             _ => {}
         }
@@ -5006,13 +5232,72 @@ impl WorkspaceView {
         group.into_any_element()
     }
 
+    fn render_sidebar_drop_indicator(
+        &self,
+        connection_id: ConnectionId,
+        card_bounds: Option<SidebarRect>,
+        theme: ThemeColors,
+    ) -> Option<AnyElement> {
+        let card_bounds = card_bounds?;
+        let (target_connection_id, y, left, right) = match self.sidebar_drop_preview? {
+            SidebarDropPreview::Connection {
+                connection_id, y, ..
+            } => (connection_id, y, card_bounds.left, card_bounds.right),
+            SidebarDropPreview::Workspace {
+                connection_id,
+                y,
+                left,
+                right,
+                ..
+            }
+            | SidebarDropPreview::Agent {
+                connection_id,
+                y,
+                left,
+                right,
+                ..
+            }
+            | SidebarDropPreview::AgentOrder {
+                connection_id,
+                y,
+                left,
+                right,
+                ..
+            } => (connection_id, y, left, right),
+        };
+        if target_connection_id != connection_id {
+            return None;
+        }
+        let width = (card_bounds.right - card_bounds.left).max(0.0);
+        let height = (card_bounds.bottom - card_bounds.top).max(0.0);
+        let left = (left - card_bounds.left).clamp(0.0, width);
+        let right = (card_bounds.right - right).clamp(0.0, width);
+        let top = (y - card_bounds.top).clamp(0.0, (height - 2.0).max(0.0));
+        Some(
+            canvas(
+                |_bounds, _, _| (),
+                move |bounds, _, window, _| {
+                    window.paint_quad(fill(bounds, rgb(theme.sidebar_drag_indicator)));
+                },
+            )
+            .absolute()
+            .left(px(left))
+            .right(px(right))
+            .top(px(top))
+            .h(px(2.0))
+            .into_any_element(),
+        )
+    }
+
     fn render_sidebar_connection(
         &self,
         connection: &WorkspaceConnection,
+        geometry: &SidebarGeometry,
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let connection_id = connection.id;
+        let card_bounds = geometry.connections.get(&connection_id).copied();
         let collapsed = self.collapsed_connections.contains(&connection_id);
         let selected = self.active_connection == connection_id;
         let title = connection.title.clone();
@@ -5134,6 +5419,11 @@ impl WorkspaceView {
         }
         if collapsed {
             // Folded host: only the title row.
+            if let Some(indicator) =
+                self.render_sidebar_drop_indicator(connection_id, card_bounds, theme)
+            {
+                card = card.child(indicator);
+            }
             return card.into_any_element();
         }
         let mut body = div()
@@ -5175,6 +5465,7 @@ impl WorkspaceView {
                 .iter()
                 .filter(|agent| agent.workspace_id == workspace.id)
                 .collect::<Vec<_>>();
+            let agents = self.sidebar_agents_in_order(connection_id, workspace.id, &agents);
             body = body.child(self.render_sidebar_workspace(
                 connection_id,
                 workspace,
@@ -5185,6 +5476,11 @@ impl WorkspaceView {
             ));
         }
         card = card.child(body);
+        if let Some(indicator) =
+            self.render_sidebar_drop_indicator(connection_id, card_bounds, theme)
+        {
+            card = card.child(indicator);
+        }
         card.into_any_element()
     }
 
@@ -5192,6 +5488,7 @@ impl WorkspaceView {
         // The sidebar is a floating surface alongside the terminal pane. Its
         // vertical inset is independently configurable; the window body
         // supplies the fixed outer breathing room shared with the panes.
+        let previous_geometry = self.sidebar_geometry_snapshot();
         if let Ok(mut geometry) = self.sidebar_geometry.lock() {
             *geometry = SidebarGeometry::default();
         }
@@ -5213,34 +5510,13 @@ impl WorkspaceView {
                         .flex_none(),
                 );
             }
-            list = list.child(self.render_sidebar_connection(connection, theme, cx));
+            list = list.child(self.render_sidebar_connection(
+                connection,
+                &previous_geometry,
+                theme,
+                cx,
+            ));
         }
-        let list_bounds = self.sidebar_scroll.bounds();
-        let indicator = self.sidebar_drop_preview.and_then(|preview| {
-            let y = match preview {
-                SidebarDropPreview::Connection { y, .. }
-                | SidebarDropPreview::Workspace { y, .. }
-                | SidebarDropPreview::Agent { y, .. } => y,
-            };
-            if list_bounds.size.height <= px(0.) {
-                return None;
-            }
-            let top = (y - f32::from(list_bounds.origin.y))
-                .clamp(0.0, (f32::from(list_bounds.size.height) - 2.0).max(0.0));
-            Some(
-                canvas(
-                    |_bounds, _, _| (),
-                    move |bounds, _, window, _| {
-                        window.paint_quad(fill(bounds, rgb(theme.sidebar_drag_indicator)));
-                    },
-                )
-                .absolute()
-                .left_0()
-                .right_0()
-                .top(px(top))
-                .h(px(2.0)),
-            )
-        });
         let content_width =
             (self.sidebar_width - self.config.ui.sidebar_resize_handle_width).max(0.);
         let label_width = content_width
@@ -5293,7 +5569,7 @@ impl WorkspaceView {
             .px(px(self.config.ui.sidebar_margin))
             .pb(px(self.config.ui.sidebar_margin))
             .child(connect_remote_button);
-        let mut sidebar_content = div()
+        let sidebar_content = div()
             .flex_1()
             .min_w(px(0.))
             .flex()
@@ -5306,9 +5582,6 @@ impl WorkspaceView {
             .mb(px(self.config.ui.sidebar_surface_margin))
             .child(list)
             .child(connect_remote);
-        if let Some(indicator) = indicator {
-            sidebar_content = sidebar_content.child(indicator);
-        }
         div()
             .w(px(self.sidebar_width))
             .h_full()
@@ -5410,6 +5683,7 @@ impl WorkspaceView {
             .items_center()
             .gap(px(6.))
             .flex()
+            .relative()
             .cursor_pointer()
             .overflow_hidden()
             .rounded(px(self.config.ui.sidebar_workspace_radius.min(8.)))
@@ -5419,6 +5693,14 @@ impl WorkspaceView {
                 theme.sidebar_agent_background
             }))
             .text_color(rgb(theme.ui_foreground))
+            .child(sidebar_geometry_canvas(
+                Arc::clone(&self.sidebar_geometry),
+                SidebarGeometryTarget::Agent {
+                    connection_id,
+                    workspace_id,
+                    pane_id,
+                },
+            ))
             .on_mouse_down(MouseButton::Left, agent_activate)
             .child(
                 div()
@@ -7184,6 +7466,43 @@ impl WorkspaceView {
         let tab_id = tab.id;
         let tree = tab.tree.clone();
         self.render_pane_tree(tab_id, &tree, window_active, metrics, theme, cx)
+    }
+}
+
+fn sidebar_ordered_pane_ids(available: &[PaneId], preferred: Option<&[PaneId]>) -> Vec<PaneId> {
+    let Some(preferred) = preferred else {
+        return available.to_vec();
+    };
+    let mut ordered = Vec::with_capacity(available.len());
+    let mut used = BTreeSet::new();
+    for pane_id in preferred {
+        if available.contains(pane_id) && used.insert(*pane_id) {
+            ordered.push(*pane_id);
+        }
+    }
+    ordered.extend(
+        available
+            .iter()
+            .copied()
+            .filter(|pane_id| !used.contains(pane_id)),
+    );
+    ordered
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SidebarRect {
+    left: f32,
+    right: f32,
+    top: f32,
+    bottom: f32,
+}
+
+impl SidebarRect {
+    fn group(self) -> SidebarGroupGeometry {
+        SidebarGroupGeometry {
+            top: self.top,
+            bottom: self.bottom,
+        }
     }
 }
 
@@ -12370,6 +12689,25 @@ mod tests {
         assert_eq!(
             sidebar_drop_boundary(125.0, &groups, 10.0, 112.0, 14.0),
             None
+        );
+    }
+
+    #[test]
+    fn sidebar_agent_order_keeps_saved_rows_and_appends_new_agents() {
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        let third = PaneId::new(3);
+        assert_eq!(
+            sidebar_ordered_pane_ids(&[first, second, third], Some(&[third, first])),
+            vec![third, first, second]
+        );
+        assert_eq!(
+            sidebar_ordered_pane_ids(&[first, second], Some(&[PaneId::new(99), second, second])),
+            vec![second, first]
+        );
+        assert_eq!(
+            sidebar_ordered_pane_ids(&[first, second], None),
+            vec![first, second]
         );
     }
 
