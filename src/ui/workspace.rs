@@ -162,8 +162,13 @@ enum ContextMenuTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarDragSource {
-    Workspace(WorkspaceId),
+    Connection(ConnectionId),
+    Workspace {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+    },
     Agent {
+        connection_id: ConnectionId,
         pane_id: PaneId,
         workspace_id: WorkspaceId,
     },
@@ -178,14 +183,69 @@ struct SidebarDrag {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SidebarDropPreview {
+    Connection {
+        y: f32,
+        index: usize,
+    },
     Workspace {
+        connection_id: ConnectionId,
         y: f32,
         index: usize,
     },
     Agent {
+        connection_id: ConnectionId,
         y: f32,
         target_workspace_id: WorkspaceId,
     },
+}
+
+#[derive(Debug, Default, Clone)]
+struct SidebarGeometry {
+    connections: BTreeMap<ConnectionId, SidebarGroupGeometry>,
+    workspaces: BTreeMap<(ConnectionId, WorkspaceId), SidebarGroupGeometry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidebarGeometryTarget {
+    Connection(ConnectionId),
+    Workspace {
+        connection_id: ConnectionId,
+        workspace_id: WorkspaceId,
+    },
+}
+
+fn sidebar_geometry_canvas(
+    geometry: Arc<Mutex<SidebarGeometry>>,
+    target: SidebarGeometryTarget,
+) -> AnyElement {
+    canvas(
+        |_bounds, _window, _cx| (),
+        move |bounds, _, _window, _cx| {
+            let value = SidebarGroupGeometry {
+                top: f32::from(bounds.top()),
+                bottom: f32::from(bounds.bottom()),
+            };
+            let Ok(mut geometry) = geometry.lock() else {
+                return;
+            };
+            match target {
+                SidebarGeometryTarget::Connection(connection_id) => {
+                    geometry.connections.insert(connection_id, value);
+                }
+                SidebarGeometryTarget::Workspace {
+                    connection_id,
+                    workspace_id,
+                } => {
+                    geometry
+                        .workspaces
+                        .insert((connection_id, workspace_id), value);
+                }
+            }
+        },
+    )
+    .absolute()
+    .inset_0()
+    .into_any_element()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1098,6 +1158,7 @@ pub struct WorkspaceView {
     window_drag_start: Option<Point<gpui::Pixels>>,
     sidebar_drag: Option<SidebarDrag>,
     sidebar_drop_preview: Option<SidebarDropPreview>,
+    sidebar_geometry: Arc<Mutex<SidebarGeometry>>,
     split_bounds: SplitBounds,
     split_drag: Option<SplitDrag>,
     titlebar_dragging: bool,
@@ -1226,6 +1287,7 @@ impl WorkspaceView {
             window_drag_start: None,
             sidebar_drag: None,
             sidebar_drop_preview: None,
+            sidebar_geometry: Arc::new(Mutex::new(SidebarGeometry::default())),
             split_bounds: Arc::new(Mutex::new(BTreeMap::new())),
             split_drag: None,
             titlebar_dragging: false,
@@ -1556,10 +1618,6 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    fn workspace_exists(&self, workspace_id: WorkspaceId) -> bool {
-        workspace_exists_in_snapshot(&self.snapshot, workspace_id)
-    }
-
     fn scroll_tab_bar(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         // Horizontal wheel/trackpad deltas are scrolled by the container's
         // built-in handler (single application; see render_tab_bar). This
@@ -1753,22 +1811,107 @@ impl WorkspaceView {
         self.split_drag = None;
     }
 
-    fn sidebar_group_bounds(&self) -> Vec<(WorkspaceId, SidebarGroupGeometry)> {
-        let offset = self.sidebar_scroll.offset();
-        self.workspace_dumps()
+    fn sidebar_geometry_snapshot(&self) -> SidebarGeometry {
+        self.sidebar_geometry
+            .lock()
+            .map(|geometry| geometry.clone())
+            .unwrap_or_default()
+    }
+
+    fn sidebar_workspace_targets(
+        &self,
+        connection_id: ConnectionId,
+        geometry: &SidebarGeometry,
+    ) -> Vec<(WorkspaceId, SidebarGroupGeometry)> {
+        let Some(connection) = self.connection_by_id(connection_id) else {
+            return Vec::new();
+        };
+        let workspace_ids = if connection.snapshot.workspaces.is_empty() {
+            connection
+                .snapshot
+                .workspace
+                .iter()
+                .map(|workspace| workspace.id)
+                .collect::<Vec<_>>()
+        } else {
+            connection
+                .snapshot
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.id)
+                .collect::<Vec<_>>()
+        };
+        workspace_ids
             .into_iter()
-            .enumerate()
-            .filter_map(|(index, workspace)| {
-                let bounds = self.sidebar_scroll.bounds_for_item(index)?;
-                Some((
-                    workspace.id,
-                    SidebarGroupGeometry {
-                        top: f32::from(bounds.top()) + f32::from(offset.y),
-                        bottom: f32::from(bounds.bottom()) + f32::from(offset.y),
-                    },
-                ))
+            .filter_map(|workspace_id| {
+                geometry
+                    .workspaces
+                    .get(&(connection_id, workspace_id))
+                    .copied()
+                    .map(|bounds| (workspace_id, bounds))
             })
             .collect()
+    }
+
+    fn sidebar_remote_connection_targets(
+        &self,
+        geometry: &SidebarGeometry,
+    ) -> Vec<(ConnectionId, SidebarGroupGeometry)> {
+        self.connections
+            .iter()
+            .filter(|connection| connection.kind == WorkspaceConnectionKind::Remote)
+            .filter_map(|connection| {
+                geometry
+                    .connections
+                    .get(&connection.id)
+                    .copied()
+                    .map(|bounds| (connection.id, bounds))
+            })
+            .collect()
+    }
+
+    fn reorder_remote_connection(&mut self, source_id: ConnectionId, index: usize) -> bool {
+        let remote_ids = self
+            .connections
+            .iter()
+            .filter(|connection| connection.kind == WorkspaceConnectionKind::Remote)
+            .map(|connection| connection.id)
+            .collect::<Vec<_>>();
+        let Some(source_index) = remote_ids.iter().position(|id| *id == source_id) else {
+            return false;
+        };
+        if remote_ids.len() < 2 {
+            return false;
+        }
+        let final_index = index.min(remote_ids.len() - 1);
+        if final_index == source_index {
+            return false;
+        }
+
+        let source_position = self
+            .connections
+            .iter()
+            .position(|connection| connection.id == source_id)
+            .expect("remote connection ID came from the connection list");
+        let connection = self.connections.remove(source_position);
+        let remaining_remote_ids = remote_ids
+            .into_iter()
+            .filter(|id| *id != source_id)
+            .collect::<Vec<_>>();
+        let insert_before = remaining_remote_ids.get(final_index).and_then(|target_id| {
+            self.connections
+                .iter()
+                .position(|connection| connection.id == *target_id)
+        });
+        let insert_position = insert_before.unwrap_or_else(|| {
+            self.connections
+                .iter()
+                .rposition(|connection| connection.kind == WorkspaceConnectionKind::Remote)
+                .map(|index| index + 1)
+                .unwrap_or(self.connections.len())
+        });
+        self.connections.insert(insert_position, connection);
+        true
     }
 
     fn update_sidebar_autoscroll(&self, position: Point<gpui::Pixels>) {
@@ -1809,16 +1952,21 @@ impl WorkspaceView {
             }
             drag.active = true;
             self.sidebar_drag = Some(drag);
+            self.sidebar_row_press = None;
         }
 
         self.update_sidebar_autoscroll(position);
         let viewport = self.sidebar_scroll.bounds();
-        let groups = self.sidebar_group_bounds();
+        let geometry = self.sidebar_geometry_snapshot();
         let y = f32::from(position.y);
         self.sidebar_drop_preview = if viewport.contains(&position) {
             match drag.source {
-                SidebarDragSource::Workspace(source_id) => {
-                    let group_bounds = groups.iter().map(|(_, bounds)| *bounds).collect::<Vec<_>>();
+                SidebarDragSource::Connection(source_id) => {
+                    let targets = self.sidebar_remote_connection_targets(&geometry);
+                    let group_bounds = targets
+                        .iter()
+                        .map(|(_, bounds)| *bounds)
+                        .collect::<Vec<_>>();
                     sidebar_drop_boundary(
                         y,
                         &group_bounds,
@@ -1827,29 +1975,58 @@ impl WorkspaceView {
                         SIDEBAR_DROP_TOLERANCE_PX,
                     )
                     .and_then(|(boundary, line_y)| {
-                        let source_index = groups
+                        let source_index = targets
+                            .iter()
+                            .position(|(connection_id, _)| *connection_id == source_id)?;
+                        let index =
+                            sidebar_reorder_final_index(source_index, boundary, targets.len());
+                        (index != source_index)
+                            .then_some(SidebarDropPreview::Connection { y: line_y, index })
+                    })
+                }
+                SidebarDragSource::Workspace {
+                    connection_id,
+                    workspace_id: source_id,
+                } => {
+                    let targets = self.sidebar_workspace_targets(connection_id, &geometry);
+                    let group_bounds = targets
+                        .iter()
+                        .map(|(_, bounds)| *bounds)
+                        .collect::<Vec<_>>();
+                    sidebar_drop_boundary(
+                        y,
+                        &group_bounds,
+                        f32::from(viewport.top()),
+                        f32::from(viewport.bottom()),
+                        SIDEBAR_DROP_TOLERANCE_PX,
+                    )
+                    .and_then(|(boundary, line_y)| {
+                        let source_index = targets
                             .iter()
                             .position(|(workspace_id, _)| *workspace_id == source_id)?;
                         let index =
-                            sidebar_reorder_final_index(source_index, boundary, groups.len());
-                        // Requirement: positions that would not change the
-                        // order (endpoints next to the dragged group, the
-                        // sole workspace) show no line and move nothing.
-                        (index != source_index)
-                            .then_some(SidebarDropPreview::Workspace { y: line_y, index })
+                            sidebar_reorder_final_index(source_index, boundary, targets.len());
+                        (index != source_index).then_some(SidebarDropPreview::Workspace {
+                            connection_id,
+                            y: line_y,
+                            index,
+                        })
                     })
                 }
                 SidebarDragSource::Agent {
+                    connection_id,
                     workspace_id: source_workspace_id,
                     ..
-                } => groups
-                    .iter()
+                } => self
+                    .sidebar_workspace_targets(connection_id, &geometry)
+                    .into_iter()
                     .find(|(workspace_id, bounds)| {
                         *workspace_id != source_workspace_id && y >= bounds.top && y < bounds.bottom
                     })
                     .map(|(target_workspace_id, bounds)| SidebarDropPreview::Agent {
+                        connection_id,
                         y: bounds.bottom,
-                        target_workspace_id: *target_workspace_id,
+                        target_workspace_id,
                     }),
             }
         } else {
@@ -1868,12 +2045,36 @@ impl WorkspaceView {
         if !drag.active {
             return;
         }
+        self.sidebar_row_press = None;
         match (drag.source, preview) {
             (
-                SidebarDragSource::Workspace(workspace_id),
-                Some(SidebarDropPreview::Workspace { index, .. }),
-            ) if self.workspace_exists(workspace_id) => {
-                self.dispatch(
+                SidebarDragSource::Connection(connection_id),
+                Some(SidebarDropPreview::Connection { index, .. }),
+            ) if self
+                .connection_by_id(connection_id)
+                .is_some_and(|connection| connection.kind == WorkspaceConnectionKind::Remote) =>
+            {
+                if self.reorder_remote_connection(connection_id, index) {
+                    cx.notify();
+                }
+            }
+            (
+                SidebarDragSource::Workspace {
+                    connection_id,
+                    workspace_id,
+                },
+                Some(SidebarDropPreview::Workspace {
+                    connection_id: target_connection_id,
+                    index,
+                    ..
+                }),
+            ) if connection_id == target_connection_id
+                && self
+                    .workspace_by_id_in(connection_id, workspace_id)
+                    .is_some() =>
+            {
+                self.dispatch_on(
+                    connection_id,
                     AppCommand::Workspace(WorkspaceCommand::Reorder {
                         workspace_id: Some(workspace_id),
                         index,
@@ -1883,20 +2084,26 @@ impl WorkspaceView {
             }
             (
                 SidebarDragSource::Agent {
+                    connection_id,
                     pane_id,
                     workspace_id: source_workspace_id,
                 },
                 Some(SidebarDropPreview::Agent {
+                    connection_id: target_connection_id,
                     target_workspace_id,
                     ..
                 }),
-            ) if source_workspace_id != target_workspace_id
-                && self.workspace_exists(target_workspace_id)
+            ) if connection_id == target_connection_id
+                && source_workspace_id != target_workspace_id
                 && self
-                    .agent_by_pane_id(pane_id)
+                    .workspace_by_id_in(connection_id, target_workspace_id)
+                    .is_some()
+                && self
+                    .agent_by_pane_id_in(connection_id, pane_id)
                     .is_some_and(|agent| agent.workspace_id == source_workspace_id) =>
             {
-                self.dispatch(
+                self.dispatch_on(
+                    connection_id,
                     AppCommand::Pane(PaneCommand::MoveToWorkspace {
                         pane_id: Some(pane_id),
                         workspace_id: target_workspace_id,
@@ -2047,13 +2254,6 @@ impl WorkspaceView {
         } else {
             self.snapshot.workspaces.iter().collect()
         }
-    }
-
-    fn agent_by_pane_id(&self, pane_id: PaneId) -> Option<&AgentDump> {
-        self.snapshot
-            .agents
-            .iter()
-            .find(|agent| agent.pane_id == pane_id)
     }
 
     fn pi_agent_running_for_terminal(&self, terminal_id: TerminalId) -> bool {
@@ -4696,7 +4896,13 @@ impl WorkspaceView {
                 return;
             }
             this.focus_handle.focus(window, cx);
-            this.begin_sidebar_drag(SidebarDragSource::Workspace(workspace_id), event.position);
+            this.begin_sidebar_drag(
+                SidebarDragSource::Workspace {
+                    connection_id,
+                    workspace_id,
+                },
+                event.position,
+            );
             cx.stop_propagation();
         });
         let disclosure = div()
@@ -4772,8 +4978,16 @@ impl WorkspaceView {
         let mut group = div()
             .id(format!("workspace-group-{connection_id}-{workspace_id}"))
             .w_full()
+            .relative()
             .flex()
             .flex_col()
+            .child(sidebar_geometry_canvas(
+                Arc::clone(&self.sidebar_geometry),
+                SidebarGeometryTarget::Workspace {
+                    connection_id,
+                    workspace_id,
+                },
+            ))
             .child(workspace_row);
         if !collapsed {
             let mut agent_rows = div()
@@ -4835,6 +5049,7 @@ impl WorkspaceView {
         // right-click menu toggles the fold.
         let connection_key = format!("c\u{1f}{}", connection_id);
         let connection_activate_key = connection_key.clone();
+        let connection_reorderable = connection.kind == WorkspaceConnectionKind::Remote;
         let header_activate = cx.listener(move |this, event: &MouseDownEvent, window, cx| {
             if !this
                 .begin_sidebar_row_activate(connection_activate_key.clone(), event.click_count >= 2)
@@ -4842,6 +5057,12 @@ impl WorkspaceView {
                 return;
             }
             this.focus_handle.focus(window, cx);
+            if connection_reorderable {
+                this.begin_sidebar_drag(
+                    SidebarDragSource::Connection(connection_id),
+                    event.position,
+                );
+            }
             cx.stop_propagation();
         });
         let mut header = div()
@@ -4891,6 +5112,7 @@ impl WorkspaceView {
         let mut card = div()
             .id(format!("connection-group-{connection_id}"))
             .w_full()
+            .relative()
             .flex()
             .flex_col()
             .overflow_hidden()
@@ -4902,6 +5124,10 @@ impl WorkspaceView {
             } else {
                 self.config.ui.sidebar_card_padding
             }))
+            .child(sidebar_geometry_canvas(
+                Arc::clone(&self.sidebar_geometry),
+                SidebarGeometryTarget::Connection(connection_id),
+            ))
             .child(header);
         if connection.status != WorkspaceConnectionStatus::Connected {
             card = card.opacity(0.58);
@@ -4966,6 +5192,9 @@ impl WorkspaceView {
         // The sidebar is a floating surface alongside the terminal pane. Its
         // vertical inset is independently configurable; the window body
         // supplies the fixed outer breathing room shared with the panes.
+        if let Ok(mut geometry) = self.sidebar_geometry.lock() {
+            *geometry = SidebarGeometry::default();
+        }
         let mut list = div()
             .id("workspace-list")
             .flex_1()
@@ -4989,7 +5218,9 @@ impl WorkspaceView {
         let list_bounds = self.sidebar_scroll.bounds();
         let indicator = self.sidebar_drop_preview.and_then(|preview| {
             let y = match preview {
-                SidebarDropPreview::Workspace { y, .. } | SidebarDropPreview::Agent { y, .. } => y,
+                SidebarDropPreview::Connection { y, .. }
+                | SidebarDropPreview::Workspace { y, .. }
+                | SidebarDropPreview::Agent { y, .. } => y,
             };
             if list_bounds.size.height <= px(0.) {
                 return None;
@@ -5157,6 +5388,7 @@ impl WorkspaceView {
             this.focus_handle.focus(window, cx);
             this.begin_sidebar_drag(
                 SidebarDragSource::Agent {
+                    connection_id,
                     pane_id,
                     workspace_id,
                 },
@@ -6961,9 +7193,9 @@ struct SidebarGroupGeometry {
     bottom: f32,
 }
 
-/// Finds the nearest visible boundary between workspace groups. The returned
+/// Finds the nearest visible boundary between sidebar groups. The returned
 /// index is an insertion slot in the original displayed order; callers map it
-/// to the command's after-removal index before dispatching.
+/// to the final after-removal index before applying the reorder.
 fn sidebar_drop_boundary(
     pointer_y: f32,
     groups: &[SidebarGroupGeometry],
@@ -7000,7 +7232,8 @@ fn sidebar_drop_boundary(
 }
 
 /// Maps an original-order insertion slot to the final index after removing
-/// the dragged workspace. The command dispatcher uses this convention.
+/// the dragged sidebar item. Both workspace commands and local connection
+/// sorting use this convention.
 fn sidebar_reorder_final_index(source_index: usize, boundary_index: usize, count: usize) -> usize {
     if count == 0 || source_index >= count {
         return 0;
@@ -7712,18 +7945,6 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                 if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
                     return;
                 }
-                // Complete a pending sidebar row activation before the
-                // terminal's own release handler runs. The sidebar rows have
-                // no hitboxes, so a release over a row is hit-tested against
-                // the terminal beneath the sidebar surface and would be
-                // consumed by `finish_terminal_selection` before the row's
-                // `on_mouse_up` ever fired.
-                if up_entity.update(cx, |view, cx| {
-                    view.finish_sidebar_row_release(event.position, cx)
-                }) {
-                    cx.stop_propagation();
-                    return;
-                }
                 let handled = up_entity.update(cx, |view, cx| {
                     view.window_drag_start = None;
                     if view.dragging_sidebar {
@@ -7731,7 +7952,22 @@ fn workspace_mouse_event_observer(entity: Entity<WorkspaceView>) -> AnyElement {
                         cx.notify();
                         true
                     } else if view.sidebar_drag.is_some() {
-                        view.finish_sidebar_drag(cx);
+                        let active = view.sidebar_drag.as_ref().is_some_and(|drag| drag.active);
+                        if active {
+                            // A real drag owns the release. The pending row
+                            // activation must not consume it first, or the
+                            // command below is never dispatched.
+                            view.finish_sidebar_drag(cx);
+                        } else {
+                            // A click still uses the same deferred activation
+                            // path as a double click, but an inactive drag
+                            // gesture must not leak into the next pointer move.
+                            view.sidebar_drag = None;
+                            view.sidebar_drop_preview = None;
+                            view.finish_sidebar_row_release(event.position, cx);
+                        }
+                        true
+                    } else if view.finish_sidebar_row_release(event.position, cx) {
                         true
                     } else if view.split_drag.is_some() {
                         view.finish_split_drag(cx);
@@ -11844,6 +12080,64 @@ mod tests {
 
         local_host.shutdown();
         remote_host.shutdown();
+    }
+
+    #[gpui::test]
+    fn remote_sidebar_reorder_keeps_local_connection_fixed(cx: &mut gpui::TestAppContext) {
+        let mut host = crate::app::ModelHost::start();
+        let client: Arc<dyn CommandTransport> = Arc::new(host.client());
+        let local_id = ConnectionId::new(1);
+        let first_remote_id = ConnectionId::new(2);
+        let second_remote_id = ConnectionId::new(3);
+        let snapshot = client.state_dump().unwrap();
+        let connections = vec![
+            WorkspaceConnection {
+                id: local_id,
+                title: "Local".to_owned(),
+                kind: WorkspaceConnectionKind::Local,
+                status: WorkspaceConnectionStatus::Connected,
+                client: client.clone(),
+                snapshot: snapshot.clone(),
+            },
+            WorkspaceConnection {
+                id: first_remote_id,
+                title: "first".to_owned(),
+                kind: WorkspaceConnectionKind::Remote,
+                status: WorkspaceConnectionStatus::Connected,
+                client: client.clone(),
+                snapshot: snapshot.clone(),
+            },
+            WorkspaceConnection {
+                id: second_remote_id,
+                title: "second".to_owned(),
+                kind: WorkspaceConnectionKind::Remote,
+                status: WorkspaceConnectionStatus::Connected,
+                client,
+                snapshot,
+            },
+        ];
+        let (view, cx) = cx.add_window_view(move |_, cx| {
+            WorkspaceView::new_with_connections(
+                None,
+                connections,
+                local_id,
+                cx.focus_handle(),
+                AppConfig::default(),
+            )
+        });
+
+        view.update_in(cx, |view, _, _| {
+            assert!(view.reorder_remote_connection(second_remote_id, 0));
+            assert_eq!(
+                view.connections
+                    .iter()
+                    .map(|connection| connection.id)
+                    .collect::<Vec<_>>(),
+                vec![local_id, second_remote_id, first_remote_id]
+            );
+            assert!(!view.reorder_remote_connection(local_id, 0));
+        });
+        host.shutdown();
     }
 
     #[gpui::test]
