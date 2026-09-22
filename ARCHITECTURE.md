@@ -1,80 +1,77 @@
 # Water 架构
 
-执行约定见 [AGENTS.md](AGENTS.md)。本文于 2026-09-11 对照代码、Cargo.toml 和构建脚本整理；描述当前实现与边界；具体检查结果随对应任务记录。
+本文描述当前实现的边界和入口；工作约定见 [AGENTS.md](AGENTS.md)，运行、测试和打包命令见 [docs/Documents.md](docs/Documents.md)。不要用旧的 Phase 叙述推断模块职责。
 
-## 从哪里开始
+## 入口地图
 
-| 工作 | 入口 |
-|---|---|
-| 应用状态、命令及完成等待 | [app/runtime.rs](src/app/runtime.rs)、[command/dispatcher.rs](src/command/dispatcher.rs)、[command/operation.rs](src/command/operation.rs) |
-| workspace/tab/pane 拓扑与身份 | [app/model.rs](src/app/model.rs)、[pane/model.rs](src/pane/model.rs)、[ids.rs](src/ids.rs) |
-| PTY、回放及订阅 | [terminal/worker.rs](src/terminal/worker.rs)、[terminal/model.rs](src/terminal/model.rs)、[terminal/replay.rs](src/terminal/replay.rs)、[terminal/stream.rs](src/terminal/stream.rs) |
-| 客户端终端模拟与窗口交互 | [terminal/emulator.rs](src/terminal/emulator.rs)、[ui/application.rs](src/ui/application.rs)、[ui/workspace.rs](src/ui/workspace.rs) |
-| 协议、CLI 与 GUI 自动化 | [control/protocol.rs](src/control/protocol.rs)、[control/server.rs](src/control/server.rs)、[control/client.rs](src/control/client.rs)、[ctl/](src/ctl/)（`water ctl`）、[ui/control.rs](src/ui/control.rs) |
-| 启动、配置、Agent 检测 | [main.rs](src/main.rs)、[server.rs](src/server.rs)、[config.rs](src/config.rs)、[agent/model.rs](src/agent/model.rs) |
-| 打包与 SSH 部署 | [build-macos-app.sh](scripts/build-macos-app.sh)、[build-embedded-servers.sh](scripts/build-embedded-servers.sh)、[build.rs](build.rs)、[remote.rs](src/remote.rs) |
+| 关注点 | 入口 |
+| --- | --- |
+| 应用模型、命令、operation、revision/event | [`src/app/`](src/app/)、[`src/command/`](src/command/)、[`src/event/mod.rs`](src/event/mod.rs) |
+| workspace/tab/pane 拓扑和 typed ID | [`src/workspace/`](src/workspace/)、[`src/pane/model.rs`](src/pane/model.rs)、[`src/ids.rs`](src/ids.rs) |
+| PTY、元数据、回放和终端流 | [`src/server.rs`](src/server.rs)、[`src/terminal/model.rs`](src/terminal/model.rs)、[`src/terminal/worker.rs`](src/terminal/worker.rs)、[`src/terminal/replay.rs`](src/terminal/replay.rs)、[`src/terminal/stream.rs`](src/terminal/stream.rs) |
+| 客户端模拟、滚动、选择和绘制 | [`src/terminal/emulator.rs`](src/terminal/emulator.rs)、[`src/ui/application.rs`](src/ui/application.rs)、[`src/ui/workspace.rs`](src/ui/workspace.rs) |
+| 控制协议、CLI 和 UI automation | [`src/control/`](src/control/)、[`src/ctl/mod.rs`](src/ctl/mod.rs)、[`src/ui/control.rs`](src/ui/control.rs)、[`src/automation/`](src/automation/) |
+| 配置、启动和构建身份 | [`src/config.rs`](src/config.rs)、[`src/main.rs`](src/main.rs)、[`build.rs`](build.rs)、[`src/lib.rs`](src/lib.rs) |
+| SSH 连接、远端 server 和 agent 检测 | [`src/remote.rs`](src/remote.rs)、[`src/agent/model.rs`](src/agent/model.rs)、[`src/control/protocol.rs`](src/control/protocol.rs) |
+
+## 运行时分层
+
+```text
+GUI / water ctl / scenario / remote client
+        │  对象所属 connection 的 CommandTransport
+        ▼
+CommandDispatcher → ApplicationModel
+        │
+        ├─ operation / state revision / bounded event history
+        └─ PTY 元数据、标题、agent 绑定和退出事件
+
+PTY worker → ordered Output / Resize / Exit
+          → bounded replay ring + live stream
+          → client emulator worker → immutable TerminalSnapshot → GPUI
+```
+
+`ApplicationModel` 只在线程内由 dispatcher 修改。control server/client、GUI 和 scenario 是 transport 适配层；它们不能通过共享全局模型绕过命令路径。持续终端输出不逐屏写入模型 snapshot，模型 snapshot 也不能替代终端流。
 
 ## 状态归属
 
-GUI 先连接已有 server；没有可用 server 时，根据配置启动 detached server 或进程内 embedded server。只有 detached/远端 server 可以独立于 GUI 存活，不能把所有启动模式都描述成独立进程。
+| 状态 | 所有者 | 备注 |
+| --- | --- | --- |
+| workspace、tab、pane tree、surface/session/terminal 元数据 | server 的 model thread | 通过 command、operation、revision/event 对外提供 |
+| PTY 子进程、原始字节、进程名、resize/exit | server PTY worker/registry | 不在 GPUI 主线程执行阻塞 I/O |
+| replay 边界、attach、live 订阅 | server `TerminalRegistry`/`ReplayRing` | 有界、按 sequence 衔接 |
+| Alacritty emulator、屏幕、scrollback、selection、viewport | 每个 connection 的 client worker/UI | 不等于应用模型变更 |
+| active window、焦点、拖拽预览、tab-strip 滚动 | GPUI client | 提交拓扑变化时才发送应用命令 |
+| host/workspace/agent 的显示排序与侧栏颜色 | workspace UI/config | 不能改变对象的 connection 归属 |
 
-| 状态 | 所有者 |
-|---|---|
-| 应用拓扑、terminal/session 元数据 | 模型线程中的 CommandDispatcher / ApplicationModel |
-| PTY I/O、子进程、原始输出事件 | 服务端 PTY worker |
-| 有界 replay、生命周期查询和订阅入口 | TerminalRegistry / ReplayRing，使用局部同步，不拥有应用模型 |
-| Alacritty Term/Processor、屏幕和 scrollback | 客户端每个已附着终端的 emulator worker |
-| 窗口选择、IME、拖拽预览、不可变终端投影 | GPUI 客户端及各 WorkspaceView |
+## 终端生命周期与内存边界
 
-外部命令与终端数据分成两条路径：
+- PTY 的 `Output`、`Resize`、`Exit` 共用有序事件序列。attach 返回有限 replay 和 live tail；客户端按 sequence 去重，不能在 replay/live 交接处丢事件或重复应用。
+- 服务端不维持长期运行的屏幕模拟器。需要 cells 的查询可以从有限 replay 临时重放；GUI 的长期 emulator、服务端 metadata snapshot 和查询投影是三个不同概念。
+- replay 原始字节、GUI scrollback grid 和 recent-output 查询各有边界。焦点终端可使用配置的滚动历史预算，失焦终端压缩到 inactive 上限，多个终端共享总字节上限；不能把服务端 replay 上限误当成客户端 scrollback 上限。
+- PTY reader 在背压、空唤醒、关闭和 detach 时必须可停止且有界；关闭 tab/pane 后应断开终端订阅，退出 terminal 的 snapshot/query 仍要能被有界 observer 读取。
 
-```text
-UI / water ctl / scenario
-  → 对象所属 connection 的 CommandTransport
-  → CommandDispatcher → ApplicationModel
-  → operation / event / revisioned metadata snapshot
+## Connection、远端和身份
 
-PTY → replay ring + 有序 Output / Resize / Exit
-  → 客户端 emulator worker → 不可变 TerminalSnapshot → GPUI
-```
+每个 Local/Remote connection 有自己的 control transport、model projection 和 client terminal state。SSH 使用 OpenSSH ControlMaster 与 Unix socket forward；首次连接按远端 OS/CPU 选择匹配的 embedded server payload，缓存和 socket 按版本、协议、namespace、destination 隔离。兼容 server 可复用，不兼容 server 不能被静默替换；transport 断开时侧栏保留 offline/dimmed host，重新连接不应丢失其服务端 workspace。
 
-模型线程还通过 dispatcher 应用 PTY 的进程元数据、标题和退出通知。模型变化才发布 metadata snapshot，持续输出不逐屏推送模型。快照邮箱只保留最新待消费版本；操作等待及终端输出/退出等待不阻塞 GPUI，终端等待由独立任务查询 registry。
+`src/ids.rs` 的 `WorkspaceId`、`TabId`、`PaneId`、`SurfaceId`、`TerminalId`、`SessionId`、`ConnectionId` 和 `OperationId` 是 typed newtype，新的身份使用完整 UUIDv4。JSON/CLI 使用标准 UUID 字符串，二进制 terminal frame 保留 16 字节；旧数值 fixture 只为兼容反序列化，不能成为新实现的身份策略。
 
-服务端不维护持续运行的屏幕模拟器。需要 cells 的查询调用方可通过 `snapshot_from_replay` 临时重放；这与 GUI 的长期 emulator、服务端 metadata snapshot 是三件不同的事。GUI 通过 worker command 执行本地滚动，键盘输入和终端应答仍通过所属连接送往 PTY。
+## UI、控制和 coding agent
 
-## 回放、连接与身份
+`water ctl` 已并入 `water` binary；协议当前为 v4，control message/attach replay 使用 JSON，live terminal event 使用带完整 ID 的二进制 frame，API signature 为 `water-control/v4`。`water ctl info`、`server info` 和 `connections list` 用于检查 client/server/build compatibility。UI automation 目前覆盖真实 keystroke、click、wheel、snapshot 和（启用且平台支持时的）window screenshot；它不提供通用 drag/pointer stream，测试不能绕过 control API 使用系统注入。
 
-终端事件有单调 sequence，Output、Resize、Exit 在同一流中。attach 返回有界历史和 live tail，重复事件按 sequence 跳过；回放阶段抑制终端查询等副作用，进入 live 后恢复。原始 replay 与客户端 scrollback 是不同存储，不能把旧服务端 grid 的限制直接当成现行内存预算。
+agent 检测依据 terminal 的前台进程和 argv，归一化为 `AgentKind`/session label，再沿同一 workspace/tab/pane/terminal 路径进入 model projection、事件和侧栏。当前范围是检测、绑定、状态、排序和侧栏交互，不把它扩展成新的结构化 Agent Surface。近期输出活跃只表示有未提交本地输入回显之外的输出，不等价于语义上的“等待输入”或“工具运行”。
 
-每个连接持有独立 transport 和模型投影，客户端终端状态也按连接管理。窗口选择及拖拽预览可以局部变化，提交应用状态时必须保留对象的连接归属。
+终端 UI 还负责 selection/copy、双击边界、OSC 8 hyperlink、本地/远端下载确认、scrollback viewport、tab/workspace 导航和非焦点 pane dimming；这些局部行为不能绕过命令/connection 边界改变服务端模型。
 
-`ids.rs` 中的实体、连接和操作 ID 是完整 UUID 的 typed newtype；IdAllocator 保留 UUIDv4 的全部 128 位。JSON 和 CLI 使用标准 UUID 字符串，二进制流保留全部 16 字节，避免数字精度丢失。反序列化仍接受旧场景的 u64 fixture，但新生成的 ID 不截取；不能以随机唯一性为由省略连接归属。PaneNode 表达分屏拓扑，pane 引用 surface，terminal 与逻辑 session 分别有自己的身份。
+## 配置与构建身份
 
-## 控制与 Agent 绑定
+`AppConfig` 由内置 defaults 与可选 override 合并而成；startup、server、shell、terminal、theme、UI、shortcut、feature 和容量限制必须同时在解析、Settings 读写、校验和运行时投影中保持一致。窗口退出、restart-required 配置和已有 PTY 的生命周期不能被静默混淆。
 
-本地使用 Unix socket；SSH 使用 OpenSSH 转发同一控制协议，后台完成部署及就绪等待。当前协议 v4 的控制消息和 attach replay 使用 JSON，live 终端事件使用二进制帧；ID 字段扩为 16 字节。请求携带 build_variant，命令、session.open 和 shutdown 均要求协议与 dev/release 变体匹配，旧协议需使用对应旧客户端。版本与编码定义集中在 control/protocol.rs。
-
-GUI 控制目前提供 keystroke、wheel、snapshot 和 screenshot 请求；screenshot 需要 `runtime-screenshot` feature。它们经 UI channel 到 GPUI 的交互处理路径，不意味着已经有通用 click/drag 自动化接口。窗口局部操作不必产生 AppCommand；涉及应用模型时才派发对应命令。
-
-Agent 检测基于前台进程名及 argv，由模型派生绑定，侧栏和状态查询消费同一 workspace/tab/pane/terminal 路径。退出时清除绑定；类型切换产生 started/stopped 事件，只有活动标志改变不产生该事件。PTY 活跃只说明排除未提交本地输入回显后的近期输出，不代表语义上的“工具运行”或“等待输入”。
-
-## 配置与构建
-
-AppConfig 合并默认值和可选 overrides。显式 `--config` / `WATER_CONFIG` 可选路径；macOS 默认先选原生 Application Support 路径，原生文件不存在时可选已有 XDG 风格配置。dev/release 各用自己的目录名，不能把原生路径写成唯一加载位置。
-
-Cargo.toml 的 GPUI 和 gpui_platform 固定到同一 revision；平台 patch 指向 stub-media 和 stub-gpui_apple。只有 dev/release 两种构建：dev 默认 opt-level 3、thin LTO、单 codegen unit，保留行表调试信息；release 同样优化。build.rs 将 Cargo 的 debug/release profile 归一为 dev/release 身份，不能根据优化级别推断身份。
-
-dev 的具体 socket、配置、Bundle ID、进程名和发布命令见 [AGENTS.md](AGENTS.md#构建与仓库)。隔离贯通以下路径：
-
-- macOS/Linux 打包和四种远端 server payload 使用同一变体；缓存放在 `target/embedded-servers/<variant>`，build.rs 检查变体标记后才嵌入。原生包从本次实际 build 目录取 GUI 和 server。
-- dev 默认配置与 zsh integration 使用 water-dev 目录。启动 sibling server 前通过 `--build-variant` 校验；服务端不会替换仍在监听的 socket。
-- SSH 转发/master 身份包含变体，远端 socket、缓存目录和日志也区分 water-dev/water。server.info 返回构建身份，远端二进制启动前同样校验变体；缺少 payload 时不回退启动任意已安装的 server。
-- macOS 保留独立 Water Dev.app / Water.app；Linux 归档区分 water-dev / water，并包含 server 和 CLI，打包不会清空另一个变体的 dist 产物。
-
-Linux → macOS 构建使用 scripts/zig-cc-mac、scripts/stub/macos-sdk 下的 framework stubs 和平台 patch。Metal shader 通过 scripts/build-metallib.sh 在 Mac 预编译，保存在 scripts/prebuilt；跨平台编译不能替代原生运行检查。
+项目只有 dev/release 两种运行身份。`build.rs`、GUI、dedicated server、embedded payload、远端缓存、socket、配置目录和 macOS bundle 必须使用同一变体；普通 `cargo build` 是优化后的 dev，不能从 opt-level 推断 release。GPUI revision、Linux cross linker、macOS framework stubs 和预编译 Metal shader 的具体命令见 [docs/Documents.md](docs/Documents.md)。
 
 ## 验证入口
 
-[automation/scenario.rs](src/automation/scenario.rs) 维护场景执行和等待；[tests/hotpath.rs](tests/hotpath.rs) 覆盖持续输出不触发 state dump / snapshot push，[tests/resize_stream.rs](tests/resize_stream.rs) 覆盖 resize 顺序及 detach/reattach。[tests/protocol.rs](tests/protocol.rs) 验证跨变体请求拒绝与 socket 所有权；[tests/build_variants.rs](tests/build_variants.rs) 用隔离的模拟编译器执行真实打包脚本，检查 dev/release GUI、server、payload 及产物共存。模拟打包不替代真实跨平台编译和 GUI 运行验证。
+模型和协议：[`tests/phase1.rs`](tests/phase1.rs)、[`tests/phase2.rs`](tests/phase2.rs)、[`tests/protocol.rs`](tests/protocol.rs)。终端可靠性：[`tests/phase3.rs`](tests/phase3.rs)、[`tests/terminal_reader.rs`](tests/terminal_reader.rs)、[`tests/terminal_detach.rs`](tests/terminal_detach.rs)、[`tests/resize_stream.rs`](tests/resize_stream.rs)、[`tests/hotpath.rs`](tests/hotpath.rs)。真实 control/GUI 路径：[`tests/ctl_smoke.rs`](tests/ctl_smoke.rs)、[`tests/scenarios/`](tests/scenarios/)。变体打包：[`tests/build_variants.rs`](tests/build_variants.rs)。
 
-遵守 AGENTS 的测试时限、控制接口和实例隔离要求。实现修改按风险运行相关测试和 GUI/打包验证，不继承历史“全通过”或“永久失败”结论。
+验证必须使用有界 operation/output/exit 条件、独立 socket/config 和 Water control API；历史“通过”或“预存失败”不自动豁免当前基线。
