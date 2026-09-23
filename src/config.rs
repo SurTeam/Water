@@ -15,7 +15,7 @@ use crate::terminal::{
     default_shell_program,
 };
 
-const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC Nerd Font";
+const DEFAULT_FONT_FAMILY: &str = "Sarasa Term SC";
 const DEFAULT_FONT_SIZE: f32 = 16.0;
 const DEFAULT_LINE_HEIGHT: f32 = 18.0;
 
@@ -23,47 +23,47 @@ pub const DEFAULT_WINDOW_WIDTH: f32 = 1100.0;
 pub const DEFAULT_WINDOW_HEIGHT: f32 = 760.0;
 pub const DEFAULT_WINDOW_MIN_WIDTH: f32 = 400.0;
 pub const DEFAULT_WINDOW_MIN_HEIGHT: f32 = 260.0;
-pub const DEFAULT_SIDEBAR_WIDTH: f32 = 170.0;
+pub const DEFAULT_SIDEBAR_WIDTH: f32 = 200.0;
 pub const DEFAULT_SIDEBAR_MIN_WIDTH: f32 = 170.0;
 pub const DEFAULT_SIDEBAR_MAX_WIDTH: f32 = 420.0;
 pub const DEFAULT_SIDEBAR_RESIZE_HANDLE_WIDTH: f32 = 6.0;
 pub const DEFAULT_TITLEBAR_HEIGHT: f32 = 36.0;
-pub const DEFAULT_TAB_HEIGHT: f32 = 28.0;
+pub const DEFAULT_TAB_HEIGHT: f32 = 30.0;
 pub const DEFAULT_SIDEBAR_HEADER_HEIGHT: f32 = 24.0;
-pub const DEFAULT_PANE_MARGIN: f32 = 4.0;
+pub const DEFAULT_PANE_MARGIN: f32 = 5.0;
 /// Inset around the sidebar and terminal surface group inside the window.
 /// This keeps the surfaces floating even when pane-to-pane margin is zero.
-pub const DEFAULT_WINDOW_PADDING: f32 = 8.0;
+pub const DEFAULT_WINDOW_PADDING: f32 = 10.0;
 /// Vertical margin around the independent floating sidebar surface.
 pub const DEFAULT_SIDEBAR_SURFACE_MARGIN: f32 = 0.0;
-pub const DEFAULT_PANE_PADDING: f32 = 8.0;
-pub const DEFAULT_PANE_CORNER_RADIUS: f32 = 12.0;
+pub const DEFAULT_PANE_PADDING: f32 = 10.0;
+pub const DEFAULT_PANE_CORNER_RADIUS: f32 = 14.0;
 pub const DEFAULT_PANE_DIVIDER_WIDTH: f32 = 2.0;
-pub const DEFAULT_SIDEBAR_MARGIN: f32 = 4.0;
-pub const DEFAULT_SIDEBAR_CARD_GAP: f32 = 6.0;
-pub const DEFAULT_SIDEBAR_CARD_PADDING: f32 = 6.0;
-pub const DEFAULT_SIDEBAR_ROW_PADDING: f32 = 10.0;
+pub const DEFAULT_SIDEBAR_MARGIN: f32 = 6.0;
+pub const DEFAULT_SIDEBAR_CARD_GAP: f32 = 8.0;
+pub const DEFAULT_SIDEBAR_CARD_PADDING: f32 = 8.0;
+pub const DEFAULT_SIDEBAR_ROW_PADDING: f32 = 12.0;
 /// Left padding inside workspace rows (the right side keeps `sidebar_row_padding`).
 pub const DEFAULT_SIDEBAR_WORKSPACE_ROW_PADDING: f32 = 10.0;
 /// Left padding inside agent rows (the right side keeps `sidebar_row_padding`).
 pub const DEFAULT_SIDEBAR_AGENT_ROW_PADDING: f32 = 10.0;
-pub const DEFAULT_SIDEBAR_AGENT_ROW_GAP: f32 = 1.0;
-pub const DEFAULT_SIDEBAR_AGENT_PADDING: f32 = 4.0;
+pub const DEFAULT_SIDEBAR_AGENT_ROW_GAP: f32 = 3.0;
+pub const DEFAULT_SIDEBAR_AGENT_PADDING: f32 = 6.0;
 pub const DEFAULT_SIDEBAR_AGENT_ROW_HEIGHT: f32 = 28.0;
 pub const DEFAULT_SIDEBAR_HOST_HEADER_HEIGHT: f32 = 28.0;
 /// Gap between the host title and the first workspace row inside the host card
 /// (the card gap is not used there).
-pub const DEFAULT_SIDEBAR_HOST_WORKSPACE_GAP: f32 = 6.0;
+pub const DEFAULT_SIDEBAR_HOST_WORKSPACE_GAP: f32 = 8.0;
 pub const DEFAULT_SIDEBAR_AGENT_ROW_WIDTH: f32 = 0.8;
-pub const DEFAULT_SIDEBAR_WORKSPACE_GAP: f32 = 2.0;
+pub const DEFAULT_SIDEBAR_WORKSPACE_GAP: f32 = 4.0;
 pub const DEFAULT_TITLEBAR_PADDING: f32 = 10.0;
 pub const DEFAULT_TITLEBAR_GAP: f32 = 8.0;
-pub const DEFAULT_TAB_GAP: f32 = 2.0;
-pub const DEFAULT_TAB_PADDING: f32 = 10.0;
+pub const DEFAULT_TAB_GAP: f32 = 5.0;
+pub const DEFAULT_TAB_PADDING: f32 = 12.0;
 /// Window corner radius applied to the client-side window shape.
-pub const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 12.0;
+pub const DEFAULT_WINDOW_CORNER_RADIUS: f32 = 16.0;
 /// Sidebar card radius; defaults to following the window corner radius.
-pub const DEFAULT_SIDEBAR_CARD_RADIUS: f32 = 12.0;
+pub const DEFAULT_SIDEBAR_CARD_RADIUS: f32 = 14.0;
 /// Workspace card radius inside the sidebar.
 pub const DEFAULT_SIDEBAR_WORKSPACE_RADIUS: f32 = 10.0;
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
@@ -865,8 +865,8 @@ pub struct ThemeConfig {
     pub agent_colors: BTreeMap<String, String>,
 }
 
-/// Water owns these built-in defaults; they mirror the dark Kitty palette
-/// without reading Kitty configuration at runtime.
+/// Water owns these built-in defaults; terminal colors follow the dark Kitty
+/// palette while the chrome uses layered graphite surfaces and a soft jade accent.
 impl Default for ThemeConfig {
     fn default() -> Self {
         Self {
@@ -879,26 +879,26 @@ impl Default for ThemeConfig {
             inverse_foreground: "#2c2c2c".to_owned(),
             inverse_background: "#e4e4e4".to_owned(),
             pane_background: "#2c2c2c".to_owned(),
-            active_pane_border: "#339966".to_owned(),
-            inactive_pane_border: "#555555".to_owned(),
-            accent: "#339966".to_owned(),
-            accent_foreground: "#000000".to_owned(),
-            chrome_background: "#000000".to_owned(),
-            tab_active_background: "#339966".to_owned(),
-            tab_inactive_background: "#161616".to_owned(),
-            tab_add_background: "#555555".to_owned(),
-            ui_foreground: "#e4e4e4".to_owned(),
-            sidebar_background: "#000000".to_owned(),
-            sidebar_connection_background: "#000000".to_owned(),
-            sidebar_connection_active_background: "#000000".to_owned(),
-            sidebar_connection_active_border: "#339966".to_owned(),
-            sidebar_connection_offline_color: "#ff5555".to_owned(),
-            sidebar_connection_offline_border: "#ff5555".to_owned(),
-            sidebar_workspace_background: "#000000".to_owned(),
-            sidebar_agent_background: "#000000".to_owned(),
-            sidebar_workspace_active_background: "#339966".to_owned(),
-            sidebar_agent_active_background: "#339966".to_owned(),
-            sidebar_drag_indicator_color: "#339966".to_owned(),
+            active_pane_border: "#72d6ab".to_owned(),
+            inactive_pane_border: "#42484a".to_owned(),
+            accent: "#72d6ab".to_owned(),
+            accent_foreground: "#111714".to_owned(),
+            chrome_background: "#121416".to_owned(),
+            tab_active_background: "#252b2a".to_owned(),
+            tab_inactive_background: "#191c1e".to_owned(),
+            tab_add_background: "#2b3032".to_owned(),
+            ui_foreground: "#e6eaea".to_owned(),
+            sidebar_background: "#171a1c".to_owned(),
+            sidebar_connection_background: "#202427".to_owned(),
+            sidebar_connection_active_background: "#222927".to_owned(),
+            sidebar_connection_active_border: "#41564c".to_owned(),
+            sidebar_connection_offline_color: "#ef7d83".to_owned(),
+            sidebar_connection_offline_border: "#70444a".to_owned(),
+            sidebar_workspace_background: "#1d2124".to_owned(),
+            sidebar_agent_background: "#1a1e20".to_owned(),
+            sidebar_workspace_active_background: "#29332f".to_owned(),
+            sidebar_agent_active_background: "#252f2b".to_owned(),
+            sidebar_drag_indicator_color: "#72d6ab".to_owned(),
             agent_colors: default_agent_colors(),
         }
     }
@@ -970,47 +970,47 @@ impl ThemeConfig {
             inverse_foreground: parse_color(&self.inverse_foreground, 0x2c2c2c),
             inverse_background: parse_color(&self.inverse_background, 0xe4e4e4),
             pane_background: parse_color(&self.pane_background, 0x2c2c2c),
-            active_pane_border: parse_color(&self.active_pane_border, 0x339966),
-            inactive_pane_border: parse_color(&self.inactive_pane_border, 0x555555),
-            accent: parse_color(&self.accent, 0x339966),
-            accent_foreground: parse_color(&self.accent_foreground, 0x000000),
-            chrome_background: parse_color(&self.chrome_background, 0x000000),
-            tab_active_background: parse_color(&self.tab_active_background, 0x339966),
-            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x161616),
-            tab_add_background: parse_color(&self.tab_add_background, 0x555555),
-            ui_foreground: parse_color(&self.ui_foreground, 0xe4e4e4),
-            sidebar_background: parse_color(&self.sidebar_background, 0x000000),
+            active_pane_border: parse_color(&self.active_pane_border, 0x72d6ab),
+            inactive_pane_border: parse_color(&self.inactive_pane_border, 0x42484a),
+            accent: parse_color(&self.accent, 0x72d6ab),
+            accent_foreground: parse_color(&self.accent_foreground, 0x111714),
+            chrome_background: parse_color(&self.chrome_background, 0x121416),
+            tab_active_background: parse_color(&self.tab_active_background, 0x252b2a),
+            tab_inactive_background: parse_color(&self.tab_inactive_background, 0x191c1e),
+            tab_add_background: parse_color(&self.tab_add_background, 0x2b3032),
+            ui_foreground: parse_color(&self.ui_foreground, 0xe6eaea),
+            sidebar_background: parse_color(&self.sidebar_background, 0x171a1c),
             sidebar_connection_background: parse_color(
                 &self.sidebar_connection_background,
-                0x000000,
+                0x202427,
             ),
             sidebar_connection_active_background: parse_color(
                 &self.sidebar_connection_active_background,
-                0x000000,
+                0x222927,
             ),
             sidebar_connection_active_border: parse_color(
                 &self.sidebar_connection_active_border,
-                0x339966,
+                0x41564c,
             ),
             sidebar_connection_offline: parse_color(
                 &self.sidebar_connection_offline_color,
-                0xff5555,
+                0xef7d83,
             ),
             sidebar_connection_offline_border: parse_color(
                 &self.sidebar_connection_offline_border,
-                0xff5555,
+                0x70444a,
             ),
-            sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x000000),
-            sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x000000),
+            sidebar_workspace_background: parse_color(&self.sidebar_workspace_background, 0x1d2124),
+            sidebar_agent_background: parse_color(&self.sidebar_agent_background, 0x1a1e20),
             sidebar_workspace_active_background: parse_color(
                 &self.sidebar_workspace_active_background,
-                0x339966,
+                0x29332f,
             ),
             sidebar_agent_active_background: parse_color(
                 &self.sidebar_agent_active_background,
-                0x339966,
+                0x252f2b,
             ),
-            sidebar_drag_indicator: parse_color(&self.sidebar_drag_indicator_color, 0x339966),
+            sidebar_drag_indicator: parse_color(&self.sidebar_drag_indicator_color, 0x72d6ab),
             agent_colors,
         }
     }
@@ -1588,6 +1588,7 @@ mod tests {
     #[test]
     fn missing_config_uses_defaults_and_invalid_colors_fall_back() {
         let config = AppConfig::default();
+        assert_eq!(config.terminal.font_family, DEFAULT_FONT_FAMILY);
         assert_eq!(config.terminal.scrollback_lines, DEFAULT_SCROLLBACK_LINES);
         assert_eq!(
             config.terminal.inactive_scrollback_lines,
@@ -1599,37 +1600,37 @@ mod tests {
         );
         assert_eq!(config.theme.colors().terminal_background, 0x2c2c2c);
         assert_eq!(config.theme.colors().terminal_foreground, 0xe4e4e4);
-        assert_eq!(config.theme.colors().active_pane_border, 0x339966);
-        assert_eq!(config.theme.colors().tab_active_background, 0x339966);
-        assert_eq!(config.theme.colors().sidebar_background, 0x000000);
+        assert_eq!(config.theme.colors().active_pane_border, 0x72d6ab);
+        assert_eq!(config.theme.colors().tab_active_background, 0x252b2a);
+        assert_eq!(config.theme.colors().sidebar_background, 0x171a1c);
         assert_eq!(
             config.theme.colors().sidebar_connection_background,
-            0x000000
+            0x202427
         );
         assert_eq!(
             config.theme.colors().sidebar_connection_active_background,
-            0x000000
+            0x222927
         );
         assert_eq!(
             config.theme.colors().sidebar_connection_active_border,
-            0x339966
+            0x41564c
         );
-        assert_eq!(config.theme.colors().sidebar_connection_offline, 0xff5555);
+        assert_eq!(config.theme.colors().sidebar_connection_offline, 0xef7d83);
         assert_eq!(
             config.theme.colors().sidebar_connection_offline_border,
-            0xff5555
+            0x70444a
         );
-        assert_eq!(config.theme.colors().sidebar_workspace_background, 0x000000);
-        assert_eq!(config.theme.colors().sidebar_agent_background, 0x000000);
+        assert_eq!(config.theme.colors().sidebar_workspace_background, 0x1d2124);
+        assert_eq!(config.theme.colors().sidebar_agent_background, 0x1a1e20);
         assert_eq!(
             config.theme.colors().sidebar_workspace_active_background,
-            0x339966
+            0x29332f
         );
         assert_eq!(
             config.theme.colors().sidebar_agent_active_background,
-            0x339966
+            0x252f2b
         );
-        assert_eq!(config.theme.colors().sidebar_drag_indicator, 0x339966);
+        assert_eq!(config.theme.colors().sidebar_drag_indicator, 0x72d6ab);
         assert_eq!(
             config.theme.colors().agent_color(AgentKind::ClaudeCode),
             0xd97757

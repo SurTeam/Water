@@ -4,7 +4,7 @@ Water is a native Rust workbench for people who run local shells, remote build e
 
 ![Water terminal workspace](assets/screenshots/water-terminal-content.png)
 
-The UI is deliberately quiet: a connection sidebar on the left, tabs above the active surface, and a terminal that stays attached to the server session that owns it.
+The UI is deliberately quiet: a connection sidebar on the left, tabs above the active surface, and a terminal that stays attached to the server session that owns it. Terminals use Sarasa Term SC by default, with a graphite-and-jade theme across the workspace.
 
 ![Water split panes](assets/screenshots/water-split.png)
 
@@ -17,7 +17,7 @@ The UI is deliberately quiet: a connection sidebar on the left, tabs above the a
 
 ## Start here
 
-The packaged product targets macOS first. The repository also supports Linux development builds; the current product screenshots above were captured from the X11 GUI during this documentation update.
+The packaged product targets macOS first. The repository also supports Linux development builds; the screenshots above show the default workspace appearance.
 
 ```sh
 cargo run --bin water

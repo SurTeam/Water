@@ -4998,8 +4998,8 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         // Selected and unselected tabs deliberately share the same floating
-        // shape. Their configured fills provide the small contrast needed to
-        // identify the active tab without creating a bridge into the pane.
+        // shape. The active tab also gets a short accent rail so selection is
+        // easy to scan without relying on a saturated fill.
         let background = if active {
             theme.tab_active_background
         } else {
@@ -5012,10 +5012,23 @@ impl WorkspaceView {
             .items_center()
             .flex()
             .flex_none()
+            .relative()
             .cursor_pointer()
             .bg(rgb(background))
             .text_color(rgb(theme.terminal_foreground))
             .child(SharedString::from(title));
+        if active {
+            tab = tab.child(
+                div()
+                    .absolute()
+                    .bottom_0()
+                    .left(px(12.))
+                    .right(px(12.))
+                    .h(px(2.))
+                    .rounded(px(1.))
+                    .bg(rgb(theme.accent)),
+            );
+        }
         if self.context_menu.is_none() {
             tab = tab.hover(|style| style.bg(rgb(theme.tab_add_background)));
         }
@@ -5369,7 +5382,15 @@ impl WorkspaceView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_size(px(9.))
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(5.))
+                    .bg(rgb(mix_rgb(
+                        connection_status_color,
+                        connection_background,
+                        0.16,
+                    )))
+                    .text_size(px(8.))
                     .text_color(rgb(connection_status_color))
                     .child(kind_label),
             )
