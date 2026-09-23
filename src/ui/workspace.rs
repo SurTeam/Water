@@ -8133,9 +8133,19 @@ fn shift_selection_for_viewport(
     else {
         return;
     };
-    let delta = next
+    let viewport_delta = next
         .viewport_position
         .saturating_sub(previous.viewport_position);
+    // Before a small scroll has reached the worker, the terminal is still at
+    // the live bottom (`viewport_position == 0`). New output can therefore
+    // push the visible rows upward without changing the semantic viewport
+    // coordinate. Keep the selection attached to those rows by accounting
+    // for the newly-created scrollback. Once the viewport is pinned, output
+    // grows behind it and must not move the selection.
+    let output_scroll_rows = (previous.viewport_position == 0)
+        .then(|| next.history_len.saturating_sub(previous.history_len))
+        .unwrap_or(0);
+    let delta = viewport_delta.saturating_sub(output_scroll_rows);
     shift_terminal_selection_rows(selection_state, delta);
 }
 
@@ -11935,6 +11945,33 @@ mod tests {
 
         assert_eq!(selection.anchor.position.row, 1);
         assert_eq!(selection.head.position.row, 2);
+    }
+
+    #[test]
+    fn output_growth_moves_selection_with_content_before_viewport_is_pinned() {
+        let terminal_id = TerminalId::new(1);
+        let mut previous = TerminalSnapshot::empty(terminal_id, TerminalSize::new(8, 4));
+        previous.history_len = 8;
+        previous.history_bottom = -8;
+        let mut next = previous.clone();
+        next.history_len = 9;
+        next.history_bottom = -9;
+        // A shallow scroll can still be visually local while the worker is
+        // at the live bottom. One output line moves the selected content up
+        // by one row even though the semantic viewport stays at zero.
+        next.viewport_position = previous.viewport_position;
+
+        let selection = TerminalSelection {
+            terminal_id,
+            anchor: endpoint(1, 2, TerminalSelectionSide::Left),
+            head: endpoint(2, 4, TerminalSelectionSide::Right),
+        };
+        let mut wrapped = Some(selection);
+        shift_selection_for_viewport(&mut wrapped, terminal_id, &previous, &next);
+        let selection = wrapped.expect("selection remains present");
+
+        assert_eq!(selection.anchor.position.row, 0);
+        assert_eq!(selection.head.position.row, 1);
     }
 
     #[test]
