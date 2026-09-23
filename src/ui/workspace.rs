@@ -6946,21 +6946,29 @@ impl WorkspaceView {
                 } else {
                     1.0
                 };
+                let inactive_dimmed = pane_opacity < 1.0;
                 // TerminalRenderElement paints the terminal background itself.
-                // Use the same base color for the inactive pane's padding so
-                // the dimming layer does not leave a visible halo around the
-                // terminal when pane_background is configured differently.
-                let pane_background = if self.config.ui.dim_inactive_panes && !active {
+                // The pane background is first composited over the workspace;
+                // the terminal's custom paint then inherits opacity over that
+                // already-dimmed surface. Match its base to the composed pane
+                // color so the second opacity pass does not create a seam.
+                let pane_background = if inactive_dimmed {
                     theme.terminal_background
                 } else {
                     theme.pane_background
                 };
-                // TerminalRenderElement is painted inside this div and
-                // inherits its opacity through GPUI's element-opacity stack.
-                // Keep the terminal and its padding on the same base color;
-                // pre-dimming the custom element would dim it twice and leave
-                // a visible mismatch around inactive panes.
-                let terminal_theme = theme;
+                let terminal_theme = if inactive_dimmed {
+                    ThemeColors {
+                        terminal_background: dimmed_inactive_terminal_background(
+                            theme.terminal_background,
+                            theme.chrome_background,
+                            pane_opacity,
+                        ),
+                        ..theme
+                    }
+                } else {
+                    theme
+                };
                 let label = match surface_kind {
                     crate::surface::SurfaceKind::Empty => "EmptySurface",
                     crate::surface::SurfaceKind::Terminal => "TerminalSurface",
@@ -10986,6 +10994,14 @@ fn mix_rgb(from: u32, to: u32, factor: f32) -> u32 {
     (blended(16) << 16) | (blended(8) << 8) | blended(0)
 }
 
+fn dimmed_inactive_terminal_background(
+    terminal_background: u32,
+    workspace_background: u32,
+    pane_opacity: f32,
+) -> u32 {
+    mix_rgb(terminal_background, workspace_background, pane_opacity)
+}
+
 /// Maximum per-channel distance between two packed RGB colors (0..=255).
 fn channel_distance(a: u32, b: u32) -> u32 {
     let channel = |value: u32, shift: u32| ((value >> shift) & 0xff) as i32;
@@ -12836,6 +12852,14 @@ mod tests {
         assert_eq!(channel_distance(0x102030, 0x102030), 0);
         assert_eq!(channel_distance(0x00ff00, 0x000000), 0xff);
         assert_eq!(channel_distance(0x0a141e, 0x000000), 0x1e);
+    }
+
+    #[test]
+    fn inactive_terminal_background_matches_dimmed_pane_padding() {
+        assert_eq!(
+            dimmed_inactive_terminal_background(0x2c2c2c, 0x121416, 0.66),
+            0x232425
+        );
     }
 
     #[test]
