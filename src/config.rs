@@ -847,6 +847,8 @@ pub struct ThemeConfig {
     pub sidebar_connection_active_background: String,
     /// Border color of the selected host (connection) card.
     pub sidebar_connection_active_border: String,
+    /// Border color of an unselected online host card.
+    pub sidebar_connection_inactive_border: String,
     /// Color used for an offline host's status label.
     pub sidebar_connection_offline_color: String,
     /// Border color used for an offline host's card.
@@ -892,6 +894,7 @@ impl Default for ThemeConfig {
             sidebar_connection_background: "#202427".to_owned(),
             sidebar_connection_active_background: "#222927".to_owned(),
             sidebar_connection_active_border: "#41564c".to_owned(),
+            sidebar_connection_inactive_border: "#42484a".to_owned(),
             sidebar_connection_offline_color: "#ef7d83".to_owned(),
             sidebar_connection_offline_border: "#70444a".to_owned(),
             sidebar_workspace_background: "#1d2124".to_owned(),
@@ -940,6 +943,7 @@ pub struct ThemeColors {
     pub sidebar_connection_background: u32,
     pub sidebar_connection_active_background: u32,
     pub sidebar_connection_active_border: u32,
+    pub sidebar_connection_inactive_border: u32,
     pub sidebar_connection_offline: u32,
     pub sidebar_connection_offline_border: u32,
     pub sidebar_workspace_background: u32,
@@ -991,6 +995,10 @@ impl ThemeConfig {
             sidebar_connection_active_border: parse_color(
                 &self.sidebar_connection_active_border,
                 0x41564c,
+            ),
+            sidebar_connection_inactive_border: parse_color(
+                &self.sidebar_connection_inactive_border,
+                0x42484a,
             ),
             sidebar_connection_offline: parse_color(
                 &self.sidebar_connection_offline_color,
@@ -1388,6 +1396,7 @@ pub struct ThemeConfigOverrides {
     pub sidebar_connection_background: Option<String>,
     pub sidebar_connection_active_background: Option<String>,
     pub sidebar_connection_active_border: Option<String>,
+    pub sidebar_connection_inactive_border: Option<String>,
     pub sidebar_connection_offline_color: Option<String>,
     pub sidebar_connection_offline_border: Option<String>,
     pub sidebar_workspace_background: Option<String>,
@@ -1429,6 +1438,7 @@ impl ThemeConfigOverrides {
         apply!(sidebar_connection_background);
         apply!(sidebar_connection_active_background);
         apply!(sidebar_connection_active_border);
+        apply!(sidebar_connection_inactive_border);
         apply!(sidebar_connection_offline_color);
         apply!(sidebar_connection_offline_border);
         apply!(sidebar_workspace_background);

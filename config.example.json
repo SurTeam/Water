@@ -39,6 +39,7 @@
     "sidebar_connection_background": "#202427",
     "sidebar_connection_active_background": "#222927",
     "sidebar_connection_active_border": "#41564c",
+    "sidebar_connection_inactive_border": "#42484a",
     "sidebar_connection_offline_color": "#ef7d83",
     "sidebar_connection_offline_border": "#70444a",
     "sidebar_workspace_background": "#1d2124",

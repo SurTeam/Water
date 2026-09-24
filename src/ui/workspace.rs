@@ -5333,7 +5333,7 @@ impl WorkspaceView {
         } else if selected {
             theme.sidebar_connection_active_border
         } else {
-            theme.inactive_pane_border
+            theme.sidebar_connection_inactive_border
         };
         let connection_status_color = if offline {
             theme.sidebar_connection_offline
@@ -12212,6 +12212,7 @@ mod tests {
                 sidebar_connection_background: 16,
                 sidebar_connection_active_background: 16,
                 sidebar_connection_active_border: 16,
+                sidebar_connection_inactive_border: 16,
                 sidebar_connection_offline: 16,
                 sidebar_connection_offline_border: 16,
                 sidebar_workspace_background: 17,

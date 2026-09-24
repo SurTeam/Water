@@ -117,6 +117,7 @@ enum SettingField {
     ThemeSidebarConnectionBackground,
     ThemeSidebarConnectionActiveBackground,
     ThemeSidebarConnectionActiveBorder,
+    ThemeSidebarConnectionInactiveBorder,
     ThemeSidebarConnectionOffline,
     ThemeSidebarConnectionOfflineBorder,
     ThemeSidebarWorkspaceBackground,
@@ -247,6 +248,9 @@ impl SettingField {
                 "theme-sidebar-connection-active-background"
             }
             Self::ThemeSidebarConnectionActiveBorder => "theme-sidebar-connection-active-border",
+            Self::ThemeSidebarConnectionInactiveBorder => {
+                "theme-sidebar-connection-inactive-border"
+            }
             Self::ThemeSidebarConnectionOffline => "theme-sidebar-connection-offline",
             Self::ThemeSidebarConnectionOfflineBorder => "theme-sidebar-connection-offline-border",
             Self::ThemeSidebarWorkspaceBackground => "theme-sidebar-workspace-background",
@@ -333,6 +337,7 @@ impl SettingField {
                 | Self::ThemeSidebarConnectionBackground
                 | Self::ThemeSidebarConnectionActiveBackground
                 | Self::ThemeSidebarConnectionActiveBorder
+                | Self::ThemeSidebarConnectionInactiveBorder
                 | Self::ThemeSidebarConnectionOffline
                 | Self::ThemeSidebarConnectionOfflineBorder
                 | Self::ThemeSidebarWorkspaceBackground
@@ -807,6 +812,9 @@ impl SettingsView {
                 .clone(),
             SettingField::ThemeSidebarConnectionActiveBorder => {
                 self.config.theme.sidebar_connection_active_border.clone()
+            }
+            SettingField::ThemeSidebarConnectionInactiveBorder => {
+                self.config.theme.sidebar_connection_inactive_border.clone()
             }
             SettingField::ThemeSidebarConnectionOffline => {
                 self.config.theme.sidebar_connection_offline_color.clone()
@@ -2110,83 +2118,103 @@ impl Render for SettingsView {
         ];
         content = content.child(self.render_section("界面布局", ui_rows, theme));
 
-        let theme_fields = [
-            (SettingField::ThemeTerminalBackground, "终端背景色"),
-            (SettingField::ThemeTerminalForeground, "终端前景色"),
-            (SettingField::ThemeSelectionBackground, "选择背景色"),
-            (SettingField::ThemeCursorForeground, "光标前景色"),
-            (SettingField::ThemeCursorBackground, "光标背景色"),
-            (SettingField::ThemeInactiveCursor, "非焦点光标色"),
-            (SettingField::ThemeInverseForeground, "反色前景色"),
-            (SettingField::ThemeInverseBackground, "反色背景色"),
-            (SettingField::ThemePaneBackground, "面板背景色"),
-            (SettingField::ThemeActivePaneBorder, "活动面板边框色"),
-            (SettingField::ThemeInactivePaneBorder, "非活动面板边框色"),
-            (SettingField::ThemeAccent, "强调色（按钮/焦点）"),
+        let theme_groups: [(&'static str, &'static [(SettingField, &'static str)]); 3] = [
             (
-                SettingField::ThemeAccentForeground,
-                "强调色前景（按钮文字）",
-            ),
-            (SettingField::ThemeChromeBackground, "窗口 chrome 背景色"),
-            (SettingField::ThemeTabActiveBackground, "活动标签背景色"),
-            (SettingField::ThemeTabInactiveBackground, "非活动标签背景色"),
-            (SettingField::ThemeTabAddBackground, "标签悬停/添加背景色"),
-            (SettingField::ThemeUiForeground, "界面前景色"),
-            (SettingField::ThemeSidebarBackground, "侧边栏背景色"),
-            (
-                SettingField::ThemeSidebarConnectionBackground,
-                "未选中主机背景色",
+                "终端显示",
+                &[
+                    (SettingField::ThemeTerminalBackground, "终端背景色"),
+                    (SettingField::ThemeTerminalForeground, "终端前景色"),
+                    (SettingField::ThemeSelectionBackground, "选择背景色"),
+                    (SettingField::ThemeCursorForeground, "光标前景色"),
+                    (SettingField::ThemeCursorBackground, "光标背景色"),
+                    (SettingField::ThemeInactiveCursor, "非焦点光标色"),
+                    (SettingField::ThemeInverseForeground, "反色前景色"),
+                    (SettingField::ThemeInverseBackground, "反色背景色"),
+                ],
             ),
             (
-                SettingField::ThemeSidebarConnectionActiveBackground,
-                "选中主机背景色",
+                "窗口与面板",
+                &[
+                    (SettingField::ThemePaneBackground, "面板背景色"),
+                    (SettingField::ThemeActivePaneBorder, "活动面板边框色"),
+                    (SettingField::ThemeInactivePaneBorder, "非活动面板边框色"),
+                    (SettingField::ThemeAccent, "强调色（按钮/焦点）"),
+                    (
+                        SettingField::ThemeAccentForeground,
+                        "强调色前景（按钮文字）",
+                    ),
+                    (SettingField::ThemeChromeBackground, "窗口 chrome 背景色"),
+                    (SettingField::ThemeTabActiveBackground, "活动标签背景色"),
+                    (SettingField::ThemeTabInactiveBackground, "非活动标签背景色"),
+                    (SettingField::ThemeTabAddBackground, "标签悬停/添加背景色"),
+                    (SettingField::ThemeUiForeground, "界面前景色"),
+                ],
             ),
             (
-                SettingField::ThemeSidebarConnectionActiveBorder,
-                "选中主机边框色",
-            ),
-            (
-                SettingField::ThemeSidebarConnectionOffline,
-                "OFFLINE 标识颜色",
-            ),
-            (
-                SettingField::ThemeSidebarConnectionOfflineBorder,
-                "离线主机边框色",
-            ),
-            (
-                SettingField::ThemeSidebarWorkspaceBackground,
-                "未选中工作区背景色",
-            ),
-            (
-                SettingField::ThemeSidebarAgentBackground,
-                "未选中 Agent 背景色",
-            ),
-            (
-                SettingField::ThemeSidebarWorkspaceActiveBackground,
-                "选中工作区背景色",
-            ),
-            (
-                SettingField::ThemeSidebarAgentActiveBackground,
-                "选中 Agent 背景色",
-            ),
-            (
-                SettingField::ThemeSidebarDragIndicator,
-                "侧边栏拖拽指示线颜色",
+                "侧边栏",
+                &[
+                    (SettingField::ThemeSidebarBackground, "侧边栏背景色"),
+                    (
+                        SettingField::ThemeSidebarConnectionBackground,
+                        "未选中主机背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarConnectionActiveBackground,
+                        "选中主机背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarConnectionActiveBorder,
+                        "选中主机边框色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarConnectionInactiveBorder,
+                        "未选中主机边框色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarConnectionOffline,
+                        "OFFLINE 标识颜色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarConnectionOfflineBorder,
+                        "离线主机边框色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarWorkspaceBackground,
+                        "未选中工作区背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarAgentBackground,
+                        "未选中 Agent 背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarWorkspaceActiveBackground,
+                        "选中工作区背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarAgentActiveBackground,
+                        "选中 Agent 背景色",
+                    ),
+                    (
+                        SettingField::ThemeSidebarDragIndicator,
+                        "侧边栏拖拽指示线颜色",
+                    ),
+                ],
             ),
         ];
-        let theme_rows = theme_fields
-            .into_iter()
-            .map(|(field, label)| {
-                self.render_setting(
+        let mut theme_rows = Vec::new();
+        for (title, fields) in theme_groups {
+            theme_rows.push(self.render_setting_group_header(title, theme));
+            for &(field, label) in fields {
+                theme_rows.push(self.render_setting(
                     field,
                     label,
                     "支持 #rgb、#rrggbb、0xrrggbb",
                     ApplyKind::Immediate,
                     theme,
                     cx,
-                )
-            })
-            .collect();
+                ));
+            }
+        }
         content = content.child(self.render_section("配色", theme_rows, theme));
 
         let agent_color_rows = AgentKind::all()
@@ -2480,6 +2508,9 @@ fn set_theme_field(
         SettingField::ThemeSidebarConnectionActiveBorder => {
             theme.sidebar_connection_active_border = value
         }
+        SettingField::ThemeSidebarConnectionInactiveBorder => {
+            theme.sidebar_connection_inactive_border = value
+        }
         SettingField::ThemeSidebarConnectionOffline => {
             theme.sidebar_connection_offline_color = value
         }
@@ -2574,6 +2605,9 @@ fn color_value(theme: &ThemeConfig, field: SettingField) -> Option<u32> {
             colors.sidebar_connection_active_background
         }
         SettingField::ThemeSidebarConnectionActiveBorder => colors.sidebar_connection_active_border,
+        SettingField::ThemeSidebarConnectionInactiveBorder => {
+            colors.sidebar_connection_inactive_border
+        }
         SettingField::ThemeSidebarConnectionOffline => colors.sidebar_connection_offline,
         SettingField::ThemeSidebarConnectionOfflineBorder => {
             colors.sidebar_connection_offline_border
