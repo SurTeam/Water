@@ -12,6 +12,7 @@
 //! There is no terminal emulator here. The GUI owns the Alacritty
 //! `Term`/`Processor` and replays these raw events into it.
 
+use std::collections::VecDeque;
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::PathBuf;
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -40,8 +41,11 @@ use super::snapshot::TerminalSize;
 use super::stream::TerminalStreamEvent;
 
 const PTY_READ_WRITE_KEY: usize = 0;
+const PTY_INPUT_WRITE_KEY: usize = 1;
 const READER_BLOCK_BYTES: usize = 128 * 1024;
 const MAX_COMMANDS_PER_TICK: usize = 64;
+const MAX_PTY_INPUT_BYTES_PER_TICK: usize = 256 * 1024;
+const PTY_INPUT_WRITE_RETRY_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_PENDING_METADATA_PROBES: usize = 64;
 /// One tick of the worker loop will coalesce at most this much PTY output
 /// before yielding to command processing.
@@ -286,10 +290,10 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
         }
     };
 
-    // The dedicated reader owns the PTY master. Keep the worker poller as a
-    // notification-only reactor: EventedPty::register would also add
-    // Alacritty's level-triggered SIGCHLD self-pipe, which can wake a Linux
-    // epoll waiter forever after the signal byte has already been consumed.
+    // The dedicated reader owns PTY reads. Keep the worker poller focused on
+    // notifications and on-demand writable readiness: EventedPty::register
+    // would also add Alacritty's level-triggered SIGCHLD self-pipe, which can
+    // wake a Linux epoll waiter forever after the signal byte is consumed.
     // The worker still calls next_child_event after reader/command wakes.
     let poller_for_wakeup = poller.clone();
     let worker_wakeup: WakeupCallback = Arc::new(move || {
@@ -356,6 +360,8 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     // Held-key repeats are merged into single PTY writes (see
     // INPUT_COALESCE_GAP). `pending_input` only ever holds input bytes.
     let mut pending_input: Vec<u8> = Vec::new();
+    let mut queued_pty_input = PendingPtyInput::default();
+    let mut pty_input_write_interest_registered = false;
     let mut pending_started = Instant::now();
     let mut last_input_at: Option<Instant> = None;
     let mut batch: Vec<u8> = Vec::with_capacity(READER_BLOCK_BYTES);
@@ -389,9 +395,17 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             };
             command_batch_full = command_index + 1 == MAX_COMMANDS_PER_TICK;
 
-            // Flush coalesced input before a non-input command so ordering
-            // with the PTY stays predictable.
-            let effect = match command {
+            // Finalize coalesced input before a non-input command so ordering
+            // with later PTY input stays predictable. The writer is
+            // nonblocking, so queued bytes remain pending until accepted.
+            if !matches!(
+                &command,
+                TerminalWorkerCommand::SendText(_) | TerminalWorkerCommand::SendBytes(_)
+            ) {
+                queue_coalesced_input(&mut pending_input, &mut queued_pty_input);
+            }
+
+            let effect: io::Result<()> = match command {
                 TerminalWorkerCommand::SendText(bytes)
                 | TerminalWorkerCommand::SendBytes(bytes) => {
                     user_input.record(&bytes, Instant::now());
@@ -402,18 +416,24 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                         });
                     last_input_at = Some(now);
                     if coalescing {
-                        if pending_input.is_empty() {
-                            pending_started = now;
+                        if bytes.len() < INPUT_COALESCE_MAX_BYTES {
+                            if pending_input.is_empty() {
+                                pending_started = now;
+                            }
+                            pending_input.extend_from_slice(&bytes);
+                            if pending_input.len() < INPUT_COALESCE_MAX_BYTES {
+                                continue;
+                            }
+                            queue_coalesced_input(&mut pending_input, &mut queued_pty_input);
+                        } else {
+                            queue_coalesced_input(&mut pending_input, &mut queued_pty_input);
+                            queued_pty_input.push(bytes);
                         }
-                        pending_input.extend_from_slice(&bytes);
-                        if pending_input.len() < INPUT_COALESCE_MAX_BYTES {
-                            continue;
-                        }
-                        write_pending_input(&mut pending_input, &mut pty)
                     } else {
-                        let _ = pty.writer().write_all(&bytes);
-                        Ok(())
+                        queue_coalesced_input(&mut pending_input, &mut queued_pty_input);
+                        queued_pty_input.push(bytes);
                     }
+                    Ok(())
                 }
                 TerminalWorkerCommand::Resize {
                     size: new_size,
@@ -521,6 +541,42 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             break 'worker;
         }
 
+        if !pending_input.is_empty() && pending_started.elapsed() >= INPUT_COALESCE_MAX_WAIT {
+            queue_coalesced_input(&mut pending_input, &mut queued_pty_input);
+        }
+
+        let mut input_write_budget_exhausted = false;
+        match queued_pty_input.flush(pty.writer(), MAX_PTY_INPUT_BYTES_PER_TICK) {
+            Ok(PendingPtyInputFlush::BudgetExhausted) => {
+                input_write_budget_exhausted = true;
+            }
+            Ok(PendingPtyInputFlush::Drained | PendingPtyInputFlush::WouldBlock) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: "water::pty",
+                    terminal_id = %terminal_id,
+                    ?error,
+                    "PTY input write failed; dropping queued input"
+                );
+                queued_pty_input.clear();
+                pending_input.clear();
+            }
+        }
+        if let Err(error) = update_pty_input_write_interest(
+            &pty,
+            &poller,
+            &mut pty_input_write_interest_registered,
+            !queued_pty_input.is_empty(),
+        ) {
+            tracing::warn!(
+                target: "water::pty",
+                terminal_id = %terminal_id,
+                ?error,
+                "could not monitor PTY input writability"
+            );
+            pty_input_write_interest_registered = false;
+        }
+
         {
             let mut events = Events::new();
             let metadata_timeout = PROCESS_METADATA_REFRESH_INTERVAL
@@ -536,6 +592,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
             if !pending_input.is_empty() && !command_batch_full {
                 poll_timeout = poll_timeout
                     .min(INPUT_COALESCE_MAX_WAIT.saturating_sub(pending_started.elapsed()));
+            }
+            if !queued_pty_input.is_empty() && !pty_input_write_interest_registered {
+                poll_timeout = poll_timeout.min(PTY_INPUT_WRITE_RETRY_INTERVAL);
+            }
+            if input_write_budget_exhausted {
+                poll_timeout = Duration::ZERO;
             }
             {
                 let mut had_output = false;
@@ -691,11 +753,6 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
                 );
             }
 
-            // Deadline flush for coalesced input.
-            if !pending_input.is_empty() && pending_started.elapsed() >= INPUT_COALESCE_MAX_WAIT {
-                let _ = write_pending_input(&mut pending_input, &mut pty);
-            }
-
             if let Some(code) = child_exited {
                 // Stop the reader first so its in-flight batch is flushed
                 // into the channel; the final drain below picks it up.
@@ -750,6 +807,12 @@ pub(crate) fn run(config: WorkerConfig, mut pty: Pty) {
     if let Some(reader_handle) = pty_reader_handle.take() {
         stop_pty_reader(&pty_reader_stopped, &pty_reader_shutdown, reader_handle);
     }
+    let _ = update_pty_input_write_interest(
+        &pty,
+        &poller,
+        &mut pty_input_write_interest_registered,
+        false,
+    );
     *wakeup_slot.lock().expect("terminal wakeup poisoned") = None;
 }
 
@@ -811,9 +874,133 @@ fn fanout(subscribers: &mut Vec<SyncSender<TerminalStreamEvent>>, event: &Termin
     subscribers.retain(|sender| sender.send(event.clone()).is_ok());
 }
 
-fn write_pending_input(pending: &mut Vec<u8>, pty: &mut Pty) -> io::Result<()> {
-    let bytes = std::mem::take(pending);
-    pty.writer().write_all(&bytes)
+fn queue_coalesced_input(pending: &mut Vec<u8>, queued: &mut PendingPtyInput) {
+    if !pending.is_empty() {
+        queued.push(std::mem::take(pending));
+    }
+}
+
+#[derive(Debug, Default)]
+struct PendingPtyInput {
+    chunks: VecDeque<Vec<u8>>,
+    front_offset: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPtyInputFlush {
+    Drained,
+    WouldBlock,
+    BudgetExhausted,
+}
+
+impl PendingPtyInput {
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    fn push(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            self.chunks.push_back(bytes);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.front_offset = 0;
+    }
+
+    fn flush<W: Write>(
+        &mut self,
+        writer: &mut W,
+        byte_budget: usize,
+    ) -> io::Result<PendingPtyInputFlush> {
+        let mut written = 0;
+        while written < byte_budget {
+            let Some(front) = self.chunks.front() else {
+                self.front_offset = 0;
+                return Ok(PendingPtyInputFlush::Drained);
+            };
+            let remaining = front.len().saturating_sub(self.front_offset);
+            if remaining == 0 {
+                self.chunks.pop_front();
+                self.front_offset = 0;
+                continue;
+            }
+            let write_len = remaining.min(byte_budget - written);
+            let result = {
+                let front = self.chunks.front().expect("pending input chunk");
+                writer.write(&front[self.front_offset..self.front_offset + write_len])
+            };
+            match result {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        ErrorKind::WriteZero,
+                        "PTY input writer accepted zero bytes",
+                    ));
+                }
+                Ok(bytes_written) => {
+                    written += bytes_written;
+                    self.front_offset += bytes_written;
+                    if self
+                        .chunks
+                        .front()
+                        .is_some_and(|front| self.front_offset == front.len())
+                    {
+                        self.chunks.pop_front();
+                        self.front_offset = 0;
+                    }
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    return Ok(PendingPtyInputFlush::WouldBlock);
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        if self.is_empty() {
+            Ok(PendingPtyInputFlush::Drained)
+        } else {
+            Ok(PendingPtyInputFlush::BudgetExhausted)
+        }
+    }
+}
+
+#[cfg(unix)]
+fn update_pty_input_write_interest(
+    pty: &Pty,
+    poller: &Poller,
+    registered: &mut bool,
+    pending: bool,
+) -> io::Result<()> {
+    if pending == *registered {
+        return Ok(());
+    }
+    if pending {
+        // PTY writers are nonblocking. An edge-triggered writable watch wakes
+        // the worker when a backpressured paste can resume without spinning.
+        unsafe {
+            poller.add_with_mode(
+                pty.file(),
+                PollEvent::writable(PTY_INPUT_WRITE_KEY),
+                PollMode::Edge,
+            )?;
+        }
+    } else {
+        poller.delete(pty.file())?;
+    }
+    *registered = pending;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn update_pty_input_write_interest(
+    _pty: &Pty,
+    _poller: &Poller,
+    registered: &mut bool,
+    _pending: bool,
+) -> io::Result<()> {
+    *registered = false;
+    Ok(())
 }
 
 fn emit_manager_event(
@@ -1901,5 +2088,82 @@ mod tests {
         assert_eq!(receiver.recv().unwrap().seq(), 1);
         handle.join().unwrap();
         assert_eq!(receiver.recv().unwrap().seq(), 2);
+    }
+
+    #[test]
+    fn large_pty_input_resumes_after_would_block_without_dropping_the_tail() {
+        struct PausingWriter {
+            written: Vec<u8>,
+            pause_after: usize,
+            ready: bool,
+        }
+
+        impl Write for PausingWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                let writable = if self.ready {
+                    bytes.len()
+                } else {
+                    self.pause_after.saturating_sub(self.written.len())
+                };
+                if writable == 0 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                let written = bytes.len().min(writable).min(16 * 1024);
+                self.written.extend_from_slice(&bytes[..written]);
+                Ok(written)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let body = vec![b'x'; 3 * 1024 * 1024];
+        let mut payload = Vec::with_capacity(body.len() + 12);
+        payload.extend_from_slice(b"\x1b[200~");
+        payload.extend_from_slice(&body);
+        payload.extend_from_slice(b"\x1b[201~");
+
+        let mut pending = PendingPtyInput::default();
+        pending.push(payload.clone());
+        let mut writer = PausingWriter {
+            written: Vec::new(),
+            pause_after: 18_944,
+            ready: false,
+        };
+
+        let mut paused = false;
+        for _ in 0..100 {
+            match pending
+                .flush(&mut writer, MAX_PTY_INPUT_BYTES_PER_TICK)
+                .unwrap()
+            {
+                PendingPtyInputFlush::BudgetExhausted => {}
+                PendingPtyInputFlush::WouldBlock => {
+                    paused = true;
+                    break;
+                }
+                PendingPtyInputFlush::Drained => break,
+            }
+        }
+        assert!(paused);
+        assert_eq!(writer.written.len(), writer.pause_after);
+        assert!(!pending.is_empty());
+
+        writer.ready = true;
+        for _ in 0..100 {
+            if pending.is_empty() {
+                break;
+            }
+            assert_ne!(
+                pending
+                    .flush(&mut writer, MAX_PTY_INPUT_BYTES_PER_TICK)
+                    .unwrap(),
+                PendingPtyInputFlush::WouldBlock
+            );
+        }
+
+        assert!(pending.is_empty());
+        assert_eq!(writer.written, payload);
     }
 }

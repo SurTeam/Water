@@ -42,6 +42,7 @@ use super::application::{
 };
 
 const DEFAULT_TERMINAL_CELL_WIDTH: f32 = 8.4;
+const MAX_TERMINAL_PASTE_CHUNK_BYTES: usize = 64 * 1024;
 /// Pixel step for a single click on the tab-strip overflow indicators.
 const TAB_SCROLL_NUDGE_PX: f32 = 160.0;
 /// Width of the sidebar disclosure column used by Workspace rows.
@@ -4556,16 +4557,22 @@ impl WorkspaceView {
             let Some(text) = terminal_clipboard_text(item) else {
                 return;
             };
-            let text = if bracketed_paste {
-                format!("\u{1b}[200~{text}\u{1b}[201~")
-            } else {
-                text
-            };
-            let _ = client.enqueue(AppCommand::Terminal(TerminalCommand::SendText {
-                terminal_id: Some(terminal_id),
-                pane_id: None,
-                text,
-            }));
+            let enqueued = enqueue_terminal_paste_chunks(&text, bracketed_paste, |text| {
+                client
+                    .enqueue(AppCommand::Terminal(TerminalCommand::SendText {
+                        terminal_id: Some(terminal_id),
+                        pane_id: None,
+                        text,
+                    }))
+                    .is_ok()
+            });
+            if !enqueued {
+                tracing::warn!(
+                    target: "water::ui",
+                    terminal_id = %terminal_id,
+                    "could not enqueue terminal paste"
+                );
+            }
         })
         .detach();
     }
@@ -4594,20 +4601,17 @@ impl WorkspaceView {
         text: String,
         bracketed_paste: bool,
     ) -> bool {
-        let text = if bracketed_paste {
-            format!("\u{1b}[200~{text}\u{1b}[201~")
-        } else {
-            text
-        };
-        self.enqueue_terminal_command_on(
-            connection_id,
-            terminal_id,
-            TerminalCommand::SendText {
-                terminal_id: Some(terminal_id),
-                pane_id: None,
-                text,
-            },
-        )
+        enqueue_terminal_paste_chunks(&text, bracketed_paste, |text| {
+            self.enqueue_terminal_command_on(
+                connection_id,
+                terminal_id,
+                TerminalCommand::SendText {
+                    terminal_id: Some(terminal_id),
+                    pane_id: None,
+                    text,
+                },
+            )
+        })
     }
 
     fn handle_terminal_file_drop(
@@ -8803,6 +8807,69 @@ fn terminal_clipboard_text(item: gpui::ClipboardItem) -> Option<String> {
         shell_quote_paths(paths.iter().map(std::path::PathBuf::as_path))
     } else {
         text
+    }
+}
+
+fn enqueue_terminal_paste_chunks(
+    text: &str,
+    bracketed_paste: bool,
+    mut enqueue: impl FnMut(String) -> bool,
+) -> bool {
+    if bracketed_paste && !enqueue("\u{1b}[200~".to_owned()) {
+        return false;
+    }
+
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = start
+            .saturating_add(MAX_TERMINAL_PASTE_CHUNK_BYTES)
+            .min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        debug_assert!(end > start);
+        if !enqueue(text[start..end].to_owned()) {
+            return false;
+        }
+        start = end;
+    }
+
+    !bracketed_paste || enqueue("\u{1b}[201~".to_owned())
+}
+
+#[cfg(test)]
+mod terminal_paste_chunk_tests {
+    use super::{MAX_TERMINAL_PASTE_CHUNK_BYTES, enqueue_terminal_paste_chunks};
+
+    #[test]
+    fn multi_megabyte_utf8_paste_is_chunked_losslessly_and_keeps_markers() {
+        let text = "x\0🌊\n".repeat(500_000);
+        assert!(text.len() > 3 * 1024 * 1024);
+
+        let mut chunks = Vec::new();
+        assert!(enqueue_terminal_paste_chunks(&text, true, |chunk| {
+            chunks.push(chunk);
+            true
+        }));
+
+        assert_eq!(chunks.first().map(String::as_str), Some("\u{1b}[200~"));
+        assert_eq!(chunks.last().map(String::as_str), Some("\u{1b}[201~"));
+        let body = &chunks[1..chunks.len() - 1];
+        assert!(body.len() > 1);
+        assert!(
+            body.iter()
+                .all(|chunk| chunk.len() <= MAX_TERMINAL_PASTE_CHUNK_BYTES)
+        );
+        assert!(
+            body.iter()
+                .all(|chunk| serde_json::to_vec(chunk).unwrap().len() < 512 * 1024)
+        );
+
+        let reconstructed = body.iter().fold(String::new(), |mut text, chunk| {
+            text.push_str(chunk);
+            text
+        });
+        assert_eq!(reconstructed, text);
     }
 }
 
