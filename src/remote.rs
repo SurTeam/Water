@@ -49,7 +49,8 @@ impl SshTunnel {
     pub fn connect(destination: &str) -> Result<Self, SshConnectionError> {
         let destination = validate_ssh_destination(destination)?;
         let remote_socket = remote_control_socket(&destination);
-        let (local_socket, control_socket) = connection_paths(&destination, &remote_socket);
+        let (local_socket, control_socket) =
+            connection_paths(&destination, &remote_socket, uuid::Uuid::new_v4());
         remove_known_socket(&local_socket, "remove stale local Water forward")?;
         ensure_control_master(&destination, &control_socket)?;
 
@@ -162,15 +163,6 @@ pub fn validate_ssh_destination(destination: &str) -> Result<String, SshConnecti
 }
 
 pub(crate) fn control_master_socket(destination: &str) -> PathBuf {
-    connection_paths(destination, &remote_control_socket(destination)).1
-}
-
-fn connection_paths(destination: &str, remote_socket: &Path) -> (PathBuf, PathBuf) {
-    let mut forward_hasher = std::collections::hash_map::DefaultHasher::new();
-    destination.hash(&mut forward_hasher);
-    remote_socket.hash(&mut forward_hasher);
-    crate::BUILD_VARIANT.hash(&mut forward_hasher);
-    let forward_identity = forward_hasher.finish();
     let mut master_hasher = std::collections::hash_map::DefaultHasher::new();
     destination.hash(&mut master_hasher);
     crate::BUILD_VARIANT.hash(&mut master_hasher);
@@ -179,11 +171,29 @@ fn connection_paths(destination: &str, remote_socket: &Path) -> (PathBuf, PathBu
     let user = unsafe { libc::geteuid() };
     #[cfg(not(unix))]
     let user = 0_u32;
+    PathBuf::from(format!("/tmp/water-ssh-{user}-{master_identity:016x}.ctl"))
+}
+
+fn connection_paths(
+    destination: &str,
+    remote_socket: &Path,
+    tunnel_id: uuid::Uuid,
+) -> (PathBuf, PathBuf) {
+    let mut forward_hasher = std::collections::hash_map::DefaultHasher::new();
+    destination.hash(&mut forward_hasher);
+    remote_socket.hash(&mut forward_hasher);
+    crate::BUILD_VARIANT.hash(&mut forward_hasher);
+    let forward_identity = forward_hasher.finish();
+    #[cfg(unix)]
+    let user = unsafe { libc::geteuid() };
+    #[cfg(not(unix))]
+    let user = 0_u32;
     (
         PathBuf::from(format!(
-            "/tmp/water-ssh-{user}-{forward_identity:016x}.sock"
+            "/tmp/water-ssh-{user}-{forward_identity:016x}-{}.sock",
+            tunnel_id.simple()
         )),
-        PathBuf::from(format!("/tmp/water-ssh-{user}-{master_identity:016x}.ctl")),
+        control_master_socket(destination),
     )
 }
 
@@ -529,14 +539,21 @@ mod tests {
     }
 
     #[test]
-    fn connection_paths_are_short_stable_and_destination_specific() {
+    fn connection_paths_isolate_forwards_and_reuse_the_control_master() {
         let remote = Path::new("/tmp/water.sock");
-        let first = connection_paths("alpha", remote);
-        assert_eq!(first, connection_paths("alpha", remote));
-        assert_ne!(first, connection_paths("beta", remote));
+        let first_id = uuid::Uuid::from_u128(1);
+        let second_id = uuid::Uuid::from_u128(2);
+        let first = connection_paths("alpha", remote, first_id);
+        assert_eq!(first, connection_paths("alpha", remote, first_id));
+        let second = connection_paths("alpha", remote, second_id);
+        assert_ne!(first.0, second.0);
+        assert_eq!(first.1, second.1);
+
+        let other_destination = connection_paths("beta", remote, first_id);
+        assert_ne!(first, other_destination);
         assert_eq!(
             first.1,
-            connection_paths("alpha", Path::new("/tmp/another.sock")).1
+            connection_paths("alpha", Path::new("/tmp/another.sock"), second_id).1
         );
         assert!(first.0.as_os_str().len() < 100);
         assert!(first.1.as_os_str().len() < 100);
