@@ -62,6 +62,7 @@ enum SettingField {
     SidebarShowAgentCount,
     DimInactivePanes,
     TabBarVerticalWheelScroll,
+    WorkspaceNavigationAcrossHosts,
     SidebarWidth,
     SidebarMinWidth,
     SidebarMaxWidth,
@@ -191,6 +192,7 @@ impl SettingField {
             Self::SidebarShowAgentCount => "sidebar-show-agent-count",
             Self::DimInactivePanes => "dim-inactive-panes",
             Self::TabBarVerticalWheelScroll => "tab-bar-vertical-wheel-scroll",
+            Self::WorkspaceNavigationAcrossHosts => "workspace-navigation-across-hosts",
             Self::SidebarWidth => "sidebar-width",
             Self::SidebarMinWidth => "sidebar-min-width",
             Self::SidebarMaxWidth => "sidebar-max-width",
@@ -309,6 +311,7 @@ impl SettingField {
                 | Self::SidebarShowAgentCount
                 | Self::DimInactivePanes
                 | Self::TabBarVerticalWheelScroll
+                | Self::WorkspaceNavigationAcrossHosts
         )
     }
 
@@ -480,6 +483,10 @@ impl SettingsView {
             SettingField::TabBarVerticalWheelScroll => {
                 self.config.ui.tab_bar_vertical_wheel_scroll =
                     !self.config.ui.tab_bar_vertical_wheel_scroll
+            }
+            SettingField::WorkspaceNavigationAcrossHosts => {
+                self.config.ui.workspace_navigation_across_hosts =
+                    !self.config.ui.workspace_navigation_across_hosts
             }
             _ => return,
         }
@@ -680,6 +687,9 @@ impl SettingsView {
                 .unwrap_or_default(),
             SettingField::InitialWorkspace => self.config.startup.initial_workspace.to_string(),
             SettingField::InitialTerminal => self.config.startup.initial_terminal.to_string(),
+            SettingField::WorkspaceNavigationAcrossHosts => {
+                self.config.ui.workspace_navigation_across_hosts.to_string()
+            }
             SettingField::WindowWidth => format_float(self.config.startup.window_width),
             SettingField::WindowHeight => format_float(self.config.startup.window_height),
             SettingField::WindowMinWidth => format_float(self.config.startup.window_min_width),
@@ -1080,7 +1090,8 @@ impl SettingsView {
             | SettingField::SidebarVisible
             | SettingField::SidebarShowAgentCount
             | SettingField::DimInactivePanes
-            | SettingField::TabBarVerticalWheelScroll => {
+            | SettingField::TabBarVerticalWheelScroll
+            | SettingField::WorkspaceNavigationAcrossHosts => {
                 return Err("布尔项请直接点击开关".to_owned());
             }
             _ => return Err("暂不支持编辑此设置".to_owned()),
@@ -1111,6 +1122,9 @@ impl SettingsView {
             SettingField::DimInactivePanes => on_off(self.config.ui.dim_inactive_panes),
             SettingField::TabBarVerticalWheelScroll => {
                 on_off(self.config.ui.tab_bar_vertical_wheel_scroll)
+            }
+            SettingField::WorkspaceNavigationAcrossHosts => {
+                on_off(self.config.ui.workspace_navigation_across_hosts)
             }
             SettingField::DefaultCwd => self
                 .config
@@ -1814,6 +1828,14 @@ impl Render for SettingsView {
                 SettingField::SidebarVisible,
                 "默认显示侧边栏",
                 "打开新窗口时侧边栏是否可见",
+                ApplyKind::Immediate,
+                theme,
+                cx,
+            ),
+            self.render_setting(
+                SettingField::WorkspaceNavigationAcrossHosts,
+                "跨已连接主机切换工作区",
+                "开启后，上一/下一工作区会按侧栏顺序遍历已连接主机；离线或仍在连接中的主机不参与",
                 ApplyKind::Immediate,
                 theme,
                 cx,

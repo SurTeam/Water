@@ -532,6 +532,8 @@ pub struct UiConfig {
     /// Whether a vertical mouse wheel over the tab strip scrolls it
     /// horizontally. Trackpad horizontal deltas always scroll the strip.
     pub tab_bar_vertical_wheel_scroll: bool,
+    /// Whether next/previous workspace navigation includes every connected host.
+    pub workspace_navigation_across_hosts: bool,
     pub sidebar_width: f32,
     pub sidebar_min_width: f32,
     pub sidebar_max_width: f32,
@@ -612,6 +614,7 @@ impl Default for UiConfig {
             sidebar_show_agent_count: true,
             dim_inactive_panes: true,
             tab_bar_vertical_wheel_scroll: false,
+            workspace_navigation_across_hosts: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_min_width: DEFAULT_SIDEBAR_MIN_WIDTH,
             sidebar_max_width: DEFAULT_SIDEBAR_MAX_WIDTH,
@@ -1228,6 +1231,9 @@ impl AppConfigOverrides {
             if let Some(value) = ui.tab_bar_vertical_wheel_scroll {
                 config.ui.tab_bar_vertical_wheel_scroll = value;
             }
+            if let Some(value) = ui.workspace_navigation_across_hosts {
+                config.ui.workspace_navigation_across_hosts = value;
+            }
             if let Some(value) = ui.sidebar_width {
                 config.ui.sidebar_width = value;
             }
@@ -1483,6 +1489,7 @@ pub struct UiConfigOverrides {
     pub sidebar_show_agent_count: Option<bool>,
     pub dim_inactive_panes: Option<bool>,
     pub tab_bar_vertical_wheel_scroll: Option<bool>,
+    pub workspace_navigation_across_hosts: Option<bool>,
     pub sidebar_width: Option<f32>,
     pub sidebar_min_width: Option<f32>,
     pub sidebar_max_width: Option<f32>,

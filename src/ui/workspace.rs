@@ -1732,28 +1732,59 @@ impl WorkspaceView {
     }
 
     fn activate_relative_workspace(&mut self, direction: isize, cx: &mut Context<Self>) {
-        let workspaces = self.workspace_dumps();
-        if workspaces.is_empty() {
+        let workspace_targets: Vec<_> = if self.config.ui.workspace_navigation_across_hosts {
+            self.connections
+                .iter()
+                .filter(|connection| connection.status == WorkspaceConnectionStatus::Connected)
+                .flat_map(|connection| {
+                    Self::workspace_dumps_from_snapshot(&connection.snapshot)
+                        .into_iter()
+                        .map(move |workspace| (connection.id, workspace.id))
+                })
+                .collect()
+        } else {
+            let active_connection = self.active_connection;
+            self.workspace_dumps()
+                .into_iter()
+                .map(|workspace| (active_connection, workspace.id))
+                .collect()
+        };
+        if workspace_targets.is_empty() {
             return;
         }
-        let current_index = self
-            .selected_workspace
-            .and_then(|workspace_id| {
-                workspaces
-                    .iter()
-                    .position(|workspace| workspace.id == workspace_id)
+        let current_index = workspace_targets
+            .iter()
+            .position(|(connection_id, workspace_id)| {
+                *connection_id == self.active_connection
+                    && Some(*workspace_id) == self.selected_workspace
             })
             .unwrap_or(0);
-        let workspace_count = workspaces.len() as isize;
+        let workspace_count = workspace_targets.len() as isize;
         let next_index = (current_index as isize + direction).rem_euclid(workspace_count) as usize;
-        let workspace_id = workspaces[next_index].id;
+        let (connection_id, workspace_id) = workspace_targets[next_index];
+        let connection_changed = if connection_id != self.active_connection {
+            let Some(connection) = self
+                .connection_by_id(connection_id)
+                .filter(|connection| connection.status == WorkspaceConnectionStatus::Connected)
+                .cloned()
+            else {
+                return;
+            };
+            self.reset_active_connection_projection(connection);
+            true
+        } else {
+            false
+        };
+        let workspace_changed = self.selected_workspace != Some(workspace_id);
         // Apply the activation locally first: the command is idempotent and
         // its pushed snapshot confirms, but waiting for the round trip made
         // the switch feel dead on remote connections.
-        if self.apply_workspace_activated_locally(workspace_id) {
+        self.apply_workspace_activated_locally(workspace_id);
+        if connection_changed || workspace_changed {
             cx.notify();
         }
-        self.dispatch(
+        self.dispatch_on(
+            connection_id,
             AppCommand::Workspace(WorkspaceCommand::Activate {
                 workspace_id: Some(workspace_id),
             }),
@@ -2476,10 +2507,14 @@ impl WorkspaceView {
     }
 
     fn workspace_dumps(&self) -> Vec<&WorkspaceDump> {
-        if self.snapshot.workspaces.is_empty() {
-            self.snapshot.workspace.iter().collect()
+        Self::workspace_dumps_from_snapshot(&self.snapshot)
+    }
+
+    fn workspace_dumps_from_snapshot(snapshot: &ModelSnapshot) -> Vec<&WorkspaceDump> {
+        if snapshot.workspaces.is_empty() {
+            snapshot.workspace.iter().collect()
         } else {
-            self.snapshot.workspaces.iter().collect()
+            snapshot.workspaces.iter().collect()
         }
     }
 
