@@ -933,10 +933,11 @@ impl PendingPtyInput {
             };
             match result {
                 Ok(0) => {
-                    return Err(io::Error::new(
-                        ErrorKind::WriteZero,
-                        "PTY input writer accepted zero bytes",
-                    ));
+                    // A PTY can temporarily accept no input. Like WouldBlock,
+                    // this must preserve the offset and every queued chunk,
+                    // including the bracketed-paste terminator. Returning an
+                    // error here makes the worker discard the entire tail.
+                    return Ok(PendingPtyInputFlush::WouldBlock);
                 }
                 Ok(bytes_written) => {
                     written += bytes_written;
@@ -2088,6 +2089,133 @@ mod tests {
         assert_eq!(receiver.recv().unwrap().seq(), 1);
         handle.join().unwrap();
         assert_eq!(receiver.recv().unwrap().seq(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn large_pty_input_survives_real_kernel_backpressure() {
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let mut master = -1;
+        let mut slave = -1;
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            },
+            0
+        );
+        // Own both descriptors immediately so assertion failures close them.
+        let mut writer = unsafe { std::fs::File::from_raw_fd(master) };
+        let mut reader = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut termios = std::mem::MaybeUninit::uninit();
+        assert_eq!(unsafe { libc::tcgetattr(slave, termios.as_mut_ptr()) }, 0);
+        let mut termios = unsafe { termios.assume_init() };
+        unsafe { libc::cfmakeraw(&mut termios) };
+        assert_eq!(
+            unsafe { libc::tcsetattr(slave, libc::TCSANOW, &termios) },
+            0
+        );
+        for fd in [writer.as_raw_fd(), reader.as_raw_fd()] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            assert!(flags >= 0);
+            assert_eq!(
+                unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+                0
+            );
+        }
+
+        let payload = format!("\x1b[200~{}\x1b[201~", "中文🌊\n".repeat(300_000)).into_bytes();
+        let mut pending = PendingPtyInput::default();
+        for chunk in payload.chunks(64 * 1024) {
+            pending.push(chunk.to_vec());
+        }
+        // Keep the slave unread until the actual kernel input buffer fills.
+        assert_eq!(
+            pending.flush(&mut writer, payload.len()).unwrap(),
+            PendingPtyInputFlush::WouldBlock
+        );
+        assert!(!pending.is_empty());
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut received = Vec::new();
+        let mut buffer = [0; 8192];
+        while !pending.is_empty() || received.len() < payload.len() {
+            assert!(Instant::now() < deadline, "PTY input did not drain");
+            match reader.read(&mut buffer) {
+                Ok(0) => panic!("PTY closed before the paste completed"),
+                Ok(count) => received.extend_from_slice(&buffer[..count]),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                Err(error) => panic!("PTY read failed: {error}"),
+            }
+            pending
+                .flush(&mut writer, MAX_PTY_INPUT_BYTES_PER_TICK)
+                .unwrap();
+            std::thread::yield_now();
+        }
+        assert_eq!(received.len(), payload.len());
+        assert!(received == payload, "PTY altered or reordered paste bytes");
+    }
+
+    #[test]
+    fn zero_byte_pty_write_preserves_paste_tail_and_following_input() {
+        struct ZeroOnceWriter {
+            written: Vec<u8>,
+            calls: usize,
+        }
+
+        impl Write for ZeroOnceWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.calls += 1;
+                if self.calls == 2 {
+                    return Ok(0);
+                }
+                let count = bytes.len().min(7);
+                self.written.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let payload = format!("\x1b[200~{}", "中文🌊\n".repeat(20_000)).into_bytes();
+        let mut pending = PendingPtyInput::default();
+        pending.push(payload.clone());
+        pending.push(b"\x1b[201~".to_vec());
+        pending.push(b"next input".to_vec());
+        let mut writer = ZeroOnceWriter {
+            written: Vec::new(),
+            calls: 0,
+        };
+
+        assert_eq!(
+            pending
+                .flush(&mut writer, MAX_PTY_INPUT_BYTES_PER_TICK)
+                .unwrap(),
+            PendingPtyInputFlush::WouldBlock
+        );
+        assert_eq!(writer.calls, 2, "zero writes must yield, not spin");
+        assert_eq!(writer.written, payload[..7]);
+        assert!(!pending.is_empty());
+        assert_eq!(
+            pending
+                .flush(&mut writer, MAX_PTY_INPUT_BYTES_PER_TICK)
+                .unwrap(),
+            PendingPtyInputFlush::Drained
+        );
+        assert!(pending.is_empty());
+        assert_eq!(
+            writer.written,
+            [payload.as_slice(), b"\x1b[201~next input"].concat()
+        );
     }
 
     #[test]
