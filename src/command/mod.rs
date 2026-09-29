@@ -69,6 +69,12 @@ pub enum TabCommand {
         tab_id: Option<TabId>,
         title: String,
     },
+    /// Moves the existing tab, including its full pane tree, to another
+    /// workspace on the same connection.
+    MoveToWorkspace {
+        tab_id: TabId,
+        workspace_id: WorkspaceId,
+    },
     Close {
         tab_id: Option<TabId>,
     },
@@ -127,6 +133,11 @@ pub enum PaneCommand {
     MoveToWorkspace {
         pane_id: Option<PaneId>,
         workspace_id: WorkspaceId,
+    },
+    /// Moves the active pane into its own tab in the pane's current
+    /// workspace, retaining the pane and its surface.
+    PromoteToTab {
+        pane_id: Option<PaneId>,
     },
     /// Sets the display label for the detected agent running in a pane.
     /// An empty label clears the override; `None` targets the active pane.
@@ -209,6 +220,10 @@ pub enum OperationResult {
     },
     TabClosed {
         tab_id: TabId,
+    },
+    TabMovedToWorkspace {
+        tab_id: TabId,
+        workspace_id: WorkspaceId,
     },
     TabActivated {
         tab_id: TabId,
@@ -308,6 +323,11 @@ enum AppCommandWire {
         tab_id: Option<TabId>,
         title: String,
     },
+    #[serde(rename = "tab.move_to_workspace")]
+    TabMoveToWorkspace {
+        tab_id: TabId,
+        workspace_id: WorkspaceId,
+    },
     #[serde(rename = "tab.close")]
     TabClose { tab_id: Option<TabId> },
     #[serde(rename = "tab.activate")]
@@ -340,6 +360,8 @@ enum AppCommandWire {
         pane_id: Option<PaneId>,
         workspace_id: WorkspaceId,
     },
+    #[serde(rename = "pane.promote_to_tab")]
+    PanePromoteToTab { pane_id: Option<PaneId> },
     #[serde(rename = "pane.agent_rename")]
     PaneAgentRename {
         pane_id: Option<PaneId>,
@@ -460,6 +482,13 @@ impl From<&AppCommand> for AppCommandWire {
                 tab_id: *tab_id,
                 title: title.clone(),
             },
+            AppCommand::Tab(TabCommand::MoveToWorkspace {
+                tab_id,
+                workspace_id,
+            }) => Self::TabMoveToWorkspace {
+                tab_id: *tab_id,
+                workspace_id: *workspace_id,
+            },
             AppCommand::Tab(TabCommand::Close { tab_id }) => Self::TabClose { tab_id: *tab_id },
             AppCommand::Tab(TabCommand::Activate { tab_id, index }) => Self::TabActivate {
                 tab_id: *tab_id,
@@ -496,6 +525,9 @@ impl From<&AppCommand> for AppCommandWire {
                 pane_id: *pane_id,
                 workspace_id: *workspace_id,
             },
+            AppCommand::Pane(PaneCommand::PromoteToTab { pane_id }) => {
+                Self::PanePromoteToTab { pane_id: *pane_id }
+            }
             AppCommand::Pane(PaneCommand::RenameAgent { pane_id, label }) => {
                 Self::PaneAgentRename {
                     pane_id: *pane_id,
@@ -616,6 +648,13 @@ impl From<AppCommandWire> for AppCommand {
             AppCommandWire::TabRename { tab_id, title } => {
                 Self::Tab(TabCommand::Rename { tab_id, title })
             }
+            AppCommandWire::TabMoveToWorkspace {
+                tab_id,
+                workspace_id,
+            } => Self::Tab(TabCommand::MoveToWorkspace {
+                tab_id,
+                workspace_id,
+            }),
             AppCommandWire::TabClose { tab_id } => Self::Tab(TabCommand::Close { tab_id }),
             AppCommandWire::TabActivate { tab_id, index } => {
                 Self::Tab(TabCommand::Activate { tab_id, index })
@@ -646,6 +685,9 @@ impl From<AppCommandWire> for AppCommand {
                 pane_id,
                 workspace_id,
             }),
+            AppCommandWire::PanePromoteToTab { pane_id } => {
+                Self::Pane(PaneCommand::PromoteToTab { pane_id })
+            }
             AppCommandWire::PaneAgentRename { pane_id, label } => {
                 Self::Pane(PaneCommand::RenameAgent { pane_id, label })
             }
@@ -760,6 +802,7 @@ impl AppCommand {
             Self::Tab(TabCommand::New { .. }) => "tab.new",
             Self::Tab(TabCommand::NewInWorkspace { .. }) => "tab.new_in_workspace",
             Self::Tab(TabCommand::Rename { .. }) => "tab.rename",
+            Self::Tab(TabCommand::MoveToWorkspace { .. }) => "tab.move_to_workspace",
             Self::Tab(TabCommand::Close { .. }) => "tab.close",
             Self::Tab(TabCommand::Activate { .. }) => "tab.activate",
             Self::Pane(PaneCommand::Split { .. }) => "pane.split",
@@ -768,6 +811,7 @@ impl AppCommand {
             Self::Pane(PaneCommand::Resize { .. }) => "pane.resize",
             Self::Pane(PaneCommand::ResizeSplit { .. }) => "pane.resize_split",
             Self::Pane(PaneCommand::MoveToWorkspace { .. }) => "pane.move_to_workspace",
+            Self::Pane(PaneCommand::PromoteToTab { .. }) => "pane.promote_to_tab",
             Self::Pane(PaneCommand::RenameAgent { .. }) => "pane.agent_rename",
             Self::Surface(SurfaceCommand::Replace { .. }) => "surface.replace",
             Self::Terminal(TerminalCommand::Spawn { .. }) => "terminal.spawn",
@@ -778,6 +822,33 @@ impl AppCommand {
             Self::Terminal(TerminalCommand::SetViewportPosition { .. }) => {
                 "terminal.set_viewport_position"
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_move_and_pane_promotion_commands_round_trip_over_wire() {
+        let commands = [
+            AppCommand::Tab(TabCommand::MoveToWorkspace {
+                tab_id: TabId::new(1),
+                workspace_id: WorkspaceId::new(2),
+            }),
+            AppCommand::Pane(PaneCommand::PromoteToTab {
+                pane_id: Some(PaneId::new(3)),
+            }),
+        ];
+
+        for command in commands {
+            let wire = serde_json::to_value(&command).unwrap();
+            assert_eq!(
+                wire.get("type").and_then(serde_json::Value::as_str),
+                Some(command.type_name())
+            );
+            assert_eq!(serde_json::from_value::<AppCommand>(wire).unwrap(), command);
         }
     }
 }

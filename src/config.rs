@@ -717,6 +717,7 @@ pub struct ShortcutConfig {
     pub split_right: String,
     pub split_down: String,
     pub close_pane: String,
+    pub promote_pane_to_tab: String,
     pub focus_left: String,
     pub focus_right: String,
     pub focus_up: String,
@@ -750,6 +751,7 @@ impl Default for ShortcutConfig {
             split_right: "cmd-\\".to_owned(),
             split_down: "cmd--".to_owned(),
             close_pane: "cmd-shift-w".to_owned(),
+            promote_pane_to_tab: "cmd-shift-enter".to_owned(),
             focus_left: "cmd-h".to_owned(),
             focus_right: "cmd-l".to_owned(),
             focus_up: "cmd-k".to_owned(),
@@ -1547,6 +1549,7 @@ pub struct ShortcutConfigOverrides {
     pub split_right: Option<String>,
     pub split_down: Option<String>,
     pub close_pane: Option<String>,
+    pub promote_pane_to_tab: Option<String>,
     pub focus_left: Option<String>,
     pub focus_right: Option<String>,
     pub focus_up: Option<String>,
@@ -1586,6 +1589,7 @@ impl ShortcutConfigOverrides {
         apply!(split_right);
         apply!(split_down);
         apply!(close_pane);
+        apply!(promote_pane_to_tab);
         apply!(focus_left);
         apply!(focus_right);
         apply!(focus_up);

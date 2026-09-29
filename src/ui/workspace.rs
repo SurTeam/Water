@@ -145,6 +145,7 @@ enum RenameTarget {
 struct ContextMenuState {
     target: ContextMenuTarget,
     position: Point<gpui::Pixels>,
+    workspace_submenu_open: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +155,10 @@ enum ContextMenuTarget {
         connection_id: ConnectionId,
         workspace_id: WorkspaceId,
     },
-    Tab(TabId),
+    Tab {
+        connection_id: ConnectionId,
+        tab_id: TabId,
+    },
     Agent {
         connection_id: ConnectionId,
         pane_id: PaneId,
@@ -2538,6 +2542,44 @@ impl WorkspaceView {
             .find(|tab| tab.id == tab_id)
     }
 
+    fn tab_and_workspace_by_id_in(
+        &self,
+        connection_id: ConnectionId,
+        tab_id: TabId,
+    ) -> Option<(&WorkspaceDump, &TabDump)> {
+        let connection = self.connection_by_id(connection_id)?;
+        Self::workspace_dumps_from_snapshot(&connection.snapshot)
+            .into_iter()
+            .find_map(|workspace| {
+                workspace
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == tab_id)
+                    .map(|tab| (workspace, tab))
+            })
+    }
+
+    fn other_workspace_targets_for_tab(
+        &self,
+        connection_id: ConnectionId,
+        tab_id: TabId,
+    ) -> Vec<(WorkspaceId, String)> {
+        let Some((source_workspace, _)) = self.tab_and_workspace_by_id_in(connection_id, tab_id)
+        else {
+            return Vec::new();
+        };
+        let source_workspace_id = source_workspace.id;
+        self.connection_by_id(connection_id)
+            .map(|connection| {
+                Self::workspace_dumps_from_snapshot(&connection.snapshot)
+                    .into_iter()
+                    .filter(|workspace| workspace.id != source_workspace_id)
+                    .map(|workspace| (workspace.id, workspace.title.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn active_tab_by_id(&self, tab_id: TabId) -> Option<&TabDump> {
         let workspace = self.selected_workspace_dump()?;
         (workspace.active_tab == Some(tab_id))
@@ -2558,7 +2600,12 @@ impl WorkspaceView {
                 .is_some_and(|connection| {
                     workspace_exists_in_snapshot(&connection.snapshot, workspace_id)
                 }),
-            ContextMenuTarget::Tab(tab_id) => self.tab_by_id(tab_id).is_some(),
+            ContextMenuTarget::Tab {
+                connection_id,
+                tab_id,
+            } => self
+                .tab_and_workspace_by_id_in(connection_id, tab_id)
+                .is_some(),
             ContextMenuTarget::Agent {
                 connection_id,
                 pane_id,
@@ -4457,6 +4504,18 @@ impl WorkspaceView {
             }
             return;
         }
+        if shortcut_matches_or_default(&shortcuts.promote_pane_to_tab, "cmd-shift-enter", keystroke)
+        {
+            if let Some(pane_id) = self.focused_pane {
+                self.dispatch(
+                    AppCommand::Pane(PaneCommand::PromoteToTab {
+                        pane_id: Some(pane_id),
+                    }),
+                    cx,
+                );
+            }
+            return;
+        }
         if shortcut_matches_or_default(&shortcuts.close_pane, "cmd-shift-w", keystroke) {
             if let Some(pane_id) = self.focused_pane {
                 self.dispatch(
@@ -4886,7 +4945,9 @@ impl WorkspaceView {
                     cx.notify();
                 }
             }
-            OperationResult::PaneClosed { .. } | OperationResult::TabClosed { .. } => {
+            OperationResult::PaneClosed { .. }
+            | OperationResult::TabClosed { .. }
+            | OperationResult::TabMovedToWorkspace { .. } => {
                 self.focused_pane = focused_pane_for_workspace(
                     &self.snapshot,
                     self.selected_workspace,
@@ -5036,6 +5097,7 @@ impl WorkspaceView {
         theme: ThemeColors,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let connection_id = self.active_connection;
         // Selected and unselected tabs deliberately share the same floating
         // shape. The active tab also gets a short accent rail so selection is
         // easy to scan without relying on a saturated fill.
@@ -5099,8 +5161,12 @@ impl WorkspaceView {
             MouseButton::Right,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                 this.context_menu = Some(ContextMenuState {
-                    target: ContextMenuTarget::Tab(tab_id),
+                    target: ContextMenuTarget::Tab {
+                        connection_id,
+                        tab_id,
+                    },
                     position: event.position,
+                    workspace_submenu_open: false,
                 });
                 this.focus_handle.focus(window, cx);
                 cx.stop_propagation();
@@ -5228,6 +5294,7 @@ impl WorkspaceView {
                             workspace_id,
                         },
                         position: event.position,
+                        workspace_submenu_open: false,
                     });
                     this.focus_handle.focus(window, cx);
                     cx.stop_propagation();
@@ -5446,6 +5513,7 @@ impl WorkspaceView {
                     this.context_menu = Some(ContextMenuState {
                         target: ContextMenuTarget::Connection(connection_id),
                         position: event.position,
+                        workspace_submenu_open: false,
                     });
                     this.focus_handle.focus(window, cx);
                     cx.stop_propagation();
@@ -5797,6 +5865,7 @@ impl WorkspaceView {
                             pane_id,
                         },
                         position: event.position,
+                        workspace_submenu_open: false,
                     });
                     this.focus_handle.focus(window, cx);
                     cx.stop_propagation();
@@ -5809,7 +5878,7 @@ impl WorkspaceView {
 
     fn render_context_menu_item(
         &self,
-        label: &'static str,
+        label: impl Into<SharedString>,
         theme: ThemeColors,
         listener: impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
@@ -5820,6 +5889,8 @@ impl WorkspaceView {
             .px(px(10.))
             .items_center()
             .flex()
+            .min_w(px(0.))
+            .truncate()
             .cursor_pointer()
             .hover(|style| style.bg(rgb(theme.tab_inactive_background)))
             .text_color(rgb(theme.ui_foreground))
@@ -5830,7 +5901,7 @@ impl WorkspaceView {
                     cx.stop_propagation();
                 }),
             )
-            .child(label)
+            .child(label.into())
             .into_any_element()
     }
 
@@ -5841,6 +5912,13 @@ impl WorkspaceView {
     ) -> Option<AnyElement> {
         let context_menu = self.context_menu?;
         let target = context_menu.target;
+        let workspace_targets = match target {
+            ContextMenuTarget::Tab {
+                connection_id,
+                tab_id,
+            } => self.other_workspace_targets_for_tab(connection_id, tab_id),
+            _ => Vec::new(),
+        };
         let rename = match target {
             ContextMenuTarget::Connection(_) => None,
             ContextMenuTarget::Workspace {
@@ -5855,7 +5933,7 @@ impl WorkspaceView {
                 },
                 cx,
             )),
-            ContextMenuTarget::Tab(tab_id) => Some(self.render_context_menu_item(
+            ContextMenuTarget::Tab { tab_id, .. } => Some(self.render_context_menu_item(
                 "Rename tab",
                 theme,
                 move |this, _event, window, cx| {
@@ -5877,6 +5955,23 @@ impl WorkspaceView {
                 cx,
             )),
         };
+        let move_to_workspace = match target {
+            ContextMenuTarget::Tab { .. } if !workspace_targets.is_empty() => {
+                Some(self.render_context_menu_item(
+                    "Move tab to workspace ›",
+                    theme,
+                    move |this, _event, _window, cx| {
+                        if let Some(context_menu) = this.context_menu.as_mut() {
+                            context_menu.workspace_submenu_open =
+                                !context_menu.workspace_submenu_open;
+                        }
+                        cx.notify();
+                    },
+                    cx,
+                ))
+            }
+            _ => None,
+        };
         let close = match target {
             ContextMenuTarget::Connection(_) => None,
             ContextMenuTarget::Workspace {
@@ -5890,12 +5985,16 @@ impl WorkspaceView {
                 },
                 cx,
             )),
-            ContextMenuTarget::Tab(tab_id) => Some(self.render_context_menu_item(
+            ContextMenuTarget::Tab {
+                connection_id,
+                tab_id,
+            } => Some(self.render_context_menu_item(
                 "Close tab",
                 theme,
                 move |this, _event, _window, cx| {
                     this.context_menu = None;
-                    this.dispatch(
+                    this.dispatch_on(
+                        connection_id,
                         AppCommand::Tab(TabCommand::Close {
                             tab_id: Some(tab_id),
                         }),
@@ -5920,6 +6019,9 @@ impl WorkspaceView {
             .rounded(px(12.));
         if let Some(rename) = rename {
             menu = menu.child(rename);
+        }
+        if let Some(move_to_workspace) = move_to_workspace {
+            menu = menu.child(move_to_workspace);
         }
         if let Some(close) = close {
             menu = menu.child(close);
@@ -5981,6 +6083,55 @@ impl WorkspaceView {
                 cx,
             ));
         }
+        let menu = if context_menu.workspace_submenu_open {
+            if let ContextMenuTarget::Tab {
+                connection_id,
+                tab_id,
+            } = target
+            {
+                let mut submenu = div()
+                    .id("workspace-context-submenu")
+                    .w(px(190.))
+                    .p(px(4.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .bg(rgb(theme.chrome_background))
+                    .border_1()
+                    .border_color(rgb(theme.inactive_pane_border))
+                    .rounded(px(12.));
+                for (workspace_id, workspace_title) in workspace_targets {
+                    submenu = submenu.child(self.render_context_menu_item(
+                        workspace_title,
+                        theme,
+                        move |this, _event, _window, cx| {
+                            this.context_menu = None;
+                            this.dispatch_on(
+                                connection_id,
+                                AppCommand::Tab(TabCommand::MoveToWorkspace {
+                                    tab_id,
+                                    workspace_id,
+                                }),
+                                cx,
+                            );
+                            cx.notify();
+                        },
+                        cx,
+                    ));
+                }
+                div()
+                    .flex()
+                    .items_start()
+                    .gap(px(4.))
+                    .child(menu)
+                    .child(submenu)
+                    .into_any_element()
+            } else {
+                menu.into_any_element()
+            }
+        } else {
+            menu.into_any_element()
+        };
         let position = context_menu.position;
         Some(
             deferred(
@@ -12692,8 +12843,12 @@ mod tests {
         // With a context menu open, no row press registers at all.
         view.update_in(cx, |view, _, _cx| {
             view.context_menu = Some(ContextMenuState {
-                target: ContextMenuTarget::Tab(crate::ids::TabId::new(1)),
+                target: ContextMenuTarget::Tab {
+                    connection_id,
+                    tab_id: crate::ids::TabId::new(1),
+                },
                 position: Point::default(),
+                workspace_submenu_open: false,
             });
             assert!(!view.begin_sidebar_row_activate("c\u{1f}x".to_owned(), false));
             assert!(!view.begin_sidebar_row_activate("c\u{1f}x".to_owned(), true));

@@ -146,6 +146,7 @@ enum SettingField {
     ShortcutSplitRight,
     ShortcutSplitDown,
     ShortcutClosePane,
+    ShortcutPromotePaneToTab,
     ShortcutFocusLeft,
     ShortcutFocusRight,
     ShortcutFocusUp,
@@ -282,6 +283,7 @@ impl SettingField {
             Self::ShortcutSplitRight => "shortcut-split-right",
             Self::ShortcutSplitDown => "shortcut-split-down",
             Self::ShortcutClosePane => "shortcut-close-pane",
+            Self::ShortcutPromotePaneToTab => "shortcut-promote-pane-to-tab",
             Self::ShortcutFocusLeft => "shortcut-focus-left",
             Self::ShortcutFocusRight => "shortcut-focus-right",
             Self::ShortcutFocusUp => "shortcut-focus-up",
@@ -877,6 +879,9 @@ impl SettingsView {
             SettingField::ShortcutSplitRight => self.config.shortcuts.split_right.clone(),
             SettingField::ShortcutSplitDown => self.config.shortcuts.split_down.clone(),
             SettingField::ShortcutClosePane => self.config.shortcuts.close_pane.clone(),
+            SettingField::ShortcutPromotePaneToTab => {
+                self.config.shortcuts.promote_pane_to_tab.clone()
+            }
             SettingField::ShortcutFocusLeft => self.config.shortcuts.focus_left.clone(),
             SettingField::ShortcutFocusRight => self.config.shortcuts.focus_right.clone(),
             SettingField::ShortcutFocusUp => self.config.shortcuts.focus_up.clone(),
@@ -2274,6 +2279,7 @@ impl Render for SettingsView {
             (SettingField::ShortcutSplitRight, "右侧分屏"),
             (SettingField::ShortcutSplitDown, "向下分屏"),
             (SettingField::ShortcutClosePane, "关闭面板"),
+            (SettingField::ShortcutPromotePaneToTab, "将面板提升为标签"),
             (SettingField::ShortcutFocusLeft, "聚焦左侧面板"),
             (SettingField::ShortcutFocusRight, "聚焦右侧面板"),
             (SettingField::ShortcutFocusUp, "聚焦上方面板"),
@@ -2484,6 +2490,7 @@ fn is_shortcut(field: SettingField) -> bool {
             | SettingField::ShortcutSplitRight
             | SettingField::ShortcutSplitDown
             | SettingField::ShortcutClosePane
+            | SettingField::ShortcutPromotePaneToTab
             | SettingField::ShortcutFocusLeft
             | SettingField::ShortcutFocusRight
             | SettingField::ShortcutFocusUp
@@ -2583,6 +2590,7 @@ fn set_shortcut_field(
         SettingField::ShortcutSplitRight => shortcuts.split_right = value,
         SettingField::ShortcutSplitDown => shortcuts.split_down = value,
         SettingField::ShortcutClosePane => shortcuts.close_pane = value,
+        SettingField::ShortcutPromotePaneToTab => shortcuts.promote_pane_to_tab = value,
         SettingField::ShortcutFocusLeft => shortcuts.focus_left = value,
         SettingField::ShortcutFocusRight => shortcuts.focus_right = value,
         SettingField::ShortcutFocusUp => shortcuts.focus_up = value,

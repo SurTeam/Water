@@ -14,9 +14,10 @@ use crate::ui::{UiKeystrokeResult, UiScreenshot, UiSnapshot, UiWheelResult};
 /// Version 4 carries full 128-bit terminal IDs in binary frames. Control messages
 /// and bounded attach replay remain JSON for compatibility and debuggability.
 pub const PROTOCOL_VERSION: u32 = 4;
-/// Stable identifier for the control API surface. Bump this when the meaning
-/// of an existing control method changes without changing the frame format.
-pub const API_SIGNATURE: &str = "water-control/v4";
+/// Stable identifier for the control API surface. Bump this when commands,
+/// events, or the meaning of an existing control method change without
+/// changing the binary terminal frame format.
+pub const API_SIGNATURE: &str = "water-control/v5";
 pub const CONTROL_API_SIGNATURE: &str = API_SIGNATURE;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 const TERMINAL_FRAME_PREFIX: &[u8; 4] = b"\0WT4";

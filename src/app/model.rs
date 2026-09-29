@@ -231,6 +231,12 @@ pub(crate) struct PaneMove {
     pub source_active_tab_changed: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TabMove {
+    pub source_workspace_id: WorkspaceId,
+    pub source_active_tab_changed: bool,
+}
+
 #[derive(Debug)]
 pub struct ApplicationModel {
     workspaces: BTreeMap<WorkspaceId, Workspace>,
@@ -504,7 +510,84 @@ impl ApplicationModel {
         Ok(changed)
     }
 
+    pub(crate) fn move_tab_to_workspace(
+        &mut self,
+        tab_id: TabId,
+        target_workspace_id: WorkspaceId,
+    ) -> Result<Option<TabMove>, &'static str> {
+        if !self.workspaces.contains_key(&target_workspace_id) {
+            return Err("workspace not found");
+        }
+        let source_workspace_id = self.workspace_id_for_tab(tab_id).ok_or("tab not found")?;
+        if source_workspace_id == target_workspace_id {
+            return Ok(None);
+        }
+
+        let source_active_tab_changed =
+            self.active_tab_id_for_workspace(source_workspace_id) == Some(tab_id);
+        let source_workspace = self
+            .workspaces
+            .get_mut(&source_workspace_id)
+            .ok_or("workspace not found")?;
+        source_workspace.tabs.retain(|existing| *existing != tab_id);
+        if source_workspace.active_tab == Some(tab_id) {
+            source_workspace.active_tab = source_workspace.tabs.last().copied();
+        }
+
+        let target_workspace = self
+            .workspaces
+            .get_mut(&target_workspace_id)
+            .ok_or("workspace not found")?;
+        target_workspace.tabs.push(tab_id);
+        target_workspace.active_tab = Some(tab_id);
+
+        Ok(Some(TabMove {
+            source_workspace_id,
+            source_active_tab_changed,
+        }))
+    }
+
     pub(crate) fn move_pane_to_workspace(
+        &mut self,
+        pane_id: PaneId,
+        target_workspace_id: WorkspaceId,
+        target_tab_id: TabId,
+    ) -> Result<Option<PaneMove>, &'static str> {
+        let source_tab_id = self.tab_id_for_pane(pane_id).ok_or("pane not found")?;
+        let source_workspace_id = self
+            .workspace_id_for_tab(source_tab_id)
+            .ok_or("workspace not found")?;
+        if source_workspace_id == target_workspace_id {
+            return Ok(None);
+        }
+
+        self.move_pane_into_new_tab(pane_id, target_workspace_id, target_tab_id)
+    }
+
+    pub(crate) fn promote_pane_to_tab(
+        &mut self,
+        pane_id: PaneId,
+        target_tab_id: TabId,
+    ) -> Result<Option<PaneMove>, &'static str> {
+        let source_tab_id = self.tab_id_for_pane(pane_id).ok_or("pane not found")?;
+        let source_workspace_id = self
+            .workspace_id_for_tab(source_tab_id)
+            .ok_or("workspace not found")?;
+        if self
+            .tabs
+            .get(&source_tab_id)
+            .ok_or("tab not found")?
+            .root
+            .pane_count()
+            == 1
+        {
+            return Ok(None);
+        }
+
+        self.move_pane_into_new_tab(pane_id, source_workspace_id, target_tab_id)
+    }
+
+    fn move_pane_into_new_tab(
         &mut self,
         pane_id: PaneId,
         target_workspace_id: WorkspaceId,
@@ -520,9 +603,6 @@ impl ApplicationModel {
         let source_workspace_id = self
             .workspace_id_for_tab(source_tab_id)
             .ok_or("workspace not found")?;
-        if source_workspace_id == target_workspace_id {
-            return Ok(None);
-        }
 
         let title = self
             .terminal_id_for_pane(pane_id)

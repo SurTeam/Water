@@ -755,6 +755,51 @@ impl CommandDispatcher {
                 let workspace_id = self.resolve_workspace(Some(workspace_id))?;
                 self.create_tab_in_workspace(workspace_id, title)
             }
+            TabCommand::MoveToWorkspace {
+                tab_id,
+                workspace_id,
+            } => {
+                let tab_id = self.resolve_tab(Some(tab_id), None)?;
+                let target_workspace_id = self.resolve_workspace(Some(workspace_id))?;
+                let source_workspace_id = self
+                    .model
+                    .workspace_id_for_tab(tab_id)
+                    .ok_or_else(|| CommandError::new("TAB_NOT_FOUND", "tab not found"))?;
+                if source_workspace_id == target_workspace_id {
+                    return Ok(OperationResult::None);
+                }
+
+                let was_active_tab = self.model.active_tab_id() == Some(tab_id);
+                let target_was_active_workspace =
+                    self.model.active_workspace_id() == Some(target_workspace_id);
+                let moved = self
+                    .model
+                    .move_tab_to_workspace(tab_id, target_workspace_id)
+                    .map_err(|message| CommandError::new("WORKSPACE_NOT_FOUND", message))?
+                    .expect("different workspaces must produce a tab move");
+
+                if was_active_tab
+                    && moved.source_active_tab_changed
+                    && let Some(active_tab_id) = self
+                        .model
+                        .active_tab_id_for_workspace(moved.source_workspace_id)
+                {
+                    self.emit(AppEventKind::TabActivated {
+                        tab_id: active_tab_id,
+                    });
+                }
+                if target_was_active_workspace {
+                    self.emit(AppEventKind::TabActivated { tab_id });
+                }
+                self.emit(AppEventKind::TabMovedToWorkspace {
+                    tab_id,
+                    workspace_id: target_workspace_id,
+                });
+                Ok(OperationResult::TabMovedToWorkspace {
+                    tab_id,
+                    workspace_id: target_workspace_id,
+                })
+            }
             TabCommand::Rename { tab_id, title } => {
                 let tab_id = self.resolve_tab(tab_id, None)?;
                 let title = normalize_title(title)?;
@@ -1010,6 +1055,59 @@ impl CommandDispatcher {
                     workspace_id: target_workspace_id,
                 });
                 Ok(OperationResult::None)
+            }
+            PaneCommand::PromoteToTab { pane_id } => {
+                let (source_tab_id, pane_id) = self.resolve_pane(pane_id)?;
+                let pane_ids = self.model.pane_ids_in_tab(source_tab_id).ok_or_else(|| {
+                    CommandError::new(
+                        "TAB_NOT_FOUND",
+                        format!("tab {source_tab_id} does not exist"),
+                    )
+                })?;
+                if pane_ids.len() <= 1 {
+                    return Ok(OperationResult::None);
+                }
+
+                let was_active_tab = self.model.active_tab_id() == Some(source_tab_id);
+                let was_focused_pane = self.model.active_pane() == Some(pane_id);
+                let target_tab_id = self.ids.alloc();
+                let move_result = self
+                    .model
+                    .promote_pane_to_tab(pane_id, target_tab_id)
+                    .map_err(|message| self.pane_error(message))?
+                    .expect("a pane in a split must be promoted into a tab");
+
+                if move_result.source_tab_removed {
+                    self.emit(AppEventKind::TabClosed {
+                        tab_id: move_result.source_tab_id,
+                    });
+                } else if self
+                    .model
+                    .refresh_tab_title_from_active_pane(move_result.source_tab_id)
+                {
+                    self.emit(AppEventKind::TabRenamed {
+                        tab_id: move_result.source_tab_id,
+                    });
+                }
+                self.emit(AppEventKind::TabCreated {
+                    tab_id: move_result.target_tab_id,
+                });
+                if was_active_tab {
+                    self.emit(AppEventKind::TabActivated {
+                        tab_id: move_result.target_tab_id,
+                    });
+                }
+                if was_focused_pane {
+                    self.emit(AppEventKind::PaneFocused { pane_id });
+                }
+                self.emit(AppEventKind::PanePromotedToTab {
+                    pane_id,
+                    source_tab_id: move_result.source_tab_id,
+                    tab_id: move_result.target_tab_id,
+                });
+                Ok(OperationResult::TabCreated {
+                    tab_id: move_result.target_tab_id,
+                })
             }
             PaneCommand::ResizeSplit {
                 tab_id,
@@ -1637,6 +1735,150 @@ mod tests {
         );
         let state = dispatcher.state_dump();
         assert_eq!(state.workspace.unwrap().tabs[0].tree.pane_count(), 1);
+    }
+
+    #[test]
+    fn promoting_a_pane_creates_a_tab_without_replacing_its_terminal() {
+        let (mut dispatcher, pane_id, terminal_id) = dispatcher_with_agent();
+        let source_tab_id = TabId::new(2);
+        let remaining_pane_id = PaneId::new(8);
+        dispatcher
+            .model
+            .split_pane(SplitRequest {
+                tab_id: source_tab_id,
+                target_pane: pane_id,
+                axis: SplitAxis::Horizontal,
+                ratio: 0.5,
+                new_pane: remaining_pane_id,
+                new_surface: SurfaceId::new(9),
+                new_first: false,
+            })
+            .unwrap();
+        let focus = dispatcher.dispatch(AppCommand::Pane(PaneCommand::Focus {
+            pane_id: Some(pane_id),
+            direction: None,
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(focus).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let operation = dispatcher.dispatch(AppCommand::Pane(PaneCommand::PromoteToTab {
+            pane_id: Some(pane_id),
+        }));
+        let result = dispatcher.wait_operation(operation).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        let promoted_tab_id = match result.result {
+            Some(OperationResult::TabCreated { tab_id }) => tab_id,
+            result => panic!("unexpected result: {result:?}"),
+        };
+
+        let state = dispatcher.state_dump();
+        let workspace = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == WorkspaceId::new(1))
+            .unwrap();
+        assert_eq!(workspace.tabs.len(), 2);
+        assert_eq!(workspace.active_tab, Some(promoted_tab_id));
+        let source_tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == source_tab_id)
+            .unwrap();
+        assert!(matches!(
+            &source_tab.tree,
+            PaneTreeDump::Leaf { pane_id, .. } if *pane_id == remaining_pane_id
+        ));
+        let promoted_tab = workspace
+            .tabs
+            .iter()
+            .find(|tab| tab.id == promoted_tab_id)
+            .unwrap();
+        assert_eq!(promoted_tab.active_pane, pane_id);
+        assert!(matches!(
+            &promoted_tab.tree,
+            PaneTreeDump::Leaf {
+                pane_id: promoted_pane,
+                surface_state: SurfaceState::Terminal(terminal),
+                ..
+            } if *promoted_pane == pane_id && terminal.terminal_id == terminal_id
+        ));
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            event.kind,
+            AppEventKind::PanePromotedToTab {
+                pane_id: event_pane,
+                source_tab_id: event_source_tab,
+                tab_id,
+            } if event_pane == pane_id
+                && event_source_tab == source_tab_id
+                && tab_id == promoted_tab_id
+        )));
+    }
+
+    #[test]
+    fn moving_a_tab_between_workspaces_preserves_its_id_and_panes() {
+        let (mut dispatcher, pane_id, terminal_id) = dispatcher_with_agent();
+        let source_workspace_id = WorkspaceId::new(1);
+        let tab_id = TabId::new(2);
+        let create = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Create));
+        let target_workspace_id = match dispatcher.wait_operation(create).unwrap().result {
+            Some(OperationResult::WorkspaceCreated { workspace_id }) => workspace_id,
+            result => panic!("unexpected workspace result: {result:?}"),
+        };
+        let activate = dispatcher.dispatch(AppCommand::Workspace(WorkspaceCommand::Activate {
+            workspace_id: Some(source_workspace_id),
+        }));
+        assert_eq!(
+            dispatcher.wait_operation(activate).unwrap().status,
+            OperationStatus::Succeeded
+        );
+
+        let operation = dispatcher.dispatch(AppCommand::Tab(TabCommand::MoveToWorkspace {
+            tab_id,
+            workspace_id: target_workspace_id,
+        }));
+        let result = dispatcher.wait_operation(operation).unwrap();
+        assert_eq!(result.status, OperationStatus::Succeeded);
+        assert_eq!(
+            result.result,
+            Some(OperationResult::TabMovedToWorkspace {
+                tab_id,
+                workspace_id: target_workspace_id,
+            })
+        );
+
+        let state = dispatcher.state_dump();
+        let source = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == source_workspace_id)
+            .unwrap();
+        assert!(source.tabs.is_empty());
+        assert_eq!(source.active_tab, None);
+        let target = state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == target_workspace_id)
+            .unwrap();
+        assert_eq!(target.active_tab, Some(tab_id));
+        assert_eq!(target.tabs.len(), 1);
+        assert_eq!(target.tabs[0].id, tab_id);
+        assert!(matches!(
+            &target.tabs[0].tree,
+            PaneTreeDump::Leaf {
+                pane_id: moved_pane,
+                surface_state: SurfaceState::Terminal(terminal),
+                ..
+            } if *moved_pane == pane_id && terminal.terminal_id == terminal_id
+        ));
+        assert!(dispatcher.all_events().iter().any(|event| matches!(
+            event.kind,
+            AppEventKind::TabMovedToWorkspace {
+                tab_id: moved_tab,
+                workspace_id,
+            } if moved_tab == tab_id && workspace_id == target_workspace_id
+        )));
     }
 
     #[test]
