@@ -10,6 +10,7 @@ pub mod agent;
 pub mod app;
 pub mod automation;
 pub mod command;
+pub mod command_file;
 pub mod config;
 pub mod control;
 pub mod ctl;

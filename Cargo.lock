@@ -5989,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "water"
-version = "0.2.31"
+version = "0.2.32"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
@@ -6005,6 +6005,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

@@ -1,6 +1,6 @@
 [package]
 name = "water"
-version = "0.2.31"
+version = "0.2.32"
 edition = "2024"
 default-run = "water"
 description = "A native Rust desktop development workbench."
@@ -54,6 +54,7 @@ serde_json = { version = "1.0", features = ["raw_value"] }
 smallvec = { version = "1.15", features = ["serde"] }
 thiserror = "2.0"
 tracing = "0.1"
+url = "2.5"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [dependencies.uuid]

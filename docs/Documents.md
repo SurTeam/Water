@@ -136,6 +136,11 @@ For a real GUI smoke run, start the current binary with a unique socket/config a
 
 ## macOS signing handoff
 
+The macOS app registers as an alternate handler for `.command` files. Choose
+Water in Finder's **Open With** menu to run an executable command file in a new
+local workspace. Its working directory is the script's directory; the configured
+shell remains open after it finishes. Local files are rejected in `--ssh` sessions.
+
 Signing is two-stage. The build machine creates a real unsigned archive; the GitHub Action only downloads, signs, verifies, and publishes it.
 
 ```sh

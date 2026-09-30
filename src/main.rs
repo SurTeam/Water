@@ -209,6 +209,15 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
         .unwrap_or_else(|| spawn_state_polling_fallback(transport.clone()));
 
     let detach_on_quit = config.server.detach_on_quit;
+    // Finder file requests must never execute on an SSH-backed connection.
+    let file_opener = if startup.ssh_destination.is_none() {
+        Some(water::command_file::start_opener(
+            transport.clone(),
+            config.clone(),
+        )?)
+    } else {
+        None
+    };
     let ui_application = WaterApplication::new_with_config_path(
         transport,
         initial,
@@ -233,6 +242,25 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
     let application =
         platform_application().with_restart_arguments(std::env::args_os().skip(1).collect());
     application.on_reopen(move |cx| reopen_application.reopen(cx));
+    let open_application = ui_application.clone();
+    let open_context = std::rc::Rc::new(std::cell::RefCell::new(None::<gpui::AsyncApp>));
+    let installed_context = open_context.clone();
+    application.on_open_urls(move |urls| {
+        if !urls.is_empty() && file_opener.is_some()
+            && let Some(cx) = open_context.borrow_mut().as_mut()
+        {
+            let _ = cx.update(|cx| open_application.reopen(cx));
+        }
+        for url in urls {
+            if let Some(opener) = &file_opener {
+                if let Err(error) = opener.try_send(url) {
+                    tracing::warn!(target: "water::workspace", ?error, "could not queue command file");
+                }
+            } else {
+                tracing::warn!(target: "water::workspace", "cannot open local command files in an SSH session");
+            }
+        }
+    });
     application.run(move |cx: &mut App| {
         ui_application.install(
             cx,
@@ -241,6 +269,7 @@ fn run_gui(arguments: impl Iterator<Item = String>) -> Result<()> {
             ui_control_receiver,
             terminal_session,
         );
+        installed_context.replace(Some(cx.to_async()));
     });
 
     // The GUI is gone: detach the server (tmux semantics) or stop it when

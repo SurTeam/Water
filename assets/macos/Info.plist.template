@@ -24,6 +24,21 @@
     <string>__WATER_VERSION__</string>
     <key>LSMinimumSystemVersion</key>
     <string>12.0</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Terminal command</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>command</string>
+            </array>
+            <key>CFBundleTypeRole</key>
+            <string>Shell</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+        </dict>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>
