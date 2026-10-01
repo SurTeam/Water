@@ -42,6 +42,13 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 	}
 	s.opsMu.Lock()
 	s.ops[id] = op
+	s.opOrder = append(s.opOrder, id)
+	const maxOperationHistory = 4096
+	if len(s.opOrder) > maxOperationHistory {
+		drop := s.opOrder[0]
+		s.opOrder = s.opOrder[1:]
+		delete(s.ops, drop)
+	}
 	s.opsMu.Unlock()
 
 	return ss.write(goprotocol.Success(msg.RequestID, map[string]uuid.UUID{
