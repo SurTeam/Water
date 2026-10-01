@@ -34,8 +34,9 @@ type Terminal struct {
 	nextSub     uint64
 
 	seq    atomic.Uint64
-	closed chan struct{}
-	once   sync.Once
+	closed     chan struct{}
+	readerDone chan struct{}
+	once       sync.Once
 }
 
 type Registry struct {
@@ -66,6 +67,7 @@ func (r *Registry) Spawn(program string, args []string, size goprotocol.Terminal
 		replayLimit: defaultReplayBytes,
 		subs:        make(map[uint64]*subscriber),
 		closed:      make(chan struct{}),
+		readerDone:  make(chan struct{}),
 	}
 	r.mu.Lock()
 	r.terms[t.ID] = t
@@ -184,6 +186,7 @@ func (t *Terminal) Close() error {
 }
 
 func (t *Terminal) readLoop() {
+	defer close(t.readerDone)
 	buf := make([]byte, readBlockBytes)
 	for {
 		n, err := t.ptmx.Read(buf)
@@ -206,6 +209,9 @@ func (t *Terminal) readLoop() {
 
 func (t *Terminal) waitLoop() {
 	err := t.cmd.Wait()
+	// Preserve the same stream-order invariant as the Rust worker: all bytes
+	// readable from the PTY must be sequenced before the authoritative Exit.
+	<-t.readerDone
 	var code *int32
 	if t.cmd.ProcessState != nil {
 		v := int32(t.cmd.ProcessState.ExitCode())
