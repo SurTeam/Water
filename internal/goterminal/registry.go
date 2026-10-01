@@ -30,7 +30,7 @@ type Terminal struct {
 	replay      []goprotocol.TerminalEvent
 	replayBytes int
 	replayLimit int
-	subs        map[uint64]chan goprotocol.TerminalEvent
+	subs        map[uint64]*subscriber
 	nextSub     uint64
 
 	seq    atomic.Uint64
@@ -64,7 +64,7 @@ func (r *Registry) Spawn(program string, args []string, size goprotocol.Terminal
 		ptmx:        ptmx,
 		size:        size,
 		replayLimit: defaultReplayBytes,
-		subs:        make(map[uint64]chan goprotocol.TerminalEvent),
+		subs:        make(map[uint64]*subscriber),
 		closed:      make(chan struct{}),
 	}
 	r.mu.Lock()
@@ -143,26 +143,32 @@ func (t *Terminal) Replay() []goprotocol.TerminalEvent {
 	return out
 }
 
-func (t *Terminal) Subscribe() (<-chan goprotocol.TerminalEvent, func()) {
+type subscriber struct {
+	events chan goprotocol.TerminalEvent
+	done   chan struct{}
+	once   sync.Once
+}
+
+func (t *Terminal) Subscribe() (<-chan goprotocol.TerminalEvent, <-chan struct{}, func()) {
 	t.mu.Lock()
 	t.nextSub++
 	id := t.nextSub
-	ch := make(chan goprotocol.TerminalEvent, 64)
-	t.subs[id] = ch
+	sub := &subscriber{
+		events: make(chan goprotocol.TerminalEvent, 64),
+		done:   make(chan struct{}),
+	}
+	t.subs[id] = sub
 	t.mu.Unlock()
 
-	var once sync.Once
 	cancel := func() {
-		once.Do(func() {
+		sub.once.Do(func() {
+			close(sub.done)
 			t.mu.Lock()
-			if c, ok := t.subs[id]; ok {
-				delete(t.subs, id)
-				close(c)
-			}
+			delete(t.subs, id)
 			t.mu.Unlock()
 		})
 	}
-	return ch, cancel
+	return sub.events, sub.done, cancel
 }
 
 func (t *Terminal) Close() error {
@@ -227,12 +233,18 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 		t.replay[0] = goprotocol.TerminalEvent{}
 		t.replay = t.replay[1:]
 	}
-	for _, ch := range t.subs {
-		select {
-		case ch <- ev:
-		default:
-			// Never backpressure the PTY on a slow client.
-		}
+	subs := make([]*subscriber, 0, len(t.subs))
+	for _, sub := range t.subs {
+		subs = append(subs, sub)
 	}
 	t.mu.Unlock()
+
+	// Match the Rust worker semantics: the 64-event subscriber queue is a
+	// bounded backpressure boundary. Never silently drop a terminal event.
+	for _, sub := range subs {
+		select {
+		case sub.events <- ev:
+		case <-sub.done:
+		}
+	}
 }
