@@ -1,0 +1,37 @@
+name: go-rewrite
+
+on:
+  push:
+    branches: [go-rewrite]
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "cmd/**"
+      - "internal/go*/**"
+      - ".github/workflows/go-rewrite.yml"
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+
+      - name: Install Linux Gio dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev
+
+      - run: go mod tidy
+      - run: go test ./internal/goprotocol ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt
+      - run: go test ./cmd/...
+      - run: go vet ./...
