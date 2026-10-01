@@ -107,6 +107,7 @@ type Session struct {
 	nextID atomic.Uint64
 
 	Events chan TerminalPush
+	Pushes chan goprotocol.WireMessage
 
 	replyMu sync.Mutex
 	replies map[uint64]chan goprotocol.WireMessage
@@ -127,6 +128,7 @@ func (c *Client) OpenSession() (*Session, error) {
 	s := &Session{
 		conn:    conn,
 		Events:  make(chan TerminalPush, 256),
+		Pushes:  make(chan goprotocol.WireMessage, 64),
 		replies: make(map[uint64]chan goprotocol.WireMessage),
 		done:    make(chan struct{}),
 	}
@@ -195,6 +197,7 @@ func (s *Session) Call(method string, params any, out any) error {
 
 func (s *Session) readLoop() {
 	defer close(s.Events)
+	defer close(s.Pushes)
 	defer close(s.done)
 	defer s.failReplies()
 
@@ -217,6 +220,10 @@ func (s *Session) readLoop() {
 			continue
 		}
 		if msg.OK == nil {
+			select {
+			case s.Pushes <- msg:
+			default:
+			}
 			continue
 		}
 		s.replyMu.Lock()
