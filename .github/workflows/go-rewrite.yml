@@ -32,6 +32,6 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev
 
       - run: go mod tidy
-      - run: go test ./internal/goprotocol ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt
+      - run: go test ./internal/goprotocol ./internal/gomodel ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt
       - run: go test ./cmd/...
       - run: go vet ./...
