@@ -14,6 +14,7 @@ import (
 	"gioui.org/widget/material"
 
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/SurTeam/Water/internal/goui"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
@@ -33,7 +34,7 @@ func main() {
 	flag.Parse()
 
 	if *terminal == "" {
-		fmt.Fprintln(os.Stderr, "water-gui requires --terminal <uuid> in the first Go rewrite milestone")
+		fmt.Fprintln(os.Stderr, "water-gui requires --terminal <uuid> in the current Go rewrite milestone")
 		os.Exit(2)
 	}
 	id, err := uuid.Parse(*terminal)
@@ -77,9 +78,10 @@ func run(socket string, id uuid.UUID) {
 			emu.Resize(ev.Columns, ev.Lines)
 		}
 	}
+	flushVTResponses(session, id, emu)
 
 	var mu sync.RWMutex
-	screen := emu.Text()
+	screen := emu.Snapshot()
 
 	go func() {
 		for push := range session.Events {
@@ -89,17 +91,20 @@ func run(socket string, id uuid.UUID) {
 			switch push.Event.Kind {
 			case goprotocol.OutputEvent:
 				emu.Write(push.Event.Data)
+				flushVTResponses(session, id, emu)
 			case goprotocol.ResizeEvent:
 				emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)
 			}
+			snapshot := emu.Snapshot()
 			mu.Lock()
-			screen = emu.Text()
+			screen = snapshot
 			mu.Unlock()
 			w.Invalidate()
 		}
 	}()
 
 	th := material.NewTheme()
+	terminalView := goui.NewTerminalView()
 	var ops op.Ops
 	for {
 		switch e := w.Event().(type) {
@@ -108,12 +113,27 @@ func run(socket string, id uuid.UUID) {
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 			mu.RLock()
-			text := screen
+			snapshot := screen
 			mu.RUnlock()
-			label := material.Label(th, unit.Sp(14), text)
-			label.Layout(gtx)
+			terminalView.Layout(gtx, th, snapshot)
 			e.Frame(&ops)
 			ops.Reset()
+		}
+	}
+}
+
+func flushVTResponses(session *goclient.Session, terminalID uuid.UUID, emu *govt.Emulator) {
+	for _, response := range emu.TakeResponses() {
+		values := make([]int, len(response))
+		for i, b := range response {
+			values[i] = int(b)
+		}
+		if err := session.Dispatch(map[string]any{
+			"type":        "terminal.send_bytes",
+			"terminal_id": terminalID,
+			"bytes":       values,
+		}, nil); err != nil {
+			return
 		}
 	}
 }
