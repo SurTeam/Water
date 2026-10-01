@@ -247,6 +247,24 @@ func (s *Session) failReplies() {
 	}
 }
 
+func (s *Session) DispatchAsync(command any) error {
+	requestID := s.nextID.Add(1)
+	params, err := json.Marshal(map[string]any{"command": command})
+	if err != nil {
+		return err
+	}
+	req := goprotocol.WireMessage{
+		ProtocolVersion: goprotocol.ProtocolVersion,
+		RequestID:       requestID,
+		Method:          "command.dispatch",
+		Params:          params,
+	}
+	s.mu.Lock()
+	err = goprotocol.WriteJSON(s.conn, req)
+	s.mu.Unlock()
+	return err
+}
+
 func (s *Session) Dispatch(command any, out any) error {
 	var dispatched struct {
 		OperationID uuid.UUID `json:"operation_id"`
