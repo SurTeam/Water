@@ -571,6 +571,75 @@ func (m *Model) SetTerminalSize(termID uuid.UUID,size goprotocol.TerminalSize) {
 	}
 }
 
+func (m *Model) AutoCloseExitedTerminal(termID uuid.UUID) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var paneID uuid.UUID
+	var tabID uuid.UUID
+	for pid, pane := range m.panes {
+		if pane.Terminal != nil && pane.Terminal.TerminalID == termID {
+			paneID = pid
+			break
+		}
+	}
+	if paneID == uuid.Nil {
+		return false
+	}
+	for tid, tab := range m.tabs {
+		if tab.Root.Contains(paneID) {
+			tabID = tid
+			break
+		}
+	}
+	if tabID == uuid.Nil {
+		return false
+	}
+	tab := m.tabs[tabID]
+	var paneIDs []uuid.UUID
+	tab.Root.LeafIDs(&paneIDs)
+	if len(paneIDs) <= 1 {
+		delete(m.panes, paneID)
+		delete(m.tabs, tabID)
+		for _, wid := range m.workspaceOrder {
+			workspace := m.workspaces[wid]
+			if workspace == nil {
+				continue
+			}
+			for index, candidate := range workspace.Tabs {
+				if candidate != tabID {
+					continue
+				}
+				workspace.Tabs = append(workspace.Tabs[:index], workspace.Tabs[index+1:]...)
+				if workspace.ActiveTab != nil && *workspace.ActiveTab == tabID {
+					workspace.ActiveTab = nil
+					if len(workspace.Tabs) > 0 {
+						next := workspace.Tabs[len(workspace.Tabs)-1]
+						workspace.ActiveTab = &next
+					}
+				}
+				m.bump()
+				return true
+			}
+		}
+		m.bump()
+		return true
+	}
+	if !tab.Root.CloseLeaf(paneID) {
+		return false
+	}
+	delete(m.panes, paneID)
+	if tab.ActivePane == paneID {
+		paneIDs = paneIDs[:0]
+		tab.Root.LeafIDs(&paneIDs)
+		if len(paneIDs) > 0 {
+			tab.ActivePane = paneIDs[0]
+		}
+	}
+	m.bump()
+	return true
+}
+
 func (m *Model) SetTerminalExit(termID uuid.UUID,code *int32) {
 	m.mu.Lock(); defer m.mu.Unlock()
 	for _,p:=range m.panes {
