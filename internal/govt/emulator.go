@@ -189,8 +189,7 @@ func (e *Emulator) Snapshot() Snapshot {
 	s.BracketedPaste = modes.BracketedPasteMode
 	s.MouseTracking = modes.MouseTrackingMode
 	s.MouseEncoding = modes.MouseEncoding
-	
-	}
+
 	for row := 0; row < term.Rows(); row++ {
 		line := buf.Lines.Get(buf.YDisp + row)
 		if line == nil {
