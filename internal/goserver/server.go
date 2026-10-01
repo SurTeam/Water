@@ -30,6 +30,9 @@ type Server struct {
 
 	opsMu sync.RWMutex
 	ops   map[uuid.UUID]OperationSnapshot
+
+	sessionsMu sync.RWMutex
+	sessions map[*session]struct{}
 }
 
 type OperationSnapshot struct {
@@ -57,6 +60,7 @@ func New(socketPath string) *Server {
 		model:      gomodel.New(),
 		closing:    make(chan struct{}),
 		ops:        make(map[uuid.UUID]OperationSnapshot),
+		sessions:   make(map[*session]struct{}),
 	}
 }
 
@@ -109,6 +113,7 @@ type session struct {
 	conn        net.Conn
 	mu          sync.Mutex
 	attachments map[uuid.UUID]func()
+	compactSnapshots bool
 }
 
 func (ss *session) write(v any) error {
@@ -132,7 +137,10 @@ func (ss *session) close() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	ss := &session{conn: conn, attachments: make(map[uuid.UUID]func())}
-	defer ss.close()
+	defer func() {
+		s.dropSession(ss)
+		ss.close()
+	}()
 
 	for {
 		frame, err := goprotocol.ReadFrame(conn)
@@ -176,16 +184,33 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"server_version":   s.Version,
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
-			"ui_sessions":      0,
+			"ui_sessions":      s.uiSessionCount(),
 		}))
 	case "session.open":
-		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
+		var p struct {
+			Role string `json:"role"`
+			CompactSnapshots bool `json:"compact_snapshots"`
+		}
+		if len(msg.Params) > 0 {
+			if err := json.Unmarshal(msg.Params, &p); err != nil {
+				return err
+			}
+		}
+		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"server_pid":       os.Getpid(),
 			"protocol_version": goprotocol.ProtocolVersion,
 			"server_version":   s.Version,
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
-		}))
+		})); err != nil {
+			return err
+		}
+		if p.Role == "gui" {
+			ss.compactSnapshots = p.CompactSnapshots
+			s.addSession(ss)
+			return s.pushSnapshot(ss)
+		}
+		return nil
 	case "state.dump":
 		return ss.write(goprotocol.Success(msg.RequestID, s.model.Dump()))
 	case "debug.memory":
@@ -406,5 +431,52 @@ func (s *Server) waitExit(ss *session, msg goprotocol.WireMessage) error {
 			}))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+
+func (s *Server) addSession(ss *session) {
+	s.sessionsMu.Lock()
+	s.sessions[ss] = struct{}{}
+	s.sessionsMu.Unlock()
+}
+
+func (s *Server) dropSession(ss *session) {
+	s.sessionsMu.Lock()
+	delete(s.sessions, ss)
+	s.sessionsMu.Unlock()
+}
+
+func (s *Server) uiSessionCount() int {
+	s.sessionsMu.RLock()
+	n := len(s.sessions)
+	s.sessionsMu.RUnlock()
+	return n
+}
+
+func (s *Server) pushSnapshot(ss *session) error {
+	state := s.model.Dump()
+	params, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return ss.write(goprotocol.WireMessage{
+		BuildVariant: s.Build,
+		ProtocolVersion: goprotocol.ProtocolVersion,
+		RequestID: 0,
+		Method: "push.snapshot",
+		Params: params,
+	})
+}
+
+func (s *Server) broadcastSnapshot() {
+	s.sessionsMu.RLock()
+	sessions := make([]*session, 0, len(s.sessions))
+	for ss := range s.sessions {
+		sessions = append(sessions, ss)
+	}
+	s.sessionsMu.RUnlock()
+	for _, ss := range sessions {
+		_ = s.pushSnapshot(ss)
 	}
 }
