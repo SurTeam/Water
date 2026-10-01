@@ -48,8 +48,12 @@ type Snapshot struct {
 	CursorHide bool
 	YBase      int
 	YDisp      int
-	AltScreen  bool
-	RowsData   []Row
+	AltScreen         bool
+	ApplicationCursor bool
+	BracketedPaste    bool
+	MouseTracking     string
+	MouseEncoding     string
+	RowsData          []Row
 }
 
 type Emulator struct {
@@ -179,6 +183,13 @@ func (e *Emulator) Snapshot() Snapshot {
 		YDisp:      buf.YDisp,
 		AltScreen:  term.IsAltBufferActive(),
 		RowsData:   make([]Row, term.Rows()),
+	}
+	modes := term.DecPrivateModes()
+	s.ApplicationCursor = modes.ApplicationCursorKeys
+	s.BracketedPaste = modes.BracketedPasteMode
+	s.MouseTracking = modes.MouseTrackingMode
+	s.MouseEncoding = modes.MouseEncoding
+	
 	}
 	for row := 0; row < term.Rows(); row++ {
 		line := buf.Lines.Get(buf.YDisp + row)
