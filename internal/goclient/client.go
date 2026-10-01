@@ -75,7 +75,7 @@ func (c *Client) Call(method string, params any, out any) error {
 
 func (c *Client) Dispatch(command any, out any) error {
 	var dispatched struct {
-		OperationID uint64 `json:"operation_id"`
+		OperationID uuid.UUID `json:"operation_id"`
 	}
 	if err := c.Call("command.dispatch", map[string]any{"command": command}, &dispatched); err != nil {
 		return err
