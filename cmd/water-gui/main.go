@@ -105,6 +105,14 @@ func run(socket string, id uuid.UUID) {
 
 	th := material.NewTheme()
 	terminalView := goui.NewTerminalView()
+	terminalInput := &goui.TerminalInput{}
+	terminalInput.OnInput = func(data []byte) {
+		_ = session.DispatchAsync(map[string]any{
+			"type":        "terminal.send_bytes",
+			"terminal_id": id,
+			"bytes":       bytesAsInts(data),
+		})
+	}
 	var ops op.Ops
 	for {
 		switch e := w.Event().(type) {
@@ -115,7 +123,9 @@ func run(socket string, id uuid.UUID) {
 			mu.RLock()
 			snapshot := screen
 			mu.RUnlock()
-			terminalView.Layout(gtx, th, snapshot)
+			terminalInput.Process(gtx, snapshot)
+			dims := terminalView.Layout(gtx, th, snapshot)
+			terminalInput.Add(gtx, dims.Size)
 			e.Frame(&ops)
 			ops.Reset()
 		}
@@ -128,12 +138,20 @@ func flushVTResponses(session *goclient.Session, terminalID uuid.UUID, emu *govt
 		for i, b := range response {
 			values[i] = int(b)
 		}
-		if err := session.Dispatch(map[string]any{
+		if err := session.DispatchAsync(map[string]any{
 			"type":        "terminal.send_bytes",
 			"terminal_id": terminalID,
 			"bytes":       values,
-		}, nil); err != nil {
+		}); err != nil {
 			return
 		}
 	}
+}
+
+func bytesAsInts(data []byte) []int {
+	values := make([]int, len(data))
+	for i, b := range data {
+		values[i] = int(b)
+	}
+	return values
 }
