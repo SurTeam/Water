@@ -66,3 +66,21 @@ func TestClosePaneCollapsesSplit(t *testing.T) {
 		t.Fatal("workspace/tab missing")
 	}
 }
+
+
+func TestExitedTerminalClosesPaneAndFinalTab(t *testing.T) {
+	m:=New()
+	wid:=m.CreateWorkspace("")
+	_,pane,err:=m.CreateTab(wid,"",false)
+	if err!=nil{t.Fatal(err)}
+	term:=uuid.New()
+	if err:=m.InstallTerminal(pane,TerminalMeta{
+		TerminalID:term,SessionID:uuid.New(),Program:"/bin/sh",
+		Size:goprotocol.TerminalSize{Columns:80,Lines:24},
+	});err!=nil{t.Fatal(err)}
+	m.SetTerminalExit(term,nil)
+	if !m.AutoCloseExitedTerminal(term){t.Fatal("terminal pane was not closed")}
+	state:=m.Dump()
+	if len(state.Workspaces)!=1{t.Fatalf("workspace removed: %#v",state)}
+	if len(state.Workspaces[0].Tabs)!=0{t.Fatalf("final tab remains: %#v",state.Workspaces[0])}
+}
