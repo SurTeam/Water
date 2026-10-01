@@ -310,7 +310,7 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 		cancel()
 	}
 
-	ch, cancel := t.Subscribe()
+	ch, done, cancel := t.Subscribe()
 	replay := t.Replay()
 	var first *uint64
 	var last uint64
@@ -337,9 +337,14 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 	ss.attachments[id] = cancel
 
 	go func() {
-		for ev := range ch {
-			if err := ss.writeTerminal(id, ev); err != nil {
-				cancel()
+		defer cancel()
+		for {
+			select {
+			case ev := <-ch:
+				if err := ss.writeTerminal(id, ev); err != nil {
+					return
+				}
+			case <-done:
 				return
 			}
 		}
