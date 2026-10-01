@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -29,13 +28,12 @@ type Server struct {
 	closing  chan struct{}
 	once     sync.Once
 
-	opSeq atomic.Uint64
 	opsMu sync.RWMutex
-	ops   map[uint64]OperationSnapshot
+	ops   map[uuid.UUID]OperationSnapshot
 }
 
 type OperationSnapshot struct {
-	ID      uint64               `json:"id"`
+	ID      uuid.UUID            `json:"id"`
 	Command json.RawMessage      `json:"command"`
 	Status  string               `json:"status"`
 	Result  any                  `json:"result,omitempty"`
@@ -58,7 +56,7 @@ func New(socketPath string) *Server {
 		registry:   goterminal.NewRegistry(),
 		model:      gomodel.New(),
 		closing:    make(chan struct{}),
-		ops:        make(map[uint64]OperationSnapshot),
+		ops:        make(map[uuid.UUID]OperationSnapshot),
 	}
 }
 
@@ -255,7 +253,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		return s.command(ss, msg)
 	case "operation.get", "operation.wait":
 		var p struct {
-			OperationID uint64 `json:"operation_id"`
+			OperationID uuid.UUID `json:"operation_id"`
 		}
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			return err
