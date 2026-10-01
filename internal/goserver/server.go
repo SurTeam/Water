@@ -240,16 +240,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		if !ok {
 			return errors.New("terminal not found")
 		}
-		replay := t.Replay()
-		wire := make([]goprotocol.WireTerminalEvent, 0, len(replay))
-		for _, ev := range replay {
-			wire = append(wire, ev.Wire())
-		}
-		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-			"terminal_id": p.TerminalID,
-			"size":        t.Size(),
-			"events":      wire,
-		}))
+		return ss.write(goprotocol.Success(msg.RequestID, terminalReplayPayload(p.TerminalID, t)))
 	case "terminal.attach":
 		var p struct {
 			TerminalID uuid.UUID `json:"terminal_id"`
@@ -363,27 +354,25 @@ func (s *Server) contains(ss *session, msg goprotocol.WireMessage) error {
 	}
 	t, ok := s.registry.Get(p.TerminalID)
 	if !ok {
-		return errors.New("terminal not found")
+		return ss.write(goprotocol.Failure(msg.RequestID, "TERMINAL_NOT_FOUND", "terminal not found"))
 	}
 	deadline := time.Now().Add(time.Duration(p.TimeoutMS) * time.Millisecond)
 	for {
+		replay := t.Replay()
 		var all []byte
-		for _, ev := range t.Replay() {
+		for _, ev := range replay {
 			if ev.Kind == goprotocol.OutputEvent {
 				all = append(all, ev.Data...)
 			}
 		}
 		if containsBytes(all, []byte(p.Text)) {
-			return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-				"terminal_id": p.TerminalID,
-				"contains":    true,
-			}))
+			return ss.write(goprotocol.Success(msg.RequestID, terminalReplayPayload(p.TerminalID, t)))
+		}
+		if replayExited(replay) {
+			return ss.write(goprotocol.Failure(msg.RequestID, "TERMINAL_PROCESS_EXITED", "terminal exited before requested text appeared"))
 		}
 		if time.Now().After(deadline) {
-			return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-				"terminal_id": p.TerminalID,
-				"contains":    false,
-			}))
+			return ss.write(goprotocol.Failure(msg.RequestID, "TERMINAL_TIMEOUT", "terminal contains timed out"))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -418,27 +407,55 @@ func (s *Server) waitExit(ss *session, msg goprotocol.WireMessage) error {
 	}
 	t, ok := s.registry.Get(p.TerminalID)
 	if !ok {
-		return errors.New("terminal not found")
+		return ss.write(goprotocol.Failure(msg.RequestID, "TERMINAL_NOT_FOUND", "terminal not found"))
 	}
 	deadline := time.Now().Add(time.Duration(p.TimeoutMS) * time.Millisecond)
 	for {
 		replay := t.Replay()
-		if len(replay) > 0 && replay[len(replay)-1].Kind == goprotocol.ExitEvent {
-			return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-				"terminal_id": p.TerminalID,
-				"exited":      true,
-			}))
+		if replayExited(replay) {
+			return ss.write(goprotocol.Success(msg.RequestID, terminalReplayPayload(p.TerminalID, t)))
 		}
 		if time.Now().After(deadline) {
-			return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-				"terminal_id": p.TerminalID,
-				"exited":      false,
-			}))
+			return ss.write(goprotocol.Failure(msg.RequestID, "TERMINAL_TIMEOUT", "terminal wait-exit timed out"))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
+func replayExited(replay []goprotocol.TerminalEvent) bool {
+	return len(replay) > 0 && replay[len(replay)-1].Kind == goprotocol.ExitEvent
+}
+
+func terminalReplayPayload(id uuid.UUID, t *goterminal.Terminal) map[string]any {
+	replay := t.Replay()
+	wire := make([]goprotocol.WireTerminalEvent, 0, len(replay))
+	var first *uint64
+	var last uint64
+	size := t.Size()
+	process := any("running")
+	for i, ev := range replay {
+		if i == 0 {
+			v := ev.Seq
+			first = &v
+			if ev.Kind == goprotocol.OutputEvent || ev.Kind == goprotocol.ResizeEvent {
+				size = ev.Size
+			}
+		}
+		last = ev.Seq
+		wire = append(wire, ev.Wire())
+		if ev.Kind == goprotocol.ExitEvent {
+			process = map[string]any{"exited": map[string]any{"code": ev.Code}}
+		}
+	}
+	return map[string]any{
+		"terminal_id": id,
+		"process": process,
+		"first_seq": first,
+		"last_seq": last,
+		"size": size,
+		"events": wire,
+	}
+}
 
 func (s *Server) addSession(ss *session) {
 	s.sessionsMu.Lock()
