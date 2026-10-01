@@ -279,13 +279,18 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 		Size:t.Size(),ProcessName:program,CWD:"",
 	}
 	if err:=s.model.InstallTerminal(paneID,meta);err!=nil{s.registry.Remove(t.ID);return nil,err}
-	ch,cancel:=t.Subscribe()
+	ch,done,cancel:=t.Subscribe()
 	go func(){
 		defer cancel()
-		for ev:=range ch{
-			if ev.Kind==goprotocol.ExitEvent{
-				s.model.SetTerminalExit(t.ID,ev.Code)
-				s.broadcastSnapshot()
+		for {
+			select {
+			case ev:=<-ch:
+				if ev.Kind==goprotocol.ExitEvent{
+					s.model.SetTerminalExit(t.ID,ev.Code)
+					s.broadcastSnapshot()
+					return
+				}
+			case <-done:
 				return
 			}
 		}
