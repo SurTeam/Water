@@ -94,6 +94,23 @@ func (r *Registry) CloseAll() {
 	}
 }
 
+func (r *Registry) Remove(id uuid.UUID) {
+	r.mu.Lock()
+	t := r.terms[id]
+	delete(r.terms, id)
+	r.mu.Unlock()
+	if t != nil {
+		_ = t.Close()
+	}
+}
+
+func (r *Registry) Count() int {
+	r.mu.RLock()
+	n := len(r.terms)
+	r.mu.RUnlock()
+	return n
+}
+
 func (t *Terminal) Size() goprotocol.TerminalSize {
 	t.mu.RLock()
 	s := t.size
