@@ -28,8 +28,9 @@ type Server struct {
 	closing  chan struct{}
 	once     sync.Once
 
-	opsMu sync.RWMutex
-	ops   map[uuid.UUID]OperationSnapshot
+	opsMu    sync.RWMutex
+	ops      map[uuid.UUID]OperationSnapshot
+	opOrder  []uuid.UUID
 
 	sessionsMu sync.RWMutex
 	sessions map[*session]struct{}
