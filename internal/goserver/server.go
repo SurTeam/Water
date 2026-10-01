@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goterminal"
 	"github.com/google/uuid"
@@ -23,6 +24,7 @@ type Server struct {
 	Version    string
 
 	registry *goterminal.Registry
+	model    *gomodel.Model
 	listener net.Listener
 	closing  chan struct{}
 	once     sync.Once
@@ -54,6 +56,7 @@ func New(socketPath string) *Server {
 		Build:      "dev",
 		Version:    "go-rewrite",
 		registry:   goterminal.NewRegistry(),
+		model:      gomodel.New(),
 		closing:    make(chan struct{}),
 		ops:        make(map[uint64]OperationSnapshot),
 	}
@@ -184,6 +187,24 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"server_version":   s.Version,
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
+		}))
+	case "state.dump":
+		return ss.write(goprotocol.Success(msg.RequestID, s.model.Dump()))
+	case "debug.memory":
+		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
+			"terminal_count": s.registry.Count(),
+			"scrollback_lines": 2000,
+			"inactive_scrollback_lines": 500,
+			"replay_history_bytes": 8 * 1024 * 1024,
+			"retained_replay_bytes": 0,
+			"visible_cells": 0,
+			"surface_count": 0,
+			"shape_cache_entries": 0,
+			"image_cache_bytes": 0,
+		}))
+	case "connection.list":
+		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
+			"connections": []any{},
 		}))
 	case "terminal.replay", "terminal.snapshot":
 		var p struct {
