@@ -38,6 +38,7 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 	} else {
 		op.Status = "succeeded"
 		op.Result = result
+		s.broadcastSnapshot()
 	}
 	s.opsMu.Lock()
 	s.ops[id] = op
@@ -282,7 +283,11 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 	go func(){
 		defer cancel()
 		for ev:=range ch{
-			if ev.Kind==goprotocol.ExitEvent{s.model.SetTerminalExit(t.ID,ev.Code);return}
+			if ev.Kind==goprotocol.ExitEvent{
+				s.model.SetTerminalExit(t.ID,ev.Code)
+				s.broadcastSnapshot()
+				return
+			}
 		}
 	}()
 	return &goterminalRef{ID:t.ID},nil
