@@ -130,6 +130,20 @@ func ensureControlMaster(destination,control string)error{
 
 func startRemoteServer(destination,control,remoteSocket string)error{
 	program:=os.Getenv("WATER_REMOTE_SERVER_COMMAND")
+	embedded:=false
+	if program==""{
+		target,err:=detectRemoteTarget(destination,control)
+		if err!=nil{return err}
+		payload,ok:=embeddedServerPayload(target)
+		if !ok{
+			return fmt.Errorf("no embedded Go server payload for %s/%s; run scripts/build-go-embedded-servers.sh before packaging",target.OS,target.Arch)
+		}
+		program,err=deployEmbeddedServer(destination,control,target,payload)
+		if err!=nil{return err}
+		embedded=true
+	}
+	if !embedded && strings.ContainsAny(program," \t\r\n'\";func startRemoteServer(destination,control,remoteSocket string)error{
+	program:=os.Getenv("WATER_REMOTE_SERVER_COMMAND")
 	if program==""{
 		return errors.New("matching remote Go server is not installed; set WATER_REMOTE_SERVER_COMMAND to the remote water-server executable")
 	}
@@ -141,6 +155,23 @@ func startRemoteServer(destination,control,remoteSocket string)error{
 		"command -v %s >/dev/null 2>&1 || exit 127; %s --socket %s >/tmp/water-go-server.log 2>&1 </dev/null &",
 		program,program,remoteQuoted,
 	)
+	return runSSH("-S",control,"-o","BatchMode=yes",destination,commandText)
+}|<>") {
+		return errors.New("WATER_REMOTE_SERVER_COMMAND must be a simple remote executable path")
+	}
+	remoteQuoted:=shellQuote(remoteSocket)
+	var commandText string
+	if embedded {
+		commandText=fmt.Sprintf(
+			"%s --socket %s >/tmp/water-go-server.log 2>&1 </dev/null &",
+			program,remoteQuoted,
+		)
+	} else {
+		commandText=fmt.Sprintf(
+			"command -v %s >/dev/null 2>&1 || exit 127; %s --socket %s >/tmp/water-go-server.log 2>&1 </dev/null &",
+			program,program,remoteQuoted,
+		)
+	}
 	return runSSH("-S",control,"-o","BatchMode=yes",destination,commandText)
 }
 
