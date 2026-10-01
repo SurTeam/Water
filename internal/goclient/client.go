@@ -247,6 +247,34 @@ func (s *Session) failReplies() {
 	}
 }
 
+func (s *Session) Dispatch(command any, out any) error {
+	var dispatched struct {
+		OperationID uuid.UUID `json:"operation_id"`
+	}
+	if err := s.Call("command.dispatch", map[string]any{"command": command}, &dispatched); err != nil {
+		return err
+	}
+
+	var op struct {
+		Status string               `json:"status"`
+		Result json.RawMessage      `json:"result"`
+		Error  *goprotocol.RPCError `json:"error"`
+	}
+	if err := s.Call("operation.wait", map[string]any{"operation_id": dispatched.OperationID}, &op); err != nil {
+		return err
+	}
+	if op.Status != "succeeded" {
+		if op.Error != nil {
+			return op.Error
+		}
+		return fmt.Errorf("operation ended with status %s", op.Status)
+	}
+	if out != nil && len(op.Result) > 0 {
+		return json.Unmarshal(op.Result, out)
+	}
+	return nil
+}
+
 func (s *Session) Attach(id uuid.UUID, out any) error {
 	return s.Call("terminal.attach", map[string]any{"terminal_id": id}, out)
 }
