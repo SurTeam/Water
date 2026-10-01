@@ -294,6 +294,7 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 			case ev:=<-ch:
 				if ev.Kind==goprotocol.ExitEvent{
 					s.model.SetTerminalExit(t.ID,ev.Code)
+					s.model.AutoCloseExitedTerminal(t.ID)
 					s.broadcastSnapshot()
 					return
 				}
