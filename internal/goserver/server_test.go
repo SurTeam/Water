@@ -2,7 +2,6 @@ package goserver_test
 
 import (
 	"encoding/base64"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,8 +14,7 @@ import (
 )
 
 func TestServerClientTerminalRoundTrip(t *testing.T) {
-	socket := filepath.Join(os.TempDir(), "water-go-test-"+uuid.New().String()+".sock")
-	defer os.Remove(socket)
+	socket := filepath.Join("/tmp", "water-go-test-"+uuid.New().String()+".sock")
 	srv := goserver.New(socket)
 	done := make(chan error, 1)
 	go func() { done <- srv.ListenAndServe() }()
@@ -37,7 +35,12 @@ func TestServerClientTerminalRoundTrip(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("server never became ready")
+			select {
+			case serveErr := <-done:
+				t.Fatalf("server failed to start: %v", serveErr)
+			default:
+				t.Fatal("server never became ready")
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
