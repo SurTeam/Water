@@ -13,6 +13,7 @@ func TestDetectAgentParity(t *testing.T) {
 		{"node",[]string{"/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js"},ClaudeCode},
 		{"python3",[]string{"/opt/homebrew/bin/aider"},Aider},
 		{"node",[]string{"/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"},Pi},
+		{"/bin/zsh",[]string{"-c","exec -a claude sleep 2"},ClaudeCode},
 	}
 	for _,tt:=range tests{
 		got:=Detect(tt.process,tt.args)
