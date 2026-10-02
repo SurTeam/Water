@@ -71,6 +71,9 @@ const (
 	hitNewTab
 	hitPane
 	hitConnection
+	hitNewRemote
+	hitRemoteCancel
+	hitDisconnectConnection
 )
 
 type automationHit struct {
@@ -380,6 +383,12 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 			imageTextures+=stats.ImageTextures
 		}
 	}
+	c.connectionMu.RLock()
+	remoteFormVisible:=c.remoteFormVisible
+	remoteConnecting:=c.remoteConnecting
+	remoteError:=c.remoteError
+	c.connectionMu.RUnlock()
+
 	return map[string]any{
 		"window_count":1,
 		"has_active_window":true,
@@ -391,6 +400,9 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"frame_size":[]int{frameSize.X,frameSize.Y},
 		"automation_hits":hits,
 		"connections":c.connectionListResponse()["connections"],
+		"remote_form_visible":remoteFormVisible,
+		"remote_connecting":remoteConnecting,
+		"remote_error":remoteError,
 	}
 }
 
@@ -402,6 +414,9 @@ func automationHitKindName(kind automationHitKind)string{
 	case hitNewTab:return "new_tab"
 	case hitPane:return "pane"
 	case hitConnection:return "connection"
+	case hitNewRemote:return "new_remote"
+	case hitRemoteCancel:return "remote_cancel"
+	case hitDisconnectConnection:return "disconnect_connection"
 	default:return "unknown"
 	}
 }
