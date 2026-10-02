@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/google/uuid"
@@ -181,14 +184,19 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 	case "pane.focus":
 		var c struct{PaneID *uuid.UUID `json:"pane_id"`;Direction *string `json:"direction"`}
 		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
-		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
-		if c.Direction!=nil{return fail("UNSUPPORTED_COMMAND",errors.New("directional pane focus is not implemented yet"))}
+		tabID,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		if c.Direction!=nil{
+			target,ok:=s.model.DirectionalPane(tabID,pid,*c.Direction)
+			if !ok{return fail("FOCUS_TARGET_NOT_FOUND",errors.New("no pane is available in the requested direction"))}
+			pid=target
+		}
 		if err:=s.model.FocusPane(pid);err!=nil{return fail("PANE_NOT_FOUND",err)}
 		return map[string]any{"type":"pane_focused","pane_id":pid},nil
 
 	case "pane.resize":
 		var c struct{PaneID *uuid.UUID `json:"pane_id"`;Ratio float32 `json:"ratio"`}
 		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		if c.Ratio<0.05 || c.Ratio>0.95{return fail("INVALID_SPLIT",errors.New("split ratio must be between 0.05 and 0.95"))}
 		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
 		if err:=s.model.ResizePane(pid,c.Ratio);err!=nil{return fail("PANE_RESIZE_FAILED",err)}
 		return map[string]any{"type":"pane_resized","pane_id":pid,"ratio":c.Ratio},nil
@@ -196,8 +204,48 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 	case "pane.resize_split":
 		var c struct{TabID uuid.UUID `json:"tab_id"`;Path []bool `json:"path"`;Ratio float32 `json:"ratio"`}
 		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		if c.Ratio<0.05 || c.Ratio>0.95{return fail("INVALID_SPLIT",errors.New("split ratio must be between 0.05 and 0.95"))}
 		if err:=s.model.ResizeSplit(c.TabID,c.Path,c.Ratio);err!=nil{return fail("PANE_RESIZE_FAILED",err)}
-		return map[string]any{"type":"pane_resized","pane_id":uuid.Nil,"ratio":c.Ratio},nil
+		return map[string]any{"type":"none"},nil
+
+	case "pane.move_to_workspace":
+		var c struct{PaneID *uuid.UUID `json:"pane_id"`;WorkspaceID uuid.UUID `json:"workspace_id"`}
+		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		move,moved,err:=s.model.MovePaneToWorkspace(pid,c.WorkspaceID)
+		if err!=nil{return fail("PANE_MOVE_FAILED",err)}
+		if !moved{return map[string]any{"type":"none"},nil}
+		return map[string]any{
+			"type":"none",
+			"pane_id":pid,
+			"tab_id":move.TargetTabID,
+			"workspace_id":c.WorkspaceID,
+		},nil
+
+	case "pane.promote_to_tab":
+		var c struct{PaneID *uuid.UUID `json:"pane_id"`}
+		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		move,moved,err:=s.model.PromotePaneToTab(pid)
+		if err!=nil{return fail("PANE_MOVE_FAILED",err)}
+		if !moved{return map[string]any{"type":"none"},nil}
+		return map[string]any{"type":"tab_created","tab_id":move.TargetTabID},nil
+
+	case "pane.agent_rename":
+		var c struct{PaneID *uuid.UUID `json:"pane_id"`;Label string `json:"label"`}
+		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		if err:=s.model.RenameAgent(pid,c.Label);err!=nil{return fail("AGENT_NOT_FOUND",err)}
+		return map[string]any{"type":"none"},nil
+
+	case "surface.replace":
+		var c struct{PaneID *uuid.UUID `json:"pane_id"`;Kind string `json:"kind"`}
+		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
+		if c.Kind!="empty"{return fail("SURFACE_NOT_AVAILABLE",errors.New("only EmptySurface is implemented"))}
+		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		surfaceID,oldTerminal,err:=s.model.ReplaceSurfaceEmpty(pid);if err!=nil{return fail("PANE_NOT_FOUND",err)}
+		if oldTerminal!=nil{s.registry.Remove(*oldTerminal)}
+		return map[string]any{"type":"surface_replaced","surface_id":surfaceID},nil
 
 	case "terminal.spawn":
 		var c struct {
@@ -208,6 +256,8 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 			Lines   int        `json:"lines"`
 		}
 		if err := json.Unmarshal(raw, &c); err != nil { return fail("INVALID_COMMAND", err) }
+		if c.Columns==0{c.Columns=80}
+		if c.Lines==0{c.Lines=24}
 		_,paneID,err:=s.model.ResolvePane(c.PaneID)
 		if err!=nil{
 			wid:=s.model.EnsureWorkspace()
@@ -281,9 +331,13 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 	if program==""{program=defaultShell();args=defaultShellArgs(program)}
 	if old,ok:=s.model.TerminalForPane(paneID);ok{s.registry.Remove(old)}
 	t,err:=s.registry.Spawn(program,args,size);if err!=nil{return nil,err}
+	processName:=strings.TrimLeft(filepath.Base(program),"-")
+	cmdline:=append([]string{program},args...)
+	cwd,_:=os.Getwd()
 	meta:=gomodel.TerminalMeta{
 		TerminalID:t.ID,SessionID:uuid.New(),Program:program,Args:append([]string(nil),args...),
-		Size:t.Size(),ProcessName:program,CWD:"",
+		Size:t.Size(),ProcessName:processName,CWD:cwd,
+		Agent:goagent.Detect(processName,cmdline),
 	}
 	if err:=s.model.InstallTerminal(paneID,meta);err!=nil{s.registry.Remove(t.ID);return nil,err}
 	ch,done,cancel:=t.Subscribe()
