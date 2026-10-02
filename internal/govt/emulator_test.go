@@ -117,3 +117,35 @@ func TestReplaySuppressesTerminalQueryResponses(t *testing.T) {
 		t.Fatalf("live query response missing: %q",got)
 	}
 }
+
+
+func TestAbsoluteSelectionTextSurvivesViewportScroll(t *testing.T) {
+	e:=New(8,3,100)
+	defer e.Close()
+	e.Write([]byte("zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive"))
+	before:=e.Snapshot()
+	if before.YBase==0 {
+		t.Fatalf("expected scrollback, snapshot=%#v",before)
+	}
+
+	e.Scroll(-2)
+	scrolled:=e.Snapshot()
+	if scrolled.YDisp>=before.YDisp {
+		t.Fatalf("viewport did not scroll into history: before=%d after=%d",before.YDisp,scrolled.YDisp)
+	}
+
+	absoluteRow:=scrolled.YDisp+1
+	got:=e.SelectionText(absoluteRow,0,absoluteRow,7)
+	if got=="" {
+		t.Fatal("absolute selection returned empty text")
+	}
+
+	e.ScrollToBottom()
+	after:=e.Snapshot()
+	if after.YDisp!=after.YBase {
+		t.Fatalf("viewport did not return to bottom: ydisp=%d ybase=%d",after.YDisp,after.YBase)
+	}
+	if again:=e.SelectionText(absoluteRow,0,absoluteRow,7);again!=got {
+		t.Fatalf("selection changed after viewport move: before=%q after=%q",got,again)
+	}
+}
