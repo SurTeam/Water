@@ -1,9 +1,13 @@
 package goui
 
 import (
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/google/uuid"
 )
 
@@ -107,4 +111,85 @@ func TestMultiWorkspaceClientConnectRemoteReusesDestination(t *testing.T){
 	if closed!=1{t.Fatalf("close count = %d",closed)}
 	if err:=manager.ConnectRemote("build-host");err!=nil{t.Fatal(err)}
 	if factoryCalls!=2{t.Fatalf("reconnect factory calls = %d",factoryCalls)}
+}
+
+
+func TestMultiWorkspaceClientAddsRunningConnectionAfterBootstrap(t *testing.T){
+	socket1,stop1:=startWorkspaceTestServer(t)
+	defer stop1()
+	socket2,stop2:=startWorkspaceTestServer(t)
+	defer stop2()
+
+	session1,err:=goclient.New(socket1).OpenSession()
+	if err!=nil{t.Fatal(err)}
+	manager:=NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+
+	local:=NewWorkspaceClientWithConnection(session1,nil,goconfig.Default(),"")
+	if err:=manager.AddConnection(ConnectionEntry{
+		ID:uuid.New(),Name:"Local",Kind:"local",Status:"connected",SocketPath:socket1,
+	},local,func(){_ = session1.Close()},true);err!=nil{t.Fatal(err)}
+	if err:=manager.Bootstrap();err!=nil{t.Fatal(err)}
+	manager.Run()
+
+	closed:=0
+	manager.SetRemoteConnector(func(destination string)(ConnectionEntry,*WorkspaceClient,func(),error){
+		session,err:=goclient.New(socket2).OpenSession()
+		if err!=nil{return ConnectionEntry{},nil,nil,err}
+		view:=NewWorkspaceClientWithConnection(session,nil,goconfig.Default(),destination)
+		return ConnectionEntry{
+			ID:uuid.New(),Name:destination,Kind:"remote",Status:"connected",
+			SocketPath:socket2,Destination:destination,
+		},view,func(){closed++;_ = session.Close()},nil
+	})
+	if err:=manager.ConnectRemote("remote-host");err!=nil{t.Fatal(err)}
+
+	remoteID:=manager.ActiveConnectionID()
+	manager.mu.RLock()
+	remote:=manager.connections[remoteID]
+	manager.mu.RUnlock()
+	if remote==nil || remote.view==nil{t.Fatal("dynamic remote view was not installed")}
+
+	if err:=goclient.New(socket2).Dispatch(map[string]any{"type":"workspace.create"},nil);err!=nil{
+		t.Fatal(err)
+	}
+	deadline:=time.Now().Add(2*time.Second)
+	for {
+		remote.view.mu.RLock()
+		count:=len(remote.view.state.Workspaces)
+		remote.view.mu.RUnlock()
+		if count>=2{break}
+		if time.Now().After(deadline){
+			t.Fatalf("dynamic remote reader did not receive snapshot push; workspace count=%d",count)
+		}
+		time.Sleep(10*time.Millisecond)
+	}
+
+	if !manager.RemoveConnection(remoteID){t.Fatal("dynamic remote removal failed")}
+	if closed!=1{t.Fatalf("dynamic remote close count = %d",closed)}
+}
+
+func startWorkspaceTestServer(t *testing.T)(string,func()){
+	t.Helper()
+	socket:=filepath.Join("/tmp","water-goui-"+uuid.New().String()+".sock")
+	server:=goserver.New(socket)
+	if err:=server.Initialize(true,false);err!=nil{t.Fatal(err)}
+	done:=make(chan error,1)
+	go func(){done<-server.ListenAndServe()}()
+	client:=goclient.New(socket)
+	deadline:=time.Now().Add(2*time.Second)
+	for {
+		var pong any
+		if client.Call("ping",map[string]any{},&pong)==nil{break}
+		if time.Now().After(deadline){t.Fatal("workspace test server did not become ready")}
+		time.Sleep(5*time.Millisecond)
+	}
+	return socket,func(){
+		_ = server.Close()
+		select{
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("workspace test server did not stop")
+		}
+	}
 }
