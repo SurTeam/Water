@@ -90,6 +90,7 @@ type TerminalView struct {
 	FontSize   unit.Sp
 	CellWidth  unit.Dp
 	LineHeight unit.Dp
+	FontFamily string
 
 	mu    sync.Mutex
 	cache map[int]preparedRow
@@ -101,6 +102,7 @@ func NewTerminalView() *TerminalView {
 		FontSize:   unit.Sp(14),
 		CellWidth:  unit.Dp(8.4),
 		LineHeight: unit.Dp(20),
+		FontFamily: "monospace",
 		cache:      make(map[int]preparedRow),
 	}
 }
@@ -151,7 +153,7 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 			label := material.Label(th, v.FontSize, run.text)
 			label.MaxLines = 1
 			label.Color = run.style.fg
-			label.Font.Typeface = font.Typeface("monospace")
+			label.Font.Typeface = font.Typeface(v.FontFamily)
 			if run.style.bold {
 				label.Font.Weight = font.Bold
 			}
