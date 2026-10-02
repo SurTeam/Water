@@ -56,6 +56,33 @@ type Snapshot struct {
 	RowsData          []Row
 }
 
+type MouseButton uint8
+
+const (
+	MouseLeft MouseButton = iota
+	MouseMiddle
+	MouseRight
+	MouseWheel
+)
+
+type MouseAction uint8
+
+const (
+	MouseUp MouseAction = iota
+	MouseDown
+	MouseMove
+)
+
+type MouseEvent struct {
+	Col, Row int
+	X, Y     int
+	Button   MouseButton
+	Action   MouseAction
+	Ctrl     bool
+	Alt      bool
+	Shift    bool
+}
+
 type Emulator struct {
 	mu   sync.RWMutex
 	term *xterm.Terminal
@@ -157,6 +184,33 @@ func (e *Emulator) Title() string {
 	title := e.title
 	e.titleMu.RUnlock()
 	return title
+}
+
+func (e *Emulator) Mouse(ev MouseEvent) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	button:=xterm.MouseButtonLeft
+	switch ev.Button {
+	case MouseMiddle:
+		button=xterm.MouseButtonMiddle
+	case MouseRight:
+		button=xterm.MouseButtonRight
+	case MouseWheel:
+		button=xterm.MouseButtonWheel
+	}
+	action:=xterm.MouseActionDown
+	switch ev.Action {
+	case MouseUp:
+		action=xterm.MouseActionUp
+	case MouseMove:
+		action=xterm.MouseActionMove
+	}
+	return e.term.TriggerMouseEvent(xterm.CoreMouseEvent{
+		Col:ev.Col,Row:ev.Row,X:ev.X,Y:ev.Y,
+		Button:button,Action:action,
+		Ctrl:ev.Ctrl,Alt:ev.Alt,Shift:ev.Shift,
+	})
 }
 
 func (e *Emulator) TakeResponses() [][]byte {
