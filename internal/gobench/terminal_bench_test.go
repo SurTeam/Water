@@ -1,6 +1,7 @@
 package gobench
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -15,10 +16,15 @@ import (
 
 const benchBytes = 64_000_000
 
+func terminalBenchmarkCommand() string {
+	if command:=os.Getenv("WATER_GO_BENCH_COMMAND");command!="" { return command }
+	return "yes WATER_GO_BENCH | head -c 64000000"
+}
+
 func BenchmarkTerminalDirect64MB(b *testing.B) {
 	for i:=0;i<b.N;i++{
 		r:=goterminal.NewRegistry()
-		term,err:=r.Spawn("/bin/sh",[]string{"-c","read _; yes WATER_GO_BENCH | head -c 64000000"},goprotocol.TerminalSize{Columns:80,Lines:24})
+		term,err:=r.Spawn("/bin/sh",[]string{"-c","read _; "+terminalBenchmarkCommand()},goprotocol.TerminalSize{Columns:80,Lines:24})
 		if err!=nil{b.Fatal(err)}
 		events,done,cancel:=term.Subscribe()
 		emu:=govt.New(80,24,10_000)
@@ -67,7 +73,7 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 		var spawned struct{TerminalID uuid.UUID `json:"terminal_id"`}
 		if err:=client.Dispatch(map[string]any{
 			"type":"terminal.spawn","program":"/bin/sh",
-			"args":[]string{"-c","read _; yes WATER_GO_BENCH | head -c 64000000"},
+			"args":[]string{"-c","read _; "+terminalBenchmarkCommand()},
 			"columns":80,"lines":24,
 		},&spawned);err!=nil{b.Fatal(err)}
 		session,err:=client.OpenSession();if err!=nil{b.Fatal(err)}
