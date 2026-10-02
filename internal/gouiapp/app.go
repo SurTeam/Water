@@ -38,15 +38,17 @@ func Run(arguments []string, buildVariant string) error {
 	if err!=nil{return fmt.Errorf("config: %w",err)}
 	socket=resolveGUISocket(socket,cfg,buildVariant)
 	var tunnel *goremote.Tunnel
+	remoteDestination:=""
 	if strings.TrimSpace(sshDestination)!="" {
 		tunnel,err=goremote.Connect(sshDestination)
 		if err!=nil{return fmt.Errorf("connect remote Water server: %w",err)}
 		defer tunnel.Close()
 		socket=tunnel.LocalSocket()
+		remoteDestination=tunnel.Destination()
 	}
 
 	runErr:=make(chan error,1)
-	go func(){runErr<-runWindow(socket,configPath,cfg,buildVariant)}()
+	go func(){runErr<-runWindowWithConnection(socket,configPath,cfg,buildVariant,remoteDestination)}()
 	app.Main()
 	select{
 	case err:=<-runErr:
@@ -57,6 +59,10 @@ func Run(arguments []string, buildVariant string) error {
 }
 
 func runWindow(socket,configPath string,cfg goconfig.AppConfig,buildVariant string) error {
+	return runWindowWithConnection(socket,configPath,cfg,buildVariant,"")
+}
+
+func runWindowWithConnection(socket,configPath string,cfg goconfig.AppConfig,buildVariant,remoteDestination string) error {
 	w:=new(app.Window)
 	w.Option(
 		app.Title("Water"),
@@ -72,7 +78,7 @@ func runWindow(socket,configPath string,cfg goconfig.AppConfig,buildVariant stri
 		defer func(){_ = goclient.New(socket).Call("server.shutdown",map[string]any{},nil)}()
 	}
 
-	view:=goui.NewWorkspaceClientWithConfig(session,w.Invalidate,cfg)
+	view:=goui.NewWorkspaceClientWithConnection(session,w.Invalidate,cfg,remoteDestination)
 	defer view.Close()
 	if err:=view.Bootstrap();err!=nil{return err}
 	go view.Run()
