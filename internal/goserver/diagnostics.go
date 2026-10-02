@@ -79,3 +79,91 @@ type appEvent struct {
 	StateRevision uint64 `json:"state_revision"`
 	Kind any `json:"kind"`
 }
+
+
+func (s *Server) emitEvent(kind map[string]any) {
+	seq:=s.eventSeq.Add(1)
+	revision:=s.model.Dump().StateRevision
+	event:=appEvent{Sequence:seq,StateRevision:revision,Kind:kind}
+	s.eventsMu.Lock()
+	const maxEvents=4096
+	if len(s.events)==maxEvents {
+		copy(s.events,s.events[1:])
+		s.events[len(s.events)-1]=event
+	} else {
+		s.events=append(s.events,event)
+	}
+	s.eventsMu.Unlock()
+}
+
+func (s *Server) recordCommandEvents(commandType string,raw json.RawMessage,result any) {
+	eventType:=""
+	switch commandType {
+	case "workspace.create","workspace.new","workspace.ensure":
+		eventType="workspace_created"
+	case "workspace.close","workspace.delete":
+		eventType="workspace_closed"
+	case "workspace.activate":
+		eventType="workspace_activated"
+	case "workspace.rename":
+		eventType="workspace_renamed"
+	case "workspace.reorder":
+		eventType="workspace_reordered"
+	case "tab.new","tab.new_in_workspace":
+		eventType="tab_created"
+	case "tab.rename":
+		eventType="tab_renamed"
+	case "tab.move_to_workspace":
+		eventType="tab_moved_to_workspace"
+	case "tab.close":
+		eventType="tab_closed"
+	case "tab.activate":
+		eventType="tab_activated"
+	case "pane.close":
+		eventType="pane_closed"
+	case "pane.focus":
+		eventType="pane_focused"
+	case "pane.resize":
+		eventType="pane_resized"
+	case "pane.resize_split":
+		eventType="split_resized"
+	case "pane.move_to_workspace":
+		eventType="pane_moved_to_workspace"
+	case "pane.promote_to_tab":
+		eventType="pane_promoted_to_tab"
+	case "pane.agent_rename":
+		eventType="agent_renamed"
+	case "surface.replace":
+		eventType="surface_changed"
+	case "terminal.spawn":
+		eventType="terminal_spawned"
+	case "terminal.resize":
+		eventType="terminal_resized"
+	default:
+		return
+	}
+	fields:=map[string]any{"type":eventType}
+	if data,err:=json.Marshal(result);err==nil {
+		var resultFields map[string]any
+		if json.Unmarshal(data,&resultFields)==nil {
+			for key,value:=range resultFields {
+				if key!="type"{fields[key]=value}
+			}
+		}
+	}
+	var commandFields map[string]any
+	if json.Unmarshal(raw,&commandFields)==nil {
+		for _,key:=range []string{"workspace_id","tab_id","pane_id","target_pane","new_pane","ratio","index","label","columns","lines"} {
+			if value,ok:=commandFields[key];ok {
+				if _,exists:=fields[key];!exists{fields[key]=value}
+			}
+		}
+	}
+	s.emitEvent(fields)
+
+	if commandType=="pane.split" {
+		created:=map[string]any{"type":"pane_created"}
+		if value,ok:=fields["pane_id"];ok{created["pane_id"]=value}
+		s.emitEvent(created)
+	}
+}
