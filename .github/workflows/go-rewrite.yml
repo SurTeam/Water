@@ -127,4 +127,4 @@ jobs:
           cache: true
       - run: go mod tidy
       - name: Gate terminal throughput and backpressure
-        run: go test ./internal/gobench -run TestTerminalPerformanceGate -count=1 -v
+        run: go test ./internal/gobench -run 'TestTerminal.*PerformanceGate' -count=1 -v
