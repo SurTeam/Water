@@ -96,6 +96,7 @@ type Selection struct {
 	FocusCol  int
 	FocusRow  int
 	Active    bool
+	Absolute  bool
 }
 
 func (s Selection) normalized() (startCol,startRow,endCol,endRow int) {
@@ -111,6 +112,10 @@ func (s Selection) normalized() (startCol,startRow,endCol,endRow int) {
 func SelectedText(snap govt.Snapshot, selection Selection) string {
 	if !selection.Active || snap.Rows<=0 || snap.Cols<=0 { return "" }
 	startCol,startRow,endCol,endRow:=selection.normalized()
+	if selection.Absolute {
+		startRow-=snap.YDisp
+		endRow-=snap.YDisp
+	}
 	if startRow<0{startRow=0};if endRow>=snap.Rows{endRow=snap.Rows-1}
 	if startRow>endRow{return ""}
 
@@ -166,22 +171,24 @@ type selectionCharacter struct {
 }
 
 func MultiClickSelection(snap govt.Snapshot,col,row,clickCount int) Selection {
+	absoluteRow:=snap.YDisp+row
+	fallback:=Selection{
+		AnchorCol:col,AnchorRow:absoluteRow,
+		FocusCol:col,FocusRow:absoluteRow,
+		Active:true,Absolute:true,
+	}
 	if clickCount<2 || row<0 || row>=len(snap.RowsData) || col<0 || col>=snap.Cols {
-		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+		return fallback
 	}
 	level:=(clickCount-2)/2
 	chars,clicked:=selectionLogicalLine(snap,col,row)
-	if len(chars)==0 || clicked<0 {
-		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
-	}
+	if len(chars)==0 || clicked<0 { return fallback }
 	segments:=selectionSegments(chars)
 	segmentIndex:=-1
 	for index,segment:=range segments {
 		if clicked>=segment.start && clicked<segment.end {segmentIndex=index;break}
 	}
-	if segmentIndex<0 {
-		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
-	}
+	if segmentIndex<0 { return fallback }
 	first,last:=segmentIndex,segmentIndex
 	for n:=0;n<level;n++ {
 		left:=selectionExpandLeft(segments,first)
@@ -193,9 +200,9 @@ func MultiClickSelection(snap govt.Snapshot,col,row,clickCount int) Selection {
 	start:=chars[segments[first].start]
 	finish:=chars[segments[last].end-1]
 	return Selection{
-		AnchorCol:start.col,AnchorRow:start.row,
-		FocusCol:finish.col,FocusRow:finish.row,
-		Active:true,
+		AnchorCol:start.col,AnchorRow:snap.YDisp+start.row,
+		FocusCol:finish.col,FocusRow:snap.YDisp+finish.row,
+		Active:true,Absolute:true,
 	}
 }
 
@@ -384,7 +391,7 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 			rect := image.Rect(x0, y, x1, y+lineHeight)
 			paint.FillShape(gtx.Ops, bg.color, clip.Rect(rect).Op())
 		}
-		if left,right,ok:=selectionColumns(selection,rowIndex,snap.Cols);ok {
+		if left,right,ok:=selectionColumnsForSnapshot(snap,selection,rowIndex);ok {
 			rect:=image.Rect(left*cellWidth,y,(right+1)*cellWidth,y+lineHeight)
 			paint.FillShape(gtx.Ops,v.Theme.Selection,clip.Rect(rect).Op())
 		}
@@ -581,4 +588,11 @@ func selectionColumns(selection Selection,row,cols int)(int,int,bool){
 	if left<0{left=0};if right>=cols{right=cols-1}
 	if left>right{return 0,0,false}
 	return left,right,true
+}
+
+
+func selectionColumnsForSnapshot(snap govt.Snapshot,selection Selection,viewportRow int)(int,int,bool){
+	row:=viewportRow
+	if selection.Absolute { row=snap.YDisp+viewportRow }
+	return selectionColumns(selection,row,snap.Cols)
 }
