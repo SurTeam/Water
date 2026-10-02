@@ -15,6 +15,10 @@ on:
       - "src/terminal/**"
       - ".github/workflows/go-rewrite.yml"
 
+concurrency:
+  group: go-rewrite-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
