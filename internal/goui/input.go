@@ -4,6 +4,7 @@ import (
 	"image"
 	"io"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -25,7 +26,7 @@ type TerminalInput struct {
 	OnInput          func([]byte)
 	OnMouse          func(govt.MouseEvent) bool
 	OnScroll         func(int)
-	OnSelectionStart func(col,row int)
+	OnSelectionStart func(col,row,clickCount int)
 	OnSelectionMove  func(col,row int)
 	OnSelectionEnd   func(col,row int)
 	OnCopy           func() string
@@ -42,6 +43,10 @@ type TerminalInput struct {
 	hyperlinkPressed string
 	hyperlinkCol int
 	hyperlinkRow int
+	lastClickTime time.Duration
+	lastClickCol int
+	lastClickRow int
+	clickCount int
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
@@ -80,8 +85,12 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		case pointer.Press:
 			button,ok:=mouseButton(pe.Buttons)
 			if !ok { continue }
+			clickCount:=1
+			if button==govt.MouseLeft {
+				clickCount=i.nextClickCount(pe.Time,col0,row0)
+			}
 			uri:=hyperlinkURIAt(snap,col0,row0)
-			if button==govt.MouseLeft && i.Hyperlinks && uri!="" &&
+			if button==govt.MouseLeft && clickCount==1 && i.Hyperlinks && uri!="" &&
 				hyperlinkClickAllowed(i.HyperlinkCommandClick,pe.Modifiers) {
 				i.hyperlinkPressed=uri
 				i.hyperlinkCol=col0
@@ -91,9 +100,9 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				continue
 			}
 			if button==govt.MouseLeft && i.OnSelectionStart!=nil && (!tracking || localOverride) {
-				i.selecting=true
+				i.selecting=clickCount==1
 				i.mousePressed=false
-				i.OnSelectionStart(col0,row0)
+				i.OnSelectionStart(col0,row0,clickCount)
 				continue
 			}
 			i.pressedMouse=button
@@ -417,4 +426,20 @@ func hyperlinkURIAt(snap govt.Snapshot,col,row int)string{
 func hyperlinkClickAllowed(requireShortcut bool,mods key.Modifiers)bool{
 	if mods.Contain(key.ModShift){return false}
 	return !requireShortcut || mods.Contain(key.ModShortcut)
+}
+
+
+func (i *TerminalInput) nextClickCount(at time.Duration,col,row int)int{
+	const multiClickWindow=500*time.Millisecond
+	if i.clickCount>0 &&
+		col==i.lastClickCol && row==i.lastClickRow &&
+		at>=i.lastClickTime && at-i.lastClickTime<=multiClickWindow {
+		i.clickCount++
+	} else {
+		i.clickCount=1
+	}
+	i.lastClickTime=at
+	i.lastClickCol=col
+	i.lastClickRow=row
+	return i.clickCount
 }
