@@ -156,6 +156,16 @@ benchmark oracle while replacing both the Water client and server in Go.
     (about 50 thousand allocs/op and 0.18–0.19 GB/op server-local).
   - Go interaction-under-flood remained low-latency: resize stayed around
     0.9–1.1 ms in the latest samples and Ctrl-C-to-exit stayed below 6 ms.
+  - Four-pane sustained throughput/RSS/frame cadence is also automated now.
+    On the latest same-runner sample, Go direct completed at about
+    16.2–16.6 MB/s aggregate with 375–382 MiB RSS and roughly
+    35–37 ms p95 / 45–47 ms p99 visible-frame gaps; Go server-local completed
+    at about 17.7–19.1 MB/s with 60–64 MiB RSS and roughly 23 ms p95 /
+    24–25 ms p99 gaps. The Rust oracle measured about 20.14 MB/s direct with
+    168.6 MiB RSS and 24.3/29.3 ms p95/p99, and about 19.38 MB/s server-local
+    with 211.4 MiB RSS and 24.7/32.4 ms p95/p99. These hosted-runner numbers
+    are directional rather than release targets, but they make multi-pane
+    memory/frame regressions visible in CI.
 
 ## Remaining parity work
 
@@ -175,16 +185,14 @@ interop cases:
   directions. Deterministic Gio IME state-machine coverage is automated; a
   true system-IME composition session still needs platform-specific manual
   validation because Xvfb cannot reliably drive a native input-method engine.
-- Extend the successful same-runner Rust-vs-Go benchmark beyond the current
-  plain-text, ANSI-heavy, and Unicode-heavy 64 MB completion fixtures: add
-  multi-pane, sustained-memory/RSS, and p50/p95/p99 frame-time fixtures before
-  making a final release-performance decision.
 - Configure the repository's Apple notarization API-key secrets
   (`APPLE_NOTARY_KEY_BASE64`, `APPLE_NOTARY_KEY_ID`,
   `APPLE_NOTARY_ISSUER_ID`) and execute one signed notarized release/dev
   artifact to validate the credentialed path. The workflow implementation is
   present, but CI cannot validate Apple credentials without those secrets.
 
-Do not merge `go-rewrite` into `main` until the credentialed release path,
-manual same-runner benchmark, and any required real-window compatibility
-scenarios are executed or explicitly waived.
+Do not merge `go-rewrite` into `main` until the credentialed Apple release
+path and true system-IME/manual desktop checks are executed or explicitly
+waived. The same-runner completion, interaction, multi-pane/RSS/frame-time,
+headless compatibility, scenario, and bidirectional real-window gates are now
+automated.
