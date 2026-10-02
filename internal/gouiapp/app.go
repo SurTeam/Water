@@ -85,7 +85,6 @@ func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,bu
 	)
 
 	multi:=goui.NewMultiWorkspaceClient(w.Invalidate)
-	defer multi.Close()
 
 	localSession,embedded,ownsDetached,localErr:=connectOrStart(socket,configPath,cfg,buildVariant)
 	if localErr==nil{
@@ -106,6 +105,10 @@ func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,bu
 	}else if len(sshDestinations)==0{
 		return localErr
 	}
+
+	// Register this after local server lifecycle defers so child sessions and
+	// terminal attachments are closed before an embedded/detached server stops.
+	defer multi.Close()
 
 	for _,rawDestination:=range sshDestinations{
 		destination,err:=goremote.ValidateDestination(rawDestination)
