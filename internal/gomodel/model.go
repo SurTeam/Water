@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/google/uuid"
 )
@@ -19,16 +20,18 @@ const (
 )
 
 type TerminalMeta struct {
-	TerminalID uuid.UUID
-	SessionID  uuid.UUID
-	Program    string
-	Args       []string
-	Size       goprotocol.TerminalSize
+	TerminalID  uuid.UUID
+	SessionID   uuid.UUID
+	Program     string
+	Args        []string
+	Size        goprotocol.TerminalSize
 	ProcessName string
 	CWD         string
 	Exited      bool
 	ExitCode    *int32
 	Title       *string
+	Agent       *goagent.DetectedAgent
+	AgentLabel  *string
 }
 
 type Pane struct {
@@ -517,9 +520,21 @@ func (m *Model) ClosePane(id uuid.UUID) ([]uuid.UUID,error) {
 }
 
 func (m *Model) FocusPane(id uuid.UUID) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	for _,t:=range m.tabs {
-		if t.Root.Contains(id) { t.ActivePane=id; m.bump(); return nil }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for tabID, tab := range m.tabs {
+		if !tab.Root.Contains(id) {
+			continue
+		}
+		workspaceID := m.workspaceIDForTabLocked(tabID)
+		if workspaceID == uuid.Nil {
+			return errors.New("workspace not found")
+		}
+		tab.ActivePane = id
+		m.activeWorkspace = ptr(workspaceID)
+		m.workspaces[workspaceID].ActiveTab = ptr(tabID)
+		m.bump()
+		return nil
 	}
 	return errors.New("pane not found")
 }
@@ -678,7 +693,35 @@ func (m *Model) Dump() StateDump {
 	out:=StateDump{StateRevision:m.revision,Agents:[]any{}}
 	if m.activeWorkspace!=nil { v:=*m.activeWorkspace; out.ActiveWorkspace=&v }
 	for _,wid:=range m.workspaceOrder {
-		if w:=m.workspaces[wid]; w!=nil { out.Workspaces=append(out.Workspaces,m.dumpWorkspaceLocked(w)) }
+		w:=m.workspaces[wid]
+		if w==nil { continue }
+		out.Workspaces=append(out.Workspaces,m.dumpWorkspaceLocked(w))
+		for _,tabID:=range w.Tabs {
+			tab:=m.tabs[tabID]
+			if tab==nil { continue }
+			var paneIDs []uuid.UUID
+			tab.Root.LeafIDs(&paneIDs)
+			for _,paneID:=range paneIDs {
+				pane:=m.panes[paneID]
+				if pane==nil || pane.Terminal==nil || pane.Terminal.Agent==nil { continue }
+				status:=any("running")
+				if pane.Terminal.Exited {
+					status=map[string]any{"exited":map[string]any{"code":pane.Terminal.ExitCode}}
+				}
+				out.Agents=append(out.Agents,map[string]any{
+					"kind":pane.Terminal.Agent.Kind,
+					"label":goagent.Label(pane.Terminal.Agent.Kind),
+					"custom_label":pane.Terminal.AgentLabel,
+					"active":pane.Terminal.Agent.Active,
+					"workspace_id":wid,
+					"tab_id":tabID,
+					"pane_id":paneID,
+					"terminal_id":pane.Terminal.TerminalID,
+					"cwd":pane.Terminal.CWD,
+					"status":status,
+				})
+			}
+		}
 	}
 	if out.ActiveWorkspace!=nil {
 		for i:=range out.Workspaces {
@@ -733,8 +776,8 @@ func (m *Model) dumpNodeLocked(n *Node) any {
 				"status":status,
 				"columns":p.Terminal.Size.Columns,
 				"lines":p.Terminal.Size.Lines,
-				"agent":nil,
-				"agent_label":nil,
+				"agent":p.Terminal.Agent,
+				"agent_label":p.Terminal.AgentLabel,
 			}
 			surfaceState=map[string]any{"Terminal":tstate}
 			terminal=map[string]any{"summary":map[string]any{
