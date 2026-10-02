@@ -180,7 +180,6 @@ func BenchmarkTerminalDirect4Pane64MB(b *testing.B) {
 			emus=append(emus,result.emu)
 		}
 		if total<int64(benchBytes){b.Fatalf("multi-pane direct bytes = %d, want at least %d",total,benchBytes)}
-		if total<int64(benchBytes){b.Fatalf("multi-pane server bytes = %d, want at least %d",total,benchBytes)}
 		duration:=time.Since(start)
 		b.ReportMetric(float64(total)/duration.Seconds()/1e6,"MB/s")
 		reportVisibleMetrics(b,gaps)
@@ -275,6 +274,7 @@ func BenchmarkTerminalServer4Pane64MB(b *testing.B) {
 			}
 		}
 		if !timer.Stop(){select{case <-timer.C:default:}}
+		if total<int64(benchBytes){b.Fatalf("multi-pane server bytes = %d, want at least %d",total,benchBytes)}
 		duration:=time.Since(start)
 		b.ReportMetric(float64(total)/duration.Seconds()/1e6,"MB/s")
 		reportVisibleMetrics(b,gaps)
