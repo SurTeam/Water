@@ -125,6 +125,57 @@ if [[ "$changed" != "1" ]]; then
   exit 1
 fi
 
+remote_hit=""
+for _ in $(seq 1 160); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
+    remote_hit="$(python3 - "$SNAPSHOT" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+for hit in data.get("automation_hits", []):
+    if hit.get("kind")=="new_remote":
+        x0,y0,x1,y1=hit["rect"]
+        print(f"{(x0+x1)/2:.1f} {(y0+y1)/2:.1f}")
+        break
+PY
+)"
+    if [[ -n "$remote_hit" ]]; then
+      break
+    fi
+  fi
+  sleep 0.025
+done
+if [[ -z "$remote_hit" ]]; then
+  echo "real Gio frame never exposed new_remote hit geometry" >&2
+  cat "$SNAPSHOT" >&2 2>/dev/null || true
+  cat "$LOG" >&2 || true
+  exit 1
+fi
+
+read -r remote_x remote_y <<<"$remote_hit"
+"$WATER_BIN" --socket "$SOCKET" ui click --x "$remote_x" --y "$remote_y" --click-count 1 >/dev/null
+
+remote_form=0
+for _ in $(seq 1 160); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
+    remote_form="$(python3 - "$SNAPSHOT" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+print(1 if data.get("remote_form_visible") else 0)
+PY
+)"
+    if [[ "$remote_form" == "1" ]]; then
+      break
+    fi
+  fi
+  sleep 0.025
+done
+if [[ "$remote_form" != "1" ]]; then
+  echo "real Gio pointer click did not open the runtime remote form" >&2
+  cat "$SNAPSHOT" >&2 2>/dev/null || true
+  cat "$LOG" >&2 || true
+  exit 1
+fi
+
 "$WATER_BIN" --socket "$SOCKET" ui screenshot --output "$SCREENSHOT" >/dev/null
 python3 - "$SCREENSHOT" <<'PY'
 import pathlib, sys
