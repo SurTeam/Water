@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -17,9 +18,9 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	buildVariant = "dev"
-	clientVersion = "go-rewrite"
+var (
+	buildVariant = gobuild.Variant
+	clientVersion = gobuild.Version
 )
 
 type cliContext struct {
