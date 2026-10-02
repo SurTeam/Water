@@ -15,6 +15,7 @@ import (
 	"gioui.org/widget/material"
 
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/govt"
@@ -77,6 +78,7 @@ func (t *terminalClient) close() {
 type WorkspaceClient struct {
 	session *goclient.Session
 	invalidate func()
+	config goconfig.AppConfig
 
 	mu sync.RWMutex
 	state gomodel.StateDump
@@ -89,9 +91,14 @@ type WorkspaceClient struct {
 }
 
 func NewWorkspaceClient(session *goclient.Session, invalidate func()) *WorkspaceClient {
+	return NewWorkspaceClientWithConfig(session,invalidate,goconfig.Default())
+}
+
+func NewWorkspaceClientWithConfig(session *goclient.Session, invalidate func(), config goconfig.AppConfig) *WorkspaceClient {
 	return &WorkspaceClient{
 		session: session,
 		invalidate: invalidate,
+		config: config.Normalized(),
 		terminals: make(map[uuid.UUID]*terminalClient),
 		workspaceClicks: make(map[uuid.UUID]*widget.Clickable),
 		tabClicks: make(map[uuid.UUID]*widget.Clickable),
@@ -197,22 +204,25 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 func (c *WorkspaceClient) dispatchAutomationKeystroke(spec string)bool{
 	key:=strings.ToLower(strings.TrimSpace(spec))
 	switch key {
-	case "cmd-t","command-t","ctrl-shift-t":
+	case strings.ToLower(c.config.Shortcuts.NewTerminalTab), "command-t", "ctrl-shift-t":
 		_ = c.session.DispatchAsync(map[string]any{"type":"tab.new"})
 		return true
-	case "cmd-w","command-w","ctrl-shift-w":
-		_ = c.session.DispatchAsync(map[string]any{"type":"tab.close"})
-		return true
-	case "cmd-n","command-n","ctrl-shift-n":
+	case strings.ToLower(c.config.Shortcuts.NewWorkspace), "command-shift-n":
 		_ = c.session.DispatchAsync(map[string]any{"type":"workspace.new"})
 		return true
-	case "cmd-left","command-left":
+	case strings.ToLower(c.config.Shortcuts.ClosePane):
+		_ = c.session.DispatchAsync(map[string]any{"type":"pane.close"})
+		return true
+	case strings.ToLower(c.config.Shortcuts.PromotePaneToTab):
+		_ = c.session.DispatchAsync(map[string]any{"type":"pane.promote_to_tab"})
+		return true
+	case strings.ToLower(c.config.Shortcuts.FocusLeft), "cmd-left", "command-left":
 		return c.focusDirection("left")
-	case "cmd-right","command-right":
+	case strings.ToLower(c.config.Shortcuts.FocusRight), "cmd-right", "command-right":
 		return c.focusDirection("right")
-	case "cmd-up","command-up":
+	case strings.ToLower(c.config.Shortcuts.FocusUp), "cmd-up", "command-up":
 		return c.focusDirection("up")
-	case "cmd-down","command-down":
+	case strings.ToLower(c.config.Shortcuts.FocusDown), "cmd-down", "command-down":
 		return c.focusDirection("down")
 	}
 	data:=automationKeyBytes(key)
@@ -381,7 +391,7 @@ func collectTreeTerminals(node *paneTree,out map[uuid.UUID]terminalSummary) {
 func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	var attached terminalAttach
 	if err:=c.session.Attach(summary.TerminalID,&attached);err!=nil{return}
-	emu:=govt.New(attached.Size.Columns,attached.Size.Lines,2000)
+	emu:=govt.New(attached.Size.Columns,attached.Size.Lines,c.config.Terminal.ScrollbackLines)
 	last:=uint64(0)
 	for _,ev:=range attached.Replay {
 		if ev.Seq<=last {continue}
@@ -389,10 +399,18 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		last=ev.Seq
 	}
 	if attached.LastSeq>last {last=attached.LastSeq}
+	view:=NewTerminalView()
+	view.FontSize=unit.Sp(c.config.Terminal.FontSize)
+	view.LineHeight=unit.Dp(c.config.Terminal.LineHeight)
+	view.CellWidth=unit.Dp(c.config.Terminal.FontSize*0.6)
+	view.FontFamily=c.config.Terminal.FontFamily
+	view.Theme.Foreground=configColor(c.config.Theme.TerminalForeground,0xe4e4e4)
+	view.Theme.Background=configColor(c.config.Theme.TerminalBackground,0x2c2c2c)
+	view.Theme.Cursor=configColor(c.config.Theme.CursorBackground,0xe4e4e4)
 	term:=&terminalClient{
 		id:summary.TerminalID,emu:emu,lastSeq:last,
 		cols:attached.Size.Columns,rows:attached.Size.Lines,
-		view:NewTerminalView(),
+		view:view,
 	}
 	term.input=&TerminalInput{OnInput:func(data []byte){
 		_ = c.session.DispatchAsync(map[string]any{
@@ -461,7 +479,7 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 	if old==nil{return}
 	var attached terminalAttach
 	if err:=c.session.Attach(id,&attached);err!=nil{return}
-	next:=govt.New(attached.Size.Columns,attached.Size.Lines,2000)
+	next:=govt.New(attached.Size.Columns,attached.Size.Lines,c.config.Terminal.ScrollbackLines)
 	var last uint64
 	for _,ev:=range attached.Replay {
 		if ev.Seq<=last{continue}
@@ -673,4 +691,10 @@ func (c *WorkspaceClient) Background() color.NRGBA {
 func exact(gtx layout.Context,size image.Point)layout.Context{
 	gtx.Constraints=layout.Exact(size)
 	return gtx
+}
+
+
+func configColor(value string,fallback uint32)color.NRGBA{
+	rgb:=goconfig.ParseColor(value,fallback)
+	return color.NRGBA{R:uint8(rgb>>16),G:uint8(rgb>>8),B:uint8(rgb),A:0xff}
 }
