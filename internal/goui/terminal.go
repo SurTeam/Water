@@ -143,6 +143,7 @@ type TerminalView struct {
 	CellWidth  unit.Dp
 	LineHeight unit.Dp
 	FontFamily string
+	Hyperlinks bool
 
 	mu    sync.Mutex
 	cache map[int]preparedRow
@@ -155,6 +156,7 @@ func NewTerminalView() *TerminalView {
 		CellWidth:  unit.Dp(8.4),
 		LineHeight: unit.Dp(20),
 		FontFamily: "monospace",
+		Hyperlinks: true,
 		cache:      make(map[int]preparedRow),
 	}
 }
@@ -286,7 +288,7 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 			bold:          cell.Bold,
 			italic:        cell.Italic,
 			dim:           cell.Dim,
-			underline:     cell.Underline || cell.URLID != 0,
+			underline:     cell.Underline || (v.Hyperlinks && cell.URLID != 0),
 			strikethrough: cell.Strikethrough,
 		}
 		width := int(cell.Width)
