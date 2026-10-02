@@ -268,14 +268,15 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	case "debug.metrics":
 		return ss.write(goprotocol.Success(msg.RequestID, s.metricsSnapshot()))
 	case "debug.memory":
+		modelMemory:=s.model.MemoryProjection()
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"terminal_count": s.registry.Count(),
 			"scrollback_lines": s.Config.Terminal.ScrollbackLines,
 			"inactive_scrollback_lines": s.Config.Terminal.InactiveScrollbackLines,
 			"replay_history_bytes": s.Config.Terminal.ReplayHistoryBytes,
 			"retained_replay_bytes": s.registry.RetainedReplayBytes(),
-			"visible_cells": 0,
-			"surface_count": 0,
+			"visible_cells": modelMemory.VisibleCells,
+			"surface_count": modelMemory.SurfaceCount,
 			"shape_cache_entries": 0,
 			"image_cache_bytes": 0,
 		}))
