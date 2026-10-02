@@ -124,11 +124,8 @@ func writePayload(w io.Writer, payload []byte) error {
 	}
 	var lenbuf [4]byte
 	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(payload)))
-	if _, err := w.Write(lenbuf[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(payload)
-	return err
+	if err:=writeAll(w,lenbuf[:]);err!=nil{return err}
+	return writeAll(w,payload)
 }
 
 func WriteTerminal(w io.Writer, id uuid.UUID, ev TerminalEvent) error {
