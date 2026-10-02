@@ -2,6 +2,7 @@ package govt
 
 import (
 	"hash/fnv"
+	"strings"
 	"sync"
 
 	xterm "github.com/gitpod-io/xterm-go"
@@ -302,6 +303,50 @@ func (e *Emulator) ScrollToBottom() {
 	e.mu.Lock()
 	e.term.ScrollToBottom()
 	e.mu.Unlock()
+}
+
+func (e *Emulator) SelectionText(startRow,startCol,endRow,endCol int) string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	if startRow>endRow || (startRow==endRow && startCol>endCol) {
+		startRow,endRow=endRow,startRow
+		startCol,endCol=endCol,startCol
+	}
+	buf:=e.term.Buffer()
+	if buf==nil || buf.Lines.Length()==0 { return "" }
+	cols:=e.term.Cols()
+	if cols<=0 { return "" }
+	if startRow<0 { startRow=0 }
+	if endRow>=buf.Lines.Length() { endRow=buf.Lines.Length()-1 }
+	if startRow>endRow { return "" }
+
+	var out strings.Builder
+	var raw xterm.CellData
+	for row:=startRow;row<=endRow;row++ {
+		line:=buf.Lines.Get(row)
+		if line==nil { continue }
+		left,right:=0,cols-1
+		if row==startRow { left=startCol }
+		if row==endRow { right=endCol }
+		if left<0 { left=0 }
+		if right>=cols { right=cols-1 }
+		if left>right { continue }
+
+		var rowText strings.Builder
+		for col:=left;col<=right && col<line.Len;col++ {
+			line.LoadCell(col,&raw)
+			if raw.GetWidth()==0 { continue }
+			text:=raw.GetChars()
+			if text=="" { rowText.WriteByte(' ') } else { rowText.WriteString(text) }
+		}
+		out.WriteString(strings.TrimRight(rowText.String()," "))
+		if row!=endRow {
+			next:=buf.Lines.Get(row+1)
+			if next==nil || !next.IsWrapped { out.WriteByte('\n') }
+		}
+	}
+	return out.String()
 }
 
 func (e *Emulator) Text() string {
