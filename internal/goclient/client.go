@@ -293,6 +293,38 @@ func (s *Session) Dispatch(command any, out any) error {
 	return nil
 }
 
+func (s *Session) ReplySuccess(requestID uint64, result any) error {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return err
+	}
+	ok := true
+	reply := goprotocol.WireMessage{
+		ProtocolVersion: goprotocol.ProtocolVersion,
+		RequestID:       requestID,
+		OK:              &ok,
+		Result:          raw,
+	}
+	s.mu.Lock()
+	err = goprotocol.WriteJSON(s.conn, reply)
+	s.mu.Unlock()
+	return err
+}
+
+func (s *Session) ReplyFailure(requestID uint64, code, message string) error {
+	ok := false
+	reply := goprotocol.WireMessage{
+		ProtocolVersion: goprotocol.ProtocolVersion,
+		RequestID:       requestID,
+		OK:              &ok,
+		Error:           &goprotocol.RPCError{Code: code, Message: message},
+	}
+	s.mu.Lock()
+	err := goprotocol.WriteJSON(s.conn, reply)
+	s.mu.Unlock()
+	return err
+}
+
 func (s *Session) Attach(id uuid.UUID, out any) error {
 	return s.Call("terminal.attach", map[string]any{"terminal_id": id}, out)
 }
