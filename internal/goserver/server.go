@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goterminal"
@@ -21,6 +22,7 @@ type Server struct {
 	SocketPath string
 	Build      string
 	Version    string
+	Config     goconfig.AppConfig
 
 	registry *goterminal.Registry
 	model    *gomodel.Model
@@ -61,11 +63,17 @@ type terminalAttachResponse struct {
 }
 
 func New(socketPath string) *Server {
+	return NewWithConfig(socketPath, goconfig.Default())
+}
+
+func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
+	config = config.Normalized()
 	return &Server{
 		SocketPath: socketPath,
 		Build:      "dev",
 		Version:    "go-rewrite",
-		registry:   goterminal.NewRegistry(),
+		Config:     config,
+		registry:   goterminal.NewRegistryWithReplayLimit(config.Terminal.ReplayHistoryBytes),
 		model:      gomodel.New(),
 		closing:    make(chan struct{}),
 		ops:        make(map[uuid.UUID]OperationSnapshot),
@@ -238,10 +246,10 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	case "debug.memory":
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"terminal_count": s.registry.Count(),
-			"scrollback_lines": 2000,
-			"inactive_scrollback_lines": 500,
-			"replay_history_bytes": 8 * 1024 * 1024,
-			"retained_replay_bytes": 0,
+			"scrollback_lines": s.Config.Terminal.ScrollbackLines,
+			"inactive_scrollback_lines": s.Config.Terminal.InactiveScrollbackLines,
+			"replay_history_bytes": s.Config.Terminal.ReplayHistoryBytes,
+			"retained_replay_bytes": s.registry.RetainedReplayBytes(),
 			"visible_cells": 0,
 			"surface_count": 0,
 			"shape_cache_entries": 0,
