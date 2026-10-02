@@ -14,7 +14,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use water::app::ModelHost;
-use water::command::{AppCommand, OperationStatus, PaneCommand, TerminalCommand, WorkspaceCommand};
+use water::command::{
+    AppCommand, OperationStatus, PaneCommand, SplitDirection, TerminalCommand, WorkspaceCommand,
+};
 use water::control::{ControlClient, ControlServer, connect_water_session};
 use water::ids::TerminalId;
 use water::terminal::{
@@ -47,6 +49,356 @@ struct CompletionSample {
 struct InteractionSample {
     resize: Duration,
     input: Duration,
+}
+
+#[derive(Clone, Debug)]
+struct MultiTerminalSample {
+    duration: Duration,
+    bytes: u64,
+    visible_gaps: Vec<Duration>,
+    rss_kb: u64,
+}
+
+
+#[test]
+#[ignore]
+fn bench_multi_terminal_parity() {
+    if std::env::var_os("WATER_BENCH").is_none() {
+        eprintln!("set WATER_BENCH=1 to run this benchmark");
+        return;
+    }
+
+    let warmups = benchmark_count("WATER_BENCH_WARMUPS", 1);
+    let runs = benchmark_count("WATER_BENCH_RUNS", 3);
+    let mut direct = Vec::with_capacity(runs);
+    for index in 0..warmups + runs {
+        let sample = run_direct_multi_terminal(index as u64 + 30_000);
+        if index >= warmups {
+            direct.push(sample);
+        }
+    }
+
+    let mut server = Vec::with_capacity(runs);
+    for index in 0..warmups + runs {
+        let sample = run_server_multi_terminal(index as u64 + 40_000);
+        if index >= warmups {
+            server.push(sample);
+        }
+    }
+
+    print_multi_terminal_summary("direct_4pane", &direct);
+    print_multi_terminal_summary("server_local_4pane", &server);
+}
+
+fn run_direct_multi_terminal(id_base: u64) -> MultiTerminalSample {
+    const PANES: usize = 4;
+    const BYTES_PER_PANE: usize = 16_000_000;
+
+    let size = TerminalSize::new(80, 24);
+    let mut manager = TerminalManager::new_with_scrollback(10_000);
+    let mut terminal_ids = Vec::with_capacity(PANES);
+    let mut attachments = Vec::with_capacity(PANES);
+    for pane in 0..PANES {
+        let terminal_id = TerminalId::new(id_base + pane as u64);
+        manager
+            .spawn(
+                terminal_id,
+                "/bin/sh".to_owned(),
+                vec![
+                    "-c".to_owned(),
+                    format!("read _; yes WATER_RUST_MULTI | head -c {BYTES_PER_PANE}"),
+                ],
+                size,
+            )
+            .unwrap();
+        attachments.push((terminal_id, manager.attach(terminal_id).unwrap()));
+        terminal_ids.push(terminal_id);
+    }
+
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(PANES + 1));
+    let mut consumers = Vec::with_capacity(PANES);
+    for (terminal_id, attachment) in attachments {
+        let barrier = barrier.clone();
+        consumers.push(std::thread::spawn(move || {
+            let mut emulator = TerminalEmulator::new(terminal_id, size, 10_000);
+            emulator.apply_batch(&attachment.replay);
+            emulator.start_live();
+            let replay_last_seq = attachment.last_seq;
+            barrier.wait();
+            let mut previous_snapshot: Option<TerminalSnapshot> = None;
+            let mut last_snapshot = Instant::now();
+            let mut gaps = Vec::new();
+            let mut bytes = 0_u64;
+            loop {
+                let event = attachment
+                    .events
+                    .recv_timeout(COMPLETION_TIMEOUT)
+                    .expect("multi-terminal direct stream timed out");
+                if event.seq() <= replay_last_seq {
+                    continue;
+                }
+                bytes += event.output_bytes() as u64;
+                let exited = matches!(event, TerminalStreamEvent::Exit { .. });
+                emulator.apply(&event);
+                let now = Instant::now();
+                if exited || now.duration_since(last_snapshot) >= VISIBLE_INTERVAL {
+                    previous_snapshot = Some(emulator.snapshot(previous_snapshot.as_ref()));
+                    gaps.push(now.duration_since(last_snapshot));
+                    last_snapshot = now;
+                }
+                if exited {
+                    break;
+                }
+            }
+            (bytes, gaps, current_rss_kb())
+        }));
+    }
+
+    let start = Instant::now();
+    barrier.wait();
+    for terminal_id in &terminal_ids {
+        manager.send_text(*terminal_id, "\n".to_owned()).unwrap();
+    }
+
+    let mut bytes = 0_u64;
+    let mut gaps = Vec::new();
+    let mut rss_kb = 0_u64;
+    for consumer in consumers {
+        let (pane_bytes, pane_gaps, pane_rss) = consumer.join().unwrap();
+        bytes += pane_bytes;
+        gaps.extend(pane_gaps);
+        rss_kb = rss_kb.max(pane_rss);
+    }
+    let duration = start.elapsed();
+    for terminal_id in terminal_ids {
+        manager.remove(terminal_id);
+    }
+    MultiTerminalSample {
+        duration,
+        bytes,
+        visible_gaps: gaps,
+        rss_kb,
+    }
+}
+
+fn run_server_multi_terminal(id_base: u64) -> MultiTerminalSample {
+    const PANES: usize = 4;
+    const BYTES_PER_PANE: usize = 16_000_000;
+
+    let socket = std::env::temp_dir().join(format!(
+        "water-multipane-{}-{id_base}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket);
+
+    let mut host = ModelHost::start();
+    let client = host.client();
+    let (server, _shutdown) = ControlServer::start(
+        socket.clone(),
+        client.clone(),
+        None,
+        Some(host.take_snapshot_receiver()),
+    )
+    .unwrap();
+    let control = ControlClient::new(&socket);
+
+    let operation = control
+        .dispatch(AppCommand::Workspace(WorkspaceCommand::New))
+        .unwrap();
+    assert_eq!(
+        control.wait_operation(operation).unwrap().status,
+        OperationStatus::Succeeded
+    );
+    let root = control.state_dump().unwrap().focused_pane.unwrap();
+
+    let split = |control: &ControlClient,
+                 pane_id,
+                 direction: SplitDirection| {
+        let operation = control
+            .dispatch(AppCommand::Pane(PaneCommand::Split {
+                pane_id: Some(pane_id),
+                direction,
+            }))
+            .unwrap();
+        let operation = control.wait_operation(operation).unwrap();
+        assert_eq!(operation.status, OperationStatus::Succeeded);
+        match operation.result.unwrap() {
+            water::command::OperationResult::PaneCreated { pane_id } => pane_id,
+            result => panic!("unexpected split result {result:?}"),
+        }
+    };
+    let right = split(&control, root, SplitDirection::Right);
+    let lower_left = split(&control, root, SplitDirection::Down);
+    let lower_right = split(&control, right, SplitDirection::Down);
+    let pane_ids = [root, right, lower_left, lower_right];
+
+    let mut terminal_ids = Vec::with_capacity(PANES);
+    for pane_id in pane_ids {
+        let operation = control
+            .dispatch(AppCommand::Terminal(TerminalCommand::Spawn {
+                pane_id: Some(pane_id),
+                program: "/bin/sh".to_owned(),
+                args: vec![
+                    "-c".to_owned(),
+                    format!("read _; yes WATER_RUST_MULTI | head -c {BYTES_PER_PANE}"),
+                ],
+                columns: 80,
+                lines: 24,
+            }))
+            .unwrap();
+        let operation = control.wait_operation(operation).unwrap();
+        assert_eq!(operation.status, OperationStatus::Succeeded);
+        let terminal_id = match operation.result.unwrap() {
+            water::command::OperationResult::TerminalSpawned { terminal_id } => terminal_id,
+            result => panic!("unexpected terminal result {result:?}"),
+        };
+        terminal_ids.push(terminal_id);
+    }
+
+    let (ui_client, _ui_receiver) = ui_control_channel();
+    let session = connect_water_session(&socket, ui_client).unwrap();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(PANES + 1));
+    let mut consumers = Vec::with_capacity(PANES);
+    for terminal_id in &terminal_ids {
+        let (response, mut stream) = session.attach(*terminal_id).unwrap();
+        let terminal_id = *terminal_id;
+        let barrier = barrier.clone();
+        consumers.push(std::thread::spawn(move || {
+            let mut tracked_size = response.size;
+            let mut emulator = TerminalEmulator::new(terminal_id, tracked_size, 10_000);
+            let replay = response
+                .replay
+                .iter()
+                .filter_map(|wire| {
+                    let event = TerminalStreamEvent::from_wire(wire, tracked_size)?;
+                    if let TerminalStreamEvent::Resize { size, .. } = event {
+                        tracked_size = size;
+                    }
+                    Some(event)
+                })
+                .collect::<Vec<_>>();
+            emulator.apply_batch(&replay);
+            emulator.start_live();
+            barrier.wait();
+
+            let mut previous_snapshot: Option<TerminalSnapshot> = None;
+            let mut last_snapshot = Instant::now();
+            let mut gaps = Vec::new();
+            let mut bytes = 0_u64;
+            loop {
+                let event = stream
+                    .recv_timeout(COMPLETION_TIMEOUT)
+                    .expect("multi-terminal server stream timed out");
+                if event.seq() <= response.last_seq {
+                    continue;
+                }
+                bytes += event.output_bytes() as u64;
+                let exited = matches!(event, TerminalStreamEvent::Exit { .. });
+                emulator.apply(&event);
+                let now = Instant::now();
+                if exited || now.duration_since(last_snapshot) >= VISIBLE_INTERVAL {
+                    previous_snapshot = Some(emulator.snapshot(previous_snapshot.as_ref()));
+                    gaps.push(now.duration_since(last_snapshot));
+                    last_snapshot = now;
+                }
+                if exited {
+                    break;
+                }
+            }
+            (bytes, gaps, current_rss_kb())
+        }));
+    }
+
+    let start = Instant::now();
+    barrier.wait();
+    for terminal_id in &terminal_ids {
+        let operation = control
+            .dispatch(AppCommand::Terminal(TerminalCommand::SendText {
+                terminal_id: Some(*terminal_id),
+                pane_id: None,
+                text: "\n".to_owned(),
+            }))
+            .unwrap();
+        assert_eq!(
+            control.wait_operation(operation).unwrap().status,
+            OperationStatus::Succeeded
+        );
+    }
+
+    let mut bytes = 0_u64;
+    let mut gaps = Vec::new();
+    let mut rss_kb = 0_u64;
+    for consumer in consumers {
+        let (pane_bytes, pane_gaps, pane_rss) = consumer.join().unwrap();
+        bytes += pane_bytes;
+        gaps.extend(pane_gaps);
+        rss_kb = rss_kb.max(pane_rss);
+    }
+    let duration = start.elapsed();
+
+    drop(session);
+    drop(server);
+    host.shutdown();
+    let _ = std::fs::remove_file(&socket);
+    MultiTerminalSample {
+        duration,
+        bytes,
+        visible_gaps: gaps,
+        rss_kb,
+    }
+}
+
+fn print_multi_terminal_summary(label: &str, samples: &[MultiTerminalSample]) {
+    let durations = samples.iter().map(|sample| sample.duration).collect::<Vec<_>>();
+    let median = percentile_duration(&durations, 0.5);
+    let bytes = samples.first().map(|sample| sample.bytes).unwrap_or(0);
+    let throughput = if median.is_zero() {
+        0.0
+    } else {
+        bytes as f64 / median.as_secs_f64() / 1e6
+    };
+    let gaps = samples
+        .iter()
+        .flat_map(|sample| sample.visible_gaps.iter().copied())
+        .collect::<Vec<_>>();
+    let rss = samples.iter().map(|sample| sample.rss_kb).max().unwrap_or(0);
+    eprintln!(
+        "{label}.process median={:.3}ms aggregate={:.2}MB/s bytes={bytes}",
+        millis(median),
+        throughput
+    );
+    eprintln!(
+        "{label}.visible_gap p95={:.3}ms p99={:.3}ms max={:.3}ms frames={}",
+        millis(percentile_duration(&gaps,0.95)),
+        millis(percentile_duration(&gaps,0.99)),
+        millis(gaps.iter().copied().max().unwrap_or_default()),
+        gaps.len(),
+    );
+    eprintln!("{label}.rss_kb max={rss}");
+}
+
+#[cfg(target_os = "linux")]
+fn current_rss_kb() -> u64 {
+    let Ok(statm) = std::fs::read_to_string("/proc/self/statm") else {
+        return 0;
+    };
+    let Some(pages) = statm
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u64>().ok())
+    else {
+        return 0;
+    };
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return 0;
+    }
+    pages.saturating_mul(page_size as u64) / 1024
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_rss_kb() -> u64 {
+    0
 }
 
 #[test]
