@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/SurTeam/Water/internal/goagent"
@@ -80,8 +79,7 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 		if err != nil {
 			return fail("WORKSPACE_CREATE_FAILED", err)
 		}
-		if _, err := s.spawnInPane(paneID, defaultShell(), defaultShellArgs(defaultShell()),
-			goprotocol.TerminalSize{Columns: 80, Lines: 24}); err != nil {
+		if _, err := s.spawnInPane(paneID, "", nil, s.defaultTerminalSize()); err != nil {
 			return fail("TERMINAL_SPAWN_FAILED", err)
 		}
 		return map[string]any{"type": "workspace_created", "workspace_id": wid}, nil
@@ -131,7 +129,7 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 		wid,err:=s.model.ResolveWorkspace(c.WorkspaceID);if err!=nil{return fail("WORKSPACE_NOT_FOUND",err)}
 		title:="";pinned:=false;if c.Title!=nil{title=*c.Title;pinned=true}
 		tabID,paneID,err:=s.model.CreateTab(wid,title,pinned);if err!=nil{return fail("TAB_CREATE_FAILED",err)}
-		if _,err:=s.spawnInPane(paneID,defaultShell(),defaultShellArgs(defaultShell()),goprotocol.TerminalSize{Columns:80,Lines:24});err!=nil{
+		if _,err:=s.spawnInPane(paneID,"",nil,s.defaultTerminalSize());err!=nil{
 			return fail("TERMINAL_SPAWN_FAILED",err)
 		}
 		return map[string]any{"type":"tab_created","tab_id":tabID},nil
@@ -169,7 +167,7 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 		if err:=json.Unmarshal(raw,&c);err!=nil{return fail("INVALID_COMMAND",err)}
 		_,pid,err:=s.model.ResolvePane(c.PaneID);if err!=nil{return fail("PANE_NOT_FOUND",err)}
 		newPane,err:=s.model.SplitPane(pid,c.Direction);if err!=nil{return fail("PANE_SPLIT_FAILED",err)}
-		if _,err:=s.spawnInPane(newPane,defaultShell(),defaultShellArgs(defaultShell()),goprotocol.TerminalSize{Columns:80,Lines:24});err!=nil{
+		if _,err:=s.spawnInPane(newPane,"",nil,s.defaultTerminalSize());err!=nil{
 			return fail("TERMINAL_SPAWN_FAILED",err)
 		}
 		return map[string]any{"type":"pane_created","pane_id":newPane},nil
@@ -257,8 +255,8 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 			Lines   int        `json:"lines"`
 		}
 		if err := json.Unmarshal(raw, &c); err != nil { return fail("INVALID_COMMAND", err) }
-		if c.Columns==0{c.Columns=80}
-		if c.Lines==0{c.Lines=24}
+		if c.Columns==0{c.Columns=s.Config.Terminal.DefaultColumns}
+		if c.Lines==0{c.Lines=s.Config.Terminal.DefaultLines}
 		_,paneID,err:=s.model.ResolvePane(c.PaneID)
 		if err!=nil{
 			wid:=s.model.EnsureWorkspace()
@@ -329,12 +327,23 @@ func (s *Server) resolveTerminal(terminalID,paneID *uuid.UUID)(uuid.UUID,error){
 }
 
 func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size goprotocol.TerminalSize)(*goterminalRef,error){
-	if program==""{program=defaultShell();args=defaultShellArgs(program)}
+	cwd:=s.model.PaneCWD(paneID)
+	if cwd=="" {
+		if workspaceID,ok:=s.model.PaneWorkspace(paneID);ok{
+			cwd=s.model.WorkspaceActiveCWD(workspaceID)
+		}
+	}
+	if cwd==""{cwd=s.Config.DefaultCWD()}
+	if cwd==""{cwd,_=os.Getwd()}
+
+	if program==""{
+		program=s.Config.Shell.Program
+		args=append([]string(nil),s.Config.Shell.Args...)
+	}
 	if old,ok:=s.model.TerminalForPane(paneID);ok{s.registry.Remove(old)}
-	t,err:=s.registry.Spawn(program,args,size);if err!=nil{return nil,err}
+	t,err:=s.registry.SpawnWithDir(program,args,size,cwd);if err!=nil{return nil,err}
 	processName:=strings.TrimLeft(filepath.Base(program),"-")
 	cmdline:=append([]string{program},args...)
-	cwd,_:=os.Getwd()
 	meta:=gomodel.TerminalMeta{
 		TerminalID:t.ID,SessionID:uuid.New(),Program:program,Args:append([]string(nil),args...),
 		Size:t.Size(),ProcessName:processName,CWD:cwd,
@@ -390,10 +399,9 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 
 type goterminalRef struct{ID uuid.UUID}
 
-func defaultShell()string{
-	if shell:=os.Getenv("SHELL");shell!=""{return shell}
-	if runtime.GOOS=="darwin"{if _,err:=os.Stat("/bin/zsh");err==nil{return "/bin/zsh"}}
-	return "/bin/sh"
+func (s *Server) defaultTerminalSize() goprotocol.TerminalSize {
+	return goprotocol.TerminalSize{
+		Columns:s.Config.Terminal.DefaultColumns,
+		Lines:s.Config.Terminal.DefaultLines,
+	}.Normalized()
 }
-
-func defaultShellArgs(program string)[]string{return []string{"-l"}}
