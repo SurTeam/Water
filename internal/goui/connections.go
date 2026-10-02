@@ -184,13 +184,6 @@ func (m *MultiWorkspaceClient) syncSwitchersLocked() {
 	active:=m.active
 	activate:=m.ActivateConnection
 	for _,connection:=range m.connections{
-		connection.view.SetConnectionSwitcher(connection.entry.ID,entries,activate)
-		_ = active
-	}
-	// SetConnectionSwitcher takes the globally active ID, not the child ID.
-	for _,connection:=range m.connections{
-		connection.view.connectionMu.Lock()
-		connection.view.connectionID=active
-		connection.view.connectionMu.Unlock()
+		connection.view.SetConnectionSwitcher(active,entries,activate)
 	}
 }
