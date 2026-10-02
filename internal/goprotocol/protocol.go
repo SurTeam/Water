@@ -132,45 +132,65 @@ func writePayload(w io.Writer, payload []byte) error {
 }
 
 func WriteTerminal(w io.Writer, id uuid.UUID, ev TerminalEvent) error {
-	var payload bytes.Buffer
-	payload.Write(terminalPrefix[:])
+	// WT4 terminal frames are hot-path binary data. Build the fixed header on
+	// the stack and write output bytes directly instead of copying every event
+	// through bytes.Buffer.
+	var frame [38]byte
+	copy(frame[4:8], terminalPrefix[:])
+
+	payloadLen:=0
 	switch ev.Kind {
 	case OutputEvent:
-		payload.WriteByte(terminalOutput)
+		frame[8]=terminalOutput
+		payloadLen=33+len(ev.Data)
 	case ResizeEvent:
-		payload.WriteByte(terminalResize)
+		frame[8]=terminalResize
+		payloadLen=33
 	case ExitEvent:
-		payload.WriteByte(terminalExit)
+		frame[8]=terminalExit
+		payloadLen=34
 	default:
 		return errors.New("unknown terminal event kind")
 	}
-	payload.Write(id[:])
-	var seq [8]byte
-	binary.BigEndian.PutUint64(seq[:], ev.Seq)
-	payload.Write(seq[:])
+	if payloadLen>MaxFrameBytes {
+		return fmt.Errorf("frame too large: %d",payloadLen)
+	}
+	binary.BigEndian.PutUint32(frame[0:4],uint32(payloadLen))
+	copy(frame[9:25],id[:])
+	binary.BigEndian.PutUint64(frame[25:33],ev.Seq)
 
 	switch ev.Kind {
-	case OutputEvent, ResizeEvent:
-		size := ev.Size.Normalized()
-		var geometry [4]byte
-		binary.BigEndian.PutUint16(geometry[0:2], uint16(size.Columns))
-		binary.BigEndian.PutUint16(geometry[2:4], uint16(size.Lines))
-		payload.Write(geometry[:])
-		if ev.Kind == OutputEvent {
-			payload.Write(ev.Data)
+	case OutputEvent,ResizeEvent:
+		size:=ev.Size.Normalized()
+		binary.BigEndian.PutUint16(frame[33:35],uint16(size.Columns))
+		binary.BigEndian.PutUint16(frame[35:37],uint16(size.Lines))
+		if err:=writeAll(w,frame[:37]);err!=nil{return err}
+		if ev.Kind==OutputEvent {
+			return writeAll(w,ev.Data)
 		}
+		return nil
 	case ExitEvent:
-		if ev.Code == nil {
-			payload.WriteByte(0)
-			payload.Write([]byte{0, 0, 0, 0})
-		} else {
-			payload.WriteByte(1)
-			var code [4]byte
-			binary.BigEndian.PutUint32(code[:], uint32(*ev.Code))
-			payload.Write(code[:])
+		if ev.Code==nil {
+			frame[33]=0
+			for i:=34;i<38;i++{frame[i]=0}
+		}else{
+			frame[33]=1
+			binary.BigEndian.PutUint32(frame[34:38],uint32(*ev.Code))
 		}
+		return writeAll(w,frame[:38])
+	default:
+		panic("unreachable")
 	}
-	return writePayload(w, payload.Bytes())
+}
+
+func writeAll(w io.Writer,data []byte)error{
+	for len(data)>0{
+		n,err:=w.Write(data)
+		if err!=nil{return err}
+		if n<=0{return io.ErrShortWrite}
+		data=data[n:]
+	}
+	return nil
 }
 
 func ReadFrame(r io.Reader) (Frame, error) {
@@ -210,7 +230,7 @@ func ReadFrame(r io.Reader) (Frame, error) {
 		}.Normalized()
 		if kind == terminalOutput {
 			ev.Kind = OutputEvent
-			ev.Data = append([]byte(nil), rest[4:]...)
+			ev.Data = rest[4:]
 		} else {
 			if len(rest) != 4 {
 				return Frame{}, errors.New("resize frame has trailing bytes")
