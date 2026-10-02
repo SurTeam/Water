@@ -20,7 +20,8 @@ const (
 	defaultReplayBytes   = 8 * 1024 * 1024
 	readBlockBytes       = 128 * 1024
 	rawReadQueueCapacity = 64
-	outputBatchDelay     = time.Millisecond
+	outputBatchIdle      = time.Millisecond
+	outputBatchMaxAge    = 5 * time.Millisecond
 	replayEventOverhead  = 64
 )
 
@@ -257,29 +258,47 @@ func (t *Terminal) readLoop() {
 	}
 	go t.rawReadLoop(raw,free)
 
-	timer:=time.NewTimer(time.Hour)
-	if !timer.Stop(){
-		select{case <-timer.C:default:}
-	}
-	defer timer.Stop()
-	var timerC <-chan time.Time
+	idleTimer:=time.NewTimer(time.Hour)
+	maxTimer:=time.NewTimer(time.Hour)
+	if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
+	if !maxTimer.Stop(){select{case <-maxTimer.C:default:}}
+	defer idleTimer.Stop()
+	defer maxTimer.Stop()
+	var idleC,maxC <-chan time.Time
 	var batch []byte
 
-	stopTimer:=func(){
-		if timerC==nil{return}
-		if !timer.Stop(){
-			select{case <-timer.C:default:}
+	stopIdle:=func(){
+		if idleC==nil{return}
+		if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
+		idleC=nil
+	}
+	stopMax:=func(){
+		if maxC==nil{return}
+		if !maxTimer.Stop(){select{case <-maxTimer.C:default:}}
+		maxC=nil
+	}
+	resetIdle:=func(){
+		if idleC!=nil {
+			if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
 		}
-		timerC=nil
+		idleTimer.Reset(outputBatchIdle)
+		idleC=idleTimer.C
+	}
+	startMax:=func(){
+		if maxC!=nil{return}
+		maxTimer.Reset(outputBatchMaxAge)
+		maxC=maxTimer.C
 	}
 	flush:=func(){
 		if len(batch)==0{
-			stopTimer()
+			stopIdle()
+			stopMax()
 			return
 		}
 		data:=batch
 		batch=nil
-		stopTimer()
+		stopIdle()
+		stopMax()
 		t.publish(goprotocol.TerminalEvent{
 			Kind:goprotocol.OutputEvent,
 			Size:t.Size(),
@@ -296,10 +315,7 @@ func (t *Terminal) readLoop() {
 		for len(chunk)>0{
 			if batch==nil{
 				batch=make([]byte,0,readBlockBytes)
-				if timerC==nil{
-					timer.Reset(outputBatchDelay)
-					timerC=timer.C
-				}
+				startMax()
 			}
 			remaining:=cap(batch)-len(batch)
 			if remaining<=0{
@@ -312,6 +328,11 @@ func (t *Terminal) readLoop() {
 			chunk=chunk[n:]
 			if len(batch)==cap(batch){
 				flush()
+			}else{
+				// Match the Rust worker's micro-burst semantics: each useful
+				// read extends the idle window, while max age still bounds a
+				// slow continuous stream to five milliseconds.
+				resetIdle()
 			}
 		}
 		returnRaw(original)
@@ -336,8 +357,11 @@ func (t *Terminal) readLoop() {
 				return
 			}
 			appendChunk(chunk)
-		case <-timerC:
-			timerC=nil
+		case <-idleC:
+			idleC=nil
+			flush()
+		case <-maxC:
+			maxC=nil
 			flush()
 		case req:=<-t.resizeRequests:
 			// Serialize resize with every PTY block already observed by the
