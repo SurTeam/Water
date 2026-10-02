@@ -63,7 +63,8 @@ func TestSGRResetPreservesOSC8AndKeepsPlainPathAllocationFree(t *testing.T) {
 }
 
 func TestAttributeClonePreservesLazyAndOwnedExtendedState(t *testing.T) {
-	plain:=DefaultAttrData().Clone()
+	defaults:=DefaultAttrData()
+	plain:=defaults.Clone()
 	if plain.Extended!=nil {
 		t.Fatal("cloning default attrs materialized extended state")
 	}
