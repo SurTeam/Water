@@ -411,6 +411,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	view.LineHeight=unit.Dp(c.config.Terminal.LineHeight)
 	view.CellWidth=unit.Dp(c.config.Terminal.FontSize*0.6)
 	view.FontFamily=c.config.Terminal.FontFamily
+	view.Hyperlinks=c.config.Terminal.Hyperlinks
 	view.Theme.Foreground=configColor(c.config.Theme.TerminalForeground,0xe4e4e4)
 	view.Theme.Background=configColor(c.config.Theme.TerminalBackground,0x2c2c2c)
 	view.Theme.Cursor=configColor(c.config.Theme.CursorBackground,0xe4e4e4)
@@ -422,6 +423,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		view:view,
 	}
 	term.input=&TerminalInput{
+		BracketedPaste:c.config.Features.BracketedPaste,
 		OnInput:func(data []byte){
 			term.mu.Lock()
 			term.selection=Selection{}
@@ -485,6 +487,15 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			term.mu.RUnlock()
 			return text
 		},
+	}
+	if !c.config.Features.MouseReporting {
+		term.input.OnMouse=nil
+	}
+	if !c.config.Features.Selection {
+		term.input.OnSelectionStart=nil
+		term.input.OnSelectionMove=nil
+		term.input.OnSelectionEnd=nil
+		term.input.OnCopy=nil
 	}
 	term.snapshot=emu.Snapshot()
 	c.flushVTResponses(term)
