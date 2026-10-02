@@ -6,6 +6,7 @@ on:
     paths:
       - ".github/workflows/go-rust-benchmark.yml"
       - "internal/gobench/**"
+      - "internal/goprotocol/**"
       - "tests/bench_terminal.rs"
       - "internal/goterminal/**"
       - "internal/goserver/**"
