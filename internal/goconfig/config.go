@@ -239,7 +239,18 @@ func Load(path string)(AppConfig,error){
 	if len(envelope.Overrides)>0 && string(envelope.Overrides)!="null" {
 		target=envelope.Overrides
 	}
+	var shellOverride struct {
+		Shell *struct {
+			Program *string         `json:"program"`
+			Args    json.RawMessage `json:"args"`
+		} `json:"shell"`
+	}
+	if err:=json.Unmarshal(target,&shellOverride);err!=nil{return AppConfig{},err}
 	if err:=json.Unmarshal(target,&cfg);err!=nil{return AppConfig{},err}
+	if shellOverride.Shell!=nil && shellOverride.Shell.Program!=nil &&
+		(len(shellOverride.Shell.Args)==0 || string(shellOverride.Shell.Args)=="null") {
+		cfg.Shell.Args=DefaultShellArgs(cfg.Shell.Program)
+	}
 	return cfg.Normalized(),nil
 }
 
