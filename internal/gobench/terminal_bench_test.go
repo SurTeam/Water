@@ -139,6 +139,7 @@ type multiPaneResult struct {
 	bytes int64
 	gaps []time.Duration
 	emu *govt.Emulator
+	complete bool
 }
 
 func BenchmarkTerminalDirect4Pane64MB(b *testing.B) {
@@ -173,10 +174,13 @@ func BenchmarkTerminalDirect4Pane64MB(b *testing.B) {
 		emus:=make([]*govt.Emulator,0,multiPaneCount)
 		for range multiPaneCount{
 			result:=<-results
+			if !result.complete{b.Fatal("multi-pane direct terminal ended before Exit")}
 			total+=result.bytes
 			gaps=append(gaps,result.gaps...)
 			emus=append(emus,result.emu)
 		}
+		if total<int64(benchBytes){b.Fatalf("multi-pane direct bytes = %d, want at least %d",total,benchBytes)}
+		if total<int64(benchBytes){b.Fatalf("multi-pane server bytes = %d, want at least %d",total,benchBytes)}
 		duration:=time.Since(start)
 		b.ReportMetric(float64(total)/duration.Seconds()/1e6,"MB/s")
 		reportVisibleMetrics(b,gaps)
@@ -307,7 +311,7 @@ func consumeMultiPaneDirect(
 				now:=time.Now()
 				gaps=append(gaps,now.Sub(lastSnapshot))
 				_ = emu.Snapshot()
-				return multiPaneResult{bytes:total,gaps:gaps,emu:emu}
+				return multiPaneResult{bytes:total,gaps:gaps,emu:emu,complete:true}
 			}
 			if time.Since(lastSnapshot)>=visibleInterval{
 				now:=time.Now()
@@ -316,9 +320,9 @@ func consumeMultiPaneDirect(
 				_ = emu.Snapshot()
 			}
 		case <-done:
-			return multiPaneResult{bytes:total,gaps:gaps,emu:emu}
+			return multiPaneResult{bytes:total,gaps:gaps,emu:emu,complete:false}
 		case <-timer.C:
-			return multiPaneResult{bytes:total,gaps:gaps,emu:emu}
+			return multiPaneResult{bytes:total,gaps:gaps,emu:emu,complete:false}
 		}
 	}
 }
