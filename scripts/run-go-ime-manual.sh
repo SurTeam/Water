@@ -151,33 +151,38 @@ Native IME validation phase 1/2: preedit isolation
 
 1. Focus the Water terminal window.
 2. Switch to the OS input method you want to validate.
-3. Compose this exact text, but DO NOT commit it yet:
+3. Begin composing the target text below, but DO NOT commit it yet:
 
    $PROBE_TEXT
 
-Keep the composition active. The harness is waiting for Gio to expose the
-native preedit locally and will verify that the same text has NOT entered the
-server-owned PTY stream.
+The visible preedit may be phonetic/transliterated text (for example Pinyin or
+Kana); it does not need to equal the final committed text. Keep the composition
+active. The harness will capture whatever non-empty preedit Gio receives and
+verify that those bytes have NOT entered the server-owned PTY stream.
 
 EOF
 
 attempts=$(( (TIMEOUT_MS + 49) / 50 ))
 preedit_seen=0
+preedit_file="$TMP_ROOT/ime-preedit.txt"
 for ((attempt=0; attempt<attempts; attempt++)); do
   if "$WATER" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
-    preedit_match="$(python3 - "$SNAPSHOT" "$PROBE_TEXT" <<'PY'
-import json, sys
+    if python3 - "$SNAPSHOT" "$preedit_file" <<'PY'
+import json, pathlib, sys
 data=json.load(open(sys.argv[1]))
-probe=sys.argv[2]
-print(1 if data.get("ime_composing") and data.get("ime_preedit","")==probe else 0)
+preedit=data.get("ime_preedit","")
+if not data.get("ime_composing") or not preedit:
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text(preedit, encoding="utf-8")
 PY
-)"
-    if [[ "$preedit_match" == "1" ]]; then
+    then
+      preedit_text="$(cat "$preedit_file")"
       if "$WATER" --socket "$SOCKET" terminal contains \
           --terminal "$terminal_id" \
-          --text "$PROBE_TEXT" \
+          --text "$preedit_text" \
           --timeout-ms 50 >/dev/null 2>&1; then
         echo "FAIL: IME preedit leaked into the authoritative PTY before commit" >&2
+        echo "leaked preedit: $preedit_text" >&2
         exit 1
       fi
       preedit_seen=1
@@ -188,15 +193,14 @@ PY
 done
 
 if [[ "$preedit_seen" != "1" ]]; then
-  echo "FAIL: native IME preedit was not observed before timeout" >&2
-  echo "expected preedit: $PROBE_TEXT" >&2
+  echo "FAIL: a non-empty native IME preedit was not observed before timeout" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   exit 1
 fi
 
 cat <<EOF
 
-PASS phase 1: the full preedit is visible in Gio and absent from the PTY.
+PASS phase 1: native preedit '$preedit_text' is visible in Gio and absent from the PTY.
 
 Native IME validation phase 2/2: commit delivery
 
