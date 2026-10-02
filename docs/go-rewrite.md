@@ -95,9 +95,13 @@ benchmark oracle while replacing both the Water client and server in Go.
   `notarytool`, staple the ticket, and validate it before release packaging.
 - Hot-path counters for PTY reads, terminal stream bytes/events, replay,
   snapshot pushes, and client processing.
-- `ui.snapshot` reports GUI-local terminal diagnostics separately from server
-  memory: attached terminals, visible cells, prepared-row cache entries, Gio
-  image-texture cache entries, and decoded terminal-graphics bytes.
+- `debug.memory` is intentionally process-local: the server reports only
+  PTY/replay/model state it owns. GUI cache diagnostics stay in `ui.snapshot`
+  because the client owns VT/render/graphics memory; the server does not block
+  on or fabricate cross-process cache values.
+- `ui.snapshot` reports GUI-local terminal diagnostics: attached terminals,
+  visible cells, prepared-row cache entries, Gio image-texture cache entries,
+  and decoded terminal-graphics bytes.
 
 ### Validation gates
 
@@ -153,10 +157,6 @@ interop cases:
   `APPLE_NOTARY_ISSUER_ID`) and execute one signed notarized release/dev
   artifact to validate the credentialed path. The workflow implementation is
   present, but CI cannot validate Apple credentials without those secrets.
-- Decide whether server `debug.memory` should aggregate GUI-local cache
-  diagnostics across processes. The GUI already exposes accurate local cache
-  counts through `ui.snapshot`; the headless server intentionally does not
-  invent those values.
 
 Do not merge `go-rewrite` into `main` until the credentialed release path,
 manual same-runner benchmark, and any required real-window compatibility
