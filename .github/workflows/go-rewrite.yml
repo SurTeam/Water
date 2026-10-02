@@ -10,6 +10,8 @@ on:
       - "cmd/**"
       - "internal/go*/**"
       - "tests/go_server_compat.rs"
+      - "tests/scenarios/**"
+      - "scripts/run-go-scenario-suite.sh"
       - "src/control/**"
       - "src/command/**"
       - "src/terminal/**"
@@ -73,3 +75,40 @@ jobs:
         env:
           WATER_GO_SERVER_BIN: ${{ github.workspace }}/target/compat/water-go-server
         run: cargo test --no-default-features --test go_server_compat -- --nocapture
+
+
+  scenarios:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+
+      - name: Install Linux scenario dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev libxcursor-dev libxfixes-dev
+
+      - name: Ensure zsh fixture path
+        run: |
+          if [ ! -x /opt/homebrew/bin/zsh ]; then
+            sudo mkdir -p /opt/homebrew/bin
+            sudo ln -sf /bin/zsh /opt/homebrew/bin/zsh
+          fi
+
+      - name: Build Go scenario binaries
+        run: |
+          mkdir -p target/go-scenarios
+          go build -o target/go-scenarios/water ./cmd/water
+          go build -o target/go-scenarios/water-server ./cmd/water-server
+
+      - name: Run full Go scenario suite
+        env:
+          WATER_SCENARIO_REQUIRE_ALL: "1"
+        run: bash scripts/run-go-scenario-suite.sh
