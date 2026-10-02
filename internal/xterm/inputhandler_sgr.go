@@ -164,15 +164,9 @@ func (h *InputHandler) charAttributes(params *Params) bool {
 
 // processSGR0 resets all SGR attributes to defaults.
 func (h *InputHandler) processSGR0(attr *AttributeData) {
-	def := DefaultAttrData()
-	attr.Fg = def.Fg
-	attr.Bg = def.Bg
-	attr.Extended = attr.extended().Clone()
-	attr.Extended.SetUnderlineStyle(UnderlineStyleNone)
-	uc := attr.Extended.UnderlineColor()
-	uc &= ^(AttrCMMask | AttrRGBMask)
-	attr.Extended.SetUnderlineColor(uc)
-	attr.UpdateExtended()
+	attr.Fg = 0
+	attr.Bg = 0
+	attr.Extended = nil
 }
 
 // updateAttrColor applies a color mode and components to a packed color value.
