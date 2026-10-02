@@ -86,3 +86,24 @@ func TestPlatformScenarioFixturesThroughGoCLI(t *testing.T){
 		})
 	}
 }
+
+
+func TestControlInvocationAllowsGlobalFlagsBeforeCommand(t *testing.T){
+	tests:=[]struct{
+		args []string
+		want bool
+	}{
+		{[]string{"ping"},true},
+		{[]string{"--socket","/tmp/water.sock","ping"},true},
+		{[]string{"--control-socket=/tmp/water.sock","scenario","run","fixture.json"},true},
+		{[]string{"--config","/tmp/water.json","ctl","state"},true},
+		{[]string{"--socket","/tmp/water.sock"},false},
+		{[]string{"--ssh","host"},false},
+		{nil,false},
+	}
+	for _,tc:=range tests{
+		if got:=isControlInvocation(tc.args);got!=tc.want{
+			t.Fatalf("isControlInvocation(%q)=%v want %v",tc.args,got,tc.want)
+		}
+	}
+}
