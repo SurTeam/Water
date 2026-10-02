@@ -16,6 +16,7 @@ struct ServerGuard {
     child: Option<Child>,
     client: ControlClient,
     socket: PathBuf,
+    config: PathBuf,
 }
 
 impl Drop for ServerGuard {
@@ -38,6 +39,7 @@ impl Drop for ServerGuard {
             }
         }
         let _ = std::fs::remove_file(&self.socket);
+        let _ = std::fs::remove_file(&self.config);
     }
 }
 
@@ -51,6 +53,15 @@ fn start_go_server() -> Option<ServerGuard> {
         "/tmp/water-go-compat-{}.json",
         uuid::Uuid::new_v4()
     ));
+    std::fs::write(
+        &config,
+        r#"{
+          "startup":{"initial_workspace":false,"initial_terminal":false},
+          "shell":{"program":"/bin/sh","args":["-l"]}
+        }"#,
+    )
+    .expect("write portable Go server config");
+
     let child = Command::new(binary)
         .arg("--control-socket")
         .arg(&socket)
@@ -70,6 +81,7 @@ fn start_go_server() -> Option<ServerGuard> {
                 child: Some(child),
                 client,
                 socket,
+                config,
             });
         }
         std::thread::sleep(Duration::from_millis(25));
