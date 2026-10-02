@@ -118,6 +118,8 @@ func (c *Client) Dispatch(command any, out any) error {
 	return nil
 }
 
+const terminalEventQueueCapacity = 64
+
 type Session struct {
 	conn   net.Conn
 	mu     sync.Mutex
@@ -146,7 +148,7 @@ func (c *Client) OpenSession() (*Session, error) {
 	s := &Session{
 		conn:    conn,
 		Build:   c.Build,
-		Events:  make(chan TerminalPush, 256),
+		Events:  make(chan TerminalPush, terminalEventQueueCapacity),
 		Pushes:  make(chan goprotocol.WireMessage, 64),
 		replies: make(map[uint64]chan goprotocol.WireMessage),
 		done:    make(chan struct{}),
