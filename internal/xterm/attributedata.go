@@ -8,6 +8,8 @@ type ExtendedAttrs struct {
 	urlID int
 }
 
+var zeroExtendedAttrs ExtendedAttrs
+
 // NewExtendedAttrs creates an ExtendedAttrs with the given raw ext value and URL ID.
 func NewExtendedAttrs(ext uint32, urlID int) *ExtendedAttrs {
 	return &ExtendedAttrs{ext: ext, urlID: urlID}
@@ -96,21 +98,25 @@ type AttributeData struct {
 
 // DefaultAttrData returns an AttributeData with default (zero) values.
 func DefaultAttrData() AttributeData {
-	return AttributeData{Extended: &ExtendedAttrs{}}
+	return AttributeData{}
 }
 
 // Clone returns a deep copy.
 func (a *AttributeData) Clone() AttributeData {
+	var extended *ExtendedAttrs
+	if a.Extended != nil {
+		extended = a.Extended.Clone()
+	}
 	return AttributeData{
 		Fg:       a.Fg,
 		Bg:       a.Bg,
-		Extended: a.extended().Clone(),
+		Extended: extended,
 	}
 }
 
 func (a *AttributeData) extended() *ExtendedAttrs {
 	if a.Extended == nil {
-		a.Extended = &ExtendedAttrs{}
+		return &zeroExtendedAttrs
 	}
 	return a.Extended
 }
