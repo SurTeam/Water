@@ -110,6 +110,8 @@ type terminalClient struct {
 	view *TerminalView
 	input *TerminalInput
 	selection Selection
+	imePreedit string
+	imeComposing bool
 }
 
 func (t *terminalClient) close() {
@@ -377,12 +379,21 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 	preparedRows:=0
 	imageTextures:=0
 	graphicsBytes:=0
+	activeIMEPreedit:=""
+	activeIMEComposing:=false
 	for _,term:=range terms{
 		term.mu.RLock()
 		snapshot:=term.snapshot
 		emu:=term.emu
 		view:=term.view
+		imePreedit:=term.imePreedit
+		imeComposing:=term.imeComposing
+		termID:=term.id
 		term.mu.RUnlock()
+		if termID==frameActiveTerminal {
+			activeIMEPreedit=imePreedit
+			activeIMEComposing=imeComposing
+		}
 		visibleCells+=snapshot.Cols*snapshot.Rows
 		if emu!=nil{graphicsBytes+=emu.ImageBytes()}
 		if view!=nil{
@@ -410,6 +421,8 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"frame_active_workspace":frameActiveWorkspace,
 		"frame_focused_pane":frameFocusedPane,
 		"frame_active_terminal":frameActiveTerminal,
+		"ime_preedit":activeIMEPreedit,
+		"ime_composing":activeIMEComposing,
 		"automation_hits":hits,
 		"connections":c.connectionListResponse()["connections"],
 		"remote_form_visible":remoteFormVisible,
@@ -1418,7 +1431,11 @@ func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node 
 	cellWidth:=gtx.Dp(term.view.CellWidth)
 	lineHeight:=gtx.Dp(term.view.LineHeight)
 	term.input.Process(gtx,snapshot,cellWidth,lineHeight)
-	composition:=term.input.CompositionText()
+	composition,composing:=term.input.CompositionState()
+	term.mu.Lock()
+	term.imePreedit=composition
+	term.imeComposing=composing
+	term.mu.Unlock()
 	dims:=term.view.Layout(gtx,th,snapshot,selection,composition)
 	term.input.Add(gtx,dims.Size)
 	return dims
