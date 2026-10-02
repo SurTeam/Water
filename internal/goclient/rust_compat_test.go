@@ -18,9 +18,15 @@ func TestGoClientAgainstRustServer(t *testing.T) {
 	serverBin:=os.Getenv("WATER_RUST_SERVER_BIN")
 	if serverBin==""{t.Skip("WATER_RUST_SERVER_BIN is not set")}
 	socket:=filepath.Join("/tmp","water-rust-compat-"+uuid.New().String()+".sock")
+	config:=filepath.Join("/tmp","water-rust-compat-"+uuid.New().String()+".json")
 	defer os.Remove(socket)
+	defer os.Remove(config)
+	if err:=os.WriteFile(config,[]byte(`{
+		"startup":{"initial_workspace":false,"initial_terminal":false},
+		"shell":{"program":"/bin/sh","args":["-l"]}
+	}`),0o600);err!=nil{t.Fatal(err)}
 
-	cmd:=exec.Command(serverBin,"--control-socket",socket,"--empty-workspace")
+	cmd:=exec.Command(serverBin,"--control-socket",socket,"--config",config,"--empty-workspace")
 	cmd.Stdout=os.Stdout
 	cmd.Stderr=os.Stderr
 	if err:=cmd.Start();err!=nil{t.Fatal(err)}
