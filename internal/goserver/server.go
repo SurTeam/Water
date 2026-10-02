@@ -282,7 +282,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	case "connection.list":
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"connections": []any{map[string]any{
-				"id": uuid.New(),
+				"id": uuid.MustParse("00000000-0000-0000-0000-000000000001"),
 				"name": "Local",
 				"kind": "local",
 				"status": "connected",
