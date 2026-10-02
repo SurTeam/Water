@@ -84,6 +84,10 @@ type WorkspaceClient struct {
 	state gomodel.StateDump
 	terminals map[uuid.UUID]*terminalClient
 
+	layoutMu sync.Mutex
+	frameSize image.Point
+	frameMetric unit.Metric
+
 	workspaceClicks map[uuid.UUID]*widget.Clickable
 	tabClicks map[uuid.UUID]*widget.Clickable
 	newWorkspace widget.Clickable
@@ -193,7 +197,9 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 			"default_prevented":scrolled,
 		},nil
 	case "ui.screenshot":
-		return nil,fmt.Errorf("Gio screenshot capture is not implemented yet")
+		var p struct{Path string `json:"path"`}
+		if err:=json.Unmarshal(params,&p);err!=nil{return nil,err}
+		return c.Screenshot(p.Path)
 	case "connection.list":
 		return map[string]any{"connections":[]any{}},nil
 	default:
@@ -541,6 +547,14 @@ func bytesAsInts(data []byte)[]int{
 }
 
 func (c *WorkspaceClient) Layout(gtx layout.Context,th *material.Theme) layout.Dimensions {
+	c.layoutMu.Lock()
+	defer c.layoutMu.Unlock()
+	c.frameSize=gtx.Constraints.Max
+	c.frameMetric=gtx.Metric
+	return c.layoutUnlocked(gtx,th)
+}
+
+func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context,th *material.Theme) layout.Dimensions {
 	c.mu.RLock()
 	state:=c.state
 	c.mu.RUnlock()
