@@ -102,3 +102,18 @@ func TestOSC8LinkIDsStayAlignedWhenTaggedLinkIsReused(t *testing.T) {
 		t.Fatalf("reused link URI = %q",snap.RowsData[1].Cells[0].LinkURI)
 	}
 }
+
+
+func TestReplaySuppressesTerminalQueryResponses(t *testing.T) {
+	e:=New(80,24,100)
+	defer e.Close()
+
+	e.WriteReplay([]byte("\x1b[5n"))
+	if got:=e.TakeResponses();len(got)!=0 {
+		t.Fatalf("replay produced PTY responses: %q",bytes.Join(got,nil))
+	}
+	e.Write([]byte("\x1b[5n"))
+	if got:=bytes.Join(e.TakeResponses(),nil);!bytes.Contains(got,[]byte("\x1b[0n")) {
+		t.Fatalf("live query response missing: %q",got)
+	}
+}
