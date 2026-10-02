@@ -25,6 +25,7 @@ func BenchmarkTerminalDirect64MB(b *testing.B) {
 		if err:=term.Write([]byte("\n"));err!=nil{b.Fatal(err)}
 		var total int64
 		start:=time.Now()
+		timer:=time.NewTimer(30*time.Second)
 	loop:
 		for{
 			select{
@@ -38,10 +39,14 @@ func BenchmarkTerminalDirect64MB(b *testing.B) {
 					break loop
 				}
 			case <-done:
+				timer.Stop()
 				b.Fatal("terminal subscription ended before exit")
-			case <-time.After(30*time.Second):
+			case <-timer.C:
 				b.Fatal("terminal benchmark timed out")
 			}
+		}
+		if !timer.Stop(){
+			select{case <-timer.C:default:}
 		}
 		_ = emu.Snapshot()
 		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
@@ -80,6 +85,7 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 
 		var total int64
 		start:=time.Now()
+		timer:=time.NewTimer(30*time.Second)
 	loop:
 		for{
 			select{
@@ -94,9 +100,12 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 				case goprotocol.ExitEvent:
 					break loop
 				}
-			case <-time.After(30*time.Second):
+			case <-timer.C:
 				b.Fatal("server terminal benchmark timed out")
 			}
+		}
+		if !timer.Stop(){
+			select{case <-timer.C:default:}
 		}
 		_ = emu.Snapshot()
 		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
