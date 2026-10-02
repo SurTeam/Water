@@ -23,6 +23,9 @@ type MultiWorkspaceClient struct {
 	connections map[uuid.UUID]*managedWorkspaceClient
 	active uuid.UUID
 	closed bool
+	bootstrapped bool
+	running bool
+	remoteConnector func(string)(ConnectionEntry,*WorkspaceClient,func(),error)
 	connectRemote func(string) error
 }
 
@@ -48,14 +51,37 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 	if entry.Kind==""{entry.Kind="remote"}
 	if entry.Status==""{entry.Status="connected"}
 
+	m.mu.RLock()
+	if m.closed{
+		m.mu.RUnlock()
+		if closeFn!=nil{closeFn()}
+		return errors.New("connection manager is closed")
+	}
+	_,duplicate:=m.connections[entry.ID]
+	bootstrapped:=m.bootstrapped
+	running:=m.running
+	m.mu.RUnlock()
+	if duplicate{
+		if closeFn!=nil{closeFn()}
+		return errors.New("connection ID already exists")
+	}
+	if bootstrapped{
+		if err:=view.Bootstrap();err!=nil{
+			if closeFn!=nil{closeFn()}
+			return err
+		}
+	}
+
 	m.mu.Lock()
 	if m.closed{
 		m.mu.Unlock()
+		view.Close()
 		if closeFn!=nil{closeFn()}
 		return errors.New("connection manager is closed")
 	}
 	if _,exists:=m.connections[entry.ID];exists{
 		m.mu.Unlock()
+		view.Close()
 		if closeFn!=nil{closeFn()}
 		return errors.New("connection ID already exists")
 	}
@@ -64,9 +90,36 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 	if m.active==uuid.Nil || activate{m.active=entry.ID}
 	m.syncSwitchersLocked()
 	m.mu.Unlock()
+	if running{go view.Run()}
 	if m.invalidate!=nil{m.invalidate()}
 	return nil
 }
+
+func (m *MultiWorkspaceClient) SetRemoteConnector(connector func(string)(ConnectionEntry,*WorkspaceClient,func(),error)){
+	m.mu.Lock()
+	m.remoteConnector=connector
+	m.syncSwitchersLocked()
+	m.mu.Unlock()
+}
+
+func (m *MultiWorkspaceClient) ConnectRemote(destination string) error {
+	m.mu.RLock()
+	for _,connection:=range m.connections{
+		if connection.entry.Kind=="remote" && connection.entry.Destination==destination{
+			id:=connection.entry.ID
+			m.mu.RUnlock()
+			m.ActivateConnection(id)
+			return nil
+		}
+	}
+	connector:=m.remoteConnector
+	m.mu.RUnlock()
+	if connector==nil{return errors.New("remote connector is unavailable")}
+	entry,view,closeFn,err:=connector(destination)
+	if err!=nil{return err}
+	return m.AddConnection(entry,view,closeFn,true)
+}
+
 
 func (m *MultiWorkspaceClient) RemoveConnection(id uuid.UUID) bool {
 	m.mu.Lock()
@@ -125,6 +178,7 @@ func (m *MultiWorkspaceClient) ConnectionEntries() []ConnectionEntry {
 
 func (m *MultiWorkspaceClient) Bootstrap() error {
 	m.mu.RLock()
+	if m.bootstrapped{m.mu.RUnlock();return nil}
 	views:=make([]*WorkspaceClient,0,len(m.order))
 	for _,id:=range m.order{
 		if connection:=m.connections[id];connection!=nil{views=append(views,connection.view)}
@@ -133,16 +187,21 @@ func (m *MultiWorkspaceClient) Bootstrap() error {
 	for _,view:=range views{
 		if err:=view.Bootstrap();err!=nil{return err}
 	}
+	m.mu.Lock()
+	m.bootstrapped=true
+	m.mu.Unlock()
 	return nil
 }
 
 func (m *MultiWorkspaceClient) Run() {
-	m.mu.RLock()
+	m.mu.Lock()
+	if m.running{m.mu.Unlock();return}
+	m.running=true
 	views:=make([]*WorkspaceClient,0,len(m.order))
 	for _,id:=range m.order{
 		if connection:=m.connections[id];connection!=nil{views=append(views,connection.view)}
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 	for _,view:=range views{go view.Run()}
 }
 
