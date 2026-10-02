@@ -3,6 +3,7 @@ package goui
 import (
 	"bytes"
 	"testing"
+	"time"
 
 	"gioui.org/io/key"
 
@@ -66,5 +67,25 @@ func TestHyperlinkURIAt(t *testing.T){
 		if got:=hyperlinkURIAt(snap,point[0],point[1]);got!=""{
 			t.Fatalf("hyperlinkURIAt(%d,%d) = %q",point[0],point[1],got)
 		}
+	}
+}
+
+
+func TestTerminalClickCountTracksSameCellWithinWindow(t *testing.T){
+	var input TerminalInput
+	if got:=input.nextClickCount(100*time.Millisecond,2,3);got!=1{
+		t.Fatalf("first click count = %d",got)
+	}
+	if got:=input.nextClickCount(300*time.Millisecond,2,3);got!=2{
+		t.Fatalf("second click count = %d",got)
+	}
+	if got:=input.nextClickCount(450*time.Millisecond,2,3);got!=3{
+		t.Fatalf("third click count = %d",got)
+	}
+	if got:=input.nextClickCount(500*time.Millisecond,3,3);got!=1{
+		t.Fatalf("different cell did not reset click count: %d",got)
+	}
+	if got:=input.nextClickCount(1200*time.Millisecond,3,3);got!=1{
+		t.Fatalf("expired click window did not reset count: %d",got)
 	}
 }
