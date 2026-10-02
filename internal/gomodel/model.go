@@ -806,6 +806,23 @@ func (m *Model) dumpNodeLocked(n *Node) any {
 	}
 }
 
+type MemoryProjection struct {
+	VisibleCells int
+	SurfaceCount int
+}
+
+func (m *Model) MemoryProjection() MemoryProjection {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	stats:=MemoryProjection{SurfaceCount:len(m.panes)}
+	for _,pane:=range m.panes {
+		if pane==nil || pane.Terminal==nil { continue }
+		size:=pane.Terminal.Size.Normalized()
+		stats.VisibleCells+=size.Columns*size.Lines
+	}
+	return stats
+}
+
 func (m *Model) SortedTerminalIDs() []uuid.UUID {
 	m.mu.RLock(); defer m.mu.RUnlock()
 	var ids []uuid.UUID
