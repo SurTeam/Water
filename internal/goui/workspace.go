@@ -8,8 +8,13 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"gioui.org/f32"
+	"gioui.org/io/input"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
@@ -864,35 +869,64 @@ func (c *WorkspaceClient) automationClick(x,y float32,count int)bool{
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
 	if count<1{count=1}
-	point:=image.Pt(int(x),int(y))
-	for i:=len(c.hitRegions)-1;i>=0;i--{
-		hit:=c.hitRegions[i]
-		if !point.In(hit.Rect){continue}
-		switch hit.Kind{
-		case hitWorkspace:
-			if click:=c.workspaceClicks[hit.ID];click!=nil{
-				for n:=0;n<count;n++{click.Click()}
-				if c.invalidate!=nil{c.invalidate()}
-				return true
-			}
-		case hitTab:
-			if click:=c.tabClicks[hit.ID];click!=nil{
-				for n:=0;n<count;n++{click.Click()}
-				if c.invalidate!=nil{c.invalidate()}
-				return true
-			}
-		case hitNewWorkspace:
-			for n:=0;n<count;n++{c.newWorkspace.Click()}
-			if c.invalidate!=nil{c.invalidate()}
-			return true
-		case hitNewTab:
-			for n:=0;n<count;n++{c.newTab.Click()}
-			if c.invalidate!=nil{c.invalidate()}
-			return true
-		case hitPane:
-			_ = c.session.DispatchAsync(map[string]any{"type":"pane.focus","pane_id":hit.ID})
-			return true
-		}
+
+	size:=c.frameSize
+	if size.X<=0||size.Y<=0{
+		size=image.Pt(int(c.config.Startup.WindowWidth),int(c.config.Startup.WindowHeight))
 	}
-	return false
+	if size.X<1{size.X=1};if size.Y<1{size.Y=1}
+	metric:=c.frameMetric
+	point:=image.Pt(int(x),int(y))
+
+	var router input.Router
+	th:=material.NewTheme()
+	now:=time.Now()
+	frame:=func(frameNow time.Time){
+		var ops op.Ops
+		gtx:=layout.Context{
+			Constraints:layout.Exact(size),
+			Metric:metric,
+			Now:frameNow,
+			Source:router.Source(),
+			Ops:&ops,
+		}
+		c.hitRegions=c.hitRegions[:0]
+		c.layoutUnlocked(gtx,th)
+		router.Frame(&ops)
+	}
+
+	// First frame registers the same widget tags and clip regions used by the
+	// real window. The synthetic pointer events below are then routed by Gio
+	// itself instead of directly invoking widget callbacks.
+	frame(now)
+	handled:=false
+	for _,hit:=range c.hitRegions{
+		if point.In(hit.Rect){handled=true;break}
+	}
+	if !handled{return false}
+
+	position:=f32.Pt(x,y)
+	for n:=0;n<count;n++{
+		eventTime:=now.Add(time.Duration(n+1)*50*time.Millisecond)
+		router.Queue(
+			pointer.Event{
+				Kind:pointer.Press,
+				Source:pointer.Mouse,
+				PointerID:1,
+				Buttons:pointer.ButtonPrimary,
+				Position:position,
+				Time:eventTime,
+			},
+			pointer.Event{
+				Kind:pointer.Release,
+				Source:pointer.Mouse,
+				PointerID:1,
+				Position:position,
+				Time:eventTime.Add(10*time.Millisecond),
+			},
+		)
+		frame(eventTime.Add(10*time.Millisecond))
+	}
+	if c.invalidate!=nil{c.invalidate()}
+	return true
 }
