@@ -37,8 +37,9 @@ type Cell struct {
 }
 
 type Row struct {
-	Cells []Cell
-	Hash  uint64
+	Cells   []Cell
+	Hash    uint64
+	Wrapped bool
 }
 
 type Snapshot struct {
@@ -436,7 +437,7 @@ func (e *Emulator) Snapshot() Snapshot {
 			put32(packed[12:16], uint32(cell.URLID))
 			_, _ = h.Write(packed[:])
 		}
-		s.RowsData[row] = Row{Cells: cells, Hash: h.Sum64()}
+		s.RowsData[row] = Row{Cells: cells, Hash: h.Sum64(), Wrapped: line.IsWrapped}
 	}
 	if e.graphics!=nil {
 		s.Images=e.graphics.snapshot(term,s.RowsData)
