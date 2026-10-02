@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -34,6 +35,10 @@ type Server struct {
 
 	sessionsMu sync.RWMutex
 	sessions map[*session]struct{}
+
+	uiSeq atomic.Uint64
+	pendingUIMu sync.Mutex
+	pendingUI map[uint64]chan goprotocol.WireMessage
 }
 
 type OperationSnapshot struct {
@@ -62,6 +67,7 @@ func New(socketPath string) *Server {
 		closing:    make(chan struct{}),
 		ops:        make(map[uuid.UUID]OperationSnapshot),
 		sessions:   make(map[*session]struct{}),
+		pendingUI:  make(map[uint64]chan goprotocol.WireMessage),
 	}
 }
 
@@ -165,6 +171,10 @@ func (s *Server) handleConn(conn net.Conn) {
 				fmt.Sprintf("got %d want %d", msg.ProtocolVersion, goprotocol.ProtocolVersion)))
 			continue
 		}
+		if msg.OK != nil {
+			s.deliverUIReply(msg)
+			continue
+		}
 		if err := s.dispatch(ss, msg); err != nil {
 			_ = ss.write(goprotocol.Failure(msg.RequestID, "REQUEST_FAILED", err.Error()))
 		}
@@ -214,6 +224,10 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		return nil
 	case "state.dump":
 		return ss.write(goprotocol.Success(msg.RequestID, s.model.Dump()))
+	case "event.list":
+		return s.eventList(ss, msg)
+	case "debug.metrics":
+		return ss.write(goprotocol.Success(msg.RequestID, s.metricsSnapshot()))
 	case "debug.memory":
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"terminal_count": s.registry.Count(),
@@ -228,8 +242,18 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		}))
 	case "connection.list":
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-			"connections": []any{},
+			"connections": []any{map[string]any{
+				"id": uuid.New(),
+				"name": "Local",
+				"kind": "local",
+				"status": "connected",
+				"socket_path": s.SocketPath,
+				"remote_socket_path": nil,
+				"destination": nil,
+			}},
 		}))
+	case "ui.keystroke", "ui.snapshot", "ui.click", "ui.screenshot", "ui.wheel":
+		return s.forwardUI(ss, msg)
 	case "terminal.replay", "terminal.snapshot":
 		var p struct {
 			TerminalID uuid.UUID `json:"terminal_id"`
