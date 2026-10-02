@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"gioui.org/f32"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -53,6 +54,10 @@ type TerminalInput struct {
 	selectionAutoScrollCol int
 	selectionAutoScrollRow int
 	selectionAutoScrollAt time.Time
+
+	imeInitialized bool
+	imeCaret key.Caret
+	imeCompositionBounds image.Rectangle
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
@@ -235,27 +240,19 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				i.emit(data)
 			}
 		case key.FocusEvent:
+			i.imeInitialized=false
 			if !ev.Focus {
-				i.composing=false
-				i.pendingComposition=""
+				i.resetComposition()
 			}
 		case key.CompositionEvent:
-			// Gio exposes the IME composition range separately from edit events.
-			// While composition is active, keep replacement text local. Send only
-			// the final edit once composition collapses.
-			wasComposing:=i.composing
-			i.composing = ev.Start != ev.End
-			if wasComposing && !i.composing && i.pendingComposition!="" {
-				i.emit([]byte(i.pendingComposition))
-				i.pendingComposition=""
-			}
+			i.handleComposition(ev)
 		case key.EditEvent:
-			if ev.Text=="" { continue }
-			if i.composing {
-				i.pendingComposition=ev.Text
-			} else {
-				i.emit([]byte(ev.Text))
-			}
+			i.handleEdit(ev)
+		case key.SnippetEvent, key.SelectionEvent:
+			// A terminal has no editable backing document. Re-publish the
+			// zero-length snippet/selection at the terminal cursor instead of
+			// allowing the platform IME to move through screen contents.
+			i.imeInitialized=false
 		case key.Event:
 			if ev.State!=key.Press { continue }
 			if ev.Name=="V" && ev.Modifiers.Contain(key.ModShortcut) {
@@ -283,6 +280,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			}
 		}
 	}
+	i.syncIME(gtx,snap,cellWidth,lineHeight)
 }
 
 func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
@@ -295,6 +293,90 @@ func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
 
 func (i *TerminalInput) Focus(gtx layout.Context) {
 	gtx.Execute(key.FocusCmd{Tag:&i.tag})
+}
+
+func compositionActive(rng key.Range)bool{
+	return rng.Start>=0 && rng.End>=0
+}
+
+func (i *TerminalInput) handleComposition(ev key.CompositionEvent){
+	active:=compositionActive(key.Range(ev))
+	i.composing=active
+	if !active {
+		// The platform IME sends the committed EditEvent after ending the
+		// composition. Never leak the last preedit into the PTY here.
+		i.pendingComposition=""
+	}
+	i.imeInitialized=false
+}
+
+func (i *TerminalInput) handleEdit(ev key.EditEvent){
+	if i.composing {
+		i.pendingComposition=ev.Text
+		i.imeInitialized=false
+		return
+	}
+	i.pendingComposition=""
+	if ev.Text!="" {
+		i.emit([]byte(ev.Text))
+	}
+	i.imeInitialized=false
+}
+
+func (i *TerminalInput) resetComposition(){
+	i.composing=false
+	i.pendingComposition=""
+	i.imeInitialized=false
+}
+
+func (i *TerminalInput) syncIME(gtx layout.Context,snap govt.Snapshot,cellWidth,lineHeight int){
+	if !gtx.Focused(&i.tag) {
+		i.imeInitialized=false
+		return
+	}
+	if cellWidth<1{cellWidth=1}
+	if lineHeight<1{lineHeight=1}
+
+	cursorX:=snap.CursorX
+	cursorY:=snap.CursorY
+	if cursorX<0{cursorX=0}
+	if cursorY<0{cursorY=0}
+	if snap.Cols>0 && cursorX>=snap.Cols{cursorX=snap.Cols-1}
+	if snap.Rows>0 && cursorY>=snap.Rows{cursorY=snap.Rows-1}
+
+	x:=cursorX*cellWidth
+	top:=cursorY*lineHeight
+	baseline:=top+lineHeight-2
+	if baseline<top{baseline=top}
+	caret:=key.Caret{
+		Pos:f32.Pt(float32(x),float32(baseline)),
+		Ascent:float32(baseline-top),
+		Descent:float32(top+lineHeight-baseline),
+	}
+	compositionBounds:=image.Rectangle{}
+	if i.composing && i.pendingComposition!="" {
+		columns:=utf8.RuneCountInString(i.pendingComposition)
+		if columns<1{columns=1}
+		compositionBounds=image.Rect(x,top,x+columns*cellWidth,top+lineHeight)
+	}
+
+	if !i.imeInitialized {
+		gtx.Execute(key.SnippetCmd{
+			Tag:&i.tag,
+			Snippet:key.Snippet{Range:key.Range{Start:0,End:0},Text:""},
+		})
+	}
+	if !i.imeInitialized || i.imeCaret!=caret || i.imeCompositionBounds!=compositionBounds {
+		gtx.Execute(key.SelectionCmd{
+			Tag:&i.tag,
+			Range:key.Range{Start:0,End:0},
+			Caret:caret,
+			CompositionBounds:compositionBounds,
+		})
+		i.imeCaret=caret
+		i.imeCompositionBounds=compositionBounds
+	}
+	i.imeInitialized=true
 }
 
 func (i *TerminalInput) emit(data []byte) {
