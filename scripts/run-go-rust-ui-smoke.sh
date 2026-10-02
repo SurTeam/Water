@@ -149,6 +149,107 @@ if [[ "$changed" != "1" ]]; then
   exit 1
 fi
 
+# Exercise real X11 keyboard and clipboard input through the Go GUI while
+# the PTY remains owned by the Rust server. Resolve the terminal from the
+# exact pane hit exposed by the current GUI frame so snapshot lag cannot make
+# the assertion target a different workspace.
+pane_info=""
+terminal_id=""
+for _ in $(seq 1 200); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null &&
+     "$WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER" 2>/dev/null; then
+    pane_info="$(python3 - "$SNAPSHOT" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+for hit in data.get("automation_hits", []):
+    if hit.get("kind")=="pane":
+        x0,y0,x1,y1=hit["rect"]
+        print(hit.get("id",""), f"{(x0+x1)/2:.1f}", f"{(y0+y1)/2:.1f}")
+        break
+PY
+)"
+    if [[ -n "$pane_info" ]]; then
+      read -r pane_id pane_x pane_y <<<"$pane_info"
+      terminal_id="$(python3 - "$STATE_AFTER" "$pane_id" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+target=sys.argv[2]
+
+def find_terminal_for_pane(value):
+    if isinstance(value, dict):
+        if value.get("pane_id")==target:
+            terminal=value.get("terminal")
+            if isinstance(terminal, dict):
+                summary=terminal.get("summary")
+                if isinstance(summary, dict) and summary.get("terminal_id"):
+                    return summary["terminal_id"]
+            state=value.get("surface_state")
+            if isinstance(state, dict):
+                terminal=state.get("Terminal")
+                if isinstance(terminal, dict) and terminal.get("terminal_id"):
+                    return terminal["terminal_id"]
+        for child in value.values():
+            found=find_terminal_for_pane(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found=find_terminal_for_pane(child)
+            if found:
+                return found
+    return None
+
+print(find_terminal_for_pane(data) or "")
+PY
+)"
+    fi
+    if [[ -n "$pane_info" && -n "$terminal_id" ]]; then
+      break
+    fi
+  fi
+  sleep 0.025
+done
+if [[ -z "$pane_info" || -z "$terminal_id" ]]; then
+  echo "could not resolve Go GUI terminal pane over Rust server" >&2
+  cat "$SNAPSHOT" >&2 2>/dev/null || true
+  cat "$STATE_AFTER" >&2 2>/dev/null || true
+  exit 1
+fi
+
+window_id="$(xdotool search --onlyvisible --name 'Water' 2>/dev/null | head -n1 || true)"
+if [[ -z "$window_id" ]]; then
+  echo "could not find visible Go Water X11 window" >&2
+  exit 1
+fi
+xdotool windowfocus --sync "$window_id"
+xdotool mousemove --window "$window_id" "$pane_x" "$pane_y" click 1
+sleep 0.15
+
+xdotool type --delay 3 'echo WATER_GO_RUST_KEY_SMOKE'
+xdotool key Return
+if ! "$WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_GO_RUST_KEY_SMOKE     --timeout-ms 5000 >/dev/null; then
+  echo "Go GUI real keyboard input did not reach Rust-owned PTY" >&2
+  echo "window_id=$window_id pane=$pane_info terminal=$terminal_id" >&2
+  cat "$GUI_LOG" >&2 || true
+  exit 1
+fi
+
+clipboard_text='echo WATER_GO_RUST_CLIPBOARD_SMOKE'
+printf '%s' "$clipboard_text" | xclip -selection clipboard
+sleep 0.1
+if [[ "$(xclip -selection clipboard -o 2>/dev/null || true)" != "$clipboard_text" ]]; then
+  echo "cross-language X11 clipboard self-check failed" >&2
+  exit 1
+fi
+xdotool key ctrl+v
+sleep 0.15
+xdotool key Return
+if ! "$WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_GO_RUST_CLIPBOARD_SMOKE     --timeout-ms 5000 >/dev/null; then
+  echo "Go GUI real clipboard paste did not reach Rust-owned PTY" >&2
+  cat "$GUI_LOG" >&2 || true
+  exit 1
+fi
+
 remote_hit=""
 for _ in $(seq 1 200); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
