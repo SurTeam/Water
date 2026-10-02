@@ -1061,7 +1061,7 @@ func (c *WorkspaceClient) layoutHyperlinkOverlay(gtx layout.Context,th *material
 }
 
 func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,state gomodel.StateDump)layout.Dimensions{
-	items:=make([]layout.FlexChild,0,len(state.Workspaces)+2)
+	items:=make([]layout.FlexChild,0,len(state.Workspaces)+8)
 	y:=0
 	header:=material.Label(th,unit.Sp(16),"Water")
 	header.Font.Weight=600
@@ -1070,24 +1070,45 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,st
 		y+=dims.Size.Y
 		return dims
 	}))
+
 	activeConnection,connections,activateConnection:=c.connectionSnapshot()
-	if len(connections)>1 {
+	connectRemote,removeConnection:=c.connectionActions()
+
+	if len(connections)>0 {
 		for _,connection:=range connections {
 			entry:=connection
 			c.connectionMu.Lock()
 			click:=c.connectionClicks[entry.ID]
 			if click==nil{click=new(widget.Clickable);c.connectionClicks[entry.ID]=click}
+			disconnect:=c.connectionDisconnectClicks[entry.ID]
+			if disconnect==nil{disconnect=new(widget.Clickable);c.connectionDisconnectClicks[entry.ID]=disconnect}
 			c.connectionMu.Unlock()
+
 			for click.Clicked(gtx){
 				if activateConnection!=nil{activateConnection(entry.ID)}
 			}
+			for disconnect.Clicked(gtx){
+				if entry.Kind=="remote" && removeConnection!=nil {
+					id:=entry.ID
+					go func(){ _ = removeConnection(id) }()
+				}
+			}
+
 			items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
 				top:=y
 				label:=entry.Name
 				if entry.ID==activeConnection{label="● "+label}else{label="○ "+label}
 				if entry.Status!="" && entry.Status!="connected"{label+=" ("+entry.Status+")"}
-				button:=material.Button(th,click,label)
-				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+
+				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(4)}.Layout(gtx,func(gtx layout.Context)layout.Dimensions{
+					return layout.Flex{Axis:layout.Horizontal}.Layout(gtx,
+						layout.Flexed(1,material.Button(th,click,label).Layout),
+						layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+							if entry.Kind!="remote"{return layout.Dimensions{}}
+							return layout.Inset{Left:unit.Dp(4)}.Layout(gtx,material.Button(th,disconnect,"×").Layout)
+						}),
+					)
+				})
 				c.hitRegions=append(c.hitRegions,automationHit{
 					Rect:image.Rect(0,top,gtx.Constraints.Max.X,top+dims.Size.Y),
 					Kind:hitConnection,ID:entry.ID,
@@ -1097,6 +1118,104 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,st
 			}))
 		}
 	}
+
+	if connectRemote!=nil {
+		for c.newRemote.Clicked(gtx){
+			c.connectionMu.Lock()
+			c.remoteFormVisible=true
+			c.remoteError=""
+			c.connectionMu.Unlock()
+		}
+		for c.remoteCancel.Clicked(gtx){
+			c.connectionMu.Lock()
+			if !c.remoteConnecting {
+				c.remoteFormVisible=false
+				c.remoteError=""
+				c.remoteClearEditor=true
+			}
+			c.connectionMu.Unlock()
+		}
+		for c.remoteConnect.Clicked(gtx){
+			destination:=strings.TrimSpace(c.remoteEditor.Text())
+			if destination=="" {
+				c.connectionMu.Lock()
+				c.remoteError="SSH destination is required"
+				c.connectionMu.Unlock()
+				continue
+			}
+			c.connectionMu.Lock()
+			if c.remoteConnecting {
+				c.connectionMu.Unlock()
+				continue
+			}
+			c.remoteConnecting=true
+			c.remoteError=""
+			c.connectionMu.Unlock()
+			go func(destination string){
+				err:=connectRemote(destination)
+				c.connectionMu.Lock()
+				c.remoteConnecting=false
+				if err!=nil {
+					c.remoteError=err.Error()
+					c.remoteFormVisible=true
+				}else{
+					c.remoteError=""
+					c.remoteFormVisible=false
+					c.remoteClearEditor=true
+				}
+				c.connectionMu.Unlock()
+				if c.invalidate!=nil{c.invalidate()}
+			}(destination)
+		}
+
+		c.connectionMu.Lock()
+		if c.remoteClearEditor {
+			c.remoteEditor.SetText("")
+			c.remoteClearEditor=false
+		}
+		showRemote:=c.remoteFormVisible
+		connecting:=c.remoteConnecting
+		remoteError:=c.remoteError
+		c.connectionMu.Unlock()
+
+		if !showRemote {
+			items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(8)}.Layout(gtx,material.Button(th,&c.newRemote,"+ Remote").Layout)
+				y+=dims.Size.Y
+				return dims
+			}))
+		}else{
+			items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(8)}.Layout(gtx,func(gtx layout.Context)layout.Dimensions{
+					children:=[]layout.FlexChild{
+						layout.Rigid(material.Editor(th,&c.remoteEditor,"user@host").Layout),
+						layout.Rigid(layout.Spacer{Height:unit.Dp(6)}.Layout),
+					}
+					if remoteError!="" {
+						children=append(children,
+							layout.Rigid(material.Caption(th,remoteError).Layout),
+							layout.Rigid(layout.Spacer{Height:unit.Dp(6)}.Layout),
+						)
+					}
+					if connecting {
+						children=append(children,layout.Rigid(material.Caption(th,"Connecting…").Layout))
+					}else{
+						children=append(children,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+							return layout.Flex{Axis:layout.Horizontal}.Layout(gtx,
+								layout.Flexed(1,material.Button(th,&c.remoteConnect,"Connect").Layout),
+								layout.Rigid(layout.Spacer{Width:unit.Dp(6)}.Layout),
+								layout.Rigid(material.Button(th,&c.remoteCancel,"Cancel").Layout),
+							)
+						}))
+					}
+					return layout.Flex{Axis:layout.Vertical}.Layout(gtx,children...)
+				})
+				y+=dims.Size.Y
+				return dims
+			}))
+		}
+	}
+
 	for _,workspace:=range state.Workspaces {
 		w:=workspace
 		click:=c.workspaceClicks[w.ID]
