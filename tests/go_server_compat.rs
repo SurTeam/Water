@@ -107,16 +107,39 @@ fn rust_client_talks_to_go_server_and_reads_live_wt4() -> io::Result<()> {
     assert_eq!(info.protocol_version, water::control::PROTOCOL_VERSION);
     assert_eq!(info.api_signature, water::control::API_SIGNATURE);
 
-    dispatch(
-        &server.client,
-        AppCommand::Workspace(WorkspaceCommand::Create),
-    );
+    let workspace_operation = server
+        .client
+        .dispatch(AppCommand::Workspace(WorkspaceCommand::Create))
+        .expect("dispatch workspace");
+    let workspace_before_wait = server
+        .client
+        .get_operation(workspace_operation)
+        .expect("operation.get")
+        .expect("workspace operation exists");
+    assert!(matches!(
+        workspace_before_wait.status,
+        OperationStatus::Pending | OperationStatus::Succeeded
+    ));
+    let workspace_done = server
+        .client
+        .wait_operation(workspace_operation)
+        .expect("operation.wait");
+    assert_eq!(workspace_done.status, OperationStatus::Succeeded);
+
     dispatch(
         &server.client,
         AppCommand::Tab(TabCommand::New {
             title: Some("Cross".to_owned()),
         }),
     );
+
+    let state = server.client.state_dump().expect("state.dump");
+    assert!(state.state_revision > 0);
+    assert!(!server.client.events_since(0).expect("event.list").is_empty());
+    let _ = server.client.memory_stats().expect("debug.memory");
+    let metrics = server.client.metrics().expect("debug.metrics");
+    assert!(metrics.is_object());
+    let _ = server.client.connection_list().expect("connection.list");
 
     let terminal_id = match dispatch(
         &server.client,
@@ -151,27 +174,59 @@ fn rust_client_talks_to_go_server_and_reads_live_wt4() -> io::Result<()> {
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut live = Vec::new();
-    while Instant::now() < deadline {
+    let mut saw_exit = false;
+    while Instant::now() < deadline && !saw_exit {
         match events.recv_timeout(Duration::from_millis(250)) {
             Ok(TerminalStreamEvent::Output { seq, bytes, .. }) if seq > attached.last_seq => {
                 live.extend_from_slice(&bytes);
-                if live
-                    .windows(b"CROSS:hello-cross".len())
-                    .any(|window| window == b"CROSS:hello-cross")
-                {
-                    return Ok(());
-                }
             }
             Ok(TerminalStreamEvent::Exit { seq, .. }) if seq > attached.last_seq => {
-                break;
+                saw_exit = true;
             }
             Ok(_) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(error) => panic!("Go session terminal stream ended: {error}"),
         }
     }
-    panic!(
+    assert!(saw_exit, "Go WT4 stream did not produce Exit");
+    assert!(
+        live.windows(b"CROSS:hello-cross".len())
+            .any(|window| window == b"CROSS:hello-cross"),
         "Rust client did not receive expected Go WT4 live output: {:?}",
         String::from_utf8_lossy(&live)
     );
+
+    let contains = server
+        .client
+        .terminal_contains(
+            terminal_id,
+            "CROSS:hello-cross",
+            Duration::from_secs(1),
+        )
+        .expect("terminal.contains");
+    assert_eq!(contains.terminal_id, terminal_id);
+
+    let exited = server
+        .client
+        .wait_terminal_exit(terminal_id, Duration::from_secs(1))
+        .expect("terminal.wait_exit");
+    assert_eq!(exited.terminal_id, terminal_id);
+
+    let replay = server
+        .client
+        .terminal_replay(terminal_id)
+        .expect("terminal.replay");
+    assert_eq!(replay.terminal_id, terminal_id);
+    assert!(replay.last_seq > 0);
+    assert!(!replay.events.is_empty());
+
+    let snapshot = server
+        .client
+        .terminal_snapshot(terminal_id)
+        .expect("terminal.snapshot");
+    assert_eq!(snapshot.terminal_id, terminal_id);
+
+    session.detach(terminal_id);
+    let _ = server.client.memory_stats().expect("final debug.memory");
+    Ok(())
 }
