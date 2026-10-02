@@ -135,7 +135,7 @@ done
 if [[ "$changed" != "1" ]]; then
   # Coordinate layouts can evolve independently; fall back to the Rust
   # keystroke automation path to still validate GUI->Go command dispatch.
-  "$GO_WATER_BIN" --socket "$SOCKET" ui key command-shift-n >/dev/null
+  "$GO_WATER_BIN" --socket "$SOCKET" ui key cmd-shift-n >/dev/null
   for _ in $(seq 1 200); do
     "$GO_WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER"
     after_count="$(python3 - "$STATE_AFTER" <<'PY'
