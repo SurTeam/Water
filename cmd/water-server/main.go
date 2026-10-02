@@ -9,13 +9,14 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/goserver"
 )
 
-const (
-	buildVariant = "dev"
-	serverVersion = "go-rewrite"
+var (
+	buildVariant = gobuild.Variant
+	serverVersion = gobuild.Version
 )
 
 func main() {
