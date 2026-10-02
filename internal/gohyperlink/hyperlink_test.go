@@ -23,7 +23,7 @@ func TestFileURLPathAndTargetValidation(t *testing.T){
 		"relative/path",
 		"1https://example.com",
 		"http s://example.com",
-		"https://example.com/\\n",
+		"https://example.com/\n",
 		"file://host",
 		"file:///tmp/%",
 		"file:///tmp/%00",
@@ -53,7 +53,7 @@ func TestDownloadDirectory(t *testing.T){
 	if err!=nil{t.Fatal(err)}
 	if got!=tmp{t.Fatalf("download directory = %q, want %q",got,tmp)}
 
-	for _,value:=range []string{"","relative","~someone/files","/tmp/\\n"}{
+	for _,value:=range []string{"","relative","~someone/files","/tmp/\n"}{
 		if _,err:=DownloadDirectory(value);err==nil{
 			t.Fatalf("DownloadDirectory(%q) unexpectedly succeeded",value)
 		}
@@ -66,7 +66,8 @@ func TestDownloadRemoteUsesControlMasterAndIsolatedDirectory(t *testing.T){
 	fakeSCP:=filepath.Join(tmp,"fake-scp")
 	script:=`#!/bin/sh
 set -eu
-printf '%s\\n' "$@" > "$WATER_FAKE_SCP_LOG"
+printf '%s
+' "$@" > "$WATER_FAKE_SCP_LOG"
 for last do :; done
 mkdir -p "$last"
 printf 'payload' > "$last/test file.txt"
