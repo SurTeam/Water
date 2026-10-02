@@ -141,31 +141,38 @@ benchmark oracle while replacing both the Water client and server in Go.
   These are CI smoke measurements, not substitutes for the formal same-machine
   Rust-vs-Go benchmark.
 - Latest same-runner language benchmark (Ubuntu hosted runner, Go 1.27.x,
-  stable Rust, 64 MB decoded payload) after PTY micro-burst batching and the
-  in-tree xterm sparse-map reuse fix:
-  - Plain text: Go direct median ~17.6 MB/s, Go server-local ~17.5 MB/s;
-    Rust direct ~23.1 MB/s and Rust server-local ~23.2 MB/s. Go retains about
-    76% of Rust direct completion throughput while its server path retains
-    essentially all of Go direct throughput.
-  - ANSI-heavy: Go direct median ~15.4 MB/s, Go server-local ~15.0 MB/s;
-    Rust direct ~18.2 MB/s and Rust server-local ~18.2 MB/s.
-  - Unicode-heavy: Go direct median ~21.4 MB/s, Go server-local ~22.4 MB/s;
-    Rust direct ~32.5 MB/s and Rust server-local ~30.2 MB/s.
-  - Plain-text Go allocations fell from roughly 8.6 million allocs/op and
-    0.6–0.8 GB/op to about 44 thousand allocs/op and 0.10–0.13 GB/op direct
-    (about 50 thousand allocs/op and 0.18–0.19 GB/op server-local).
-  - Go interaction-under-flood remained low-latency: resize stayed around
-    0.9–1.1 ms in the latest samples and Ctrl-C-to-exit stayed below 6 ms.
-  - Four-pane sustained throughput/RSS/frame cadence is also automated now.
-    On the latest same-runner sample, Go direct completed at about
-    16.2–16.6 MB/s aggregate with 375–382 MiB RSS and roughly
-    35–37 ms p95 / 45–47 ms p99 visible-frame gaps; Go server-local completed
-    at about 17.7–19.1 MB/s with 60–64 MiB RSS and roughly 23 ms p95 /
-    24–25 ms p99 gaps. The Rust oracle measured about 20.14 MB/s direct with
-    168.6 MiB RSS and 24.3/29.3 ms p95/p99, and about 19.38 MB/s server-local
-    with 211.4 MiB RSS and 24.7/32.4 ms p95/p99. These hosted-runner numbers
-    are directional rather than release targets, but they make multi-pane
-    memory/frame regressions visible in CI.
+  stable Rust, 64 MB decoded payload) after Rust-style PTY micro-burst batching,
+  exact-sized retained output batches, and the in-tree xterm sparse-map/lazy
+  attribute fixes:
+  - Plain text: Go direct median **20.33 MB/s**, Go server-local **19.24 MB/s**;
+    Rust direct **37.72 MB/s** and Rust server-local **37.11 MB/s**. Go is about
+    54% of Rust direct throughput on this pure-text single-pane workload, while
+    the Go server path retains about 95% of Go direct throughput.
+  - ANSI-heavy: Go direct **22.59 MB/s**, Go server-local **22.09 MB/s**;
+    Rust direct **23.71 MB/s** and Rust server-local **21.25 MB/s**. The two
+    implementations are effectively in the same hosted-runner range here.
+  - Unicode-heavy: Go direct **32.98 MB/s**, Go server-local **30.54 MB/s**;
+    Rust direct **42.35 MB/s** and Rust server-local **37.94 MB/s**. Go reaches
+    roughly 78-81% of the corresponding Rust path.
+  - Plain-text Go allocations are now about **23k allocs/op and 96 MB/op**
+    direct, and about **36k allocs/op and 171 MB/op** server-local. Earlier
+    versions of the rewrite were around 8.6 million allocs/op and
+    0.6-0.8 GB/op.
+  - The latest Go allocation profile attributes roughly 79 MB of a ~102 MB
+    direct run to immutable retained PTY output batches and about 9.5 MB to
+    xterm buffer-line cloning; the former is now close to the unavoidable
+    64 MB decoded payload plus bounded batching/replay overhead.
+  - Go interaction-under-flood remained low-latency: latest samples were about
+    **0.44-0.59 ms** resize and **0.41-1.90 ms** Ctrl-C-to-exit.
+  - Four-pane sustained throughput is also close to the Rust oracle: Go direct
+    median **26.37 MB/s** and Go server-local **24.68 MB/s**, versus Rust
+    **27.20 MB/s** direct and **23.52 MB/s** server-local. The same run measured
+    Go direct around **182-210 MiB RSS** with roughly **27 ms p95 / 30-31 ms
+    p99** visible-frame gaps, and Go server-local around **227-310 MiB RSS**
+    with roughly **33-35 ms p95 / 38-41 ms p99** gaps.
+  These hosted-runner numbers are directional rather than release targets, but
+  they make throughput, allocation, multi-pane memory, and frame regressions
+  visible in CI.
 
 ## Remaining parity work
 
