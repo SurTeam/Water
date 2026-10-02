@@ -96,9 +96,22 @@ else
     --notes "Temporary unsigned archive. The signing workflow replaces this asset before publication."
 fi
 
+workflow_ref="${WATER_SIGNING_WORKFLOW_REF:-$(git branch --show-current)}"
+if [[ -z "$workflow_ref" ]]; then
+  workflow_ref="main"
+fi
+[[ "$workflow_ref" =~ ^[A-Za-z0-9._/-]+$ ]] || {
+  echo "error: signing workflow ref contains unsupported characters" >&2
+  exit 1
+}
+git ls-remote --exit-code origin "$workflow_ref" >/dev/null 2>&1 || {
+  echo "error: signing workflow ref $workflow_ref does not exist on origin" >&2
+  exit 1
+}
+
 gh workflow run macos-signed.yml \
   --repo "$repository" \
-  --ref main \
+  --ref "$workflow_ref" \
   -f "variant=$variant" \
   -f "publication=$publication" \
   -f "tag=$release_tag" \
@@ -106,4 +119,4 @@ gh workflow run macos-signed.yml \
   -f "source_asset=$release_asset"
 
 echo "Staged unsigned $app_name.app as $repository#$release_tag"
-echo "Dispatched signing workflow for $release_tag"
+echo "Dispatched signing workflow for $release_tag from ref $workflow_ref"
