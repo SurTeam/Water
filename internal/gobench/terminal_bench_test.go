@@ -44,7 +44,7 @@ func BenchmarkTerminalDirect64MB(b *testing.B) {
 			}
 		}
 		_ = emu.Snapshot()
-		b.ReportMetric(float64(total)/start.Seconds()/1e6,"MB/s")
+		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
 		emu.Close();cancel();r.CloseAll()
 	}
 	b.SetBytes(benchBytes)
@@ -99,7 +99,7 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 			}
 		}
 		_ = emu.Snapshot()
-		b.ReportMetric(float64(total)/start.Seconds()/1e6,"MB/s")
+		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
 		emu.Close();_ = session.Close();_ = server.Close()
 		select{case <-serveDone:case <-time.After(time.Second):}
 	}
