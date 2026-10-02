@@ -361,6 +361,20 @@ func NewTerminalView() *TerminalView {
 	}
 }
 
+type TerminalViewCacheStats struct {
+	PreparedRows int
+	ImageTextures int
+}
+
+func (v *TerminalView) CacheStats() TerminalViewCacheStats {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return TerminalViewCacheStats{
+		PreparedRows: len(v.cache),
+		ImageTextures: len(v.imageCache),
+	}
+}
+
 func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot, selection Selection) layout.Dimensions {
 	cellWidth := gtx.Dp(v.CellWidth)
 	lineHeight := gtx.Dp(v.LineHeight)
