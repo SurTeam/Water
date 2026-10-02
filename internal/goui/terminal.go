@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"sync"
+	"strings"
 
 	"gioui.org/font"
 	"gioui.org/layout"
@@ -20,6 +21,7 @@ type TerminalTheme struct {
 	Foreground color.NRGBA
 	Background color.NRGBA
 	Cursor     color.NRGBA
+	Selection  color.NRGBA
 	Palette    [256]color.NRGBA
 }
 
@@ -28,6 +30,7 @@ func DefaultTerminalTheme() TerminalTheme {
 		Foreground: color.NRGBA{R: 0xd8, G: 0xde, B: 0xe9, A: 0xff},
 		Background: color.NRGBA{R: 0x16, G: 0x1b, B: 0x22, A: 0xff},
 		Cursor:     color.NRGBA{R: 0xa3, G: 0xbe, B: 0x8c, A: 0xff},
+		Selection:  color.NRGBA{R: 0x5e, G: 0x81, B: 0xac, A: 0x88},
 	}
 	base := [16]color.NRGBA{
 		{0x2e, 0x34, 0x40, 0xff}, {0xbf, 0x61, 0x6a, 0xff},
@@ -85,6 +88,49 @@ type preparedRow struct {
 	backgrounds []backgroundRun
 }
 
+type Selection struct {
+	AnchorCol int
+	AnchorRow int
+	FocusCol  int
+	FocusRow  int
+	Active    bool
+}
+
+func (s Selection) normalized() (startCol,startRow,endCol,endRow int) {
+	startCol,startRow=s.AnchorCol,s.AnchorRow
+	endCol,endRow=s.FocusCol,s.FocusRow
+	if startRow>endRow || (startRow==endRow && startCol>endCol) {
+		startCol,endCol=endCol,startCol
+		startRow,endRow=endRow,startRow
+	}
+	return
+}
+
+func SelectedText(snap govt.Snapshot, selection Selection) string {
+	if !selection.Active || snap.Rows<=0 || snap.Cols<=0 { return "" }
+	startCol,startRow,endCol,endRow:=selection.normalized()
+	if startRow<0{startRow=0};if endRow>=snap.Rows{endRow=snap.Rows-1}
+	if startRow>endRow{return ""}
+
+	var out strings.Builder
+	for row:=startRow;row<=endRow;row++ {
+		if row>startRow { out.WriteByte('\n') }
+		if row<0 || row>=len(snap.RowsData) { continue }
+		line:=snap.RowsData[row]
+		left,right:=0,snap.Cols-1
+		if row==startRow { left=startCol }
+		if row==endRow { right=endCol }
+		if left<0{left=0};if right>=snap.Cols{right=snap.Cols-1}
+		if left>right{continue}
+		for col:=left;col<=right && col<len(line.Cells);col++ {
+			cell:=line.Cells[col]
+			if cell.Width==0 { continue }
+			if cell.Text=="" { out.WriteByte(' ') } else { out.WriteString(cell.Text) }
+		}
+	}
+	return out.String()
+}
+
 type TerminalView struct {
 	Theme      TerminalTheme
 	FontSize   unit.Sp
@@ -107,7 +153,7 @@ func NewTerminalView() *TerminalView {
 	}
 }
 
-func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot) layout.Dimensions {
+func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot, selection Selection) layout.Dimensions {
 	cellWidth := gtx.Dp(v.CellWidth)
 	lineHeight := gtx.Dp(v.LineHeight)
 	width := snap.Cols * cellWidth
@@ -136,6 +182,10 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 			x1 := (bg.startColumn + bg.spanColumns) * cellWidth
 			rect := image.Rect(x0, y, x1, y+lineHeight)
 			paint.FillShape(gtx.Ops, bg.color, clip.Rect(rect).Op())
+		}
+		if left,right,ok:=selectionColumns(selection,rowIndex,snap.Cols);ok {
+			rect:=image.Rect(left*cellWidth,y,(right+1)*cellWidth,y+lineHeight)
+			paint.FillShape(gtx.Ops,v.Theme.Selection,clip.Rect(rect).Op())
 		}
 		for _, run := range prepared.text {
 			if run.text == "" {
@@ -278,4 +328,17 @@ func resolveColor(c govt.Color, fallback color.NRGBA, theme TerminalTheme) color
 		}
 	}
 	return fallback
+}
+
+
+func selectionColumns(selection Selection,row,cols int)(int,int,bool){
+	if !selection.Active || cols<=0 { return 0,0,false }
+	startCol,startRow,endCol,endRow:=selection.normalized()
+	if row<startRow || row>endRow { return 0,0,false }
+	left,right:=0,cols-1
+	if row==startRow { left=startCol }
+	if row==endRow { right=endCol }
+	if left<0{left=0};if right>=cols{right=cols-1}
+	if left>right{return 0,0,false}
+	return left,right,true
 }
