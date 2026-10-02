@@ -252,6 +252,9 @@ func (t *Terminal) readLoop() {
 
 	raw:=make(chan []byte,rawReadQueueCapacity)
 	free:=make(chan []byte,rawReadQueueCapacity)
+	for i:=0;i<rawReadQueueCapacity;i++{
+		free<-make([]byte,readBlockBytes)
+	}
 	go t.rawReadLoop(raw,free)
 
 	timer:=time.NewTimer(time.Hour)
@@ -285,27 +288,33 @@ func (t *Terminal) readLoop() {
 	}
 	returnRaw:=func(chunk []byte){
 		if cap(chunk)<readBlockBytes{return}
-		chunk=chunk[:readBlockBytes]
-		select{
-		case free<-chunk:
-		default:
-		}
+		free<-chunk[:readBlockBytes]
 	}
 	appendChunk:=func(chunk []byte){
 		if len(chunk)==0{return}
-		if batch==nil{
-			batch=make([]byte,0,readBlockBytes)
+		original:=chunk
+		for len(chunk)>0{
+			if batch==nil{
+				batch=make([]byte,0,readBlockBytes)
+				if timerC==nil{
+					timer.Reset(outputBatchDelay)
+					timerC=timer.C
+				}
+			}
+			remaining:=cap(batch)-len(batch)
+			if remaining<=0{
+				flush()
+				continue
+			}
+			n:=len(chunk)
+			if n>remaining{n=remaining}
+			batch=append(batch,chunk[:n]...)
+			chunk=chunk[n:]
+			if len(batch)==cap(batch){
+				flush()
+			}
 		}
-		batch=append(batch,chunk...)
-		returnRaw(chunk)
-		if len(batch)>=readBlockBytes{
-			flush()
-			return
-		}
-		if timerC==nil{
-			timer.Reset(outputBatchDelay)
-			timerC=timer.C
-		}
+		returnRaw(original)
 	}
 	drainObserved:=func(){
 		for {
@@ -367,17 +376,9 @@ func (t *Terminal) rawReadLoop(out chan<- []byte,free <-chan []byte){
 	var buf []byte
 	for {
 		if buf==nil{
-			select{
-			case buf=<-free:
-			default:
-				buf=make([]byte,readBlockBytes)
-			}
+			buf=<-free
 		}
-		if cap(buf)<readBlockBytes{
-			buf=make([]byte,readBlockBytes)
-		}else{
-			buf=buf[:readBlockBytes]
-		}
+		buf=buf[:readBlockBytes]
 
 		gometrics.PTYReadCalls.Add(1)
 		n,err:=t.ptmx.Read(buf)
