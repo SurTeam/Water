@@ -1,6 +1,7 @@
 package goclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,21 @@ func New(socketPath string) *Client {
 	return &Client{SocketPath: socketPath, Build: "dev"}
 }
 
+func marshalParams(params any) (json.RawMessage, error) {
+	if params == nil {
+		return nil, nil
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		return nil, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if bytes.Equal(trimmed, []byte("{}")) || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	return json.RawMessage(raw), nil
+}
+
 func (c *Client) Call(method string, params any, out any) error {
 	conn, err := net.Dial("unix", c.SocketPath)
 	if err != nil {
@@ -30,7 +46,7 @@ func (c *Client) Call(method string, params any, out any) error {
 	defer conn.Close()
 
 	requestID := c.nextID.Add(1)
-	raw, err := json.Marshal(params)
+	raw, err := marshalParams(params)
 	if err != nil {
 		return err
 	}
@@ -149,7 +165,7 @@ func (c *Client) OpenSession() (*Session, error) {
 
 func (s *Session) Call(method string, params any, out any) error {
 	requestID := s.nextID.Add(1)
-	raw, err := json.Marshal(params)
+	raw, err := marshalParams(params)
 	if err != nil {
 		return err
 	}
