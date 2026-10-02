@@ -16,7 +16,8 @@ import (
 
 const (
 	defaultReplayBytes = 8 * 1024 * 1024
-	readBlockBytes     = 128 * 1024
+	readBlockBytes     = 64 * 1024
+	replayEventOverhead = 64
 )
 
 type Terminal struct {
@@ -270,15 +271,11 @@ func (t *Terminal) waitLoop() {
 func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 	ev.Seq = t.seq.Add(1)
 	t.mu.Lock()
-	if ev.Kind == goprotocol.OutputEvent {
-		t.replayBytes += len(ev.Data)
-	}
+	t.replayBytes += retainedEventBytes(ev)
 	t.replay = append(t.replay, ev)
 	for t.replayBytes > t.replayLimit && len(t.replay) > 1 {
 		old := t.replay[0]
-		if old.Kind == goprotocol.OutputEvent {
-			t.replayBytes -= len(old.Data)
-		}
+		t.replayBytes -= retainedEventBytes(old)
 		t.replay[0] = goprotocol.TerminalEvent{}
 		t.replay = t.replay[1:]
 	}
@@ -296,4 +293,13 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 		case <-sub.done:
 		}
 	}
+}
+
+
+func retainedEventBytes(ev goprotocol.TerminalEvent) int {
+	n := replayEventOverhead
+	if ev.Kind == goprotocol.OutputEvent {
+		n += len(ev.Data)
+	}
+	return n
 }
