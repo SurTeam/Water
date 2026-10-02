@@ -46,8 +46,8 @@ anyhow = "1.0"
 flate2 = "1.1"
 image = { version = "0.25.10", optional = true }
 libc = "0.2"
-gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit"], optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", features = ["font-kit"], optional = true }
+gpui = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", default-features = false, features = ["font-kit", "x11"], optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", rev = "ce48461eaadd16c65c31f835511ab96bd3b6e746", features = ["font-kit", "x11"], optional = true }
 polling = "3.8.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["raw_value"] }
