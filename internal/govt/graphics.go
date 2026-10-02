@@ -956,6 +956,48 @@ func (g *graphicsState) allocateProtocolID() uint32 {
 	}
 }
 
+func (g *graphicsState) eraseVisible(term *xterm.Terminal) {
+	if g==nil || term==nil { return }
+	buf:=term.Buffer()
+	start:=buf.YDisp
+	end:=start+term.Rows()
+	g.retainPlacements(func(p *imagePlacement)bool{
+		if p==nil || p.marker==nil || p.marker.IsDisposed || p.marker.Line<0 { return false }
+		pEnd:=p.marker.Line+maxInt(p.height,1)
+		return pEnd<=start || p.marker.Line>=end
+	})
+}
+
+func (g *graphicsState) eraseScrollback(term *xterm.Terminal) {
+	if g==nil || term==nil { return }
+	start:=term.Buffer().YDisp
+	g.retainPlacements(func(p *imagePlacement)bool{
+		return p!=nil && p.marker!=nil && !p.marker.IsDisposed && p.marker.Line>=start
+	})
+}
+
+func (g *graphicsState) retainPlacements(keep func(*imagePlacement)bool) {
+	for id,record:=range g.images {
+		if record==nil { delete(g.images,id);continue }
+		if len(record.placements)>0 {
+			next:=record.placements[:0]
+			for _,placement:=range record.placements {
+				if keep(placement) {
+					next=append(next,placement)
+				} else {
+					placement.dispose()
+				}
+			}
+			record.placements=next
+		}
+		if len(record.placements)==0 && !record.unicodePlaceholder {
+			g.storedBytes-=len(record.rgba)
+			if g.storedBytes<0{g.storedBytes=0}
+			delete(g.images,id)
+		}
+	}
+}
+
 func (g *graphicsState) snapshot(term *xterm.Terminal, rows []Row) []TerminalImage {
 	if g == nil || term == nil || len(g.images) == 0 {
 		return nil
