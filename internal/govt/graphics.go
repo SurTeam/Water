@@ -5,6 +5,7 @@ import (
 	"compress/zlib"
 	"encoding/base64"
 	"image"
+	"image/color"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
@@ -471,15 +472,15 @@ func decodeEncodedImage(raw []byte) *decodedImage {
 	if !validImageSize(width, height, width*height*4) {
 		return nil
 	}
-	rgba := image.NewRGBA(image.Rect(0, 0, width, height))
+	rgba := image.NewNRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			r, gg, b, a := img.At(bounds.Min.X+x, bounds.Min.Y+y).RGBA()
+			pixel:=color.NRGBAModel.Convert(img.At(bounds.Min.X+x,bounds.Min.Y+y)).(color.NRGBA)
 			off := y*rgba.Stride + x*4
-			rgba.Pix[off+0] = byte(r >> 8)
-			rgba.Pix[off+1] = byte(gg >> 8)
-			rgba.Pix[off+2] = byte(b >> 8)
-			rgba.Pix[off+3] = byte(a >> 8)
+			rgba.Pix[off+0] = pixel.R
+			rgba.Pix[off+1] = pixel.G
+			rgba.Pix[off+2] = pixel.B
+			rgba.Pix[off+3] = pixel.A
 		}
 	}
 	return &decodedImage{width: width, height: height, rgba: rgba.Pix}
