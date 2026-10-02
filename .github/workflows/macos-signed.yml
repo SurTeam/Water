@@ -171,7 +171,7 @@ jobs:
             --pattern "$SOURCE_ASSET" \
             --dir "$unsigned_dir"
           test -s "$unsigned_dir/$SOURCE_ASSET"
-          unzip -q "$unsigned_dir/$SOURCE_ASSET" -d "$signing_dir"
+          ditto -x -k "$unsigned_dir/$SOURCE_ASSET" "$signing_dir"
           test -d "$signing_dir/$APP_NAME.app"
 
       - name: Import SurTeam signing certificate
@@ -280,7 +280,7 @@ jobs:
           app_dir="$RUNNER_TEMP/water-signing/$APP_NAME.app"
           submission="$RUNNER_TEMP/water-notary-submit.zip"
           rm -f "$submission"
-          (cd "$RUNNER_TEMP/water-signing" && zip -r -X -q "$submission" "$APP_NAME.app")
+          ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$submission"
           test -s "$submission"
 
           xcrun notarytool submit "$submission" \
@@ -301,11 +301,21 @@ jobs:
           set -euo pipefail
           app_dir="$RUNNER_TEMP/water-signing/$APP_NAME.app"
           signed_asset="$RUNNER_TEMP/$SOURCE_ASSET"
+          verify_dir="$RUNNER_TEMP/water-signed-verify"
           codesign --verify --deep --strict --verbose=2 "$app_dir"
           codesign --display --verbose=2 "$app_dir" 2>&1
-          (cd "$RUNNER_TEMP/water-signing" && zip -r -X -q "$signed_asset" "$APP_NAME.app")
+          rm -f "$signed_asset"
+          ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$signed_asset"
           test -s "$signed_asset"
-          unzip -tq "$signed_asset"
+
+          rm -rf "$verify_dir"
+          mkdir -p "$verify_dir"
+          ditto -x -k "$signed_asset" "$verify_dir"
+          test -d "$verify_dir/$APP_NAME.app"
+          codesign --verify --deep --strict --verbose=2 "$verify_dir/$APP_NAME.app"
+          if [[ "${{ inputs.notarize }}" == "true" ]]; then
+            xcrun stapler validate "$verify_dir/$APP_NAME.app"
+          fi
           echo "WATER_SIGNED_ASSET=$signed_asset" >> "$GITHUB_ENV"
 
       - name: Upload signed asset and publish release
