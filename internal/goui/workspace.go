@@ -567,6 +567,10 @@ func (c *WorkspaceClient) Bootstrap() error {
 func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 	wanted:=collectTerminalIDs(state)
 	c.mu.Lock()
+	if state.StateRevision<c.state.StateRevision {
+		c.mu.Unlock()
+		return
+	}
 	c.state=state
 	var remove []*terminalClient
 	for id,term:=range c.terminals {
