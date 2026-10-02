@@ -56,7 +56,7 @@ release_asset="${asset// /.}"
 asset_path="$root_dir/dist/$asset"
 test -s "$asset_path" || {
   echo "error: missing unsigned archive $asset_path" >&2
-  echo "hint: run CODESIGN_SKIP=1 WATER_APP_VARIANT=$variant bash scripts/build-macos-app.sh" >&2
+  echo "hint: run CODESIGN_SKIP=1 WATER_APP_VARIANT=$variant bash scripts/build-go-macos-app.sh" >&2
   exit 1
 }
 unzip -tq "$asset_path" >/dev/null
