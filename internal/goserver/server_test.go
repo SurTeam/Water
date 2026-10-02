@@ -310,14 +310,26 @@ func TestSessionMultiplexesFourTerminalStreamsWithoutLoss(t *testing.T) {
 	received:=make(map[uuid.UUID]int64,terminals)
 
 	for i:=0;i<terminals;i++{
+		var paneID *uuid.UUID
+		if i>0{
+			var split struct{PaneID uuid.UUID `json:"pane_id"`}
+			if err:=client.Dispatch(map[string]any{
+				"type":"pane.split",
+				"direction":"right",
+			},&split);err!=nil{t.Fatal(err)}
+			paneID=&split.PaneID
+		}
+
 		var spawned struct{TerminalID uuid.UUID `json:"terminal_id"`}
-		if err:=client.Dispatch(map[string]any{
+		command:=map[string]any{
 			"type":"terminal.spawn",
 			"program":"/bin/sh",
 			"args":[]string{"-c",fmt.Sprintf("read _; yes WATER_MULTI_%d | head -c %d",i,bytesPerTerminal)},
 			"columns":80,
 			"lines":24,
-		},&spawned);err!=nil{t.Fatal(err)}
+		}
+		if paneID!=nil{command["pane_id"]=*paneID}
+		if err:=client.Dispatch(command,&spawned);err!=nil{t.Fatal(err)}
 		var attached struct{LastSeq uint64 `json:"last_seq"`}
 		if err:=session.Attach(spawned.TerminalID,&attached);err!=nil{t.Fatal(err)}
 		ids=append(ids,spawned.TerminalID)
