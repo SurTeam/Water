@@ -340,7 +340,7 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 		program=s.Config.Shell.Program
 		args=append([]string(nil),s.Config.Shell.Args...)
 	}
-	if old,ok:=s.model.TerminalForPane(paneID);ok{s.registry.Remove(old)}
+	oldID,hadOld:=s.model.TerminalForPane(paneID)
 	t,err:=s.registry.SpawnWithDir(program,args,size,cwd);if err!=nil{return nil,err}
 	processName:=strings.TrimLeft(filepath.Base(program),"-")
 	cmdline:=append([]string{program},args...)
@@ -350,6 +350,12 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 		Agent:goagent.Detect(processName,cmdline),
 	}
 	if err:=s.model.InstallTerminal(paneID,meta);err!=nil{s.registry.Remove(t.ID);return nil,err}
+
+	// Replace transaction order matters: once the model points at the new
+	// terminal, an Exit from the retired worker can no longer auto-close this
+	// pane out from under the replacement.
+	if hadOld{s.registry.Remove(oldID)}
+
 	if meta.Agent!=nil {
 		s.emitEvent(map[string]any{
 			"type":"agent_started",
@@ -358,43 +364,62 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 			"kind":meta.Agent.Kind,
 		})
 	}
+
 	ch,done,cancel:=t.Subscribe()
-	go func(){
+	replay:=t.Replay()
+	var replayLast uint64
+	for _,ev:=range replay{
+		if ev.Seq>replayLast{replayLast=ev.Seq}
+	}
+	if len(replay)>0 && replay[len(replay)-1].Kind==goprotocol.ExitEvent{
+		s.handleTerminalLifecycleEvent(t.ID,paneID,meta,replay[len(replay)-1])
+		cancel()
+		return &goterminalRef{ID:t.ID},nil
+	}
+
+	go func(lastSeq uint64){
 		defer cancel()
 		for {
 			select {
 			case ev:=<-ch:
-				switch ev.Kind {
-				case goprotocol.OutputEvent:
-					s.emitEvent(map[string]any{"type":"terminal_output_changed","terminal_id":t.ID})
-				case goprotocol.ResizeEvent:
-					s.emitEvent(map[string]any{
-						"type":"terminal_resized","terminal_id":t.ID,
-						"columns":ev.Size.Columns,"lines":ev.Size.Lines,
-					})
-				case goprotocol.ExitEvent:
-					s.model.SetTerminalExit(t.ID,ev.Code)
-					exitCode:=any(nil)
-					if ev.Code!=nil{exitCode=*ev.Code}
-					s.emitEvent(map[string]any{
-						"type":"terminal_exited","terminal_id":t.ID,"exit_code":exitCode,
-					})
-					if meta.Agent!=nil {
-						s.emitEvent(map[string]any{
-							"type":"agent_stopped","terminal_id":t.ID,
-							"pane_id":paneID,"kind":meta.Agent.Kind,
-						})
-					}
-					s.model.AutoCloseExitedTerminal(t.ID)
-					s.broadcastSnapshot()
-					return
-				}
+				if ev.Seq<=lastSeq{continue}
+				lastSeq=ev.Seq
+				if s.handleTerminalLifecycleEvent(t.ID,paneID,meta,ev){return}
 			case <-done:
 				return
 			}
 		}
-	}()
+	}(replayLast)
 	return &goterminalRef{ID:t.ID},nil
+}
+
+func (s *Server) handleTerminalLifecycleEvent(terminalID,paneID uuid.UUID,meta gomodel.TerminalMeta,ev goprotocol.TerminalEvent)bool{
+	switch ev.Kind {
+	case goprotocol.OutputEvent:
+		s.emitEvent(map[string]any{"type":"terminal_output_changed","terminal_id":terminalID})
+	case goprotocol.ResizeEvent:
+		s.emitEvent(map[string]any{
+			"type":"terminal_resized","terminal_id":terminalID,
+			"columns":ev.Size.Columns,"lines":ev.Size.Lines,
+		})
+	case goprotocol.ExitEvent:
+		s.model.SetTerminalExit(terminalID,ev.Code)
+		exitCode:=any(nil)
+		if ev.Code!=nil{exitCode=*ev.Code}
+		s.emitEvent(map[string]any{
+			"type":"terminal_exited","terminal_id":terminalID,"exit_code":exitCode,
+		})
+		if meta.Agent!=nil {
+			s.emitEvent(map[string]any{
+				"type":"agent_stopped","terminal_id":terminalID,
+				"pane_id":paneID,"kind":meta.Agent.Kind,
+			})
+		}
+		s.model.AutoCloseExitedTerminal(terminalID)
+		s.broadcastSnapshot()
+		return true
+	}
+	return false
 }
 
 type goterminalRef struct{ID uuid.UUID}
