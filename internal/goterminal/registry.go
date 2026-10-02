@@ -178,7 +178,13 @@ func (t *Terminal) Close() error {
 	t.once.Do(func() {
 		close(t.closed)
 		if t.cmd.Process != nil {
-			err = t.cmd.Process.Signal(syscall.SIGHUP)
+			// creack/pty starts the child in its own session/process group.
+			// Signal the whole group so pane/tab closure cannot leave shell
+			// descendants running in the background.
+			pid := t.cmd.Process.Pid
+			if killErr := syscall.Kill(-pid, syscall.SIGHUP); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
+				err = t.cmd.Process.Signal(syscall.SIGHUP)
+			}
 		}
 		_ = t.ptmx.Close()
 	})
