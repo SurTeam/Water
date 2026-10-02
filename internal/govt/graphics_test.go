@@ -99,3 +99,31 @@ func TestSixelDecodesPalettePixel(t *testing.T) {
 		t.Fatalf("unexpected sixel pixel: %v",img.RGBA[:4])
 	}
 }
+
+
+func TestKittyPlacementAdvancesCursorBeforeFollowingText(t *testing.T) {
+	e:=New(20,6,100)
+	defer e.Close()
+	e.SetCellSize(8,16)
+	seq:="A\x1b_Ga=T,i=9,f=100,c=1,r=2;"+tinyPNG(t)+"\x1b\\B"
+	e.Write([]byte(seq))
+	s:=e.Snapshot()
+
+	if len(s.Images)!=1 {
+		t.Fatalf("images=%d",len(s.Images))
+	}
+	// A is on row 0. A two-row image placement advances the cursor so the
+	// trailing B from the same PTY chunk is parsed after that movement.
+	foundB:=false
+	for rowIndex,row:=range s.RowsData {
+		for col,cell:=range row.Cells {
+			if cell.Text=="B" {
+				foundB=true
+				if rowIndex<2 {
+					t.Fatalf("B remained before graphics cursor advance at row=%d col=%d",rowIndex,col)
+				}
+			}
+		}
+	}
+	if !foundB { t.Fatal("trailing text missing") }
+}
