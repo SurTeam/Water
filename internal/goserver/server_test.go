@@ -273,3 +273,85 @@ func TestRejectsIncompatibleBuildVariantBeforeDispatch(t *testing.T) {
 		t.Fatalf("incompatible request mutated model: before=%d after=%d", before, after)
 	}
 }
+
+
+func TestCommandReplyIsNotBlockedByFloodedGUISession(t *testing.T) {
+	socket:=filepath.Join("/tmp","water-go-backpressure-"+uuid.New().String()+".sock")
+	srv:=goserver.New(socket)
+	done:=make(chan error,1)
+	go func(){done<-srv.ListenAndServe()}()
+	defer func(){
+		_ = srv.Close()
+		select{
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+	}()
+
+	client:=goclient.New(socket)
+	deadline:=time.Now().Add(2*time.Second)
+	for {
+		var pong any
+		if client.Call("ping",map[string]any{},&pong)==nil{break}
+		if time.Now().After(deadline){t.Fatal("server never became ready")}
+		time.Sleep(5*time.Millisecond)
+	}
+
+	var spawned struct{TerminalID uuid.UUID `json:"terminal_id"`}
+	if err:=client.Dispatch(map[string]any{
+		"type":"terminal.spawn",
+		"program":"/bin/sh",
+		"args":[]string{"-c","read _; exec yes WATER_BACKPRESSURE"},
+		"columns":80,
+		"lines":24,
+	},&spawned);err!=nil{t.Fatal(err)}
+
+	session,err:=client.OpenSession()
+	if err!=nil{t.Fatal(err)}
+	defer session.Close()
+	var attached any
+	if err:=session.Attach(spawned.TerminalID,&attached);err!=nil{t.Fatal(err)}
+	if err:=client.Dispatch(map[string]any{
+		"type":"terminal.send_text",
+		"terminal_id":spawned.TerminalID,
+		"text":"\n",
+	},nil);err!=nil{t.Fatal(err)}
+
+	fillDeadline:=time.Now().Add(3*time.Second)
+	for len(session.Events)<cap(session.Events) && time.Now().Before(fillDeadline){
+		time.Sleep(time.Millisecond)
+	}
+	if got,want:=len(session.Events),cap(session.Events);got!=want{
+		t.Fatalf("GUI terminal queue did not saturate: len=%d cap=%d",got,want)
+	}
+	// Give the server enough time to fill the Unix socket behind the stalled
+	// client reader. The terminal writer may now be blocked while holding the
+	// session wire mutex; snapshot delivery must not join that critical path.
+	time.Sleep(100*time.Millisecond)
+
+	resizeDone:=make(chan error,1)
+	go func(){
+		resizeDone<-client.Dispatch(map[string]any{
+			"type":"terminal.resize",
+			"terminal_id":spawned.TerminalID,
+			"columns":100,
+			"lines":31,
+		},nil)
+	}()
+	select{
+	case err:=<-resizeDone:
+		if err!=nil{t.Fatal(err)}
+	case <-time.After(time.Second):
+		t.Fatal("command reply blocked behind flooded GUI session")
+	}
+
+	// Closing the GUI session cancels its terminal attachment so shutdown is
+	// not itself held behind the intentionally saturated client queue.
+	_ = session.Close()
+	_ = client.Dispatch(map[string]any{
+		"type":"terminal.send_bytes",
+		"terminal_id":spawned.TerminalID,
+		"bytes":[]int{3},
+	},nil)
+}
