@@ -82,6 +82,24 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 	}
 }
 
+func (s *Server) Initialize(initialWorkspace, initialTerminal bool) error {
+	if !initialWorkspace {
+		return nil
+	}
+	if len(s.model.Dump().Workspaces) != 0 {
+		return nil
+	}
+	if initialTerminal {
+		_, rpcErr := s.executeCommand("workspace.new", json.RawMessage(`{"type":"workspace.new"}`))
+		if rpcErr != nil {
+			return rpcErr
+		}
+		return nil
+	}
+	s.model.CreateWorkspace("")
+	return nil
+}
+
 func (s *Server) ListenAndServe() error {
 	if s.SocketPath == "" {
 		return errors.New("socket path is required")
