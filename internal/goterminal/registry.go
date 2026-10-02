@@ -364,12 +364,14 @@ func (t *Terminal) readLoop() {
 
 func (t *Terminal) rawReadLoop(out chan<- []byte,free <-chan []byte){
 	defer close(out)
+	var buf []byte
 	for {
-		var buf []byte
-		select{
-		case buf=<-free:
-		default:
-			buf=make([]byte,readBlockBytes)
+		if buf==nil{
+			select{
+			case buf=<-free:
+			default:
+				buf=make([]byte,readBlockBytes)
+			}
 		}
 		if cap(buf)<readBlockBytes{
 			buf=make([]byte,readBlockBytes)
@@ -383,12 +385,6 @@ func (t *Terminal) rawReadLoop(out chan<- []byte,free <-chan []byte){
 			gometrics.PTYBytesRead.Add(uint64(n))
 			out<-buf[:n]
 			buf=nil
-		}
-		if buf!=nil{
-			select{
-			case <-t.closed:
-			default:
-			}
 		}
 		if err!=nil{
 			if !errors.Is(err,io.EOF){
