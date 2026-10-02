@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"gioui.org/app"
 	"gioui.org/op"
 	"gioui.org/unit"
@@ -22,33 +24,39 @@ import (
 	"github.com/SurTeam/Water/internal/goui"
 )
 
+type stringListFlag []string
+
+func (values *stringListFlag) String() string {
+	return strings.Join(*values,",")
+}
+
+func (values *stringListFlag) Set(value string) error {
+	value=strings.TrimSpace(value)
+	if value==""{return fmt.Errorf("SSH destination must not be empty")}
+	*values=append(*values,value)
+	return nil
+}
+
+var localConnectionID=uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
 func Run(arguments []string, buildVariant string) error {
 	var socket string
 	var configPath string
-	var sshDestination string
+	var sshDestinations stringListFlag
 	flags:=flag.NewFlagSet("water",flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.StringVar(&socket,"socket","","Unix control socket (compatibility alias)")
 	flags.StringVar(&socket,"control-socket","","Unix control socket")
 	flags.StringVar(&configPath,"config",goconfig.DefaultLoadPath(buildVariant),"Water config JSON")
-	flags.StringVar(&sshDestination,"ssh","","SSH destination for a remote Water server")
+	flags.Var(&sshDestinations,"ssh","SSH destination to add to this window (may be repeated)")
 	if err:=flags.Parse(arguments);err!=nil{return err}
 
 	cfg,err:=goconfig.Load(configPath)
 	if err!=nil{return fmt.Errorf("config: %w",err)}
 	socket=resolveGUISocket(socket,cfg,buildVariant)
-	var tunnel *goremote.Tunnel
-	remoteDestination:=""
-	if strings.TrimSpace(sshDestination)!="" {
-		tunnel,err=goremote.Connect(sshDestination)
-		if err!=nil{return fmt.Errorf("connect remote Water server: %w",err)}
-		defer tunnel.Close()
-		socket=tunnel.LocalSocket()
-		remoteDestination=tunnel.Destination()
-	}
 
 	runErr:=make(chan error,1)
-	go func(){runErr<-runWindowWithConnection(socket,configPath,cfg,buildVariant,remoteDestination)}()
+	go func(){runErr<-runWindowWithConnections(socket,configPath,cfg,buildVariant,sshDestinations)}()
 	app.Main()
 	select{
 	case err:=<-runErr:
@@ -59,10 +67,16 @@ func Run(arguments []string, buildVariant string) error {
 }
 
 func runWindow(socket,configPath string,cfg goconfig.AppConfig,buildVariant string) error {
-	return runWindowWithConnection(socket,configPath,cfg,buildVariant,"")
+	return runWindowWithConnections(socket,configPath,cfg,buildVariant,nil)
 }
 
 func runWindowWithConnection(socket,configPath string,cfg goconfig.AppConfig,buildVariant,remoteDestination string) error {
+	var destinations []string
+	if strings.TrimSpace(remoteDestination)!=""{destinations=[]string{remoteDestination}}
+	return runWindowWithConnections(socket,configPath,cfg,buildVariant,destinations)
+}
+
+func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,buildVariant string,sshDestinations []string) error {
 	w:=new(app.Window)
 	w.Option(
 		app.Title("Water"),
@@ -70,18 +84,65 @@ func runWindowWithConnection(socket,configPath string,cfg goconfig.AppConfig,bui
 		app.MinSize(unit.Dp(cfg.Startup.WindowMinWidth),unit.Dp(cfg.Startup.WindowMinHeight)),
 	)
 
-	session,embedded,ownsDetached,err:=connectOrStart(socket,configPath,cfg,buildVariant)
-	if err!=nil{return err}
-	if embedded!=nil{defer embedded.Close()}
-	defer session.Close()
-	if embedded==nil && ownsDetached && !cfg.Server.DetachOnQuit {
-		defer func(){_ = goclient.New(socket).Call("server.shutdown",map[string]any{},nil)}()
+	multi:=goui.NewMultiWorkspaceClient(w.Invalidate)
+	defer multi.Close()
+
+	localSession,embedded,ownsDetached,localErr:=connectOrStart(socket,configPath,cfg,buildVariant)
+	if localErr==nil{
+		if embedded!=nil{defer embedded.Close()}
+		if embedded==nil && ownsDetached && !cfg.Server.DetachOnQuit {
+			defer func(){_ = goclient.New(socket).Call("server.shutdown",map[string]any{},nil)}()
+		}
+		localView:=goui.NewWorkspaceClientWithConnection(localSession,w.Invalidate,cfg,"")
+		if err:=multi.AddConnection(goui.ConnectionEntry{
+			ID:localConnectionID,
+			Name:"Local",
+			Kind:"local",
+			Status:"connected",
+			SocketPath:socket,
+		},localView,func(){_ = localSession.Close()},len(sshDestinations)==0);err!=nil{
+			return err
+		}
+	}else if len(sshDestinations)==0{
+		return localErr
 	}
 
-	view:=goui.NewWorkspaceClientWithConnection(session,w.Invalidate,cfg,remoteDestination)
-	defer view.Close()
-	if err:=view.Bootstrap();err!=nil{return err}
-	go view.Run()
+	for _,rawDestination:=range sshDestinations{
+		destination,err:=goremote.ValidateDestination(rawDestination)
+		if err!=nil{return fmt.Errorf("SSH destination %q: %w",rawDestination,err)}
+		tunnel,err:=goremote.Connect(destination)
+		if err!=nil{return fmt.Errorf("connect remote Water server %s: %w",destination,err)}
+		session,err:=tunnel.Client().OpenSession()
+		if err!=nil{
+			_ = tunnel.Close()
+			return fmt.Errorf("open remote Water session %s: %w",destination,err)
+		}
+		view:=goui.NewWorkspaceClientWithConnection(session,w.Invalidate,cfg,destination)
+		entry:=goui.ConnectionEntry{
+			ID:uuid.New(),
+			Name:destination,
+			Kind:"remote",
+			Status:"connected",
+			SocketPath:tunnel.LocalSocket(),
+			RemoteSocketPath:tunnel.RemoteSocket(),
+			Destination:destination,
+		}
+		closeRemote:=func(){
+			_ = session.Close()
+			_ = tunnel.Close()
+		}
+		if err:=multi.AddConnection(entry,view,closeRemote,true);err!=nil{
+			closeRemote()
+			return err
+		}
+	}
+	if len(multi.ConnectionEntries())==0{
+		if localErr!=nil{return localErr}
+		return fmt.Errorf("no Water connection is available")
+	}
+
+	if err:=multi.Bootstrap();err!=nil{return err}
+	multi.Run()
 
 	th:=material.NewTheme()
 	var ops op.Ops
@@ -91,7 +152,7 @@ func runWindowWithConnection(socket,configPath string,cfg goconfig.AppConfig,bui
 			return e.Err
 		case app.FrameEvent:
 			gtx:=app.NewContext(&ops,e)
-			view.Layout(gtx,th)
+			multi.Layout(gtx,th)
 			e.Frame(&ops)
 			ops.Reset()
 		}
