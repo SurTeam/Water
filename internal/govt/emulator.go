@@ -33,6 +33,7 @@ type Cell struct {
 	Inverse       bool
 	Invisible     bool
 	URLID         int
+	LinkURI       string
 }
 
 type Row struct {
@@ -93,6 +94,8 @@ type Emulator struct {
 
 	titleMu sync.RWMutex
 	title   string
+
+	links *osc8Tracker
 }
 
 func New(cols, rows, scrollback int) *Emulator {
@@ -106,6 +109,7 @@ func New(cols, rows, scrollback int) *Emulator {
 		scrollback = 2000
 	}
 	e := &Emulator{
+		links: newOSC8Tracker(),
 		term: xterm.New(
 			xterm.WithCols(cols),
 			xterm.WithRows(rows),
@@ -144,8 +148,27 @@ func (e *Emulator) Close() {
 
 func (e *Emulator) Write(p []byte) {
 	e.mu.Lock()
+	e.links.feed(p)
 	_, _ = e.term.Write(p)
+	e.pruneLinksLocked()
 	e.mu.Unlock()
+}
+
+func (e *Emulator) pruneLinksLocked() {
+	if e.links==nil || (len(e.links.uriByID)==0 && e.links.activeID==0){return}
+	buf:=e.term.Buffer()
+	live:=make(map[int]struct{})
+	var raw xterm.CellData
+	for row:=0;row<buf.Lines.Length();row++{
+		line:=buf.Lines.Get(row)
+		if line==nil{continue}
+		for col:=0;col<line.Length();col++{
+			line.LoadCell(col,&raw)
+			if raw.Extended==nil{continue}
+			if id:=raw.Extended.URLID();id!=0{live[id]=struct{}{}}
+		}
+	}
+	e.links.prune(live)
 }
 
 func (e *Emulator) Resize(cols, rows int) {
@@ -273,6 +296,7 @@ func (e *Emulator) Snapshot() Snapshot {
 			}
 			if raw.Extended != nil {
 				cell.URLID = raw.Extended.URLID()
+				cell.LinkURI = e.links.uri(cell.URLID)
 			}
 			if cell.Width == 0 && cell.Text == "" {
 				// xterm uses width zero for the trailing half of wide glyphs.
