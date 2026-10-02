@@ -14,7 +14,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const performanceGateBytes = 32_000_000
+const (
+	performanceGateBytes = 32_000_000
+	minimumSharedRunnerThroughputMBps = 5.0
+)
 
 type performanceSample struct {
 	bytes      int64
@@ -44,15 +47,22 @@ func TestTerminalPerformanceGate(t *testing.T) {
 		direct.mbps(), server.mbps(), retention*100, direct.maxBacklog, server.maxBacklog,
 	)
 
-	// These thresholds are intentionally well below the historical same-machine
-	// Rust measurements. They catch architectural regressions (JSON/base64 live
-	// data, lost backpressure, pathological allocation) without treating shared
-	// CI runner noise as a release failure.
-	if direct.mbps() < 10 {
-		t.Fatalf("direct terminal throughput %.1f MB/s is below 10 MB/s", direct.mbps())
+	// The absolute floor only catches order-of-magnitude regressions. Shared
+	// GitHub runners can vary enough that direct and server measurements may
+	// even invert, so the same-runner Rust-vs-Go workflow is the comparison
+	// oracle. This gate keeps the architectural invariants hard: sequence
+	// continuity, bounded queues/replay, server/direct retention, and latency.
+	if direct.mbps() < minimumSharedRunnerThroughputMBps {
+		t.Fatalf(
+			"direct terminal throughput %.1f MB/s is below %.1f MB/s shared-runner floor",
+			direct.mbps(), minimumSharedRunnerThroughputMBps,
+		)
 	}
-	if server.mbps() < 10 {
-		t.Fatalf("server terminal throughput %.1f MB/s is below 10 MB/s", server.mbps())
+	if server.mbps() < minimumSharedRunnerThroughputMBps {
+		t.Fatalf(
+			"server terminal throughput %.1f MB/s is below %.1f MB/s shared-runner floor",
+			server.mbps(), minimumSharedRunnerThroughputMBps,
+		)
 	}
 	if retention < 0.60 {
 		t.Fatalf("server/direct throughput retention %.1f%% is below 60%%", retention*100)
