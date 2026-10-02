@@ -19,26 +19,46 @@ func TestDefaultAttributeDataKeepsExtendedAttrsLazy(t *testing.T) {
 	}
 }
 
-func TestSGRResetDropsExtendedAttrsWithoutAllocation(t *testing.T) {
+func TestSGRResetPreservesOSC8AndKeepsPlainPathAllocationFree(t *testing.T) {
 	var handler InputHandler
+	original:=NewExtendedAttrs(uint32(UnderlineStyleDouble)<<26,17)
 	attr:=AttributeData{
 		Fg:FgFlagBold|FgFlagUnderline|AttrCMP16|3,
 		Bg:BgFlagItalic|BgFlagHasExtended,
-		Extended:NewExtendedAttrs(uint32(UnderlineStyleDouble)<<26,17),
+		Extended:original,
 	}
 	handler.processSGR0(&attr)
-	if attr.Fg!=0 || attr.Bg!=0 || attr.Extended!=nil {
-		t.Fatalf("SGR reset = %#v",attr)
+	if attr.Fg!=0 {
+		t.Fatalf("SGR reset foreground = %#x",attr.Fg)
+	}
+	if attr.Extended==nil || attr.Extended==original {
+		t.Fatalf("SGR reset did not preserve owned OSC8 state safely: %#v",attr.Extended)
+	}
+	if got:=attr.Extended.URLID();got!=17 {
+		t.Fatalf("SGR reset URL ID = %d, want 17",got)
+	}
+	if got:=attr.Extended.UnderlineStyle();got!=UnderlineStyleDashed {
+		t.Fatalf("OSC8 effective underline style = %v, want dashed",got)
+	}
+	if attr.Bg&BgFlagHasExtended==0 {
+		t.Fatalf("SGR reset dropped HAS_EXTENDED while OSC8 link is active: %#x",attr.Bg)
+	}
+	if original.URLID()!=17 || original.UnderlineStyle()!=UnderlineStyleDashed {
+		t.Fatal("SGR reset mutated the previously owned extended attrs")
 	}
 
+	plain:=AttributeData{}
 	allocs:=testing.AllocsPerRun(1000,func(){
-		attr.Fg=FgFlagBold|AttrCMP16|1
-		attr.Bg=BgFlagDim
-		attr.Extended=nil
-		handler.processSGR0(&attr)
+		plain.Fg=FgFlagBold|AttrCMP16|1
+		plain.Bg=BgFlagDim
+		plain.Extended=nil
+		handler.processSGR0(&plain)
 	})
 	if allocs!=0 {
-		t.Fatalf("SGR reset allocations = %.2f, want 0",allocs)
+		t.Fatalf("plain SGR reset allocations = %.2f, want 0",allocs)
+	}
+	if plain.Fg!=0 || plain.Bg!=0 || plain.Extended!=nil {
+		t.Fatalf("plain SGR reset = %#v",plain)
 	}
 }
 
