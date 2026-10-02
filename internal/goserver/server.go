@@ -3,7 +3,6 @@ package goserver
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net"
 	"os"
@@ -170,9 +169,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = ss.write(goprotocol.Failure(0, "INVALID_JSON", err.Error()))
 			continue
 		}
-		if msg.ProtocolVersion != goprotocol.ProtocolVersion {
-			_ = ss.write(goprotocol.Failure(msg.RequestID, "PROTOCOL_MISMATCH",
-				fmt.Sprintf("got %d want %d", msg.ProtocolVersion, goprotocol.ProtocolVersion)))
+		if msg.OK == nil && (msg.ProtocolVersion != goprotocol.ProtocolVersion || msg.BuildVariant != s.Build) {
+			_ = ss.write(goprotocol.Failure(
+				msg.RequestID,
+				"INCOMPATIBLE_SERVER",
+				"protocol version and dev/release variant must match",
+			))
 			continue
 		}
 		if msg.OK != nil {
