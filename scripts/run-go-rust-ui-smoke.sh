@@ -191,9 +191,8 @@ fi
 python3 - "$SCREENSHOT" <<'PY'
 import pathlib, sys
 data=pathlib.Path(sys.argv[1]).read_bytes()
-if len(data) < 8 or data[:8] != b"PNG
-
-":
+png_magic=bytes.fromhex("89504e470d0a1a0a")
+if len(data) < len(png_magic) or data[:len(png_magic)] != png_magic:
     raise SystemExit("cross-language screenshot is not a PNG")
 print(f"Go GUI ↔ Rust server real-window smoke passed; screenshot bytes={len(data)}")
 PY
