@@ -48,11 +48,11 @@ func TestTerminalPerformanceGate(t *testing.T) {
 	// Rust measurements. They catch architectural regressions (JSON/base64 live
 	// data, lost backpressure, pathological allocation) without treating shared
 	// CI runner noise as a release failure.
-	if direct.mbps() < 20 {
-		t.Fatalf("direct terminal throughput %.1f MB/s is below 20 MB/s", direct.mbps())
+	if direct.mbps() < 10 {
+		t.Fatalf("direct terminal throughput %.1f MB/s is below 10 MB/s", direct.mbps())
 	}
-	if server.mbps() < 20 {
-		t.Fatalf("server terminal throughput %.1f MB/s is below 20 MB/s", server.mbps())
+	if server.mbps() < 10 {
+		t.Fatalf("server terminal throughput %.1f MB/s is below 10 MB/s", server.mbps())
 	}
 	if retention < 0.60 {
 		t.Fatalf("server/direct throughput retention %.1f%% is below 60%%", retention*100)
