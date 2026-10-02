@@ -99,6 +99,7 @@ type Emulator struct {
 
 	links    *osc8Tracker
 	graphics *graphicsState
+	pendingCellSizeQuery []byte
 }
 
 func New(cols, rows, scrollback int) *Emulator {
@@ -153,6 +154,8 @@ func (e *Emulator) write(p []byte,replay bool) {
 	e.mu.Lock()
 	previous:=e.suppressResponses
 	e.suppressResponses=replay
+	p=e.filterCellSizeQueryLocked(p)
+	e.applyGraphicsEraseLocked(p)
 	e.links.feed(p)
 
 	events:=e.graphics.parser.feed(p)
@@ -180,6 +183,69 @@ func (e *Emulator) write(p []byte,replay bool) {
 	e.pruneLinksLocked()
 	e.suppressResponses=previous
 	e.mu.Unlock()
+}
+
+func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
+	const query="\x1b[16t"
+	if len(e.pendingCellSizeQuery)==0 && !bytesContains(p,[]byte{0x1b}) {
+		return p
+	}
+	input:=make([]byte,0,len(e.pendingCellSizeQuery)+len(p))
+	input=append(input,e.pendingCellSizeQuery...)
+	e.pendingCellSizeQuery=e.pendingCellSizeQuery[:0]
+	input=append(input,p...)
+	filtered:=make([]byte,0,len(input))
+	for i:=0;i<len(input); {
+		remaining:=input[i:]
+		if len(remaining)<len(query) && string(query[:len(remaining)])==string(remaining) {
+			e.pendingCellSizeQuery=append(e.pendingCellSizeQuery,remaining...)
+			break
+		}
+		if len(remaining)>=len(query) && string(remaining[:len(query)])==query {
+			width,height:=8,16
+			if e.graphics!=nil {
+				width=maxInt(e.graphics.cellWidth,1)
+				height=maxInt(e.graphics.cellHeight,1)
+			}
+			e.enqueueResponse([]byte("\x1b[6;"+itoaPositive(height)+";"+itoaPositive(width)+"t"))
+			i+=len(query)
+			continue
+		}
+		filtered=append(filtered,input[i])
+		i++
+	}
+	return filtered
+}
+
+func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
+	if e.graphics==nil || len(p)==0 { return }
+	if bytesContains(p,[]byte("\x1b[3J")) {
+		e.graphics.eraseScrollback(e.term)
+	}
+	if e.term.IsAltBufferActive() && bytesContains(p,[]byte("\x1b[2J")) {
+		e.graphics.eraseVisible(e.term)
+	}
+}
+
+func bytesContains(haystack,needle []byte)bool {
+	if len(needle)==0{return true}
+	if len(haystack)<len(needle){return false}
+	for i:=0;i+len(needle)<=len(haystack);i++ {
+		match:=true
+		for j:=range needle {
+			if haystack[i+j]!=needle[j]{match=false;break}
+		}
+		if match{return true}
+	}
+	return false
+}
+
+func itoaPositive(v int)string {
+	if v<=0{return "0"}
+	var buf [20]byte
+	i:=len(buf)
+	for v>0 { i--;buf[i]=byte('0'+v%10);v/=10 }
+	return string(buf[i:])
 }
 
 func (e *Emulator) enqueueResponse(data []byte) {
