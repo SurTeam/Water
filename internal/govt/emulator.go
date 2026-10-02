@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	xterm "github.com/gitpod-io/xterm-go"
+	xterm "github.com/SurTeam/Water/internal/xterm"
 )
 
 type ColorMode uint8
