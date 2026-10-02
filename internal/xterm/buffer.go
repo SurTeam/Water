@@ -98,7 +98,7 @@ func (b *Buffer) GetNullCell(attr *AttributeData) *CellData {
 	} else {
 		b.nullCell.Fg = 0
 		b.nullCell.Bg = 0
-		b.nullCell.Extended = &ExtendedAttrs{}
+		b.nullCell.Extended = nil
 	}
 	return b.nullCell
 }
@@ -112,7 +112,7 @@ func (b *Buffer) GetWhitespaceCell(attr *AttributeData) *CellData {
 	} else {
 		b.whitespaceCell.Fg = 0
 		b.whitespaceCell.Bg = 0
-		b.whitespaceCell.Extended = &ExtendedAttrs{}
+		b.whitespaceCell.Extended = nil
 	}
 	return b.whitespaceCell
 }
