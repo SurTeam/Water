@@ -14,6 +14,7 @@ import (
 	"gioui.org/io/pointer"
 	"gioui.org/io/transfer"
 	"gioui.org/layout"
+	"gioui.org/op"
 	"gioui.org/op/clip"
 
 	"github.com/SurTeam/Water/internal/govt"
@@ -29,6 +30,7 @@ type TerminalInput struct {
 	OnSelectionStart func(col,row,clickCount int)
 	OnSelectionMove  func(col,row int)
 	OnSelectionEnd   func(col,row int)
+	OnSelectionAutoScroll func(col,row,lines int)
 	OnCopy           func() string
 	OnHyperlink      func(uri string)
 	BracketedPaste   bool
@@ -47,6 +49,10 @@ type TerminalInput struct {
 	lastClickCol int
 	lastClickRow int
 	clickCount int
+	selectionAutoScrollLines int
+	selectionAutoScrollCol int
+	selectionAutoScrollRow int
+	selectionAutoScrollAt time.Time
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
@@ -120,6 +126,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			if i.selecting {
 				if i.OnSelectionEnd!=nil { i.OnSelectionEnd(col0,row0) }
 				i.selecting=false
+				i.clearSelectionAutoScroll()
 				continue
 			}
 			if !i.mousePressed { continue }
@@ -135,6 +142,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			}
 			if i.selecting {
 				if i.OnSelectionMove!=nil { i.OnSelectionMove(col0,row0) }
+				i.updateSelectionAutoScroll(float32(pe.Position.Y),snap.Rows,lineHeight,col0,gtx.Now)
 				continue
 			}
 			if !tracking { continue }
@@ -166,8 +174,11 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			i.mousePressed=false
 			i.selecting=false
 			i.hyperlinkPressed=""
+			i.clearSelectionAutoScroll()
 		}
 	}
+
+	i.processSelectionAutoScroll(gtx)
 
 	allMods := key.ModCtrl | key.ModAlt | key.ModShift | key.ModCommand | key.ModSuper
 	filters := []event.Filter{
@@ -442,4 +453,60 @@ func (i *TerminalInput) nextClickCount(at time.Duration,col,row int)int{
 	i.lastClickCol=col
 	i.lastClickRow=row
 	return i.clickCount
+}
+
+
+const (
+	selectionAutoScrollMarginPx = 24
+	selectionAutoScrollRows = 3
+	selectionAutoScrollInterval = 50 * time.Millisecond
+)
+
+func selectionAutoScrollDirection(y float32,height int)int{
+	if height<=0{return 0}
+	if y<float32(selectionAutoScrollMarginPx){return -selectionAutoScrollRows}
+	if y>float32(height-selectionAutoScrollMarginPx){return selectionAutoScrollRows}
+	return 0
+}
+
+func (i *TerminalInput) updateSelectionAutoScroll(y float32,rows,lineHeight,col int,now time.Time){
+	lines:=selectionAutoScrollDirection(y,rows*lineHeight)
+	if lines==0 {
+		i.clearSelectionAutoScroll()
+		return
+	}
+	row:=0
+	if lines>0 {row=rows-1}
+	if row<0{row=0}
+	i.selectionAutoScrollLines=lines
+	i.selectionAutoScrollCol=col
+	i.selectionAutoScrollRow=row
+	if i.selectionAutoScrollAt.IsZero(){
+		i.selectionAutoScrollAt=now.Add(selectionAutoScrollInterval)
+	}
+}
+
+func (i *TerminalInput) processSelectionAutoScroll(gtx layout.Context){
+	if !i.selecting || i.selectionAutoScrollLines==0 || i.OnSelectionAutoScroll==nil {
+		return
+	}
+	if i.selectionAutoScrollAt.IsZero(){
+		i.selectionAutoScrollAt=gtx.Now.Add(selectionAutoScrollInterval)
+	}
+	if !gtx.Now.Before(i.selectionAutoScrollAt){
+		i.OnSelectionAutoScroll(
+			i.selectionAutoScrollCol,
+			i.selectionAutoScrollRow,
+			i.selectionAutoScrollLines,
+		)
+		i.selectionAutoScrollAt=gtx.Now.Add(selectionAutoScrollInterval)
+	}
+	gtx.Execute(op.InvalidateCmd{At:i.selectionAutoScrollAt})
+}
+
+func (i *TerminalInput) clearSelectionAutoScroll(){
+	i.selectionAutoScrollLines=0
+	i.selectionAutoScrollCol=0
+	i.selectionAutoScrollRow=0
+	i.selectionAutoScrollAt=time.Time{}
 }
