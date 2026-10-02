@@ -114,3 +114,17 @@ jobs:
         env:
           WATER_SCENARIO_REQUIRE_ALL: "1"
         run: bash scripts/run-go-scenario-suite.sh
+
+
+  performance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - run: go mod tidy
+      - name: Gate terminal throughput and backpressure
+        run: go test ./internal/gobench -run TestTerminalPerformanceGate -count=1 -v
