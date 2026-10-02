@@ -61,6 +61,9 @@ jobs:
           test -x "target/go-linux/dev/water-dev/water-dev"
           test -x "target/go-linux/dev/water-dev/water-srv-dev"
           test -s "dist/water-dev-ci-x86_64-linux.tar.gz"
+          test "$(target/go-linux/dev/water-dev/water-srv-dev --build-variant)" = "dev"
+          test "$(target/go-linux/dev/water-dev/water-srv-dev --version)" = "water-server ci"
+          target/go-linux/dev/water-dev/water-dev version | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["build_variant"]=="dev" and d["client_version"]=="ci"'
 
       - name: Smoke-build native macOS Go app bundle
         if: runner.os == 'macOS'
@@ -73,6 +76,9 @@ jobs:
           test -x "dist/Water Dev.app/Contents/MacOS/water-dev"
           test -x "dist/Water Dev.app/Contents/MacOS/water-srv-dev"
           test -s "dist/Water Dev-ci-macOS-arm64.zip"
+          test "$(dist/Water\ Dev.app/Contents/MacOS/water-srv-dev --build-variant)" = "dev"
+          test "$(dist/Water\ Dev.app/Contents/MacOS/water-srv-dev --version)" = "water-server ci"
+          "dist/Water Dev.app/Contents/MacOS/water-dev" version | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["build_variant"]=="dev" and d["client_version"]=="ci"'
 
 
   compat:
