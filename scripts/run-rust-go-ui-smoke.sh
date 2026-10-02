@@ -225,7 +225,7 @@ if [[ "$(xclip -selection clipboard -o 2>/dev/null || true)" != "$clipboard_text
   echo "reverse cross-language X11 clipboard self-check failed" >&2
   exit 1
 fi
-xdotool key ctrl+v
+xdotool key super+v
 sleep 0.15
 xdotool key Return
 if ! "$GO_WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_RUST_GO_CLIPBOARD_SMOKE     --timeout-ms 5000 >/dev/null; then
