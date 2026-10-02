@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -72,8 +73,8 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 	config = config.Normalized()
 	return &Server{
 		SocketPath: socketPath,
-		Build:      "dev",
-		Version:    "go-rewrite",
+		Build:      gobuild.Variant,
+		Version:    gobuild.Version,
 		Config:     config,
 		registry:   goterminal.NewRegistryWithReplayLimit(config.Terminal.ReplayHistoryBytes),
 		model:      gomodel.New(),
