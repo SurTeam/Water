@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"sync"
 	"strings"
+	"unicode"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -115,7 +116,6 @@ func SelectedText(snap govt.Snapshot, selection Selection) string {
 
 	var out strings.Builder
 	for row:=startRow;row<=endRow;row++ {
-		if row>startRow { out.WriteByte('\n') }
 		if row<0 || row>=len(snap.RowsData) { continue }
 		line:=snap.RowsData[row]
 		left,right:=0,snap.Cols-1
@@ -123,19 +123,209 @@ func SelectedText(snap govt.Snapshot, selection Selection) string {
 		if row==endRow { right=endCol }
 		if left<0{left=0};if right>=snap.Cols{right=snap.Cols-1}
 		if left>right{continue}
+
 		var rowText strings.Builder
 		for col:=left;col<=right && col<len(line.Cells);col++ {
 			cell:=line.Cells[col]
 			if cell.Width==0 { continue }
 			if cell.Text=="" { rowText.WriteByte(' ') } else { rowText.WriteString(cell.Text) }
 		}
-		text:=rowText.String()
-		if right==snap.Cols-1 {
-			text=strings.TrimRight(text," ")
+		out.WriteString(strings.TrimRight(rowText.String()," "))
+		if row!=endRow {
+			// xterm marks the following physical row as wrapped when this
+			// row soft-wraps into it. Soft wraps must not become clipboard
+			// newlines.
+			nextWrapped:=row+1<len(snap.RowsData) && snap.RowsData[row+1].Wrapped
+			if !nextWrapped { out.WriteByte('\n') }
 		}
-		out.WriteString(text)
 	}
 	return out.String()
+}
+
+type selectionWordClass uint8
+
+const (
+	selectionWhitespace selectionWordClass = iota
+	selectionCJK
+	selectionAlphanumeric
+	selectionPunctuation
+)
+
+type selectionSegment struct {
+	start int
+	end int
+	class selectionWordClass
+	contiguousFromPrevious bool
+}
+
+type selectionCharacter struct {
+	row int
+	col int
+	text string
+	class selectionWordClass
+}
+
+func MultiClickSelection(snap govt.Snapshot,col,row,clickCount int) Selection {
+	if clickCount<2 || row<0 || row>=len(snap.RowsData) || col<0 || col>=snap.Cols {
+		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+	}
+	level:=(clickCount-2)/2
+	chars,clicked:=selectionLogicalLine(snap,col,row)
+	if len(chars)==0 || clicked<0 {
+		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+	}
+	segments:=selectionSegments(chars)
+	segmentIndex:=-1
+	for index,segment:=range segments {
+		if clicked>=segment.start && clicked<segment.end {segmentIndex=index;break}
+	}
+	if segmentIndex<0 {
+		return Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+	}
+	first,last:=segmentIndex,segmentIndex
+	for n:=0;n<level;n++ {
+		left:=selectionExpandLeft(segments,first)
+		right:=selectionExpandRight(segments,last)
+		if left<0 && right<0 {break}
+		if left>=0 {first=left}
+		if right>=0 {last=right}
+	}
+	start:=chars[segments[first].start]
+	finish:=chars[segments[last].end-1]
+	return Selection{
+		AnchorCol:start.col,AnchorRow:start.row,
+		FocusCol:finish.col,FocusRow:finish.row,
+		Active:true,
+	}
+}
+
+func selectionLogicalLine(snap govt.Snapshot,col,row int)([]selectionCharacter,int){
+	first,last:=row,row
+	for first>0 && first<len(snap.RowsData) && snap.RowsData[first].Wrapped { first-- }
+	for last+1<len(snap.RowsData) && snap.RowsData[last+1].Wrapped { last++ }
+
+	chars:=make([]selectionCharacter,0,(last-first+1)*snap.Cols)
+	clicked:=-1
+	for y:=first;y<=last;y++ {
+		line:=snap.RowsData[y]
+		for x:=0;x<snap.Cols && x<len(line.Cells);x++ {
+			cell:=line.Cells[x]
+			if cell.Width==0 { continue }
+			text:=cell.Text
+			if text=="" {text=" "}
+			r,_:=utf8FirstRune(text)
+			entry:=selectionCharacter{row:y,col:x,text:text,class:selectionClass(r)}
+			if y==row && (x==col || (cell.Width==2 && col==x+1)) {clicked=len(chars)}
+			chars=append(chars,entry)
+		}
+	}
+	if clicked<0 && col>0 && row>=0 && row<len(snap.RowsData) {
+		line:=snap.RowsData[row]
+		if col<len(line.Cells) && line.Cells[col].Width==0 {
+			for index:=range chars {
+				if chars[index].row==row && chars[index].col==col-1 {clicked=index;break}
+			}
+		}
+	}
+	return chars,clicked
+}
+
+func selectionSegments(chars []selectionCharacter)[]selectionSegment{
+	if len(chars)==0{return nil}
+	segments:=make([]selectionSegment,0,len(chars))
+	start:=0
+	for end:=1;end<=len(chars);end++ {
+		split:=end==len(chars)
+		if !split {
+			split=chars[end-1].class!=chars[end].class ||
+				!selectionCharactersAdjacent(chars[end-1],chars[end])
+		}
+		if !split {continue}
+		segments=append(segments,selectionSegment{
+			start:start,end:end,class:chars[start].class,
+			contiguousFromPrevious:start>0 && selectionCharactersAdjacent(chars[start-1],chars[start]),
+		})
+		start=end
+	}
+	return segments
+}
+
+func selectionCharactersAdjacent(left,right selectionCharacter)bool{
+	if left.row==right.row {
+		return right.col==left.col+1 || right.col==left.col+2
+	}
+	return right.row==left.row+1 && right.col==0
+}
+
+func selectionExpandLeft(segments []selectionSegment,index int)int{
+	if index<0 || index>=len(segments){return -1}
+	current:=segments[index]
+	if current.class==selectionWhitespace{return -1}
+	if current.class==selectionPunctuation {
+		if index==0{return -1}
+		previous:=segments[index-1]
+		if current.contiguousFromPrevious && selectionTextClass(previous.class){return index-1}
+		return -1
+	}
+	if index<2{return -1}
+	punctuation:=segments[index-1]
+	word:=segments[index-2]
+	if current.contiguousFromPrevious &&
+		punctuation.contiguousFromPrevious &&
+		punctuation.class==selectionPunctuation &&
+		selectionTextClass(word.class) {return index-2}
+	return -1
+}
+
+func selectionExpandRight(segments []selectionSegment,index int)int{
+	if index<0 || index>=len(segments){return -1}
+	current:=segments[index]
+	if current.class==selectionWhitespace{return -1}
+	if current.class==selectionPunctuation {
+		next:=index+1
+		if next<len(segments) && segments[next].contiguousFromPrevious && selectionTextClass(segments[next].class){
+			return next
+		}
+		return -1
+	}
+	punctuationIndex:=index+1
+	wordIndex:=index+2
+	if wordIndex>=len(segments){return -1}
+	punctuation:=segments[punctuationIndex]
+	word:=segments[wordIndex]
+	if punctuation.class==selectionPunctuation &&
+		punctuation.contiguousFromPrevious &&
+		word.contiguousFromPrevious &&
+		selectionTextClass(word.class) {return wordIndex}
+	return -1
+}
+
+func selectionTextClass(class selectionWordClass)bool{
+	return class==selectionCJK || class==selectionAlphanumeric
+}
+
+func selectionClass(r rune)selectionWordClass{
+	if unicode.IsSpace(r){return selectionWhitespace}
+	if selectionIsCJK(r){return selectionCJK}
+	if unicode.IsLetter(r)||unicode.IsDigit(r){return selectionAlphanumeric}
+	return selectionPunctuation
+}
+
+func selectionIsCJK(r rune)bool{
+	v:=uint32(r)
+	return v>=0x1100&&v<=0x11ff ||
+		v>=0x3040&&v<=0x30ff ||
+		v>=0x3130&&v<=0x318f ||
+		v>=0x3400&&v<=0x4dbf ||
+		v>=0x4e00&&v<=0x9fff ||
+		v>=0xac00&&v<=0xd7af ||
+		v>=0xf900&&v<=0xfaff ||
+		v>=0x20000&&v<=0x2fa1f
+}
+
+func utf8FirstRune(value string)(rune,int){
+	for _,r:=range value{return r,len(string(r))}
+	return ' ',1
 }
 
 type TerminalView struct {
