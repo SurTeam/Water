@@ -53,6 +53,7 @@ jobs:
           cache: true
       - name: Select stable Rust
         run: rustup default stable
+      - run: go mod tidy
       - name: Build Go server
         run: |
           mkdir -p target/compat
