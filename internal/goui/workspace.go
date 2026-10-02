@@ -142,7 +142,18 @@ type WorkspaceClient struct {
 	connectionID uuid.UUID
 	connectionEntries []ConnectionEntry
 	connectionClicks map[uuid.UUID]*widget.Clickable
+	connectionDisconnectClicks map[uuid.UUID]*widget.Clickable
 	onActivateConnection func(uuid.UUID)
+	onConnectRemote func(string) error
+	onRemoveConnection func(uuid.UUID) bool
+	newRemote widget.Clickable
+	remoteConnect widget.Clickable
+	remoteCancel widget.Clickable
+	remoteEditor widget.Editor
+	remoteFormVisible bool
+	remoteConnecting bool
+	remoteError string
+	remoteClearEditor bool
 
 	hyperlinkMu sync.Mutex
 	hyperlinkPrompt *hyperlinkPrompt
@@ -160,7 +171,7 @@ func NewWorkspaceClientWithConfig(session *goclient.Session, invalidate func(), 
 }
 
 func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func(), config goconfig.AppConfig, remoteDestination string) *WorkspaceClient {
-	return &WorkspaceClient{
+	c:=&WorkspaceClient{
 		session: session,
 		invalidate: invalidate,
 		config: config.Normalized(),
@@ -169,7 +180,10 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 		workspaceClicks: make(map[uuid.UUID]*widget.Clickable),
 		tabClicks: make(map[uuid.UUID]*widget.Clickable),
 		connectionClicks: make(map[uuid.UUID]*widget.Clickable),
+		connectionDisconnectClicks: make(map[uuid.UUID]*widget.Clickable),
 	}
+	c.remoteEditor.SingleLine=true
+	return c
 }
 
 func (c *WorkspaceClient) SetConnectionSwitcher(id uuid.UUID, entries []ConnectionEntry, activate func(uuid.UUID)) {
@@ -182,10 +196,29 @@ func (c *WorkspaceClient) SetConnectionSwitcher(id uuid.UUID, entries []Connecti
 		for _,entry:=range entries {
 			if entry.ID==key {found=true;break}
 		}
-		if !found {delete(c.connectionClicks,key)}
+		if !found {
+			delete(c.connectionClicks,key)
+			delete(c.connectionDisconnectClicks,key)
+		}
 	}
 	c.connectionMu.Unlock()
 	if c.invalidate!=nil{c.invalidate()}
+}
+
+func (c *WorkspaceClient) SetConnectionActions(connect func(string) error, remove func(uuid.UUID) bool) {
+	c.connectionMu.Lock()
+	c.onConnectRemote=connect
+	c.onRemoveConnection=remove
+	c.connectionMu.Unlock()
+	if c.invalidate!=nil{c.invalidate()}
+}
+
+func (c *WorkspaceClient) connectionActions()(func(string) error,func(uuid.UUID) bool){
+	c.connectionMu.RLock()
+	connect:=c.onConnectRemote
+	remove:=c.onRemoveConnection
+	c.connectionMu.RUnlock()
+	return connect,remove
 }
 
 func (c *WorkspaceClient) connectionSnapshot()(uuid.UUID,[]ConnectionEntry,func(uuid.UUID)){
