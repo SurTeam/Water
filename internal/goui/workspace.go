@@ -209,10 +209,7 @@ func (c *WorkspaceClient) handleUIPush(msg goprotocol.WireMessage) {
 func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)(any,error){
 	switch method {
 	case "ui.snapshot":
-		return map[string]any{
-			"window_count":1,
-			"has_active_window":true,
-		},nil
+		return c.uiSnapshot(),nil
 	case "ui.keystroke":
 		var p struct{Keystroke string `json:"keystroke"`}
 		if err:=json.Unmarshal(params,&p);err!=nil{return nil,err}
@@ -249,6 +246,41 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 		return map[string]any{"connections":[]any{}},nil
 	default:
 		return nil,fmt.Errorf("unsupported UI method %q",method)
+	}
+}
+
+func (c *WorkspaceClient) uiSnapshot() map[string]any {
+	c.mu.RLock()
+	terms:=make([]*terminalClient,0,len(c.terminals))
+	for _,term:=range c.terminals{terms=append(terms,term)}
+	c.mu.RUnlock()
+
+	visibleCells:=0
+	preparedRows:=0
+	imageTextures:=0
+	graphicsBytes:=0
+	for _,term:=range terms{
+		term.mu.RLock()
+		snapshot:=term.snapshot
+		emu:=term.emu
+		view:=term.view
+		term.mu.RUnlock()
+		visibleCells+=snapshot.Cols*snapshot.Rows
+		if emu!=nil{graphicsBytes+=emu.ImageBytes()}
+		if view!=nil{
+			stats:=view.CacheStats()
+			preparedRows+=stats.PreparedRows
+			imageTextures+=stats.ImageTextures
+		}
+	}
+	return map[string]any{
+		"window_count":1,
+		"has_active_window":true,
+		"attached_terminal_count":len(terms),
+		"visible_cells":visibleCells,
+		"prepared_row_cache_entries":preparedRows,
+		"image_texture_cache_entries":imageTextures,
+		"terminal_graphics_bytes":graphicsBytes,
 	}
 }
 
