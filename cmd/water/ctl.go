@@ -424,20 +424,28 @@ func runScenario(ctx cliContext,args []string)error{
 	return runScenarioFile(ctx,args[1])
 }
 
-func dispatchAndPrint(ctx cliContext,command any)error{
+type cliOperation struct{
+	ID uuid.UUID `json:"id"`
+	Status string `json:"status"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error *goprotocol.RPCError `json:"error,omitempty"`
+}
+
+func dispatchOperation(ctx cliContext,command any)(uuid.UUID,cliOperation,error){
 	var ack struct{OperationID uuid.UUID `json:"operation_id"`}
-	if err:=ctx.client.Call("command.dispatch",map[string]any{"command":command},&ack);err!=nil{return err}
-	var op struct{
-		ID uuid.UUID `json:"id"`
-		Status string `json:"status"`
-		Result json.RawMessage `json:"result,omitempty"`
-		Error *goprotocol.RPCError `json:"error,omitempty"`
-	}
-	if err:=ctx.client.Call("operation.wait",map[string]any{"operation_id":ack.OperationID},&op);err!=nil{return err}
+	if err:=ctx.client.Call("command.dispatch",map[string]any{"command":command},&ack);err!=nil{return uuid.Nil,cliOperation{},err}
+	var op cliOperation
+	if err:=ctx.client.Call("operation.wait",map[string]any{"operation_id":ack.OperationID},&op);err!=nil{return ack.OperationID,cliOperation{},err}
 	if op.Status=="failed"{
-		if op.Error!=nil{return op.Error}
-		return errors.New("operation failed")
+		if op.Error!=nil{return ack.OperationID,op,op.Error}
+		return ack.OperationID,op,errors.New("operation failed")
 	}
+	return ack.OperationID,op,nil
+}
+
+func dispatchAndPrint(ctx cliContext,command any)error{
+	_,op,err:=dispatchOperation(ctx,command)
+	if err!=nil{return err}
 	return printJSON(op)
 }
 
@@ -674,34 +682,191 @@ Operations/scenarios:
 `)
 }
 
+type scenarioFile struct{
+	Name string `json:"name"`
+	Steps []scenarioStep `json:"steps"`
+}
+type scenarioStep struct{
+	Command map[string]any `json:"command,omitempty"`
+	Assert *scenarioAssertion `json:"assert,omitempty"`
+	Wait *scenarioWait `json:"wait,omitempty"`
+}
+type scenarioAssertion struct{
+	Type string `json:"type"`
+	Value uint64 `json:"value,omitempty"`
+	Kind string `json:"kind,omitempty"`
+}
+type scenarioWait struct{
+	Type string `json:"type"`
+	OperationID *uuid.UUID `json:"operation_id,omitempty"`
+	EventType string `json:"event_type,omitempty"`
+	Value uint64 `json:"value,omitempty"`
+	TerminalID *uuid.UUID `json:"terminal_id,omitempty"`
+	Text string `json:"text,omitempty"`
+	TimeoutMS int `json:"timeout_ms,omitempty"`
+}
+
 func runScenarioFile(ctx cliContext,path string)error{
 	data,err:=os.ReadFile(path);if err!=nil{return err}
-	var scenario struct{
-		Name string `json:"name"`
-		Steps []struct{
-			Action string `json:"action"`
-			Command map[string]any `json:"command"`
-			Method string `json:"method"`
-			Params map[string]any `json:"params"`
-			SleepMS int `json:"sleep_ms"`
-		} `json:"steps"`
-	}
-	if err:=json.Unmarshal(data,&scenario);err!=nil{return err}
-	for idx,step:=range scenario.Steps{
-		switch {
-		case step.SleepMS>0:
-			time.Sleep(time.Duration(step.SleepMS)*time.Millisecond)
-		case step.Action=="dispatch" || step.Command!=nil:
-			if step.Command==nil{return fmt.Errorf("scenario step %d: command missing",idx)}
-			if err:=dispatchAndPrint(ctx,step.Command);err!=nil{return fmt.Errorf("scenario step %d: %w",idx,err)}
-		case step.Method!="":
-			var out any
-			if err:=ctx.client.Call(step.Method,step.Params,&out);err!=nil{return fmt.Errorf("scenario step %d: %w",idx,err)}
-		default:
-			return fmt.Errorf("scenario step %d is unsupported",idx)
+	var scenario scenarioFile
+	if err:=json.Unmarshal(data,&scenario);err!=nil{return fmt.Errorf("invalid scenario: %w",err)}
+	var lastOperation *uuid.UUID
+	var lastTerminal *uuid.UUID
+	var lastEvent uint64
+
+	for index,step:=range scenario.Steps{
+		actions:=0
+		if step.Command!=nil{actions++};if step.Assert!=nil{actions++};if step.Wait!=nil{actions++}
+		if actions!=1{return fmt.Errorf("scenario step %d: each step must contain exactly one of command, assert, or wait",index)}
+
+		if step.Command!=nil{
+			opID,op,err:=dispatchOperation(ctx,step.Command);if err!=nil{return fmt.Errorf("scenario step %d: %w",index,err)}
+			lastOperation=&opID
+			if len(op.Result)>0{
+				var result map[string]any
+				if json.Unmarshal(op.Result,&result)==nil{
+					if raw,ok:=result["terminal_id"].(string);ok{
+						if id,e:=uuid.Parse(raw);e==nil{lastTerminal=&id}
+					}
+				}
+			}
+			continue
+		}
+		if step.Assert!=nil{
+			if err:=runScenarioAssertion(ctx,*step.Assert);err!=nil{return fmt.Errorf("scenario assertion failed at step %d: %w",index,err)}
+			continue
+		}
+		if err:=runScenarioWait(ctx,*step.Wait,lastOperation,lastTerminal,&lastEvent);err!=nil{
+			return fmt.Errorf("scenario wait failed at step %d: %w",index,err)
 		}
 	}
 	if scenario.Name==""{scenario.Name=path}
 	fmt.Printf("scenario %s: passed\n",scenario.Name)
 	return nil
+}
+
+func runScenarioAssertion(ctx cliContext,a scenarioAssertion)error{
+	var state gomodel.StateDump
+	if err:=ctx.client.Call("state.dump",map[string]any{},&state);err!=nil{return err}
+	switch a.Type{
+	case "pane_count":
+		got:=activePaneCountCLI(state)
+		if uint64(got)!=a.Value{return fmt.Errorf("pane count %d != %d",got,a.Value)}
+	case "tab_count":
+		w:=activeWorkspaceCLI(state);got:=0;if w!=nil{got=len(w.Tabs)}
+		if uint64(got)!=a.Value{return fmt.Errorf("tab count %d != %d",got,a.Value)}
+	case "active_surface_kind":
+		kind:=activeSurfaceKindCLI(state)
+		if kind!=a.Kind{return fmt.Errorf("active surface kind %q != %q",kind,a.Kind)}
+	case "state_revision_at_least":
+		if state.StateRevision<a.Value{return fmt.Errorf("state revision %d is below %d",state.StateRevision,a.Value)}
+	default:
+		return fmt.Errorf("unsupported assertion %q",a.Type)
+	}
+	return nil
+}
+
+func runScenarioWait(ctx cliContext,w scenarioWait,lastOperation,lastTerminal *uuid.UUID,lastEvent *uint64)error{
+	timeout:=w.TimeoutMS;if timeout<=0{timeout=5000}
+	switch w.Type{
+	case "operation_complete","app_idle":
+		var id *uuid.UUID
+		if w.OperationID!=nil{id=w.OperationID}else{id=lastOperation}
+		if id==nil {
+			if w.Type=="app_idle"{return nil}
+			return errors.New("operation_complete requires a prior command or operation_id")
+		}
+		var op cliOperation
+		if err:=ctx.client.Call("operation.wait",map[string]any{"operation_id":*id},&op);err!=nil{return err}
+		if op.Status=="failed"{if op.Error!=nil{return op.Error};return errors.New("operation failed")}
+		return nil
+	case "state_revision_at_least":
+		var state gomodel.StateDump
+		if err:=ctx.client.Call("state.dump",map[string]any{},&state);err!=nil{return err}
+		if state.StateRevision<w.Value{return fmt.Errorf("state revision %d is below %d",state.StateRevision,w.Value)}
+		return nil
+	case "terminal_contains":
+		id:=w.TerminalID;if id==nil{id=lastTerminal};if id==nil{return errors.New("terminal_contains requires terminal_id or prior terminal.spawn")}
+		var out any
+		return ctx.client.Call("terminal.contains",map[string]any{"terminal_id":*id,"text":w.Text,"timeout_ms":timeout},&out)
+	case "process_exit":
+		id:=w.TerminalID;if id==nil{id=lastTerminal};if id==nil{return errors.New("process_exit requires terminal_id or prior terminal.spawn")}
+		var out any
+		return ctx.client.Call("terminal.wait_exit",map[string]any{"terminal_id":*id,"timeout_ms":timeout},&out)
+	case "event":
+		var events []struct{
+			Sequence uint64 `json:"sequence"`
+			Kind map[string]any `json:"kind"`
+		}
+		if err:=ctx.client.Call("event.list",map[string]any{"after_sequence":*lastEvent},&events);err!=nil{return err}
+		found:=false
+		for _,event:=range events{
+			if event.Sequence>*lastEvent{*lastEvent=event.Sequence}
+			wire,_:=event.Kind["type"].(string)
+			if eventTypeName(wire)==w.EventType{found=true}
+		}
+		if !found{return fmt.Errorf("event %q was not observed",w.EventType)}
+		return nil
+	default:
+		return fmt.Errorf("unsupported wait %q",w.Type)
+	}
+}
+
+func eventTypeName(wire string)string{
+	if i:=strings.IndexByte(wire,'_');i>=0{return wire[:i]+"."+wire[i+1:]}
+	return wire
+}
+
+func activeWorkspaceCLI(state gomodel.StateDump)*gomodel.WorkspaceDump{
+	if state.Workspace!=nil{return state.Workspace}
+	if state.ActiveWorkspace!=nil{
+		for i:=range state.Workspaces{if state.Workspaces[i].ID==*state.ActiveWorkspace{return &state.Workspaces[i]}}
+	}
+	if len(state.Workspaces)>0{return &state.Workspaces[0]}
+	return nil
+}
+
+func activePaneCountCLI(state gomodel.StateDump)int{
+	w:=activeWorkspaceCLI(state);if w==nil{return 0}
+	var tab *gomodel.TabDump
+	if w.ActiveTab!=nil{for i:=range w.Tabs{if w.Tabs[i].ID==*w.ActiveTab{tab=&w.Tabs[i];break}}}
+	if tab==nil && len(w.Tabs)>0{tab=&w.Tabs[0]}
+	if tab==nil{return 0}
+	var root cliPaneTree
+	if json.Unmarshal(tab.Tree,&root)!=nil{return 0}
+	return paneTreeCount(&root)
+}
+
+func paneTreeCount(n *cliPaneTree)int{
+	if n==nil{return 0};if n.Type=="leaf"{return 1};return paneTreeCount(n.First)+paneTreeCount(n.Second)
+}
+
+func activeSurfaceKindCLI(state gomodel.StateDump)string{
+	w:=activeWorkspaceCLI(state);if w==nil||w.ActiveTab==nil{return ""}
+	var tab *gomodel.TabDump
+	for i:=range w.Tabs{if w.Tabs[i].ID==*w.ActiveTab{tab=&w.Tabs[i];break}}
+	if tab==nil{return ""}
+	var root struct{
+		Type string `json:"type"`
+		PaneID uuid.UUID `json:"pane_id"`
+		SurfaceKind string `json:"surface_kind"`
+		First json.RawMessage `json:"first"`
+		Second json.RawMessage `json:"second"`
+	}
+	var walk func(json.RawMessage)string
+	walk=func(raw json.RawMessage)string{
+		var n struct{
+			Type string `json:"type"`
+			PaneID uuid.UUID `json:"pane_id"`
+			SurfaceKind string `json:"surface_kind"`
+			First json.RawMessage `json:"first"`
+			Second json.RawMessage `json:"second"`
+		}
+		if json.Unmarshal(raw,&n)!=nil{return ""}
+		if n.Type=="leaf"{if n.PaneID==tab.ActivePane{return n.SurfaceKind};return ""}
+		if v:=walk(n.First);v!=""{return v};return walk(n.Second)
+	}
+	raw:=tab.Tree
+	if json.Unmarshal(raw,&root)!=nil{return ""}
+	return walk(raw)
 }
