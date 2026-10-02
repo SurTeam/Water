@@ -275,3 +275,91 @@ func TestRejectsIncompatibleBuildVariantBeforeDispatch(t *testing.T) {
 }
 
 
+
+
+func TestSessionMultiplexesFourTerminalStreamsWithoutLoss(t *testing.T) {
+	socket:=filepath.Join("/tmp","water-go-multi-attach-"+uuid.New().String()+".sock")
+	srv:=goserver.New(socket)
+	done:=make(chan error,1)
+	go func(){done<-srv.ListenAndServe()}()
+	defer func(){
+		_ = srv.Close()
+		select{
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+	}()
+
+	client:=goclient.New(socket)
+	deadline:=time.Now().Add(2*time.Second)
+	for {
+		var pong any
+		if client.Call("ping",map[string]any{},&pong)==nil{break}
+		if time.Now().After(deadline){t.Fatal("server never became ready")}
+		time.Sleep(5*time.Millisecond)
+	}
+
+	const terminals=4
+	const bytesPerTerminal=1_000_000
+	ids:=make([]uuid.UUID,0,terminals)
+	session,err:=client.OpenSession()
+	if err!=nil{t.Fatal(err)}
+	defer session.Close()
+	lastSeq:=make(map[uuid.UUID]uint64,terminals)
+	received:=make(map[uuid.UUID]int64,terminals)
+
+	for i:=0;i<terminals;i++{
+		var spawned struct{TerminalID uuid.UUID `json:"terminal_id"`}
+		if err:=client.Dispatch(map[string]any{
+			"type":"terminal.spawn",
+			"program":"/bin/sh",
+			"args":[]string{"-c",fmt.Sprintf("read _; yes WATER_MULTI_%d | head -c %d",i,bytesPerTerminal)},
+			"columns":80,
+			"lines":24,
+		},&spawned);err!=nil{t.Fatal(err)}
+		var attached struct{LastSeq uint64 `json:"last_seq"`}
+		if err:=session.Attach(spawned.TerminalID,&attached);err!=nil{t.Fatal(err)}
+		ids=append(ids,spawned.TerminalID)
+		lastSeq[spawned.TerminalID]=attached.LastSeq
+	}
+
+	for _,id:=range ids{
+		if err:=client.Dispatch(map[string]any{
+			"type":"terminal.send_text",
+			"terminal_id":id,
+			"text":"\n",
+		},nil);err!=nil{t.Fatal(err)}
+	}
+
+	exited:=make(map[uuid.UUID]bool,terminals)
+	timeout:=time.NewTimer(10*time.Second)
+	defer timeout.Stop()
+	for len(exited)<terminals{
+		select{
+		case push,ok:=<-session.Events:
+			if !ok{t.Fatal("multiplexed session closed before all terminal exits")}
+			if _,known:=lastSeq[push.TerminalID];!known{continue}
+			previous:=lastSeq[push.TerminalID]
+			if push.Event.Seq<=previous{continue}
+			if previous!=0 && push.Event.Seq!=previous+1{
+				t.Fatalf("terminal %s sequence gap: previous=%d next=%d",push.TerminalID,previous,push.Event.Seq)
+			}
+			lastSeq[push.TerminalID]=push.Event.Seq
+			switch push.Event.Kind{
+			case goprotocol.OutputEvent:
+				received[push.TerminalID]+=int64(len(push.Event.Data))
+			case goprotocol.ExitEvent:
+				exited[push.TerminalID]=true
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out: exited=%d/%d bytes=%v",len(exited),terminals,received)
+		}
+	}
+
+	for _,id:=range ids{
+		if got:=received[id];got<bytesPerTerminal{
+			t.Fatalf("terminal %s received %d bytes, want at least %d",id,got,bytesPerTerminal)
+		}
+	}
+}
