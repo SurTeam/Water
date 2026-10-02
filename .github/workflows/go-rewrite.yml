@@ -13,6 +13,7 @@ on:
       - "tests/scenarios/**"
       - "scripts/run-go-scenario-suite.sh"
       - "scripts/run-go-ui-smoke.sh"
+      - "scripts/run-go-rust-ui-smoke.sh"
       - "src/control/**"
       - "src/command/**"
       - "src/terminal/**"
@@ -49,7 +50,7 @@ jobs:
       - run: go test ./internal/goprotocol ./internal/goagent ./internal/goconfig ./internal/gohyperlink ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
-      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-embedded-servers.sh
+      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-embedded-servers.sh scripts/run-go-ui-smoke.sh scripts/run-go-rust-ui-smoke.sh
       - name: Smoke-build native macOS Go app bundle
         if: runner.os == 'macOS'
         env:
@@ -161,9 +162,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y             xvfb libgl1-mesa-dri             libxkbcommon-dev libwayland-dev libx11-xcb-dev             libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev             libvulkan-dev libxcursor-dev libxfixes-dev
       - run: go mod tidy
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Build headless Rust server
+        run: cargo build --no-default-features --bin water-server
       - name: Build Go desktop client
         run: |
           mkdir -p target/go-ui-smoke
           go build -o target/go-ui-smoke/water ./cmd/water
       - name: Exercise real Gio window through Xvfb
         run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-go-ui-smoke.sh
+      - name: Exercise Go GUI against Rust server through Xvfb
+        env:
+          WATER_RUST_SERVER_BIN: ${{ github.workspace }}/target/debug/water-server
+        run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-go-rust-ui-smoke.sh
