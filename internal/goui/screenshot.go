@@ -41,6 +41,7 @@ func (c *WorkspaceClient) Screenshot(path string)(map[string]any,error){
 		Ops:&ops,
 	}
 	th:=material.NewTheme()
+	c.hitRegions=c.hitRegions[:0]
 	c.layoutUnlocked(gtx,th)
 
 	window,err:=headless.NewWindow(size.X,size.Y)
