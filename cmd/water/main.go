@@ -10,7 +10,7 @@ import (
 func main() {
 	args:=os.Args[1:]
 	var err error
-	if len(args)>0 && isControlArgument(args[0]) {
+	if isControlInvocation(args) {
 		err=run(args)
 	} else {
 		err=gouiapp.Run(args,buildVariant)
@@ -30,4 +30,14 @@ func isControlArgument(first string) bool {
 	default:
 		return false
 	}
+}
+
+
+func isControlInvocation(args []string) bool {
+	if len(args)==0{return false}
+	_,_,filtered,err:=extractGlobal(args)
+	if err==nil && len(filtered)>0 {
+		return isControlArgument(filtered[0])
+	}
+	return isControlArgument(args[0])
 }
