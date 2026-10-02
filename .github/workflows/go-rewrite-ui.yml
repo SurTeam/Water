@@ -43,7 +43,7 @@ on:
 
 concurrency:
   group: go-rewrite-ui-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   gio-smoke:
