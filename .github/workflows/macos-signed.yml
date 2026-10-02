@@ -62,6 +62,7 @@ jobs:
       NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
       NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
       NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      NOTARIZE_REQUESTED: ${{ inputs.notarize }}
 
     steps:
       - name: Resolve signing inputs
@@ -150,6 +151,32 @@ jobs:
             echo "version=$version"
             echo "title=$app_name $version"
           } >> "$GITHUB_OUTPUT"
+
+      - name: Preflight signing credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          missing=()
+          [[ -n "$CERTIFICATE_BASE64" ]] || missing+=(SURTEAM_CODE_P12_BASE64)
+          [[ -n "$CERTIFICATE_PASSWORD" ]] || missing+=(SURTEAM_SIGN_PASS)
+          if [[ "$NOTARIZE_REQUESTED" == "true" ]]; then
+            [[ -n "$NOTARY_KEY_BASE64" ]] || missing+=(APPLE_NOTARY_KEY_BASE64)
+            [[ -n "$NOTARY_KEY_ID" ]] || missing+=(APPLE_NOTARY_KEY_ID)
+            [[ -n "$NOTARY_ISSUER_ID" ]] || missing+=(APPLE_NOTARY_ISSUER_ID)
+          fi
+          if ((${#missing[@]})); then
+            printf 'error: missing required repository secret(s): %s\n' "${missing[*]}" >&2
+            exit 1
+          fi
+
+          command -v security >/dev/null
+          command -v codesign >/dev/null
+          command -v xcrun >/dev/null
+          if [[ "$NOTARIZE_REQUESTED" == "true" ]]; then
+            xcrun --find notarytool >/dev/null
+            xcrun --find stapler >/dev/null
+          fi
 
       - name: Download unsigned app
         shell: bash
