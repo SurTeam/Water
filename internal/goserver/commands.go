@@ -41,6 +41,7 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 	} else {
 		op.Status = "succeeded"
 		op.Result = result
+		s.recordCommandEvents(head.Type, p.Command, result)
 		s.broadcastSnapshot()
 	}
 	s.opsMu.Lock()
@@ -340,14 +341,41 @@ func (s *Server) spawnInPane(paneID uuid.UUID,program string,args []string,size 
 		Agent:goagent.Detect(processName,cmdline),
 	}
 	if err:=s.model.InstallTerminal(paneID,meta);err!=nil{s.registry.Remove(t.ID);return nil,err}
+	if meta.Agent!=nil {
+		s.emitEvent(map[string]any{
+			"type":"agent_started",
+			"terminal_id":t.ID,
+			"pane_id":paneID,
+			"kind":meta.Agent.Kind,
+		})
+	}
 	ch,done,cancel:=t.Subscribe()
 	go func(){
 		defer cancel()
 		for {
 			select {
 			case ev:=<-ch:
-				if ev.Kind==goprotocol.ExitEvent{
+				switch ev.Kind {
+				case goprotocol.OutputEvent:
+					s.emitEvent(map[string]any{"type":"terminal_output_changed","terminal_id":t.ID})
+				case goprotocol.ResizeEvent:
+					s.emitEvent(map[string]any{
+						"type":"terminal_resized","terminal_id":t.ID,
+						"columns":ev.Size.Columns,"lines":ev.Size.Lines,
+					})
+				case goprotocol.ExitEvent:
 					s.model.SetTerminalExit(t.ID,ev.Code)
+					exitCode:=any(nil)
+					if ev.Code!=nil{exitCode=*ev.Code}
+					s.emitEvent(map[string]any{
+						"type":"terminal_exited","terminal_id":t.ID,"exit_code":exitCode,
+					})
+					if meta.Agent!=nil {
+						s.emitEvent(map[string]any{
+							"type":"agent_stopped","terminal_id":t.ID,
+							"pane_id":paneID,"kind":meta.Agent.Kind,
+						})
+					}
 					s.model.AutoCloseExitedTerminal(t.ID)
 					s.broadcastSnapshot()
 					return
