@@ -131,17 +131,19 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 The automated rewrite gates now cover the headless protocol, terminal stream,
 scenario suite, performance smoke tests, selection/scrollback behavior,
-graphics, single-connection remote transport, and macOS bundle construction.
-One functional parity gap remains alongside the credentialed/manual validation
-work:
+graphics, multi-connection remote transport, macOS bundle construction, and
+real-window Gio automation under Xvfb.
 
-- Port Rust's multi-connection desktop model: one window can keep Local plus
-  multiple independent SSH connections alive, switch between their workspace
-  projections, connect/disconnect remotes dynamically, and expose the combined
-  connection list. The current Go GUI can connect to SSH, but a launch still
-  owns only one active control/session plane.
-- Add or run GUI-only Rust/Go compatibility scenarios that require a real
-  desktop window, especially end-to-end pointer/IME/clipboard interactions.
+Remaining work is credentialed/manual validation plus a small set of desktop
+interop cases:
+
+- Keep the real-window cross-language compatibility gates green in both
+  directions: Go GUI against the Rust server and Rust GUI against the Go
+  server. These exercise UI registration, state mutation through real window
+  input, and screenshot capture over the opposite-language control plane.
+- Extend real-window compatibility coverage beyond pointer/click/screenshot to
+  end-to-end IME and clipboard behavior where the CI display/input stack can
+  provide deterministic events.
 - Run the manual same-runner Rust-vs-Go benchmark workflow and publish the
   resulting 64 MB completion/interaction data. For release decisions, also run
   the larger ANSI-heavy / sustained-memory fixtures and record p50/p95/p99,
