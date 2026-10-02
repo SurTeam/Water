@@ -216,7 +216,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				if i.OnCopy!=nil {
 					if selected:=i.OnCopy(); selected!="" {
 						gtx.Execute(clipboard.WriteCmd{
-							Type:"text/plain;charset=utf-8",
+							Type:"application/text",
 							Data:io.NopCloser(strings.NewReader(selected)),
 						})
 						continue
