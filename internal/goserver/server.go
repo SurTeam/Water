@@ -241,6 +241,13 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 				return err
 			}
 		}
+		isGUI:=p.Role=="gui"
+		if isGUI {
+			ss.compactSnapshots=p.CompactSnapshots
+			// Register before acknowledging session.open. Once OpenSession
+			// returns, callers must be able to route UI automation immediately.
+			s.addSession(ss)
+		}
 		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"server_pid":       os.Getpid(),
 			"protocol_version": goprotocol.ProtocolVersion,
@@ -248,13 +255,10 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
 		})); err != nil {
+			if isGUI{s.dropSession(ss)}
 			return err
 		}
-		if p.Role == "gui" {
-			ss.compactSnapshots = p.CompactSnapshots
-			s.addSession(ss)
-			return s.pushSnapshot(ss)
-		}
+		if isGUI{return s.pushSnapshot(ss)}
 		return nil
 	case "state.dump":
 		gometrics.StateDumps.Add(1)
