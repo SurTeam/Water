@@ -986,19 +986,16 @@ func (g *graphicsState) snapshot(term *xterm.Terminal, rows []Row) []TerminalIma
 				out = append(out, terminalImageFromRecord(record, minRow, minCol, maxCol-minCol+1, maxRow-minRow+1, nil))
 			}
 		}
-		filtered := record.placements[:0]
 		for _, placement := range record.placements {
 			if placement == nil || placement.marker == nil || placement.marker.IsDisposed || placement.marker.Line < 0 {
 				continue
 			}
-			filtered = append(filtered, placement)
 			row := placement.marker.Line - buf.YDisp
 			if row+placement.height < -imageOverscanRows || row > term.Rows()+imageOverscanRows {
 				continue
 			}
 			out = append(out, terminalImageFromRecord(record, row, placement.column, placement.width, placement.height, placement))
 		}
-		record.placements = filtered
 	}
 	return out
 }
