@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goterminal"
@@ -256,7 +257,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		}
 		return nil
 	case "state.dump":
-		metricStateDumps.Add(1)
+		gometrics.StateDumps.Add(1)
 		return ss.write(goprotocol.Success(msg.RequestID, s.model.Dump()))
 	case "event.list":
 		return s.eventList(ss, msg)
@@ -391,9 +392,9 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 		for {
 			select {
 			case ev := <-ch:
-				metricTerminalStreamEvents.Add(1)
+				gometrics.TerminalStreamEvents.Add(1)
 				if ev.Kind == goprotocol.OutputEvent {
-					metricTerminalOutputBytes.Add(uint64(len(ev.Data)))
+					gometrics.TerminalOutputBytesSent.Add(uint64(len(ev.Data)))
 				}
 				if err := ss.writeTerminal(id, ev); err != nil {
 					return
@@ -541,7 +542,7 @@ func (s *Server) uiSessionCount() int {
 
 func (s *Server) pushSnapshot(ss *session) error {
 	state := s.model.Dump()
-	metricSnapshotPushes.Add(1)
+	gometrics.ModelSnapshotPushes.Add(1)
 	params, err := json.Marshal(state)
 	if err != nil {
 		return err
