@@ -134,6 +134,10 @@ type WorkspaceClient struct {
 	layoutMu sync.Mutex
 	frameSize image.Point
 	frameMetric unit.Metric
+	frameStateRevision uint64
+	frameActiveWorkspace uuid.UUID
+	frameFocusedPane uuid.UUID
+	frameActiveTerminal uuid.UUID
 	hitRegions []automationHit
 
 	workspaceClicks map[uuid.UUID]*widget.Clickable
@@ -363,6 +367,10 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		})
 	}
 	frameSize:=c.frameSize
+	frameStateRevision:=c.frameStateRevision
+	frameActiveWorkspace:=c.frameActiveWorkspace
+	frameFocusedPane:=c.frameFocusedPane
+	frameActiveTerminal:=c.frameActiveTerminal
 	c.layoutMu.Unlock()
 
 	visibleCells:=0
@@ -398,6 +406,10 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"image_texture_cache_entries":imageTextures,
 		"terminal_graphics_bytes":graphicsBytes,
 		"frame_size":[]int{frameSize.X,frameSize.Y},
+		"frame_state_revision":frameStateRevision,
+		"frame_active_workspace":frameActiveWorkspace,
+		"frame_focused_pane":frameFocusedPane,
+		"frame_active_terminal":frameActiveTerminal,
 		"automation_hits":hits,
 		"connections":c.connectionListResponse()["connections"],
 		"remote_form_visible":remoteFormVisible,
@@ -498,6 +510,10 @@ func (c *WorkspaceClient) activeTerminalID()(uuid.UUID,bool){
 	c.mu.RLock()
 	state:=c.state
 	c.mu.RUnlock()
+	return activeTerminalIDFromState(state)
+}
+
+func activeTerminalIDFromState(state gomodel.StateDump)(uuid.UUID,bool){
 	workspace:=activeWorkspace(state)
 	if workspace==nil{return uuid.Nil,false}
 	tab:=activeTab(*workspace)
@@ -952,6 +968,13 @@ func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context,th *material.Theme) 
 	c.mu.RLock()
 	state:=c.state
 	c.mu.RUnlock()
+	c.frameStateRevision=state.StateRevision
+	c.frameActiveWorkspace=uuid.Nil
+	c.frameFocusedPane=uuid.Nil
+	c.frameActiveTerminal=uuid.Nil
+	if state.ActiveWorkspace!=nil{c.frameActiveWorkspace=*state.ActiveWorkspace}
+	if state.FocusedPane!=nil{c.frameFocusedPane=*state.FocusedPane}
+	if id,ok:=activeTerminalIDFromState(state);ok{c.frameActiveTerminal=id}
 
 	for c.newWorkspace.Clicked(gtx) {
 		_ = c.session.DispatchAsync(map[string]any{"type":"workspace.new"})
