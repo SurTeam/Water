@@ -60,7 +60,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Cached row/style-run terminal renderer instead of rebuilding the whole
   terminal as one string.
 - Keyboard input, Ctrl/Alt sequences, function keys, application-cursor mode,
-  IME composition, bracketed paste, DEC mouse tracking, and local scrollback.
+  bracketed paste, DEC mouse tracking, and local scrollback.
+- Gio IME integration publishes terminal-cursor caret/snippet state to the
+  platform input method, keeps preedit text local and visibly overlaid at the
+  cursor, and sends only the final committed edit to the PTY.
 - Character drag selection, Rust-style repeated-click word/segment expansion,
   CJK segmentation, wide-cell handling, wrapped-line copy semantics, and
   clipboard copy-or-interrupt behavior.
@@ -145,9 +148,10 @@ interop cases:
   directions: Go GUI against the Rust server and Rust GUI against the Go
   server. These exercise UI registration, state mutation through real window
   input, and screenshot capture over the opposite-language control plane.
-- Extend real-window compatibility coverage beyond pointer/click/screenshot to
-  end-to-end IME and clipboard behavior where the CI display/input stack can
-  provide deterministic events.
+- Keep the real-window keyboard/clipboard compatibility paths green in both
+  directions. Deterministic Gio IME state-machine coverage is automated; a
+  true system-IME composition session still needs platform-specific manual
+  validation because Xvfb cannot reliably drive a native input-method engine.
 - Run the manual same-runner Rust-vs-Go benchmark workflow and publish the
   resulting 64 MB completion/interaction data. For release decisions, also run
   the larger ANSI-heavy / sustained-memory fixtures and record p50/p95/p99,
