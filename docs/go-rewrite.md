@@ -178,31 +178,52 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 The automated rewrite gates now cover the headless protocol, terminal stream,
 scenario suite, performance smoke tests, selection/scrollback behavior,
-graphics, multi-connection remote transport, macOS bundle construction, and
-real-window Gio automation under Xvfb.
+graphics, multi-connection remote transport, Linux/macOS package construction,
+bidirectional Rust/Go control+WT4 compatibility, and bidirectional real-window
+keyboard/clipboard/screenshot behavior under Xvfb.
 
-Remaining work is credentialed/manual validation plus a small set of desktop
-interop cases:
+Only credentialed/manual environment validation remains:
 
-- Keep the real-window cross-language compatibility gates green in both
-  directions: Go GUI against the Rust server and Rust GUI against the Go
-  server. These exercise UI registration, state mutation through real window
-  input, and screenshot capture over the opposite-language control plane.
-- Keep the real-window keyboard/clipboard compatibility paths green in both
-  directions. Deterministic Gio IME state-machine coverage is automated; a
-  true system-IME composition session still needs platform-specific manual
-  validation because Xvfb cannot reliably drive a native input-method engine.
-- Configure the repository's Apple notarization API-key secrets
-  (`APPLE_NOTARY_KEY_BASE64`, `APPLE_NOTARY_KEY_ID`,
-  `APPLE_NOTARY_ISSUER_ID`) and execute one signed notarized release/dev
-  artifact to validate the credentialed path. The staging helper now dispatches
-  the signing workflow from the current branch by default (override with
-  `WATER_SIGNING_WORKFLOW_REF`), so this can be validated on `go-rewrite`
-  before merging. CI still cannot validate Apple credentials without those
-  secrets.
+- **Native system IME session.** Deterministic Gio IME state-machine coverage is
+  automated, including caret/snippet publication, preedit isolation/rendering,
+  and single final commit delivery. Xvfb cannot reliably drive a native input
+  method engine, so execute a real desktop composition session with:
 
-Do not merge `go-rewrite` into `main` until the credentialed Apple release
-path and true system-IME/manual desktop checks are executed or explicitly
-waived. The same-runner completion, interaction, multi-pane/RSS/frame-time,
-headless compatibility, scenario, and bidirectional real-window gates are now
-automated.
+  ```sh
+  bash scripts/run-go-ime-manual.sh
+  ```
+
+  The harness starts the Go GUI/server, switches the active PTY to `cat`,
+  waits for a committed IME probe string, and verifies that exact UTF-8 text in
+  the authoritative server-owned terminal stream. Override the probe for a
+  different IME with `WATER_IME_PROBE_TEXT='…'`.
+
+- **Credentialed Apple signing/notarization.** The signing workflow now performs
+  a fail-fast credential/tool preflight before downloading the unsigned asset.
+  A signed run requires the repository code-signing secrets
+  `SURTEAM_CODE_P12_BASE64` and `SURTEAM_SIGN_PASS` (plus
+  `SURTEAM_SIGNING_IDENTITY` only when an explicit identity override is
+  desired). A notarized run additionally requires
+  `APPLE_NOTARY_KEY_BASE64`, `APPLE_NOTARY_KEY_ID`, and
+  `APPLE_NOTARY_ISSUER_ID`.
+
+  Stage an unsigned Go bundle and dispatch the signing workflow from
+  `go-rewrite` with:
+
+  ```sh
+  CODESIGN_SKIP=1 WATER_APP_VARIANT=dev bash scripts/build-go-macos-app.sh
+  WATER_APP_VARIANT=dev WATER_RELEASE_PUBLICATION=none \
+    WATER_SIGNING_WORKFLOW_REF=go-rewrite \
+    bash scripts/publish-unsigned-macos.sh
+  ```
+
+  Then run the dispatched workflow with notarization enabled. The workflow
+  imports the certificate into an isolated temporary keychain, signs nested
+  executables before the app bundle, submits through `notarytool`, staples
+  the ticket, re-extracts the final archive, and verifies the signed/stapled
+  bundle before publication.
+
+Do not merge `go-rewrite` into `main` until the credentialed Apple path and
+one true system-IME desktop session are executed or explicitly waived. All
+other protocol, scenario, performance, packaging, cross-language, and
+real-window compatibility gates are automated.
