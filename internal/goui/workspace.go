@@ -679,6 +679,17 @@ func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context,th *material.Theme) 
 		_ = c.session.DispatchAsync(map[string]any{"type":"tab.new"})
 	}
 
+	return layout.Stack{Alignment:layout.Center}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context)layout.Dimensions{
+			return c.layoutMain(gtx,th,state)
+		}),
+		layout.Expanded(func(gtx layout.Context)layout.Dimensions{
+			return c.layoutHyperlinkOverlay(gtx,th)
+		}),
+	)
+}
+
+func (c *WorkspaceClient) layoutMain(gtx layout.Context,th *material.Theme,state gomodel.StateDump)layout.Dimensions{
 	sidebarWidth:=gtx.Dp(unit.Dp(190))
 	return layout.Flex{Axis:layout.Horizontal}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context)layout.Dimensions{
@@ -688,6 +699,97 @@ func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context,th *material.Theme) 
 		}),
 		layout.Flexed(1,func(gtx layout.Context)layout.Dimensions{
 			return c.layoutWorkspace(gtx,th,state,image.Pt(sidebarWidth,0))
+		}),
+	)
+}
+
+func (c *WorkspaceClient) layoutHyperlinkOverlay(gtx layout.Context,th *material.Theme)layout.Dimensions{
+	c.hyperlinkMu.Lock()
+	prompt:=c.hyperlinkPrompt
+	if prompt!=nil {
+		copy:=*prompt
+		prompt=&copy
+	}
+	c.hyperlinkMu.Unlock()
+	if prompt==nil{return layout.Dimensions{}}
+
+	for c.hyperlinkCancel.Clicked(gtx){
+		c.cancelHyperlink()
+		return layout.Dimensions{}
+	}
+	for c.hyperlinkConfirm.Clicked(gtx){
+		c.confirmHyperlink()
+	}
+	for c.hyperlinkScrim.Clicked(gtx){}
+
+	c.hyperlinkMu.Lock()
+	current:=c.hyperlinkPrompt
+	if current!=nil {
+		copy:=*current
+		prompt=&copy
+	} else {
+		prompt=nil
+	}
+	c.hyperlinkMu.Unlock()
+	if prompt==nil{return layout.Dimensions{}}
+
+	return layout.Stack{Alignment:layout.Center}.Layout(gtx,
+		layout.Expanded(func(gtx layout.Context)layout.Dimensions{
+			return c.hyperlinkScrim.Layout(gtx,func(gtx layout.Context)layout.Dimensions{
+				size:=gtx.Constraints.Max
+				paint.FillShape(gtx.Ops,color.NRGBA{A:0xb0},clip.Rect{Max:size}.Op())
+				return layout.Dimensions{Size:size}
+			})
+		}),
+		layout.Stacked(func(gtx layout.Context)layout.Dimensions{
+			if gtx.Constraints.Max.X>520{gtx.Constraints.Max.X=520}
+			if gtx.Constraints.Max.Y>280{gtx.Constraints.Max.Y=280}
+			record:=op.Record(gtx.Ops)
+			dims:=layout.UniformInset(unit.Dp(18)).Layout(gtx,func(gtx layout.Context)layout.Dimensions{
+				title:="Open hyperlink"
+				action:="Open"
+				if prompt.Destination!=""{
+					title="Download remote file and open?"
+					action="Download & Open"
+				}
+				if prompt.Working{
+					title="Processing hyperlink…"
+				}
+				children:=[]layout.FlexChild{
+					layout.Rigid(material.H6(th,title).Layout),
+					layout.Rigid(layout.Spacer{Height:unit.Dp(10)}.Layout),
+					layout.Rigid(material.Body2(th,prompt.URI).Layout),
+				}
+				if prompt.Destination!=""{
+					children=append(children,
+						layout.Rigid(layout.Spacer{Height:unit.Dp(8)}.Layout),
+						layout.Rigid(material.Caption(th,"Download directory: "+c.config.Terminal.HyperlinkDownloadDirectory).Layout),
+					)
+				}
+				if prompt.Error!=""{
+					children=append(children,
+						layout.Rigid(layout.Spacer{Height:unit.Dp(8)}.Layout),
+						layout.Rigid(material.Body2(th,prompt.Error).Layout),
+					)
+				}
+				if !prompt.Working{
+					children=append(children,
+						layout.Rigid(layout.Spacer{Height:unit.Dp(14)}.Layout),
+						layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+							return layout.Flex{Axis:layout.Horizontal,Spacing:layout.SpaceEnd}.Layout(gtx,
+								layout.Rigid(material.Button(th,&c.hyperlinkCancel,"Cancel").Layout),
+								layout.Rigid(layout.Spacer{Width:unit.Dp(10)}.Layout),
+								layout.Rigid(material.Button(th,&c.hyperlinkConfirm,action).Layout),
+							)
+						}),
+					)
+				}
+				return layout.Flex{Axis:layout.Vertical}.Layout(gtx,children...)
+			})
+			call:=record.Stop()
+			paint.FillShape(gtx.Ops,configColor(c.config.Theme.ChromeBackground,0x121416),clip.Rect{Max:dims.Size}.Op())
+			call.Add(gtx.Ops)
+			return dims
 		}),
 	)
 }
