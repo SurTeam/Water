@@ -124,10 +124,15 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 The automated rewrite gates now cover the headless protocol, terminal stream,
 scenario suite, performance smoke tests, selection/scrollback behavior,
-graphics, remote transport, and macOS bundle construction. The remaining work
-is validation that requires credentials, a real desktop window, or an explicit
-benchmark run:
+graphics, single-connection remote transport, and macOS bundle construction.
+One functional parity gap remains alongside the credentialed/manual validation
+work:
 
+- Port Rust's multi-connection desktop model: one window can keep Local plus
+  multiple independent SSH connections alive, switch between their workspace
+  projections, connect/disconnect remotes dynamically, and expose the combined
+  connection list. The current Go GUI can connect to SSH, but a launch still
+  owns only one active control/session plane.
 - Add or run GUI-only Rust/Go compatibility scenarios that require a real
   desktop window, especially end-to-end pointer/IME/clipboard interactions.
 - Run the manual same-runner Rust-vs-Go benchmark workflow and publish the
