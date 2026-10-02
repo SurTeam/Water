@@ -102,6 +102,8 @@ jobs:
             sudo ln -sf /bin/zsh /opt/homebrew/bin/zsh
           fi
 
+      - run: go mod tidy
+
       - name: Build Go scenario binaries
         run: |
           mkdir -p target/go-scenarios
