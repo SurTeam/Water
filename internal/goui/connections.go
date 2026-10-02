@@ -182,7 +182,7 @@ func (m *MultiWorkspaceClient) entriesLocked() []ConnectionEntry {
 func (m *MultiWorkspaceClient) syncSwitchersLocked() {
 	entries:=m.entriesLocked()
 	active:=m.active
-	activate:=m.ActivateConnection
+	activate:=func(id uuid.UUID){ _ = m.ActivateConnection(id) }
 	for _,connection:=range m.connections{
 		connection.view.SetConnectionSwitcher(active,entries,activate)
 	}
