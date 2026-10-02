@@ -13,7 +13,7 @@ set -euo pipefail
 #   WATER_KEEP_IME_LOGS   keep the temporary directory when set to 1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP_ROOT="${TMPDIR:-/tmp}/water-go-ime-manual-$$"
+TMP_ROOT="${WATER_IME_TMP_ROOT:-/tmp/water-go-ime-manual-$}"
 SOCKET="$TMP_ROOT/water.sock"
 CONFIG="$TMP_ROOT/config.json"
 LOG="$TMP_ROOT/water-gui.log"
@@ -98,7 +98,7 @@ JSON
 "$WATER" --control-socket "$SOCKET" --config "$CONFIG" >"$LOG" 2>&1 &
 gui_pid=$!
 
-for _ in $(seq 1 320); do
+for ((attempt=0; attempt<320; attempt++)); do
   if "$WATER" --socket "$SOCKET" ping >/dev/null 2>&1; then
     break
   fi
@@ -111,7 +111,7 @@ done
 }
 
 terminal_id=""
-for _ in $(seq 1 320); do
+for ((attempt=0; attempt<320; attempt++)); do
   if "$WATER" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
     terminal_id="$(python3 - "$SNAPSHOT" <<'PY'
 import json, sys
