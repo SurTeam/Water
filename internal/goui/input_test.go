@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"gioui.org/io/key"
+
+	"github.com/SurTeam/Water/internal/govt"
 )
 
 func TestEncodeKeyApplicationCursorAndModifiers(t *testing.T){
@@ -27,5 +29,42 @@ func TestEncodeKeyApplicationCursorAndModifiers(t *testing.T){
 			got:=EncodeKey(tc.ev,tc.app)
 			if !bytes.Equal(got,tc.want){t.Fatalf("got %q want %q",got,tc.want)}
 		})
+	}
+}
+
+
+func TestHyperlinkClickModifierRules(t *testing.T){
+	if !hyperlinkClickAllowed(false,0){
+		t.Fatal("plain hyperlink click should be allowed when shortcut is optional")
+	}
+	if hyperlinkClickAllowed(false,key.ModShift){
+		t.Fatal("shift must remain available for terminal selection")
+	}
+	if hyperlinkClickAllowed(true,0){
+		t.Fatal("shortcut-required hyperlink activated without shortcut")
+	}
+	if !hyperlinkClickAllowed(true,key.ModShortcut){
+		t.Fatal("platform shortcut should activate hyperlink")
+	}
+	if hyperlinkClickAllowed(true,key.ModShortcut|key.ModShift){
+		t.Fatal("shift+shortcut should preserve selection override")
+	}
+}
+
+func TestHyperlinkURIAt(t *testing.T){
+	snap:=govt.Snapshot{
+		Cols:2,Rows:1,
+		RowsData:[]govt.Row{{Cells:[]govt.Cell{
+			{Text:"x",Width:1,LinkURI:"https://example.com"},
+			{Text:"y",Width:1},
+		}}},
+	}
+	if got:=hyperlinkURIAt(snap,0,0);got!="https://example.com"{
+		t.Fatalf("link URI = %q",got)
+	}
+	for _,point:=range [][2]int{{1,0},{2,0},{0,1},{-1,0}}{
+		if got:=hyperlinkURIAt(snap,point[0],point[1]);got!=""{
+			t.Fatalf("hyperlinkURIAt(%d,%d) = %q",point[0],point[1],got)
+		}
 	}
 }
