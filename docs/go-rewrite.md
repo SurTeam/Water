@@ -20,8 +20,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 - Go 1.27.
 - Unix PTY: `github.com/creack/pty`.
-- VT core: `github.com/gitpod-io/xterm-go`, isolated behind
-  `internal/govt` so Water can replace it without changing the wire protocol.
+- VT core: a pinned MIT-licensed fork of `github.com/gitpod-io/xterm-go`
+  lives under `internal/xterm`, still isolated behind `internal/govt`.
+  The in-tree fork currently carries Water's scrollback sparse-map reuse
+  optimization and can be removed once upstream provides equivalent behavior.
 - Desktop UI: Gio 0.10.3.
 - Remote transport: the system OpenSSH client with ControlMaster and
   Unix-socket forwarding, matching the Rust architecture.
@@ -138,17 +140,22 @@ benchmark oracle while replacing both the Water client and server in Go.
     output flood.
   These are CI smoke measurements, not substitutes for the formal same-machine
   Rust-vs-Go benchmark.
-- Same-runner language benchmark (Ubuntu hosted runner, Go 1.27.1,
-  Rust 1.98.1, 68.27 MB decoded payload):
-  - Go direct median: ~16.7 MB/s.
-  - Go server-local median: ~16.8 MB/s.
-  - Rust direct median: ~25.2 MB/s.
-  - Rust server-local median: ~25.7 MB/s.
-  - Go therefore delivers roughly 65–66% of Rust terminal-core completion
-    throughput on this workload, while the Go server-local transport retains
-    essentially all of the Go direct throughput.
-  - Go interaction-under-flood remained low-latency in the same run:
-    resize 0.36–2.14 ms and Ctrl-C-to-exit 0.72–5.12 ms across three samples.
+- Latest same-runner language benchmark (Ubuntu hosted runner, Go 1.27.x,
+  stable Rust, 64 MB decoded payload) after PTY micro-burst batching and the
+  in-tree xterm sparse-map reuse fix:
+  - Plain text: Go direct median ~17.6 MB/s, Go server-local ~17.5 MB/s;
+    Rust direct ~23.1 MB/s and Rust server-local ~23.2 MB/s. Go retains about
+    76% of Rust direct completion throughput while its server path retains
+    essentially all of Go direct throughput.
+  - ANSI-heavy: Go direct median ~15.4 MB/s, Go server-local ~15.0 MB/s;
+    Rust direct ~18.2 MB/s and Rust server-local ~18.2 MB/s.
+  - Unicode-heavy: Go direct median ~21.4 MB/s, Go server-local ~22.4 MB/s;
+    Rust direct ~32.5 MB/s and Rust server-local ~30.2 MB/s.
+  - Plain-text Go allocations fell from roughly 8.6 million allocs/op and
+    0.6–0.8 GB/op to about 44 thousand allocs/op and 0.10–0.13 GB/op direct
+    (about 50 thousand allocs/op and 0.18–0.19 GB/op server-local).
+  - Go interaction-under-flood remained low-latency: resize stayed around
+    0.9–1.1 ms in the latest samples and Ctrl-C-to-exit stayed below 6 ms.
 
 ## Remaining parity work
 
@@ -169,7 +176,7 @@ interop cases:
   true system-IME composition session still needs platform-specific manual
   validation because Xvfb cannot reliably drive a native input-method engine.
 - Extend the successful same-runner Rust-vs-Go benchmark beyond the current
-  64 MB plain-text completion fixture: add ANSI-heavy, Unicode/ligature,
+  plain-text, ANSI-heavy, and Unicode-heavy 64 MB completion fixtures: add
   multi-pane, sustained-memory/RSS, and p50/p95/p99 frame-time fixtures before
   making a final release-performance decision.
 - Configure the repository's Apple notarization API-key secrets
