@@ -66,8 +66,7 @@ func TestDownloadRemoteUsesControlMasterAndIsolatedDirectory(t *testing.T){
 	fakeSCP:=filepath.Join(tmp,"fake-scp")
 	script:=`#!/bin/sh
 set -eu
-printf '%s
-' "$@" > "$WATER_FAKE_SCP_LOG"
+printf '%s\n' "$@" > "$WATER_FAKE_SCP_LOG"
 for last do :; done
 mkdir -p "$last"
 printf 'payload' > "$last/test file.txt"
