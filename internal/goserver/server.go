@@ -39,6 +39,10 @@ type Server struct {
 	uiSeq atomic.Uint64
 	pendingUIMu sync.Mutex
 	pendingUI map[uint64]chan goprotocol.WireMessage
+
+	eventsMu sync.RWMutex
+	events []appEvent
+	eventSeq atomic.Uint64
 }
 
 type OperationSnapshot struct {
@@ -223,6 +227,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		}
 		return nil
 	case "state.dump":
+		metricStateDumps.Add(1)
 		return ss.write(goprotocol.Success(msg.RequestID, s.model.Dump()))
 	case "event.list":
 		return s.eventList(ss, msg)
@@ -357,6 +362,10 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 		for {
 			select {
 			case ev := <-ch:
+				metricTerminalStreamEvents.Add(1)
+				if ev.Kind == goprotocol.OutputEvent {
+					metricTerminalOutputBytes.Add(uint64(len(ev.Data)))
+				}
 				if err := ss.writeTerminal(id, ev); err != nil {
 					return
 				}
@@ -503,6 +512,7 @@ func (s *Server) uiSessionCount() int {
 
 func (s *Server) pushSnapshot(ss *session) error {
 	state := s.model.Dump()
+	metricSnapshotPushes.Add(1)
 	params, err := json.Marshal(state)
 	if err != nil {
 		return err
