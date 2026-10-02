@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"path"
 	"strings"
+
+	"github.com/SurTeam/Water/internal/gobuild"
+	"github.com/SurTeam/Water/internal/goprotocol"
 )
 
 //go:embed payloads/*
@@ -46,7 +49,12 @@ func embeddedServerPayload(target RemoteTarget)([]byte,bool){
 
 func deployEmbeddedServer(destination,control string,target RemoteTarget,payload []byte)(string,error){
 	if len(payload)==0{return "",errors.New("empty embedded server payload")}
-	remoteDir:=path.Join("$HOME",".cache","water-go","go-rewrite",fmt.Sprintf("p%d",4),target.OS+"-"+target.Arch)
+	remoteDir:=path.Join(
+		"$HOME",".cache","water-go",buildIdentityToken(),
+		fmt.Sprintf("v-%016x",stableID(gobuild.Version+"|"+gobuild.Variant)),
+		fmt.Sprintf("p%d",goprotocol.ProtocolVersion),
+		target.OS+"-"+target.Arch,
+	)
 	remoteBin:=path.Join(remoteDir,"water-server")
 	// $HOME is intentionally expanded by the remote shell; all remaining path
 	// components are fixed build identities and contain no shell metacharacters.
