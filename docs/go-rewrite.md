@@ -53,6 +53,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Attach replay is side-effect free; VT-generated DA/DSR/mouse replies are
   written back to the PTY only for live input.
 - Gio workspace/sidebar/tab/pane UI backed by server snapshot pushes.
+- One desktop window can keep Local plus multiple independent SSH Water sessions
+  alive at once, switch their workspace projections, add remotes at runtime,
+  disconnect them without closing the window, and expose one combined
+  connection list through GUI automation/control projection.
 - Cached row/style-run terminal renderer instead of rebuilding the whole
   terminal as one string.
 - Keyboard input, Ctrl/Alt sequences, function keys, application-cursor mode,
@@ -116,7 +120,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Example shared-runner measurements observed while adding the gate:
   - 26.8 MB/s direct vs 23.6 MB/s server (87.8% retention).
   - 16.1 MB/s direct vs 13.0 MB/s server (80.6% retention) under a noisier run.
-  - 0.66 ms resize and 0.81 ms Ctrl-C-to-exit during output flood.
+  - 15.8 MB/s direct vs 12.0 MB/s server (76.0% retention) on the latest
+    shared-runner gate; both decoded queues reached the intended 64-event cap.
+  - Latest interaction gate: 0.49 ms resize and 0.98 ms Ctrl-C-to-exit during
+    output flood.
   These are CI smoke measurements, not substitutes for the formal same-machine
   Rust-vs-Go benchmark.
 
