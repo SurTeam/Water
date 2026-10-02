@@ -14,7 +14,7 @@ import (
 	"strconv"
 	"strings"
 
-	xterm "github.com/gitpod-io/xterm-go"
+	xterm "github.com/SurTeam/Water/internal/xterm"
 )
 
 const (
