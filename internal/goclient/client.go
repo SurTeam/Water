@@ -105,6 +105,7 @@ type Session struct {
 	conn   net.Conn
 	mu     sync.Mutex
 	nextID atomic.Uint64
+	Build  string
 
 	Events chan TerminalPush
 	Pushes chan goprotocol.WireMessage
@@ -127,6 +128,7 @@ func (c *Client) OpenSession() (*Session, error) {
 	}
 	s := &Session{
 		conn:    conn,
+		Build:   c.Build,
 		Events:  make(chan TerminalPush, 256),
 		Pushes:  make(chan goprotocol.WireMessage, 64),
 		replies: make(map[uint64]chan goprotocol.WireMessage),
@@ -152,6 +154,7 @@ func (s *Session) Call(method string, params any, out any) error {
 		return err
 	}
 	req := goprotocol.WireMessage{
+		BuildVariant:    s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
 		RequestID:       requestID,
 		Method:          method,
@@ -254,6 +257,7 @@ func (s *Session) DispatchAsync(command any) error {
 		return err
 	}
 	req := goprotocol.WireMessage{
+		BuildVariant:    s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
 		RequestID:       requestID,
 		Method:          "command.dispatch",
@@ -300,6 +304,7 @@ func (s *Session) ReplySuccess(requestID uint64, result any) error {
 	}
 	ok := true
 	reply := goprotocol.WireMessage{
+		BuildVariant:    s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
 		RequestID:       requestID,
 		OK:              &ok,
@@ -314,6 +319,7 @@ func (s *Session) ReplySuccess(requestID uint64, result any) error {
 func (s *Session) ReplyFailure(requestID uint64, code, message string) error {
 	ok := false
 	reply := goprotocol.WireMessage{
+		BuildVariant:    s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
 		RequestID:       requestID,
 		OK:              &ok,
