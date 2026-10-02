@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/SurTeam/Water/internal/goterminal"
@@ -209,10 +210,31 @@ func BenchmarkTerminalServer4Pane64MB(b *testing.B) {
 		lastSnapshot:=make(map[uuid.UUID]time.Time,multiPaneCount)
 		gaps:=make([]time.Duration,0,1024)
 
-		for pane:=0;pane<multiPaneCount;pane++{
+		if err:=client.Dispatch(map[string]any{"type":"workspace.new"},nil);err!=nil{b.Fatal(err)}
+		var state gomodel.StateDump
+		if err:=client.Call("state.dump",map[string]any{},&state);err!=nil{b.Fatal(err)}
+		if state.FocusedPane==nil{b.Fatal("workspace.new did not create a focused pane")}
+		root:=*state.FocusedPane
+		split:=func(paneID uuid.UUID,direction string)uuid.UUID{
+			var result struct{PaneID uuid.UUID `json:"pane_id"`}
+			if err:=client.Dispatch(map[string]any{
+				"type":"pane.split",
+				"pane_id":paneID,
+				"direction":direction,
+			},&result);err!=nil{b.Fatal(err)}
+			if result.PaneID==uuid.Nil{b.Fatal("pane.split returned nil pane id")}
+			return result.PaneID
+		}
+		right:=split(root,"right")
+		lowerLeft:=split(root,"down")
+		lowerRight:=split(right,"down")
+		panes:=[]uuid.UUID{root,right,lowerLeft,lowerRight}
+
+		for _,paneID:=range panes{
 			var spawned struct{TerminalID uuid.UUID `json:"terminal_id"`}
 			if err:=client.Dispatch(map[string]any{
 				"type":"terminal.spawn",
+				"pane_id":paneID,
 				"program":"/bin/sh",
 				"args":[]string{"-c","read _; "+multiPaneBenchmarkCommand()},
 				"columns":80,
