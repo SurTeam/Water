@@ -206,7 +206,7 @@ func (h *InputHandler) createHyperlink(params, uri string) bool {
 }
 
 func (h *InputHandler) finishHyperlink() bool {
-	h.curAttrData.Extended = h.curAttrData.Extended.Clone()
+	h.curAttrData.Extended = h.curAttrData.extended().Clone()
 	h.curAttrData.Extended.SetURLID(0)
 	h.curAttrData.UpdateExtended()
 	return true
