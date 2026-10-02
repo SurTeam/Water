@@ -54,6 +54,22 @@ type terminalAttach struct {
 	Replay     []goprotocol.WireTerminalEvent  `json:"replay"`
 }
 
+type automationHitKind uint8
+
+const (
+	hitWorkspace automationHitKind = iota + 1
+	hitTab
+	hitNewWorkspace
+	hitNewTab
+	hitPane
+)
+
+type automationHit struct {
+	Rect image.Rectangle
+	Kind automationHitKind
+	ID   uuid.UUID
+}
+
 type terminalClient struct {
 	id uuid.UUID
 	mu sync.RWMutex
@@ -88,6 +104,7 @@ type WorkspaceClient struct {
 	layoutMu sync.Mutex
 	frameSize image.Point
 	frameMetric unit.Metric
+	hitRegions []automationHit
 
 	workspaceClicks map[uuid.UUID]*widget.Clickable
 	tabClicks map[uuid.UUID]*widget.Clickable
@@ -181,11 +198,11 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 	case "ui.click":
 		var p struct{X float32 `json:"x"`;Y float32 `json:"y"`;ClickCount int `json:"click_count"`}
 		if err:=json.Unmarshal(params,&p);err!=nil{return nil,err}
-		// Gio pointer injection is platform-owned; return the post-click UI
-		// snapshot for protocol parity until synthetic pointer routing is wired.
+		handled:=c.automationClick(p.X,p.Y,p.ClickCount)
 		return map[string]any{
 			"window_count":1,
 			"has_active_window":true,
+			"handled":handled,
 		},nil
 	case "ui.wheel":
 		var p struct{X float32 `json:"x"`;Y float32 `json:"y"`;DX float32 `json:"dx"`;DY float32 `json:"dy"`}
@@ -606,6 +623,7 @@ func (c *WorkspaceClient) Layout(gtx layout.Context,th *material.Theme) layout.D
 	defer c.layoutMu.Unlock()
 	c.frameSize=gtx.Constraints.Max
 	c.frameMetric=gtx.Metric
+	c.hitRegions=c.hitRegions[:0]
 	return c.layoutUnlocked(gtx,th)
 }
 
@@ -621,24 +639,28 @@ func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context,th *material.Theme) 
 		_ = c.session.DispatchAsync(map[string]any{"type":"tab.new"})
 	}
 
+	sidebarWidth:=gtx.Dp(unit.Dp(190))
 	return layout.Flex{Axis:layout.Horizontal}.Layout(gtx,
 		layout.Rigid(func(gtx layout.Context)layout.Dimensions{
-			gtx.Constraints.Min.X=gtx.Dp(unit.Dp(190))
-			gtx.Constraints.Max.X=gtx.Dp(unit.Dp(190))
+			gtx.Constraints.Min.X=sidebarWidth
+			gtx.Constraints.Max.X=sidebarWidth
 			return c.layoutSidebar(gtx,th,state)
 		}),
 		layout.Flexed(1,func(gtx layout.Context)layout.Dimensions{
-			return c.layoutWorkspace(gtx,th,state)
+			return c.layoutWorkspace(gtx,th,state,image.Pt(sidebarWidth,0))
 		}),
 	)
 }
 
 func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,state gomodel.StateDump)layout.Dimensions{
 	items:=make([]layout.FlexChild,0,len(state.Workspaces)+2)
+	y:=0
 	header:=material.Label(th,unit.Sp(16),"Water")
 	header.Font.Weight=600
 	items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
-		return layout.UniformInset(unit.Dp(12)).Layout(gtx,header.Layout)
+		dims:=layout.UniformInset(unit.Dp(12)).Layout(gtx,header.Layout)
+		y+=dims.Size.Y
+		return dims
 	}))
 	for _,workspace:=range state.Workspaces {
 		w:=workspace
@@ -648,25 +670,44 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,st
 			_ = c.session.DispatchAsync(map[string]any{"type":"workspace.activate","workspace_id":w.ID})
 		}
 		items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+			top:=y
 			button:=material.Button(th,click,w.Title)
-			return layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+			dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+			c.hitRegions=append(c.hitRegions,automationHit{
+				Rect:image.Rect(0,top,gtx.Constraints.Max.X,top+dims.Size.Y),
+				Kind:hitWorkspace,ID:w.ID,
+			})
+			y+=dims.Size.Y
+			return dims
 		}))
 	}
 	items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+		top:=y
 		button:=material.Button(th,&c.newWorkspace,"+ Workspace")
-		return layout.UniformInset(unit.Dp(8)).Layout(gtx,button.Layout)
+		dims:=layout.UniformInset(unit.Dp(8)).Layout(gtx,button.Layout)
+		c.hitRegions=append(c.hitRegions,automationHit{
+			Rect:image.Rect(0,top,gtx.Constraints.Max.X,top+dims.Size.Y),
+			Kind:hitNewWorkspace,
+		})
+		y+=dims.Size.Y
+		return dims
 	}))
 	return layout.Flex{Axis:layout.Vertical}.Layout(gtx,items...)
 }
 
-func (c *WorkspaceClient) layoutWorkspace(gtx layout.Context,th *material.Theme,state gomodel.StateDump)layout.Dimensions{
+func (c *WorkspaceClient) layoutWorkspace(gtx layout.Context,th *material.Theme,state gomodel.StateDump,origin image.Point)layout.Dimensions{
 	workspace:=activeWorkspace(state)
 	if workspace==nil {
 		label:=material.Label(th,unit.Sp(14),"Creating workspace…")
 		return layout.Center.Layout(gtx,label.Layout)
 	}
+	tabHeight:=0
 	return layout.Flex{Axis:layout.Vertical}.Layout(gtx,
-		layout.Rigid(func(gtx layout.Context)layout.Dimensions{return c.layoutTabs(gtx,th,*workspace)}),
+		layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+			dims:=c.layoutTabs(gtx,th,*workspace,origin)
+			tabHeight=dims.Size.Y
+			return dims
+		}),
 		layout.Flexed(1,func(gtx layout.Context)layout.Dimensions{
 			tab:=activeTab(*workspace)
 			if tab==nil {
@@ -678,7 +719,7 @@ func (c *WorkspaceClient) layoutWorkspace(gtx layout.Context,th *material.Theme,
 				label:=material.Label(th,unit.Sp(14),"Invalid pane tree")
 				return layout.Center.Layout(gtx,label.Layout)
 			}
-			return c.layoutPane(gtx,th,&root,*tab)
+			return c.layoutPane(gtx,th,&root,*tab,origin.Add(image.Pt(0,tabHeight)))
 		}),
 	)
 }
@@ -700,37 +741,64 @@ func activeTab(workspace gomodel.WorkspaceDump)*gomodel.TabDump{
 	return nil
 }
 
-func (c *WorkspaceClient) layoutTabs(gtx layout.Context,th *material.Theme,workspace gomodel.WorkspaceDump)layout.Dimensions{
+func (c *WorkspaceClient) layoutTabs(gtx layout.Context,th *material.Theme,workspace gomodel.WorkspaceDump,origin image.Point)layout.Dimensions{
 	children:=make([]layout.FlexChild,0,len(workspace.Tabs)+1)
+	x:=0
 	for _,tab:=range workspace.Tabs {
 		t:=tab
 		click:=c.tabClicks[t.ID]
 		if click==nil{click=new(widget.Clickable);c.tabClicks[t.ID]=click}
 		for click.Clicked(gtx){_ = c.session.DispatchAsync(map[string]any{"type":"tab.activate","tab_id":t.ID})}
 		children=append(children,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+			left:=x
 			button:=material.Button(th,click,t.Title)
-			return layout.Inset{Left:unit.Dp(4),Top:unit.Dp(4),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+			dims:=layout.Inset{Left:unit.Dp(4),Top:unit.Dp(4),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+			c.hitRegions=append(c.hitRegions,automationHit{
+				Rect:image.Rect(origin.X+left,origin.Y,origin.X+left+dims.Size.X,origin.Y+dims.Size.Y),
+				Kind:hitTab,ID:t.ID,
+			})
+			x+=dims.Size.X
+			return dims
 		}))
 	}
 	children=append(children,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+		left:=x
 		button:=material.Button(th,&c.newTab,"+")
-		return layout.UniformInset(unit.Dp(4)).Layout(gtx,button.Layout)
+		dims:=layout.UniformInset(unit.Dp(4)).Layout(gtx,button.Layout)
+		c.hitRegions=append(c.hitRegions,automationHit{
+			Rect:image.Rect(origin.X+left,origin.Y,origin.X+left+dims.Size.X,origin.Y+dims.Size.Y),
+			Kind:hitNewTab,
+		})
+		x+=dims.Size.X
+		return dims
 	}))
 	return layout.Flex{Axis:layout.Horizontal}.Layout(gtx,children...)
 }
 
-func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node *paneTree,tab gomodel.TabDump)layout.Dimensions{
+func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node *paneTree,tab gomodel.TabDump,origin image.Point)layout.Dimensions{
 	if node==nil{return layout.Dimensions{}}
 	if node.Type=="split" {
 		ratio:=node.Ratio
 		if ratio<=0.05||ratio>=0.95{ratio=0.5}
 		axis:=layout.Horizontal
 		if node.Axis=="vertical"{axis=layout.Vertical}
+		if axis==layout.Horizontal {
+			firstWidth:=int(float32(gtx.Constraints.Max.X)*ratio)
+			return layout.Flex{Axis:axis}.Layout(gtx,
+				layout.Flexed(ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.First,tab,origin)}),
+				layout.Flexed(1-ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.Second,tab,origin.Add(image.Pt(firstWidth,0)))}),
+			)
+		}
+		firstHeight:=int(float32(gtx.Constraints.Max.Y)*ratio)
 		return layout.Flex{Axis:axis}.Layout(gtx,
-			layout.Flexed(ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.First,tab)}),
-			layout.Flexed(1-ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.Second,tab)}),
+			layout.Flexed(ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.First,tab,origin)}),
+			layout.Flexed(1-ratio,func(gtx layout.Context)layout.Dimensions{return c.layoutPane(gtx,th,node.Second,tab,origin.Add(image.Pt(0,firstHeight)))}),
 		)
 	}
+	c.hitRegions=append(c.hitRegions,automationHit{
+		Rect:image.Rectangle{Min:origin,Max:origin.Add(gtx.Constraints.Max)},
+		Kind:hitPane,ID:node.PaneID,
+	})
 	if node.Terminal==nil {
 		label:=material.Label(th,unit.Sp(14),"Empty pane")
 		return layout.Center.Layout(gtx,label.Layout)
@@ -789,4 +857,42 @@ func exact(gtx layout.Context,size image.Point)layout.Context{
 func configColor(value string,fallback uint32)color.NRGBA{
 	rgb:=goconfig.ParseColor(value,fallback)
 	return color.NRGBA{R:uint8(rgb>>16),G:uint8(rgb>>8),B:uint8(rgb),A:0xff}
+}
+
+
+func (c *WorkspaceClient) automationClick(x,y float32,count int)bool{
+	c.layoutMu.Lock()
+	defer c.layoutMu.Unlock()
+	if count<1{count=1}
+	point:=image.Pt(int(x),int(y))
+	for i:=len(c.hitRegions)-1;i>=0;i--{
+		hit:=c.hitRegions[i]
+		if !point.In(hit.Rect){continue}
+		switch hit.Kind{
+		case hitWorkspace:
+			if click:=c.workspaceClicks[hit.ID];click!=nil{
+				for n:=0;n<count;n++{click.Click()}
+				if c.invalidate!=nil{c.invalidate()}
+				return true
+			}
+		case hitTab:
+			if click:=c.tabClicks[hit.ID];click!=nil{
+				for n:=0;n<count;n++{click.Click()}
+				if c.invalidate!=nil{c.invalidate()}
+				return true
+			}
+		case hitNewWorkspace:
+			for n:=0;n<count;n++{c.newWorkspace.Click()}
+			if c.invalidate!=nil{c.invalidate()}
+			return true
+		case hitNewTab:
+			for n:=0;n<count;n++{c.newTab.Click()}
+			if c.invalidate!=nil{c.invalidate()}
+			return true
+		case hitPane:
+			_ = c.session.DispatchAsync(map[string]any{"type":"pane.focus","pane_id":hit.ID})
+			return true
+		}
+	}
+	return false
 }
