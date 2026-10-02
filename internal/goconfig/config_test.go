@@ -59,3 +59,12 @@ func TestNormalizeClampsTerminalLimits(t *testing.T){
 		t.Fatalf("replay limit not clamped: %d",cfg.Terminal.ReplayHistoryBytes)
 	}
 }
+
+
+func TestChangingShellProgramRecomputesDefaultArgs(t *testing.T){
+	path:=filepath.Join(t.TempDir(),"config.json")
+	if err:=os.WriteFile(path,[]byte(`{"shell":{"program":"/bin/sh"}}`),0o600);err!=nil{t.Fatal(err)}
+	cfg,err:=Load(path);if err!=nil{t.Fatal(err)}
+	if cfg.Shell.Program!="/bin/sh"{t.Fatalf("program=%q",cfg.Shell.Program)}
+	if len(cfg.Shell.Args)!=0{t.Fatalf("sh inherited stale args: %#v",cfg.Shell.Args)}
+}
