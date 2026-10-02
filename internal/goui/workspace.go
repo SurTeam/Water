@@ -907,7 +907,7 @@ func (c *WorkspaceClient) automationClick(x,y float32,count int)bool{
 
 	position:=f32.Pt(x,y)
 	for n:=0;n<count;n++{
-		eventTime:=now.Add(time.Duration(n+1)*50*time.Millisecond)
+		eventOffset:=time.Duration(n+1)*50*time.Millisecond
 		router.Queue(
 			pointer.Event{
 				Kind:pointer.Press,
@@ -915,17 +915,17 @@ func (c *WorkspaceClient) automationClick(x,y float32,count int)bool{
 				PointerID:1,
 				Buttons:pointer.ButtonPrimary,
 				Position:position,
-				Time:eventTime,
+				Time:eventOffset,
 			},
 			pointer.Event{
 				Kind:pointer.Release,
 				Source:pointer.Mouse,
 				PointerID:1,
 				Position:position,
-				Time:eventTime.Add(10*time.Millisecond),
+				Time:eventOffset+10*time.Millisecond,
 			},
 		)
-		frame(eventTime.Add(10*time.Millisecond))
+		frame(now.Add(eventOffset+10*time.Millisecond))
 	}
 	if c.invalidate!=nil{c.invalidate()}
 	return true
