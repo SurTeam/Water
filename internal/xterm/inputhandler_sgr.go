@@ -166,7 +166,19 @@ func (h *InputHandler) charAttributes(params *Params) bool {
 func (h *InputHandler) processSGR0(attr *AttributeData) {
 	attr.Fg = 0
 	attr.Bg = 0
-	attr.Extended = nil
+	if attr.Extended==nil {
+		return
+	}
+	// SGR 0 resets visual decoration but must not terminate an OSC 8
+	// hyperlink. Clone only when extended state actually exists so ordinary
+	// color/style resets remain allocation-free while already-emitted cells
+	// keep their immutable extended attributes.
+	attr.Extended=attr.Extended.Clone()
+	attr.Extended.SetUnderlineStyle(UnderlineStyleNone)
+	uc:=attr.Extended.UnderlineColor()
+	uc&=^(AttrCMMask|AttrRGBMask)
+	attr.Extended.SetUnderlineColor(uc)
+	attr.UpdateExtended()
 }
 
 // updateAttrColor applies a color mode and components to a packed color value.
