@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -61,5 +62,27 @@ func TestEventTypeNameParity(t *testing.T){
 		if got:=eventTypeName(wire);got!=want{
 			t.Fatalf("%q => %q, want %q",wire,got,want)
 		}
+	}
+}
+
+
+func TestPlatformScenarioFixturesThroughGoCLI(t *testing.T){
+	cases:=[]struct{
+		name string
+		required string
+	}{
+		{name:"terminal_zsh.json",required:"/opt/homebrew/bin/zsh"},
+		{name:"agent_detection.json",required:"/bin/zsh"},
+	}
+	for _,tc:=range cases{
+		t.Run(tc.name,func(t *testing.T){
+			if _,err:=os.Stat(tc.required);err!=nil{t.Skipf("%s is unavailable: %v",tc.required,err)}
+			withCLIServer(t,func(socket string){
+				path:=filepath.Join("..","..","tests","scenarios",tc.name)
+				if err:=run([]string{"--socket",socket,"scenario","run",path});err!=nil{
+					t.Fatalf("scenario %s: %v",tc.name,err)
+				}
+			})
+		})
 	}
 }
