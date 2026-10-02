@@ -194,11 +194,12 @@ Only credentialed/manual environment validation remains:
   ```
 
   The harness starts the Go GUI/server, switches the active PTY to `cat`,
-  and performs two phases: it first waits for the exact native preedit in
-  `ui.snapshot` while asserting that text has not leaked into the PTY, then
-  prompts for commit and verifies the exact UTF-8 text in the authoritative
-  server-owned terminal stream plus composition-state cleanup. Override the
-  probe for a different IME with `WATER_IME_PROBE_TEXT='…'`.
+  and performs two phases: it first captures any non-empty native preedit in
+  `ui.snapshot` (including phonetic Pinyin/Kana-style preedit) while asserting
+  those bytes have not leaked into the PTY, then prompts for commit and verifies
+  the configured final UTF-8 probe text in the authoritative server-owned
+  terminal stream plus composition-state cleanup. Override the final probe for
+  a different IME with `WATER_IME_PROBE_TEXT='…'`.
 
 - **Credentialed Apple signing/notarization.** The signing workflow now performs
   a fail-fast credential/tool preflight before downloading the unsigned asset.
