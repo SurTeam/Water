@@ -234,8 +234,9 @@ if ! "$GO_WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$termi
   exit 1
 fi
 
-"$GO_WATER_BIN" --socket "$SOCKET" ui screenshot --output "$SCREENSHOT" >/dev/null
-python3 - "$SCREENSHOT" <<'PY'
+screenshot_error="$TMP_ROOT/screenshot.err"
+if "$GO_WATER_BIN" --socket "$SOCKET" ui screenshot --output "$SCREENSHOT" >/dev/null 2>"$screenshot_error"; then
+  python3 - "$SCREENSHOT" <<'PY'
 import pathlib, sys
 data=pathlib.Path(sys.argv[1]).read_bytes()
 png_magic=bytes.fromhex("89504e470d0a1a0a")
@@ -243,3 +244,10 @@ if len(data) < len(png_magic) or data[:len(png_magic)] != png_magic:
     raise SystemExit("reverse cross-language screenshot is not a PNG")
 print(f"Rust GUI ↔ Go server real-window smoke passed; screenshot bytes={len(data)}")
 PY
+elif grep -q "render_to_image not implemented for this platform" "$screenshot_error"; then
+  echo "Rust GUI ↔ Go server real-window/input/clipboard smoke passed; GPUI runtime screenshot is unsupported on Linux"
+else
+  echo "Rust GUI screenshot forwarding failed unexpectedly" >&2
+  cat "$screenshot_error" >&2 || true
+  exit 1
+fi
