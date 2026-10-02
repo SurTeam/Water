@@ -265,7 +265,12 @@ func (t *Terminal) readLoop() {
 	defer idleTimer.Stop()
 	defer maxTimer.Stop()
 	var idleC,maxC <-chan time.Time
-	var batch []byte
+
+	// Hold reader-owned blocks until flush, then allocate exactly the number of
+	// immutable bytes retained by replay/subscribers. This avoids reserving a
+	// full 128 KiB event buffer for every partially-filled micro-burst.
+	pending:=make([][]byte,0,rawReadQueueCapacity)
+	pendingBytes:=0
 
 	stopIdle:=func(){
 		if idleC==nil{return}
@@ -289,14 +294,27 @@ func (t *Terminal) readLoop() {
 		maxTimer.Reset(outputBatchMaxAge)
 		maxC=maxTimer.C
 	}
+	returnPending:=func(){
+		for _,chunk:=range pending{
+			if cap(chunk)>=readBlockBytes{
+				free<-chunk[:readBlockBytes]
+			}
+		}
+		pending=pending[:0]
+		pendingBytes=0
+	}
 	flush:=func(){
-		if len(batch)==0{
+		if pendingBytes==0{
 			stopIdle()
 			stopMax()
 			return
 		}
-		data:=batch
-		batch=nil
+		data:=make([]byte,pendingBytes)
+		offset:=0
+		for _,chunk:=range pending{
+			offset+=copy(data[offset:],chunk)
+		}
+		returnPending()
 		stopIdle()
 		stopMax()
 		t.publish(goprotocol.TerminalEvent{
@@ -305,37 +323,25 @@ func (t *Terminal) readLoop() {
 			Data:data,
 		})
 	}
-	returnRaw:=func(chunk []byte){
-		if cap(chunk)<readBlockBytes{return}
-		free<-chunk[:readBlockBytes]
-	}
 	appendChunk:=func(chunk []byte){
-		if len(chunk)==0{return}
-		original:=chunk
-		for len(chunk)>0{
-			if batch==nil{
-				batch=make([]byte,0,readBlockBytes)
-				startMax()
-			}
-			remaining:=cap(batch)-len(batch)
-			if remaining<=0{
-				flush()
-				continue
-			}
-			n:=len(chunk)
-			if n>remaining{n=remaining}
-			batch=append(batch,chunk[:n]...)
-			chunk=chunk[n:]
-			if len(batch)==cap(batch){
-				flush()
-			}else{
-				// Match the Rust worker's micro-burst semantics: each useful
-				// read extends the idle window, while max age still bounds a
-				// slow continuous stream to five milliseconds.
-				resetIdle()
-			}
+		if len(chunk)==0{
+			if cap(chunk)>=readBlockBytes{free<-chunk[:readBlockBytes]}
+			return
 		}
-		returnRaw(original)
+		if pendingBytes>0 && pendingBytes+len(chunk)>readBlockBytes{
+			flush()
+		}
+		if pendingBytes==0{startMax()}
+		pending=append(pending,chunk)
+		pendingBytes+=len(chunk)
+		if pendingBytes>=readBlockBytes{
+			flush()
+		}else{
+			// Match the Rust worker's micro-burst semantics: each useful read
+			// extends the idle window, while max age still bounds a continuous
+			// stream to five milliseconds.
+			resetIdle()
+		}
 	}
 	drainObserved:=func(){
 		for {
