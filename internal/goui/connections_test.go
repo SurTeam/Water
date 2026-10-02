@@ -72,3 +72,39 @@ func TestMultiWorkspaceClientRejectsDuplicateID(t *testing.T){
 	}
 	if closed!=1{t.Fatalf("duplicate close count = %d",closed)}
 }
+
+
+func TestMultiWorkspaceClientConnectRemoteReusesDestination(t *testing.T){
+	manager:=NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+
+	factoryCalls:=0
+	closed:=0
+	manager.SetRemoteConnector(func(destination string)(ConnectionEntry,*WorkspaceClient,func(),error){
+		factoryCalls++
+		return ConnectionEntry{
+			ID:uuid.New(),
+			Name:destination,
+			Kind:"remote",
+			Status:"connected",
+			Destination:destination,
+		},NewWorkspaceClientWithConnection(nil,nil,goconfig.Default(),destination),func(){closed++},nil
+	})
+
+	if err:=manager.ConnectRemote("build-host");err!=nil{t.Fatal(err)}
+	entries:=manager.ConnectionEntries()
+	if len(entries)!=1{t.Fatalf("connection count = %d",len(entries))}
+	firstID:=entries[0].ID
+	if got:=manager.ActiveConnectionID();got!=firstID{
+		t.Fatalf("active connection = %s, want %s",got,firstID)
+	}
+
+	if err:=manager.ConnectRemote("build-host");err!=nil{t.Fatal(err)}
+	if factoryCalls!=1{t.Fatalf("duplicate destination factory calls = %d",factoryCalls)}
+	if len(manager.ConnectionEntries())!=1{t.Fatal("duplicate destination created another connection")}
+
+	if !manager.RemoveConnection(firstID){t.Fatal("remove remote failed")}
+	if closed!=1{t.Fatalf("close count = %d",closed)}
+	if err:=manager.ConnectRemote("build-host");err!=nil{t.Fatal(err)}
+	if factoryCalls!=2{t.Fatalf("reconnect factory calls = %d",factoryCalls)}
+}
