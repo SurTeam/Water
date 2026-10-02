@@ -6,6 +6,7 @@ import (
 	"sync"
 	"strings"
 
+	"gioui.org/f32"
 	"gioui.org/font"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -145,8 +146,9 @@ type TerminalView struct {
 	FontFamily string
 	Hyperlinks bool
 
-	mu    sync.Mutex
-	cache map[int]preparedRow
+	mu         sync.Mutex
+	cache      map[int]preparedRow
+	imageCache map[uint64]paint.ImageOp
 }
 
 func NewTerminalView() *TerminalView {
@@ -158,6 +160,7 @@ func NewTerminalView() *TerminalView {
 		FontFamily: "monospace",
 		Hyperlinks: true,
 		cache:      make(map[int]preparedRow),
+		imageCache: make(map[uint64]paint.ImageOp),
 	}
 }
 
@@ -238,6 +241,45 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 	}
 	for row := len(snap.RowsData); row < len(v.cache); row++ {
 		delete(v.cache, row)
+	}
+	liveImages:=make(map[uint64]struct{},len(snap.Images))
+	for _,terminalImage:=range snap.Images {
+		if terminalImage.PixelWidth<=0 || terminalImage.PixelHeight<=0 ||
+			terminalImage.SourceWidth<=0 || terminalImage.SourceHeight<=0 ||
+			len(terminalImage.RGBA)<terminalImage.PixelWidth*terminalImage.PixelHeight*4 {
+			continue
+		}
+		liveImages[terminalImage.ID]=struct{}{}
+		imageOp,ok:=v.imageCache[terminalImage.ID]
+		if !ok {
+			rgba:=&image.RGBA{
+				Pix:terminalImage.RGBA,
+				Stride:terminalImage.PixelWidth*4,
+				Rect:image.Rect(0,0,terminalImage.PixelWidth,terminalImage.PixelHeight),
+			}
+			imageOp=paint.NewImageOp(rgba)
+			v.imageCache[terminalImage.ID]=imageOp
+		}
+		left:=terminalImage.Column*cellWidth
+		top:=terminalImage.Row*lineHeight
+		destWidth:=terminalImage.Width*cellWidth
+		destHeight:=terminalImage.Height*lineHeight
+		if destWidth<=0 || destHeight<=0 { continue }
+		right:=left+destWidth
+		bottom:=top+destHeight
+		clipStack:=clip.Rect(image.Rect(left,top,right,bottom)).Push(gtx.Ops)
+		scaleX:=float32(destWidth)/float32(terminalImage.SourceWidth)
+		scaleY:=float32(destHeight)/float32(terminalImage.SourceHeight)
+		imageX:=float32(left)-float32(terminalImage.SourceX)*scaleX
+		imageY:=float32(top)-float32(terminalImage.SourceY)*scaleY
+		transform:=op.Affine(f32.NewAffine2D(scaleX,0,imageX,0,scaleY,imageY)).Push(gtx.Ops)
+		imageOp.Add(gtx.Ops)
+		paint.PaintOp{}.Add(gtx.Ops)
+		transform.Pop()
+		clipStack.Pop()
+	}
+	for id:=range v.imageCache {
+		if _,ok:=liveImages[id];!ok { delete(v.imageCache,id) }
 	}
 	v.mu.Unlock()
 
