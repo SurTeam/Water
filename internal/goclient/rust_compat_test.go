@@ -38,10 +38,11 @@ func TestGoClientAgainstRustServer(t *testing.T) {
 
 	client:=New(socket)
 	deadline:=time.Now().Add(10*time.Second)
+	var lastErr error
 	for {
 		var pong any
-		if err:=client.Call("ping",map[string]any{},&pong);err==nil{break}
-		if time.Now().After(deadline){t.Fatal("Rust server did not become ready")}
+		if err:=client.Call("ping",map[string]any{},&pong);err==nil{break}else{lastErr=err}
+		if time.Now().After(deadline){t.Fatalf("Rust server did not become ready: %v",lastErr)}
 		time.Sleep(25*time.Millisecond)
 	}
 
