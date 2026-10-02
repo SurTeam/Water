@@ -1391,7 +1391,8 @@ func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node 
 	cellWidth:=gtx.Dp(term.view.CellWidth)
 	lineHeight:=gtx.Dp(term.view.LineHeight)
 	term.input.Process(gtx,snapshot,cellWidth,lineHeight)
-	dims:=term.view.Layout(gtx,th,snapshot,selection)
+	composition:=term.input.CompositionText()
+	dims:=term.view.Layout(gtx,th,snapshot,selection,composition)
 	term.input.Add(gtx,dims.Size)
 	return dims
 }
