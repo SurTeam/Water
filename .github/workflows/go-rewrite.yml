@@ -32,6 +32,8 @@ jobs:
           sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev libxcursor-dev libxfixes-dev
 
       - run: go mod tidy
-      - run: go test ./internal/goprotocol ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
+      - name: Build remote payloads
+        run: bash scripts/build-go-embedded-servers.sh
+      - run: go test ./internal/goprotocol ./internal/goagent ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
