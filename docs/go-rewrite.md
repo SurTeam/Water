@@ -188,8 +188,11 @@ interop cases:
 - Configure the repository's Apple notarization API-key secrets
   (`APPLE_NOTARY_KEY_BASE64`, `APPLE_NOTARY_KEY_ID`,
   `APPLE_NOTARY_ISSUER_ID`) and execute one signed notarized release/dev
-  artifact to validate the credentialed path. The workflow implementation is
-  present, but CI cannot validate Apple credentials without those secrets.
+  artifact to validate the credentialed path. The staging helper now dispatches
+  the signing workflow from the current branch by default (override with
+  `WATER_SIGNING_WORKFLOW_REF`), so this can be validated on `go-rewrite`
+  before merging. CI still cannot validate Apple credentials without those
+  secrets.
 
 Do not merge `go-rewrite` into `main` until the credentialed Apple release
 path and true system-IME/manual desktop checks are executed or explicitly
