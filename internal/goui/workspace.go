@@ -255,6 +255,18 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 	for _,term:=range c.terminals{terms=append(terms,term)}
 	c.mu.RUnlock()
 
+	c.layoutMu.Lock()
+	hits:=make([]map[string]any,0,len(c.hitRegions))
+	for _,hit:=range c.hitRegions{
+		hits=append(hits,map[string]any{
+			"kind":automationHitKindName(hit.Kind),
+			"id":hit.ID,
+			"rect":[]int{hit.Rect.Min.X,hit.Rect.Min.Y,hit.Rect.Max.X,hit.Rect.Max.Y},
+		})
+	}
+	frameSize:=c.frameSize
+	c.layoutMu.Unlock()
+
 	visibleCells:=0
 	preparedRows:=0
 	imageTextures:=0
@@ -281,6 +293,19 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"prepared_row_cache_entries":preparedRows,
 		"image_texture_cache_entries":imageTextures,
 		"terminal_graphics_bytes":graphicsBytes,
+		"frame_size":[]int{frameSize.X,frameSize.Y},
+		"automation_hits":hits,
+	}
+}
+
+func automationHitKindName(kind automationHitKind)string{
+	switch kind{
+	case hitWorkspace:return "workspace"
+	case hitTab:return "tab"
+	case hitNewWorkspace:return "new_workspace"
+	case hitNewTab:return "new_tab"
+	case hitPane:return "pane"
+	default:return "unknown"
 	}
 }
 
