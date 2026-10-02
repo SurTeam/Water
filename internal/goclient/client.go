@@ -9,6 +9,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/google/uuid"
 )
@@ -20,7 +21,7 @@ type Client struct {
 }
 
 func New(socketPath string) *Client {
-	return &Client{SocketPath: socketPath, Build: "dev"}
+	return &Client{SocketPath: socketPath, Build: gobuild.Variant}
 }
 
 func marshalParams(params any) (json.RawMessage, error) {
