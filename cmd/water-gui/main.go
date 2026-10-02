@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,7 +172,3 @@ func resolveGUISocket(explicit string,cfg goconfig.AppConfig)string{
 	return "/tmp/water-dev.sock"
 }
 
-func isDialError(err error)bool{
-	var netErr *net.OpError
-	return err!=nil && (strings.Contains(err.Error(),"connect") || errors.As(err,&netErr))
-}
