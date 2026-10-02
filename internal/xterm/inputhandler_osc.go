@@ -199,7 +199,7 @@ func (h *InputHandler) createHyperlink(params, uri string) bool {
 		}
 	}
 
-	h.curAttrData.Extended = h.curAttrData.Extended.Clone()
+	h.curAttrData.Extended = h.curAttrData.extended().Clone()
 	h.curAttrData.Extended.SetURLID(h.oscLinkService.RegisterLink(OscLinkData{ID: id, URI: uri}))
 	h.curAttrData.UpdateExtended()
 	return true
