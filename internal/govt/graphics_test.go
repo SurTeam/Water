@@ -127,3 +127,35 @@ func TestKittyPlacementAdvancesCursorBeforeFollowingText(t *testing.T) {
 	}
 	if !foundB { t.Fatal("trailing text missing") }
 }
+
+
+func TestCellPixelQueryUsesConfiguredGeometryAndIsLiveOnly(t *testing.T) {
+	e:=New(80,24,100)
+	defer e.Close()
+	e.SetCellSize(11,23)
+
+	e.WriteReplay([]byte("\x1b[16t"))
+	if got:=e.TakeResponses();len(got)!=0 {
+		t.Fatalf("replay cell query produced response %q",bytes.Join(got,nil))
+	}
+	e.Write([]byte("\x1b[1"))
+	e.Write([]byte("6t"))
+	got:=bytes.Join(e.TakeResponses(),nil)
+	if !bytes.Contains(got,[]byte("\x1b[6;23;11t")) {
+		t.Fatalf("unexpected cell query response %q",got)
+	}
+}
+
+func TestAltScreenEraseRemovesImagePlacement(t *testing.T) {
+	e:=New(20,6,100)
+	defer e.Close()
+	e.Write([]byte("\x1b[?1049h"))
+	e.Write([]byte("\x1b_Ga=T,i=12,f=100;"+tinyPNG(t)+"\x1b\\"))
+	if got:=len(e.Snapshot().Images);got!=1 {
+		t.Fatalf("image count before erase=%d",got)
+	}
+	e.Write([]byte("\x1b[2J"))
+	if got:=len(e.Snapshot().Images);got!=0 {
+		t.Fatalf("image count after alt-screen erase=%d",got)
+	}
+}
