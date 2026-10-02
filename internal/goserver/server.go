@@ -153,6 +153,10 @@ type session struct {
 	mu          sync.Mutex
 	attachments map[uuid.UUID]func()
 	compactSnapshots bool
+
+	snapshotRequests chan struct{}
+	done             chan struct{}
+	closeOnce        sync.Once
 }
 
 func (ss *session) write(v any) error {
@@ -168,14 +172,32 @@ func (ss *session) writeTerminal(id uuid.UUID, ev goprotocol.TerminalEvent) erro
 }
 
 func (ss *session) close() {
-	for _, cancel := range ss.attachments {
-		cancel()
+	ss.closeOnce.Do(func() {
+		close(ss.done)
+		for _, cancel := range ss.attachments {
+			cancel()
+		}
+		_ = ss.conn.Close()
+	})
+}
+
+func (ss *session) requestSnapshot() {
+	select {
+	case ss.snapshotRequests <- struct{}{}:
+	default:
+		// Latest-wins: a pending notification will serialize the newest model
+		// revision once the session writer becomes available.
 	}
-	_ = ss.conn.Close()
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	ss := &session{conn: conn, attachments: make(map[uuid.UUID]func())}
+	ss := &session{
+		conn: conn,
+		attachments: make(map[uuid.UUID]func()),
+		snapshotRequests: make(chan struct{},1),
+		done: make(chan struct{}),
+	}
+	go s.snapshotLoop(ss)
 	defer func() {
 		s.dropSession(ss)
 		ss.close()
@@ -551,18 +573,32 @@ func (s *Server) uiSessionCount() int {
 
 func (s *Server) pushSnapshot(ss *session) error {
 	state := s.model.Dump()
-	gometrics.ModelSnapshotPushes.Add(1)
 	params, err := json.Marshal(state)
 	if err != nil {
 		return err
 	}
-	return ss.write(goprotocol.WireMessage{
+	err = ss.write(goprotocol.WireMessage{
 		BuildVariant: s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
 		RequestID: 0,
 		Method: "push.snapshot",
 		Params: params,
 	})
+	if err==nil {
+		gometrics.ModelSnapshotPushes.Add(1)
+	}
+	return err
+}
+
+func (s *Server) snapshotLoop(ss *session) {
+	for {
+		select {
+		case <-ss.snapshotRequests:
+			if err:=s.pushSnapshot(ss);err!=nil{return}
+		case <-ss.done:
+			return
+		}
+	}
 }
 
 func (s *Server) broadcastSnapshot() {
@@ -573,6 +609,6 @@ func (s *Server) broadcastSnapshot() {
 	}
 	s.sessionsMu.RUnlock()
 	for _, ss := range sessions {
-		_ = s.pushSnapshot(ss)
+		ss.requestSnapshot()
 	}
 }
