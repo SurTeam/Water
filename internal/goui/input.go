@@ -7,7 +7,6 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"gioui.org/gesture"
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
@@ -22,28 +21,23 @@ import (
 type TerminalInput struct {
 	tag      struct{}
 	mouseTag struct{}
-	click    gesture.Click
 
-	OnInput  func([]byte)
-	OnMouse  func(govt.MouseEvent) bool
-	OnScroll func(int)
+	OnInput          func([]byte)
+	OnMouse          func(govt.MouseEvent) bool
+	OnScroll         func(int)
+	OnSelectionStart func(col,row int)
+	OnSelectionMove  func(col,row int)
+	OnSelectionEnd   func(col,row int)
+	OnCopy           func() string
 
 	composing bool
 	pendingComposition string
 	pressedMouse govt.MouseButton
 	mousePressed bool
+	selecting bool
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
-	for {
-		ev, ok := i.click.Update(gtx.Source)
-		if !ok { break }
-		if ev.Kind == gesture.KindPress {
-			gtx.Execute(key.FocusCmd{Tag:&i.tag})
-			gtx.Execute(key.SoftKeyboardCmd{Show:true})
-		}
-	}
-
 	if cellWidth < 1 { cellWidth = 1 }
 	if lineHeight < 1 { lineHeight = 1 }
 	for {
@@ -60,33 +54,51 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			gtx.Execute(key.FocusCmd{Tag:&i.tag})
 			gtx.Execute(key.SoftKeyboardCmd{Show:true})
 		}
-		col:=int(pe.Position.X)/cellWidth+1
-		row:=int(pe.Position.Y)/lineHeight+1
-		if col<1{col=1};if col>snap.Cols{col=snap.Cols}
-		if row<1{row=1};if row>snap.Rows{row=snap.Rows}
+
+		col0:=int(pe.Position.X)/cellWidth
+		row0:=int(pe.Position.Y)/lineHeight
+		if col0<0{col0=0};if col0>=snap.Cols{col0=snap.Cols-1}
+		if row0<0{row0=0};if row0>=snap.Rows{row0=snap.Rows-1}
 		base:=govt.MouseEvent{
-			Col:col,Row:row,
+			Col:col0+1,Row:row0+1,
 			X:int(pe.Position.X)+1,Y:int(pe.Position.Y)+1,
 			Ctrl:pe.Modifiers.Contain(key.ModCtrl),
 			Alt:pe.Modifiers.Contain(key.ModAlt),
 			Shift:pe.Modifiers.Contain(key.ModShift),
 		}
+		tracking:=snap.MouseTracking!="" && snap.MouseTracking!="NONE"
+		localOverride:=pe.Modifiers.Contain(key.ModShift)
 
 		switch pe.Kind {
 		case pointer.Press:
 			button,ok:=mouseButton(pe.Buttons)
 			if !ok { continue }
+			if button==govt.MouseLeft && i.OnSelectionStart!=nil && (!tracking || localOverride) {
+				i.selecting=true
+				i.mousePressed=false
+				i.OnSelectionStart(col0,row0)
+				continue
+			}
 			i.pressedMouse=button
 			i.mousePressed=true
 			base.Button=button;base.Action=govt.MouseDown
-			if i.OnMouse!=nil { _=i.OnMouse(base) }
+			if tracking && i.OnMouse!=nil { _=i.OnMouse(base) }
 		case pointer.Release:
+			if i.selecting {
+				if i.OnSelectionEnd!=nil { i.OnSelectionEnd(col0,row0) }
+				i.selecting=false
+				continue
+			}
 			if !i.mousePressed { continue }
 			base.Button=i.pressedMouse;base.Action=govt.MouseUp
-			if i.OnMouse!=nil { _=i.OnMouse(base) }
+			if tracking && i.OnMouse!=nil { _=i.OnMouse(base) }
 			i.mousePressed=false
 		case pointer.Move,pointer.Drag:
-			if snap.MouseTracking=="" || snap.MouseTracking=="NONE" { continue }
+			if i.selecting {
+				if i.OnSelectionMove!=nil { i.OnSelectionMove(col0,row0) }
+				continue
+			}
+			if !tracking { continue }
 			if i.mousePressed { base.Button=i.pressedMouse } else { base.Button=govt.MouseNone }
 			base.Action=govt.MouseMove
 			if i.OnMouse!=nil { _=i.OnMouse(base) }
@@ -96,8 +108,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				if pe.Scroll.Y<0 { steps=-1 } else if pe.Scroll.Y>0 { steps=1 }
 			}
 			if steps==0 { continue }
-			tracked:=snap.MouseTracking!="" && snap.MouseTracking!="NONE" && i.OnMouse!=nil
-			if tracked {
+			if tracking && !localOverride && i.OnMouse!=nil {
 				action:=govt.MouseDown
 				if steps<0 { action=govt.MouseUp;steps=-steps }
 				base.Button=govt.MouseWheel;base.Action=action
@@ -114,6 +125,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			}
 		case pointer.Cancel:
 			i.mousePressed=false
+			i.selecting=false
 		}
 	}
 
@@ -122,6 +134,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		key.FocusFilter{Target:&i.tag},
 		transfer.TargetFilter{Target:&i.tag,Type:"application/text"},
 		key.Filter{Focus:&i.tag,Name:"V",Required:key.ModShortcut},
+		key.Filter{Focus:&i.tag,Name:"C",Required:key.ModShortcut},
 		key.Filter{Focus:&i.tag, Name:key.NameReturn, Optional:allMods},
 		key.Filter{Focus:&i.tag, Name:key.NameEnter, Optional:allMods},
 		key.Filter{Focus:&i.tag, Name:key.NameEscape, Optional:allMods},
@@ -198,6 +211,19 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				gtx.Execute(clipboard.ReadCmd{Tag:&i.tag})
 				continue
 			}
+			if ev.Name=="C" && ev.Modifiers.Contain(key.ModShortcut) {
+				if i.OnCopy!=nil {
+					if selected:=i.OnCopy(); selected!="" {
+						gtx.Execute(clipboard.WriteCmd{
+							Type:"text/plain;charset=utf-8",
+							Data:io.NopCloser(strings.NewReader(selected)),
+						})
+						continue
+					}
+				}
+				i.emit([]byte{0x03})
+				continue
+			}
 			if ev.Modifiers.Contain(key.ModCommand) || ev.Modifiers.Contain(key.ModSuper) {
 				continue
 			}
@@ -213,7 +239,6 @@ func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
 	event.Op(gtx.Ops,&i.tag)
 	event.Op(gtx.Ops,&i.mouseTag)
 	key.InputHintOp{Tag:&i.tag,Hint:key.HintText}.Add(gtx.Ops)
-	i.click.Add(gtx.Ops)
 	stack.Pop()
 }
 
