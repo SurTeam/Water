@@ -3,6 +3,7 @@ package goserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
