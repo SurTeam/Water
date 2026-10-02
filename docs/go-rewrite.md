@@ -93,7 +93,11 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Existing Water scenario JSON format is understood by the Go CLI.
 - Native macOS Go `.app` packaging with the same Water/Water Dev bundle and
   binary names consumed by the existing codesign/release workflow.
-- The ordinary macOS CI smoke-builds the unsigned Go app bundle and archive.
+- Native Linux Go tarball packaging with the same dev/release binary names as
+  the Rust package (`water-dev` / `water-srv-dev` or
+  `water` / `water-server`).
+- Ordinary CI smoke-builds both the Linux Go archive and the unsigned macOS Go
+  app bundle/archive.
   The signing workflow can optionally submit the signed bundle through
   `notarytool`, staple the ticket, and validate it before release packaging.
 - Hot-path counters for PTY reads, terminal stream bytes/events, replay,
