@@ -124,10 +124,11 @@ benchmark oracle while replacing both the Water client and server in Go.
   verifies sequence continuity, 64-event queue caps, the 8 MiB replay bound,
   and a conservative shared-runner throughput gate. It also measures resize
   and Ctrl-C-to-exit latency while stdout is flooded.
-- `.github/workflows/go-rust-benchmark.yml` provides a manual same-runner
-  Rust-vs-Go 64 MB comparison using the existing Rust completion benchmark and
-  Go direct/server benchmarks, plus interaction-under-flood measurements. Raw
-  logs are retained as a workflow artifact.
+- `.github/workflows/go-rust-benchmark.yml` provides an automatic/manual
+  same-runner Rust-vs-Go 64 MB comparison using the existing Rust completion
+  benchmark and Go direct/server benchmarks, plus interaction-under-flood
+  measurements. Raw logs and a Go allocation profile are retained as workflow
+  artifacts.
 - Example shared-runner measurements observed while adding the gate:
   - 26.8 MB/s direct vs 23.6 MB/s server (87.8% retention).
   - 16.1 MB/s direct vs 13.0 MB/s server (80.6% retention) under a noisier run.
@@ -137,6 +138,17 @@ benchmark oracle while replacing both the Water client and server in Go.
     output flood.
   These are CI smoke measurements, not substitutes for the formal same-machine
   Rust-vs-Go benchmark.
+- Same-runner language benchmark (Ubuntu hosted runner, Go 1.27.1,
+  Rust 1.98.1, 68.27 MB decoded payload):
+  - Go direct median: ~16.7 MB/s.
+  - Go server-local median: ~16.8 MB/s.
+  - Rust direct median: ~25.2 MB/s.
+  - Rust server-local median: ~25.7 MB/s.
+  - Go therefore delivers roughly 65–66% of Rust terminal-core completion
+    throughput on this workload, while the Go server-local transport retains
+    essentially all of the Go direct throughput.
+  - Go interaction-under-flood remained low-latency in the same run:
+    resize 0.36–2.14 ms and Ctrl-C-to-exit 0.72–5.12 ms across three samples.
 
 ## Remaining parity work
 
@@ -156,10 +168,10 @@ interop cases:
   directions. Deterministic Gio IME state-machine coverage is automated; a
   true system-IME composition session still needs platform-specific manual
   validation because Xvfb cannot reliably drive a native input-method engine.
-- Run the manual same-runner Rust-vs-Go benchmark workflow and publish the
-  resulting 64 MB completion/interaction data. For release decisions, also run
-  the larger ANSI-heavy / sustained-memory fixtures and record p50/p95/p99,
-  allocations, and RSS rather than relying only on shared-runner smoke gates.
+- Extend the successful same-runner Rust-vs-Go benchmark beyond the current
+  64 MB plain-text completion fixture: add ANSI-heavy, Unicode/ligature,
+  multi-pane, sustained-memory/RSS, and p50/p95/p99 frame-time fixtures before
+  making a final release-performance decision.
 - Configure the repository's Apple notarization API-key secrets
   (`APPLE_NOTARY_KEY_BASE64`, `APPLE_NOTARY_KEY_ID`,
   `APPLE_NOTARY_ISSUER_ID`) and execute one signed notarized release/dev
