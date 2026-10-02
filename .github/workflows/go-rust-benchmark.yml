@@ -9,6 +9,8 @@ on:
       - "internal/goprotocol/**"
       - "tests/bench_terminal.rs"
       - "internal/goterminal/**"
+      - "internal/govt/**"
+      - "internal/xterm/**"
       - "internal/goserver/**"
       - "internal/goclient/**"
       - "src/terminal/**"
