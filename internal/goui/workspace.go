@@ -563,6 +563,78 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	c.mu.Unlock()
 }
 
+func (c *WorkspaceClient) activateHyperlink(uri string){
+	uri=strings.TrimSpace(uri)
+	if uri=="" || !c.config.Terminal.Hyperlinks{return}
+	destination:=""
+	if c.remoteDestination!="" && strings.HasPrefix(uri,"file://"){
+		destination=c.remoteDestination
+	}
+	if destination!="" && !c.config.Terminal.RemoteHyperlinkAutoDownload{
+		c.hyperlinkMu.Lock()
+		c.hyperlinkPrompt=&hyperlinkPrompt{URI:uri,Destination:destination}
+		c.hyperlinkMu.Unlock()
+		if c.invalidate!=nil{c.invalidate()}
+		return
+	}
+	c.runHyperlink(uri,destination)
+}
+
+func (c *WorkspaceClient) confirmHyperlink(){
+	c.hyperlinkMu.Lock()
+	prompt:=c.hyperlinkPrompt
+	if prompt==nil || prompt.Working{
+		c.hyperlinkMu.Unlock()
+		return
+	}
+	prompt.Working=true
+	prompt.Error=""
+	uri,destination:=prompt.URI,prompt.Destination
+	c.hyperlinkMu.Unlock()
+	if c.invalidate!=nil{c.invalidate()}
+	c.runHyperlink(uri,destination)
+}
+
+func (c *WorkspaceClient) cancelHyperlink(){
+	c.hyperlinkMu.Lock()
+	c.hyperlinkPrompt=nil
+	c.hyperlinkMu.Unlock()
+	if c.invalidate!=nil{c.invalidate()}
+}
+
+func (c *WorkspaceClient) runHyperlink(uri,destination string){
+	go func(){
+		var err error
+		if destination!=""{
+			var path string
+			path,err=gohyperlink.DownloadRemote(
+				destination,
+				uri,
+				c.config.Terminal.HyperlinkDownloadDirectory,
+			)
+			if err==nil{err=gohyperlink.OpenPath(path)}
+		}else{
+			err=gohyperlink.OpenTarget(uri)
+		}
+
+		c.hyperlinkMu.Lock()
+		prompt:=c.hyperlinkPrompt
+		same:=prompt!=nil && prompt.URI==uri && prompt.Destination==destination
+		if err==nil{
+			if same{c.hyperlinkPrompt=nil}
+		}else if prompt==nil || same{
+			if prompt==nil{
+				prompt=&hyperlinkPrompt{URI:uri,Destination:destination}
+				c.hyperlinkPrompt=prompt
+			}
+			prompt.Working=false
+			prompt.Error=err.Error()
+		}
+		c.hyperlinkMu.Unlock()
+		if c.invalidate!=nil{c.invalidate()}
+	}()
+}
+
 func applyWireEvent(emu *govt.Emulator,ev goprotocol.WireTerminalEvent) {
 	switch ev.Type {
 	case "output":
