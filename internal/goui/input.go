@@ -29,6 +29,7 @@ type TerminalInput struct {
 	OnSelectionMove  func(col,row int)
 	OnSelectionEnd   func(col,row int)
 	OnCopy           func() string
+	BracketedPaste   bool
 
 	composing bool
 	pendingComposition string
@@ -174,7 +175,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			data,err:=io.ReadAll(reader)
 			_ = reader.Close()
 			if err!=nil || len(data)==0 { continue }
-			if snap.BracketedPaste {
+			if i.BracketedPaste && snap.BracketedPaste {
 				wrapped:=make([]byte,0,len(data)+12)
 				wrapped=append(wrapped,[]byte("[200~")...)
 				wrapped=append(wrapped,data...)
