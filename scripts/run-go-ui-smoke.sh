@@ -125,6 +125,83 @@ if [[ "$changed" != "1" ]]; then
   exit 1
 fi
 
+# Exercise the real X11 clipboard and keyboard path rather than the internal
+# automation helpers. Focus the visible terminal pane, put a shell command in
+# the clipboard, press Ctrl+V, then Return, and verify the PTY output.
+pane_hit=""
+terminal_id=""
+for _ in $(seq 1 160); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null &&
+     "$WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER" 2>/dev/null; then
+    pane_hit="$(python3 - "$SNAPSHOT" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+for hit in data.get("automation_hits", []):
+    if hit.get("kind")=="pane":
+        x0,y0,x1,y1=hit["rect"]
+        print(f"{(x0+x1)/2:.1f} {(y0+y1)/2:.1f}")
+        break
+PY
+)"
+    terminal_id="$(python3 - "$STATE_AFTER" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+
+def find_terminal(value):
+    if isinstance(value, dict):
+        terminal=value.get("terminal")
+        if isinstance(terminal, dict):
+            summary=terminal.get("summary")
+            if isinstance(summary, dict) and summary.get("terminal_id"):
+                return summary["terminal_id"]
+        if value.get("terminal_id"):
+            return value["terminal_id"]
+        for child in value.values():
+            found=find_terminal(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found=find_terminal(child)
+            if found:
+                return found
+    return None
+
+root=data.get("workspace") or data
+print(find_terminal(root) or "")
+PY
+)"
+    if [[ -n "$pane_hit" && -n "$terminal_id" ]]; then
+      break
+    fi
+  fi
+  sleep 0.025
+done
+if [[ -z "$pane_hit" || -z "$terminal_id" ]]; then
+  echo "could not resolve active terminal pane for clipboard smoke" >&2
+  cat "$SNAPSHOT" >&2 2>/dev/null || true
+  cat "$STATE_AFTER" >&2 2>/dev/null || true
+  exit 1
+fi
+
+window_id="$(xdotool search --onlyvisible --name 'Water' 2>/dev/null | head -n1 || true)"
+if [[ -z "$window_id" ]]; then
+  echo "could not find visible Water X11 window" >&2
+  exit 1
+fi
+read -r pane_x pane_y <<<"$pane_hit"
+xdotool windowactivate --sync "$window_id"
+xdotool mousemove --window "$window_id" "$pane_x" "$pane_y" click 1
+printf '%s' 'echo WATER_CLIPBOARD_SMOKE' | xclip -selection clipboard
+xdotool key --window "$window_id" ctrl+v
+xdotool key --window "$window_id" Return
+
+if ! "$WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_CLIPBOARD_SMOKE     --timeout-ms 5000 >/dev/null; then
+  echo "real Gio clipboard paste did not reach the PTY" >&2
+  cat "$LOG" >&2 || true
+  exit 1
+fi
+
 remote_hit=""
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
