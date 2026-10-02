@@ -159,6 +159,81 @@ if [[ "$changed" != "1" ]]; then
   exit 1
 fi
 
+# Exercise the real X11 input path through the Rust GPUI client while the
+# terminal remains owned by the Go server.
+"$GO_WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER"
+terminal_id="$(python3 - "$STATE_AFTER" <<'PY'
+import json, sys
+data=json.load(open(sys.argv[1]))
+
+def find_terminal(value):
+    if isinstance(value, dict):
+        terminal=value.get("terminal")
+        if isinstance(terminal, dict):
+            summary=terminal.get("summary")
+            if isinstance(summary, dict) and summary.get("terminal_id"):
+                return summary["terminal_id"]
+        if value.get("terminal_id"):
+            return value["terminal_id"]
+        for child in value.values():
+            found=find_terminal(child)
+            if found:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found=find_terminal(child)
+            if found:
+                return found
+    return None
+
+print(find_terminal(data.get("workspace") or data) or find_terminal(data) or "")
+PY
+)"
+if [[ -z "$terminal_id" ]]; then
+  echo "could not resolve terminal for Rust GUI real-input smoke" >&2
+  cat "$STATE_AFTER" >&2 || true
+  exit 1
+fi
+
+window_id="$(xdotool search --onlyvisible --pid "$gui_pid" 2>/dev/null | head -n1 || true)"
+if [[ -z "$window_id" ]]; then
+  echo "could not find visible Rust Water X11 window for pid $gui_pid" >&2
+  cat "$GUI_LOG" >&2 || true
+  exit 1
+fi
+xdotool windowfocus --sync "$window_id"
+geometry="$(xdotool getwindowgeometry --shell "$window_id")"
+eval "$geometry"
+focus_x=$(( WIDTH * 2 / 3 ))
+focus_y=$(( HEIGHT / 2 ))
+xdotool mousemove --window "$window_id" "$focus_x" "$focus_y" click 1
+sleep 0.15
+
+xdotool type --delay 3 'echo WATER_RUST_GO_KEY_SMOKE'
+xdotool key Return
+if ! "$GO_WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_RUST_GO_KEY_SMOKE     --timeout-ms 5000 >/dev/null; then
+  echo "Rust GUI real keyboard input did not reach Go-owned PTY" >&2
+  echo "window_id=$window_id terminal=$terminal_id geometry=$WIDTH x $HEIGHT" >&2
+  cat "$GUI_LOG" >&2 || true
+  exit 1
+fi
+
+clipboard_text='echo WATER_RUST_GO_CLIPBOARD_SMOKE'
+printf '%s' "$clipboard_text" | xclip -selection clipboard
+sleep 0.1
+if [[ "$(xclip -selection clipboard -o 2>/dev/null || true)" != "$clipboard_text" ]]; then
+  echo "reverse cross-language X11 clipboard self-check failed" >&2
+  exit 1
+fi
+xdotool key ctrl+v
+sleep 0.15
+xdotool key Return
+if ! "$GO_WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_RUST_GO_CLIPBOARD_SMOKE     --timeout-ms 5000 >/dev/null; then
+  echo "Rust GUI real clipboard paste did not reach Go-owned PTY" >&2
+  cat "$GUI_LOG" >&2 || true
+  exit 1
+fi
+
 "$GO_WATER_BIN" --socket "$SOCKET" ui screenshot --output "$SCREENSHOT" >/dev/null
 python3 - "$SCREENSHOT" <<'PY'
 import pathlib, sys
