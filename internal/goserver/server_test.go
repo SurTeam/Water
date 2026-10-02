@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -207,5 +208,68 @@ func TestUIForwardingAndEventList(t *testing.T) {
 		if _, ok := metrics[key]; !ok {
 			t.Fatalf("missing metric %q", key)
 		}
+	}
+}
+
+
+func TestRejectsIncompatibleBuildVariantBeforeDispatch(t *testing.T) {
+	socket := filepath.Join("/tmp", "water-go-variant-"+uuid.New().String()+".sock")
+	srv := goserver.New(socket)
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+	defer func() {
+		_ = srv.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+	}()
+
+	client := goclient.New(socket)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var pong map[string]any
+		if err := client.Call("ping", map[string]any{}, &pong); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	before := stateDump(t, client).StateRevision
+
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	params, _ := json.Marshal(map[string]any{
+		"command": map[string]any{"type": "workspace.create"},
+	})
+	if err := goprotocol.WriteJSON(conn, goprotocol.WireMessage{
+		BuildVariant:    "release",
+		ProtocolVersion: goprotocol.ProtocolVersion,
+		RequestID:       77,
+		Method:          "command.dispatch",
+		Params:          params,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := goprotocol.ReadFrame(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply goprotocol.WireMessage
+	if err := json.Unmarshal(frame.JSON, &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.OK == nil || *reply.OK || reply.Error == nil || reply.Error.Code != "INCOMPATIBLE_SERVER" {
+		t.Fatalf("unexpected reply: %#v", reply)
+	}
+	after := stateDump(t, client).StateRevision
+	if after != before {
+		t.Fatalf("incompatible request mutated model: before=%d after=%d", before, after)
 	}
 }
