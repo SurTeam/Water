@@ -29,13 +29,19 @@ type TerminalInput struct {
 	OnSelectionMove  func(col,row int)
 	OnSelectionEnd   func(col,row int)
 	OnCopy           func() string
+	OnHyperlink      func(uri string)
 	BracketedPaste   bool
+	Hyperlinks       bool
+	HyperlinkCommandClick bool
 
 	composing bool
 	pendingComposition string
 	pressedMouse govt.MouseButton
 	mousePressed bool
 	selecting bool
+	hyperlinkPressed string
+	hyperlinkCol int
+	hyperlinkRow int
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
@@ -74,6 +80,16 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		case pointer.Press:
 			button,ok:=mouseButton(pe.Buttons)
 			if !ok { continue }
+			uri:=hyperlinkURIAt(snap,col0,row0)
+			if button==govt.MouseLeft && i.Hyperlinks && uri!="" &&
+				hyperlinkClickAllowed(i.HyperlinkCommandClick,pe.Modifiers) {
+				i.hyperlinkPressed=uri
+				i.hyperlinkCol=col0
+				i.hyperlinkRow=row0
+				i.mousePressed=false
+				i.selecting=false
+				continue
+			}
 			if button==govt.MouseLeft && i.OnSelectionStart!=nil && (!tracking || localOverride) {
 				i.selecting=true
 				i.mousePressed=false
@@ -85,6 +101,13 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			base.Button=button;base.Action=govt.MouseDown
 			if tracking && i.OnMouse!=nil { _=i.OnMouse(base) }
 		case pointer.Release:
+			if i.hyperlinkPressed!="" {
+				uri:=i.hyperlinkPressed
+				same:=i.hyperlinkCol==col0 && i.hyperlinkRow==row0 && hyperlinkURIAt(snap,col0,row0)==uri
+				i.hyperlinkPressed=""
+				if same && i.OnHyperlink!=nil { i.OnHyperlink(uri) }
+				continue
+			}
 			if i.selecting {
 				if i.OnSelectionEnd!=nil { i.OnSelectionEnd(col0,row0) }
 				i.selecting=false
@@ -95,6 +118,12 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			if tracking && i.OnMouse!=nil { _=i.OnMouse(base) }
 			i.mousePressed=false
 		case pointer.Move,pointer.Drag:
+			if i.hyperlinkPressed!="" {
+				if i.hyperlinkCol!=col0 || i.hyperlinkRow!=row0 {
+					i.hyperlinkPressed=""
+				}
+				continue
+			}
 			if i.selecting {
 				if i.OnSelectionMove!=nil { i.OnSelectionMove(col0,row0) }
 				continue
@@ -127,6 +156,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		case pointer.Cancel:
 			i.mousePressed=false
 			i.selecting=false
+			i.hyperlinkPressed=""
 		}
 	}
 
@@ -374,4 +404,17 @@ func mouseButton(buttons pointer.Buttons)(govt.MouseButton,bool){
 	default:
 		return govt.MouseNone,false
 	}
+}
+
+
+func hyperlinkURIAt(snap govt.Snapshot,col,row int)string{
+	if row<0 || row>=len(snap.RowsData) || col<0 || col>=snap.Cols { return "" }
+	cells:=snap.RowsData[row].Cells
+	if col>=len(cells){return ""}
+	return cells[col].LinkURI
+}
+
+func hyperlinkClickAllowed(requireShortcut bool,mods key.Modifiers)bool{
+	if mods.Contain(key.ModShift){return false}
+	return !requireShortcut || mods.Contain(key.ModShortcut)
 }
