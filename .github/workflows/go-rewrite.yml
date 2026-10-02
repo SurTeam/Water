@@ -50,7 +50,7 @@ jobs:
       - run: go test ./internal/goprotocol ./internal/goagent ./internal/goconfig ./internal/gohyperlink ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/xterm ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
-      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-linux.sh scripts/build-go-embedded-servers.sh scripts/publish-unsigned-macos.sh scripts/run-go-ui-smoke.sh scripts/run-go-rust-ui-smoke.sh scripts/run-rust-go-ui-smoke.sh
+      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-linux.sh scripts/build-go-embedded-servers.sh scripts/publish-unsigned-macos.sh scripts/run-go-ui-smoke.sh scripts/run-go-rust-ui-smoke.sh scripts/run-rust-go-ui-smoke.sh scripts/run-go-ime-manual.sh
       - name: Smoke-build native Linux Go package
         if: runner.os == 'Linux'
         env:
