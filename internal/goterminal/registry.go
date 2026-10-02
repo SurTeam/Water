@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"syscall"
 
+	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
@@ -233,8 +234,10 @@ func (t *Terminal) readLoop() {
 	defer close(t.readerDone)
 	buf := make([]byte, readBlockBytes)
 	for {
+		gometrics.PTYReadCalls.Add(1)
 		n, err := t.ptmx.Read(buf)
 		if n > 0 {
+			gometrics.PTYBytesRead.Add(uint64(n))
 			data := append([]byte(nil), buf[:n]...)
 			t.publish(goprotocol.TerminalEvent{
 				Kind: goprotocol.OutputEvent,
