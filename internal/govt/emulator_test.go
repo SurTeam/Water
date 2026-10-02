@@ -49,3 +49,21 @@ func TestTerminalQueryResponsesAreRetained(t *testing.T) {
 		t.Fatalf("responses were not drained: %q", more)
 	}
 }
+
+
+func TestMouseTrackingEncodesThroughVTCore(t *testing.T) {
+	e := New(80, 24, 100)
+	defer e.Close()
+
+	e.Write([]byte("[?1000h[?1006h"))
+	if !e.Mouse(MouseEvent{
+		Col:5,Row:3,X:40,Y:60,
+		Button:MouseLeft,Action:MouseDown,
+	}) {
+		t.Fatal("mouse event was not accepted")
+	}
+	data:=bytes.Join(e.TakeResponses(),nil)
+	if !bytes.Contains(data,[]byte("[<0;5;3M")) {
+		t.Fatalf("unexpected mouse response %q",data)
+	}
+}
