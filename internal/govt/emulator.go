@@ -55,6 +55,7 @@ type Snapshot struct {
 	MouseTracking     string
 	MouseEncoding     string
 	RowsData          []Row
+	Images            []TerminalImage
 }
 
 type MouseButton uint8
@@ -96,7 +97,8 @@ type Emulator struct {
 	titleMu sync.RWMutex
 	title   string
 
-	links *osc8Tracker
+	links    *osc8Tracker
+	graphics *graphicsState
 }
 
 func New(cols, rows, scrollback int) *Emulator {
@@ -111,6 +113,7 @@ func New(cols, rows, scrollback int) *Emulator {
 	}
 	e := &Emulator{
 		links: newOSC8Tracker(),
+		graphics: newGraphicsState(),
 		term: xterm.New(
 			xterm.WithCols(cols),
 			xterm.WithRows(rows),
@@ -134,6 +137,7 @@ func New(cols, rows, scrollback int) *Emulator {
 func (e *Emulator) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.graphics!=nil { e.graphics.close() }
 	e.term.Dispose()
 }
 
@@ -150,7 +154,29 @@ func (e *Emulator) write(p []byte,replay bool) {
 	previous:=e.suppressResponses
 	e.suppressResponses=replay
 	e.links.feed(p)
-	_, _ = e.term.Write(p)
+
+	events:=e.graphics.parser.feed(p)
+	consumed:=0
+	for _,event:=range events {
+		end:=event.endOffset
+		if end<consumed {end=consumed}
+		if end>len(p) {end=len(p)}
+		if end>consumed {
+			_,_ = e.term.Write(p[consumed:end])
+		}
+		rows,response:=e.graphics.handle(e.term,event)
+		if len(response)>0 { e.enqueueResponse(response) }
+		if rows>0 {
+			advance:=make([]byte,0,2+rows)
+			advance=append(advance,'\r','\n')
+			for n:=1;n<rows;n++ { advance=append(advance,'\n') }
+			_,_ = e.term.Write(advance)
+		}
+		consumed=end
+	}
+	if consumed<len(p) {
+		_,_ = e.term.Write(p[consumed:])
+	}
 	e.pruneLinksLocked()
 	e.suppressResponses=previous
 	e.mu.Unlock()
@@ -178,6 +204,19 @@ func (e *Emulator) pruneLinksLocked() {
 		}
 	}
 	e.links.prune(live)
+}
+
+func (e *Emulator) SetCellSize(width,height int) {
+	e.mu.Lock()
+	if e.graphics!=nil { e.graphics.setCellSize(width,height) }
+	e.mu.Unlock()
+}
+
+func (e *Emulator) ImageBytes() int {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if e.graphics==nil { return 0 }
+	return e.graphics.storedBytes
 }
 
 func (e *Emulator) Resize(cols, rows int) {
@@ -332,6 +371,9 @@ func (e *Emulator) Snapshot() Snapshot {
 			_, _ = h.Write(packed[:])
 		}
 		s.RowsData[row] = Row{Cells: cells, Hash: h.Sum64()}
+	}
+	if e.graphics!=nil {
+		s.Images=e.graphics.snapshot(term,s.RowsData)
 	}
 	return s
 }
