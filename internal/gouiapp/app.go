@@ -16,6 +16,7 @@ import (
 
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goremote"
 	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/SurTeam/Water/internal/goui"
 )
@@ -23,16 +24,25 @@ import (
 func Run(arguments []string, buildVariant string) error {
 	var socket string
 	var configPath string
+	var sshDestination string
 	flags:=flag.NewFlagSet("water",flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	flags.StringVar(&socket,"socket","","Unix control socket (compatibility alias)")
 	flags.StringVar(&socket,"control-socket","","Unix control socket")
 	flags.StringVar(&configPath,"config",goconfig.DefaultLoadPath(buildVariant),"Water config JSON")
+	flags.StringVar(&sshDestination,"ssh","","SSH destination for a remote Water server")
 	if err:=flags.Parse(arguments);err!=nil{return err}
 
 	cfg,err:=goconfig.Load(configPath)
 	if err!=nil{return fmt.Errorf("config: %w",err)}
 	socket=resolveGUISocket(socket,cfg,buildVariant)
+	var tunnel *goremote.Tunnel
+	if strings.TrimSpace(sshDestination)!="" {
+		tunnel,err=goremote.Connect(sshDestination)
+		if err!=nil{return fmt.Errorf("connect remote Water server: %w",err)}
+		defer tunnel.Close()
+		socket=tunnel.LocalSocket()
+	}
 
 	runErr:=make(chan error,1)
 	go func(){runErr<-runWindow(socket,configPath,cfg)}()
@@ -53,11 +63,11 @@ func runWindow(socket,configPath string,cfg goconfig.AppConfig) error {
 		app.MinSize(unit.Dp(cfg.Startup.WindowMinWidth),unit.Dp(cfg.Startup.WindowMinHeight)),
 	)
 
-	session,embedded,err:=connectOrStart(socket,configPath,cfg)
+	session,embedded,ownsDetached,err:=connectOrStart(socket,configPath,cfg)
 	if err!=nil{return err}
 	if embedded!=nil{defer embedded.Close()}
 	defer session.Close()
-	if embedded==nil && !cfg.Server.DetachOnQuit {
+	if embedded==nil && ownsDetached && !cfg.Server.DetachOnQuit {
 		defer func(){_ = goclient.New(socket).Call("server.shutdown",map[string]any{},nil)}()
 	}
 
@@ -81,33 +91,33 @@ func runWindow(socket,configPath string,cfg goconfig.AppConfig) error {
 	}
 }
 
-func connectOrStart(socket,configPath string,cfg goconfig.AppConfig)(*goclient.Session,*goserver.Server,error){
+func connectOrStart(socket,configPath string,cfg goconfig.AppConfig)(*goclient.Session,*goserver.Server,bool,error){
 	client:=goclient.New(socket)
-	if session,err:=client.OpenSession();err==nil{return session,nil,nil}
+	if session,err:=client.OpenSession();err==nil{return session,nil,false,nil}
 	if !cfg.Server.AutoStart{
-		return nil,nil,fmt.Errorf("server is not available at %s and auto_start is disabled",socket)
+		return nil,nil,false,fmt.Errorf("server is not available at %s and auto_start is disabled",socket)
 	}
 
 	if !cfg.Server.Detached{
 		srv:=goserver.NewWithConfig(socket,cfg)
 		if err:=srv.Initialize(cfg.Startup.InitialWorkspace,cfg.Startup.InitialTerminal&&cfg.Startup.InitialWorkspace);err!=nil{
-			return nil,nil,err
+			return nil,nil,false,err
 		}
 		errCh:=make(chan error,1)
 		go func(){errCh<-srv.ListenAndServe()}()
 		session,err:=waitForSession(socket,3*time.Second)
 		if err!=nil{
 			_ = srv.Close()
-			select{case serveErr:=<-errCh: if serveErr!=nil{return nil,nil,serveErr};default:}
-			return nil,nil,err
+			select{case serveErr:=<-errCh: if serveErr!=nil{return nil,nil,false,serveErr};default:}
+			return nil,nil,false,err
 		}
-		return session,srv,nil
+		return session,srv,false,nil
 	}
 
-	if err:=startDetachedServer(socket,configPath);err!=nil{return nil,nil,err}
+	if err:=startDetachedServer(socket,configPath);err!=nil{return nil,nil,false,err}
 	session,err:=waitForSession(socket,5*time.Second)
-	if err!=nil{return nil,nil,err}
-	return session,nil,nil
+	if err!=nil{return nil,nil,false,err}
+	return session,nil,true,nil
 }
 
 func waitForSession(socket string,timeout time.Duration)(*goclient.Session,error){
