@@ -133,42 +133,52 @@ terminal_id=""
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null &&
      "$WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER" 2>/dev/null; then
-    pane_hit="$(python3 - "$SNAPSHOT" <<'PY'
+    pane_info="$(python3 - "$SNAPSHOT" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 for hit in data.get("automation_hits", []):
     if hit.get("kind")=="pane":
         x0,y0,x1,y1=hit["rect"]
-        print(f"{(x0+x1)/2:.1f} {(y0+y1)/2:.1f}")
+        print(hit.get("id",""), f"{(x0+x1)/2:.1f}", f"{(y0+y1)/2:.1f}")
         break
 PY
 )"
-    terminal_id="$(python3 - "$STATE_AFTER" <<'PY'
+    if [[ -n "$pane_info" ]]; then
+      read -r pane_id pane_x pane_y <<<"$pane_info"
+      pane_hit="$pane_x $pane_y"
+    else
+      pane_id=""
+    fi
+    terminal_id="$(python3 - "$STATE_AFTER" "$pane_id" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
+target=sys.argv[2]
 
-def find_terminal(value):
+def find_terminal_for_pane(value):
     if isinstance(value, dict):
-        terminal=value.get("terminal")
-        if isinstance(terminal, dict):
-            summary=terminal.get("summary")
-            if isinstance(summary, dict) and summary.get("terminal_id"):
-                return summary["terminal_id"]
-        if value.get("terminal_id"):
-            return value["terminal_id"]
+        if value.get("pane_id")==target:
+            terminal=value.get("terminal")
+            if isinstance(terminal, dict):
+                summary=terminal.get("summary")
+                if isinstance(summary, dict) and summary.get("terminal_id"):
+                    return summary["terminal_id"]
+            state=value.get("surface_state")
+            if isinstance(state, dict):
+                terminal=state.get("Terminal")
+                if isinstance(terminal, dict) and terminal.get("terminal_id"):
+                    return terminal["terminal_id"]
         for child in value.values():
-            found=find_terminal(child)
+            found=find_terminal_for_pane(child)
             if found:
                 return found
     elif isinstance(value, list):
         for child in value:
-            found=find_terminal(child)
+            found=find_terminal_for_pane(child)
             if found:
                 return found
     return None
 
-root=data.get("workspace") or data
-print(find_terminal(root) or "")
+print(find_terminal_for_pane(data) or "")
 PY
 )"
     if [[ -n "$pane_hit" && -n "$terminal_id" ]]; then
