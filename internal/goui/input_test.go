@@ -89,3 +89,29 @@ func TestTerminalClickCountTracksSameCellWithinWindow(t *testing.T){
 		t.Fatalf("expired click window did not reset count: %d",got)
 	}
 }
+
+
+func TestSelectionAutoScrollDirection(t *testing.T){
+	const height=200
+	tests:=[]struct{
+		y float32
+		want int
+	}{
+		{0,-3},
+		{23,-3},
+		{24,0},
+		{100,0},
+		{176,0},
+		{177,3},
+		{199,3},
+		{220,3},
+	}
+	for _,tc:=range tests{
+		if got:=selectionAutoScrollDirection(tc.y,height);got!=tc.want{
+			t.Fatalf("direction at y=%.1f = %d, want %d",tc.y,got,tc.want)
+		}
+	}
+	if got:=selectionAutoScrollDirection(0,0);got!=0{
+		t.Fatalf("zero-height direction = %d",got)
+	}
+}
