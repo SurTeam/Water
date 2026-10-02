@@ -192,12 +192,44 @@ fi
 read -r pane_x pane_y <<<"$pane_hit"
 xdotool windowfocus --sync "$window_id"
 xdotool mousemove --window "$window_id" "$pane_x" "$pane_y" click 1
-printf '%s' 'echo WATER_CLIPBOARD_SMOKE' | xclip -selection clipboard
-xdotool key --window "$window_id" ctrl+v
-xdotool key --window "$window_id" Return
+sleep 0.15
 
-if ! "$WATER_BIN" --socket "$SOCKET" terminal contains     --terminal "$terminal_id"     --text WATER_CLIPBOARD_SMOKE     --timeout-ms 5000 >/dev/null; then
-  echo "real Gio clipboard paste did not reach the PTY" >&2
+# First prove that the real X11 keyboard/focus path reaches Gio and the PTY.
+xdotool type --delay 3 'echo WATER_X11_KEY_SMOKE'
+xdotool key Return
+if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
+    --terminal "$terminal_id" \
+    --text WATER_X11_KEY_SMOKE \
+    --timeout-ms 5000 >/dev/null; then
+  echo "real X11 keyboard input did not reach the PTY" >&2
+  echo "window_id=$window_id focused=$(xdotool getwindowfocus 2>/dev/null || true) pane=$pane_hit terminal=$terminal_id" >&2
+  cat "$SNAPSHOT" >&2 2>/dev/null || true
+  cat "$STATE_AFTER" >&2 2>/dev/null || true
+  cat "$LOG" >&2 || true
+  exit 1
+fi
+
+# Then isolate the clipboard path. Verify the X selection itself before asking
+# Gio to read it, and send the shortcut to the already-focused window.
+clipboard_text='echo WATER_CLIPBOARD_SMOKE'
+printf '%s' "$clipboard_text" | xclip -selection clipboard
+sleep 0.1
+clipboard_readback="$(xclip -selection clipboard -o 2>/dev/null || true)"
+if [[ "$clipboard_readback" != "$clipboard_text" ]]; then
+  echo "X11 clipboard self-check failed: got '$clipboard_readback'" >&2
+  exit 1
+fi
+
+xdotool key ctrl+v
+sleep 0.15
+xdotool key Return
+
+if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
+    --terminal "$terminal_id" \
+    --text WATER_CLIPBOARD_SMOKE \
+    --timeout-ms 5000 >/dev/null; then
+  echo "real Gio clipboard paste did not reach the PTY after keyboard path succeeded" >&2
+  echo "window_id=$window_id focused=$(xdotool getwindowfocus 2>/dev/null || true) pane=$pane_hit terminal=$terminal_id" >&2
   cat "$LOG" >&2 || true
   exit 1
 fi
