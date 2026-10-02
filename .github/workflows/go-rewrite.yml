@@ -50,7 +50,18 @@ jobs:
       - run: go test ./internal/goprotocol ./internal/goagent ./internal/goconfig ./internal/gohyperlink ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
-      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-embedded-servers.sh scripts/run-go-ui-smoke.sh scripts/run-go-rust-ui-smoke.sh scripts/run-rust-go-ui-smoke.sh
+      - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-linux.sh scripts/build-go-embedded-servers.sh scripts/run-go-ui-smoke.sh scripts/run-go-rust-ui-smoke.sh scripts/run-rust-go-ui-smoke.sh
+      - name: Smoke-build native Linux Go package
+        if: runner.os == 'Linux'
+        env:
+          WATER_APP_VARIANT: dev
+          WATER_APP_VERSION: ci
+        run: |
+          bash scripts/build-go-linux.sh
+          test -x "target/go-linux/dev/water-dev/water-dev"
+          test -x "target/go-linux/dev/water-dev/water-srv-dev"
+          test -s "dist/water-dev-ci-x86_64-linux.tar.gz"
+
       - name: Smoke-build native macOS Go app bundle
         if: runner.os == 'macOS'
         env:
