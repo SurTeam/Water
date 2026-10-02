@@ -2,10 +2,14 @@ package goui
 
 import (
 	"bytes"
+	"image"
 	"testing"
 	"time"
 
+	"gioui.org/io/input"
 	"gioui.org/io/key"
+	"gioui.org/layout"
+	"gioui.org/op"
 
 	"github.com/SurTeam/Water/internal/govt"
 )
@@ -113,5 +117,90 @@ func TestSelectionAutoScrollDirection(t *testing.T){
 	}
 	if got:=selectionAutoScrollDirection(0,0);got!=0{
 		t.Fatalf("zero-height direction = %d",got)
+	}
+}
+
+
+func TestTerminalIMEPreeditDoesNotLeakIntoPTY(t *testing.T){
+	var inputState TerminalInput
+	var emitted [][]byte
+	inputState.OnInput=func(data []byte){
+		emitted=append(emitted,append([]byte(nil),data...))
+	}
+
+	if compositionActive(key.Range{Start:-1,End:-1}) {
+		t.Fatal("(-1,-1) must mean no active composition")
+	}
+	if !compositionActive(key.Range{Start:0,End:0}) {
+		t.Fatal("zero-length preedit range is still an active composition")
+	}
+
+	inputState.handleComposition(key.CompositionEvent{Start:0,End:0})
+	inputState.handleEdit(key.EditEvent{Text:"拼"})
+	if len(emitted)!=0 {
+		t.Fatalf("preedit leaked into PTY: %q",emitted)
+	}
+	if inputState.pendingComposition!="拼" || !inputState.composing {
+		t.Fatalf("unexpected preedit state: composing=%v pending=%q",inputState.composing,inputState.pendingComposition)
+	}
+
+	inputState.handleComposition(key.CompositionEvent{Start:-1,End:-1})
+	if len(emitted)!=0 {
+		t.Fatalf("ending composition emitted stale preedit: %q",emitted)
+	}
+	if inputState.pendingComposition!="" || inputState.composing {
+		t.Fatalf("composition did not reset: composing=%v pending=%q",inputState.composing,inputState.pendingComposition)
+	}
+
+	inputState.handleEdit(key.EditEvent{Text:"中"})
+	if len(emitted)!=1 || string(emitted[0])!="中" {
+		t.Fatalf("commit = %q, want exactly one 中",emitted)
+	}
+}
+
+func TestTerminalIMEPublishesCaretAndEmptySnippet(t *testing.T){
+	var terminalInput TerminalInput
+	var router input.Router
+	var ops op.Ops
+	size:=image.Pt(320,200)
+
+	gtx:=layout.Context{
+		Ops:&ops,
+		Source:router.Source(),
+		Constraints:layout.Exact(size),
+	}
+	terminalInput.Add(gtx,size)
+	gtx.Execute(key.FocusCmd{Tag:&terminalInput.tag})
+	router.Frame(&ops)
+
+	ops.Reset()
+	gtx.Ops=&ops
+	gtx.Source=router.Source()
+	snap:=govt.Snapshot{Cols:40,Rows:10,CursorX:3,CursorY:2}
+	terminalInput.syncIME(gtx,snap,8,20)
+	terminalInput.Add(gtx,size)
+	router.Frame(&ops)
+
+	state:=router.EditorState()
+	if state.Snippet.Text!="" || state.Snippet.Range!=(key.Range{Start:0,End:0}) {
+		t.Fatalf("terminal IME snippet = %#v, want empty zero-range snippet",state.Snippet)
+	}
+	if state.Selection.Range!=(key.Range{Start:0,End:0}) {
+		t.Fatalf("terminal IME selection = %#v",state.Selection.Range)
+	}
+	if state.Selection.Caret.Pos.X!=24 || state.Selection.Caret.Pos.Y!=58 {
+		t.Fatalf("terminal IME caret = %#v, want (24,58)",state.Selection.Caret)
+	}
+
+	terminalInput.handleComposition(key.CompositionEvent{Start:0,End:1})
+	terminalInput.handleEdit(key.EditEvent{Text:"拼音"})
+	ops.Reset()
+	gtx.Ops=&ops
+	gtx.Source=router.Source()
+	terminalInput.syncIME(gtx,snap,8,20)
+	terminalInput.Add(gtx,size)
+	router.Frame(&ops)
+	if bounds:=router.EditorState().Selection.CompositionBounds; bounds.Empty() {
+		t.Fatal("active terminal composition did not expose caret-local composition bounds")
 	}
 }
