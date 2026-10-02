@@ -40,20 +40,41 @@ type Terminal struct {
 }
 
 type Registry struct {
-	mu    sync.RWMutex
-	terms map[uuid.UUID]*Terminal
+	mu          sync.RWMutex
+	terms       map[uuid.UUID]*Terminal
+	replayLimit int
 }
 
 func NewRegistry() *Registry {
-	return &Registry{terms: make(map[uuid.UUID]*Terminal)}
+	return NewRegistryWithReplayLimit(defaultReplayBytes)
+}
+
+func NewRegistryWithReplayLimit(limit int) *Registry {
+	if limit < 1024*1024 {
+		limit = 1024 * 1024
+	}
+	if limit > defaultReplayBytes {
+		limit = defaultReplayBytes
+	}
+	return &Registry{
+		terms:       make(map[uuid.UUID]*Terminal),
+		replayLimit: limit,
+	}
 }
 
 func (r *Registry) Spawn(program string, args []string, size goprotocol.TerminalSize) (*Terminal, error) {
+	return r.SpawnWithDir(program, args, size, "")
+}
+
+func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.TerminalSize, cwd string) (*Terminal, error) {
 	if program == "" {
 		return nil, errors.New("program is required")
 	}
 	size = size.Normalized()
 	cmd := exec.Command(program, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(size.Lines), Cols: uint16(size.Columns)})
 	if err != nil {
@@ -64,7 +85,7 @@ func (r *Registry) Spawn(program string, args []string, size goprotocol.Terminal
 		cmd:         cmd,
 		ptmx:        ptmx,
 		size:        size,
-		replayLimit: defaultReplayBytes,
+		replayLimit: r.replayLimit,
 		subs:        make(map[uint64]*subscriber),
 		closed:      make(chan struct{}),
 		readerDone:  make(chan struct{}),
@@ -111,6 +132,22 @@ func (r *Registry) Count() int {
 	n := len(r.terms)
 	r.mu.RUnlock()
 	return n
+}
+
+func (r *Registry) RetainedReplayBytes() int {
+	r.mu.RLock()
+	terms := make([]*Terminal, 0, len(r.terms))
+	for _, term := range r.terms {
+		terms = append(terms, term)
+	}
+	r.mu.RUnlock()
+	total := 0
+	for _, term := range terms {
+		term.mu.RLock()
+		total += term.replayBytes
+		term.mu.RUnlock()
+	}
+	return total
 }
 
 func (t *Terminal) Size() goprotocol.TerminalSize {
