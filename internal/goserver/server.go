@@ -282,6 +282,9 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"image_cache_bytes": 0,
 		}))
 	case "connection.list":
+		if s.uiSessionCount()>0 {
+			return s.forwardUI(ss,msg)
+		}
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"connections": []any{map[string]any{
 				"id": uuid.MustParse("00000000-0000-0000-0000-000000000001"),
