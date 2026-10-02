@@ -472,6 +472,8 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	}
 	term.input=&TerminalInput{
 		BracketedPaste:c.config.Features.BracketedPaste,
+		Hyperlinks:c.config.Terminal.Hyperlinks,
+		HyperlinkCommandClick:c.config.Terminal.HyperlinkCommandClick,
 		OnInput:func(data []byte){
 			term.mu.Lock()
 			term.selection=Selection{}
@@ -534,6 +536,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			text:=SelectedText(term.snapshot,term.selection)
 			term.mu.RUnlock()
 			return text
+		},
+		OnHyperlink:func(uri string){
+			c.activateHyperlink(uri)
 		},
 	}
 	if !c.config.Features.MouseReporting {
