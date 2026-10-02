@@ -84,3 +84,22 @@ func TestExitedTerminalClosesPaneAndFinalTab(t *testing.T) {
 	if len(state.Workspaces)!=1{t.Fatalf("workspace removed: %#v",state)}
 	if len(state.Workspaces[0].Tabs)!=0{t.Fatalf("final tab remains: %#v",state.Workspaces[0])}
 }
+
+
+func TestMemoryProjectionCountsSurfacesAndCells(t *testing.T) {
+	m:=New()
+	wid:=m.CreateWorkspace("")
+	_,pane,err:=m.CreateTab(wid,"",false)
+	if err!=nil{t.Fatal(err)}
+	meta:=TerminalMeta{
+		TerminalID:uuid.New(),
+		SessionID:uuid.New(),
+		Program:"/bin/sh",
+		Size:goprotocol.TerminalSize{Columns:80,Lines:24},
+	}
+	if err:=m.InstallTerminal(pane,meta);err!=nil{t.Fatal(err)}
+	stats:=m.MemoryProjection()
+	if stats.SurfaceCount!=1 || stats.VisibleCells!=80*24 {
+		t.Fatalf("memory projection = %#v",stats)
+	}
+}
