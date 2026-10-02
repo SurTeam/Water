@@ -1,6 +1,17 @@
 name: Go vs Rust terminal benchmark
 
 on:
+  push:
+    branches: [go-rewrite]
+    paths:
+      - ".github/workflows/go-rust-benchmark.yml"
+      - "internal/gobench/**"
+      - "tests/bench_terminal.rs"
+      - "internal/goterminal/**"
+      - "internal/goserver/**"
+      - "internal/goclient/**"
+      - "src/terminal/**"
+      - "src/control/**"
   workflow_dispatch:
     inputs:
       runs:
@@ -47,14 +58,14 @@ jobs:
 
       - name: Go 64 MB direct/server completion
         env:
-          RUNS: ${{ inputs.runs }}
+          RUNS: ${{ inputs.runs || '3' }}
         run: |
           set -o pipefail
           go test ./internal/gobench             -run '^$'             -bench 'BenchmarkTerminal(Direct|Server)64MB$'             -benchtime=1x             -count="$RUNS"             -benchmem             2>&1 | tee target/go-terminal-64mb.log
 
       - name: Go interaction under output flood
         env:
-          RUNS: ${{ inputs.runs }}
+          RUNS: ${{ inputs.runs || '3' }}
         run: |
           set -o pipefail
           go test ./internal/gobench             -run TestTerminalInteractionPerformanceGate             -count="$RUNS"             -v             2>&1 | tee target/go-terminal-interaction.log
@@ -62,8 +73,8 @@ jobs:
       - name: Rust 64 MB direct/server completion
         env:
           WATER_BENCH: "1"
-          WATER_BENCH_WARMUPS: ${{ inputs.warmups }}
-          WATER_BENCH_RUNS: ${{ inputs.runs }}
+          WATER_BENCH_WARMUPS: ${{ inputs.warmups || '1' }}
+          WATER_BENCH_RUNS: ${{ inputs.runs || '3' }}
           WATER_BENCH_PROGRAM: unused
           WATER_BENCH_COMMAND: "yes WATER_GO_BENCH | head -c 64000000"
         run: |
@@ -73,8 +84,8 @@ jobs:
       - name: Rust interaction under output flood
         env:
           WATER_BENCH: "1"
-          WATER_BENCH_WARMUPS: ${{ inputs.warmups }}
-          WATER_BENCH_RUNS: ${{ inputs.runs }}
+          WATER_BENCH_WARMUPS: ${{ inputs.warmups || '1' }}
+          WATER_BENCH_RUNS: ${{ inputs.runs || '3' }}
         run: |
           set -o pipefail
           cargo test --release --no-default-features             --test bench_terminal bench_interaction_parity             -- --ignored --nocapture             2>&1 | tee target/rust-terminal-interaction.log
