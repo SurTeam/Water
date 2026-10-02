@@ -107,7 +107,8 @@ fi
 zip_name="${app_name}-${version}-macOS-arm64.zip"
 zip_path="$root_dir/dist/$zip_name"
 rm -f "$zip_path"
-(cd "$root_dir/dist" && zip -r -X -q "$zip_path" "${app_name}.app")
+ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$zip_path"
+test -s "$zip_path"
 
 echo "Built $app_dir"
 echo "Built $zip_path"
