@@ -169,13 +169,18 @@ func TestTerminalIMEPublishesCaretAndEmptySnippet(t *testing.T){
 		Source:router.Source(),
 		Constraints:layout.Exact(size),
 	}
-	terminalInput.Add(gtx,size)
+	// Match Gio Editor's focus setup: queue FocusCmd before the frame registers
+	// the input tag, then observe the focused state from the next Source.
 	gtx.Execute(key.FocusCmd{Tag:&terminalInput.tag})
+	terminalInput.Add(gtx,size)
 	router.Frame(&ops)
 
 	ops.Reset()
 	gtx.Ops=&ops
 	gtx.Source=router.Source()
+	if !gtx.Focused(&terminalInput.tag){
+		t.Fatal("terminal input did not become focused")
+	}
 	snap:=govt.Snapshot{Cols:40,Rows:10,CursorX:3,CursorY:2}
 	terminalInput.syncIME(gtx,snap,8,20)
 	terminalInput.Add(gtx,size)
