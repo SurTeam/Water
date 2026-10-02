@@ -9,6 +9,7 @@ import (
 	"gioui.org/gesture"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 
@@ -16,22 +17,100 @@ import (
 )
 
 type TerminalInput struct {
-	tag   struct{}
-	click gesture.Click
+	tag      struct{}
+	mouseTag struct{}
+	click    gesture.Click
 
-	OnInput func([]byte)
+	OnInput  func([]byte)
+	OnMouse  func(govt.MouseEvent) bool
+	OnScroll func(int)
 
 	composing bool
 	pendingComposition string
+	pressedMouse govt.MouseButton
+	mousePressed bool
 }
 
-func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot) {
+func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
 	for {
 		ev, ok := i.click.Update(gtx.Source)
 		if !ok { break }
 		if ev.Kind == gesture.KindPress {
 			gtx.Execute(key.FocusCmd{Tag:&i.tag})
 			gtx.Execute(key.SoftKeyboardCmd{Show:true})
+		}
+	}
+
+	if cellWidth < 1 { cellWidth = 1 }
+	if lineHeight < 1 { lineHeight = 1 }
+	for {
+		ev, ok := gtx.Event(pointer.Filter{
+			Target:&i.mouseTag,
+			Kinds:pointer.Press|pointer.Release|pointer.Move|pointer.Drag|pointer.Scroll|pointer.Cancel,
+			ScrollX:pointer.ScrollRange{Min:-10000,Max:10000},
+			ScrollY:pointer.ScrollRange{Min:-10000,Max:10000},
+		})
+		if !ok { break }
+		pe,ok:=ev.(pointer.Event)
+		if !ok || pe.Source!=pointer.Mouse { continue }
+		if pe.Kind==pointer.Press {
+			gtx.Execute(key.FocusCmd{Tag:&i.tag})
+			gtx.Execute(key.SoftKeyboardCmd{Show:true})
+		}
+		col:=int(pe.Position.X)/cellWidth+1
+		row:=int(pe.Position.Y)/lineHeight+1
+		if col<1{col=1};if col>snap.Cols{col=snap.Cols}
+		if row<1{row=1};if row>snap.Rows{row=snap.Rows}
+		base:=govt.MouseEvent{
+			Col:col,Row:row,
+			X:int(pe.Position.X)+1,Y:int(pe.Position.Y)+1,
+			Ctrl:pe.Modifiers.Contain(key.ModCtrl),
+			Alt:pe.Modifiers.Contain(key.ModAlt),
+			Shift:pe.Modifiers.Contain(key.ModShift),
+		}
+
+		switch pe.Kind {
+		case pointer.Press:
+			button,ok:=mouseButton(pe.Buttons)
+			if !ok { continue }
+			i.pressedMouse=button
+			i.mousePressed=true
+			base.Button=button;base.Action=govt.MouseDown
+			if i.OnMouse!=nil { _=i.OnMouse(base) }
+		case pointer.Release:
+			if !i.mousePressed { continue }
+			base.Button=i.pressedMouse;base.Action=govt.MouseUp
+			if i.OnMouse!=nil { _=i.OnMouse(base) }
+			i.mousePressed=false
+		case pointer.Move,pointer.Drag:
+			if snap.MouseTracking=="" || snap.MouseTracking=="NONE" { continue }
+			if i.mousePressed { base.Button=i.pressedMouse } else { base.Button=govt.MouseNone }
+			base.Action=govt.MouseMove
+			if i.OnMouse!=nil { _=i.OnMouse(base) }
+		case pointer.Scroll:
+			steps:=int(pe.Scroll.Y/float32(lineHeight))
+			if steps==0 {
+				if pe.Scroll.Y<0 { steps=-1 } else if pe.Scroll.Y>0 { steps=1 }
+			}
+			if steps==0 { continue }
+			tracked:=snap.MouseTracking!="" && snap.MouseTracking!="NONE" && i.OnMouse!=nil
+			if tracked {
+				action:=govt.MouseDown
+				if steps<0 { action=govt.MouseUp;steps=-steps }
+				base.Button=govt.MouseWheel;base.Action=action
+				accepted:=false
+				for n:=0;n<steps;n++ { if i.OnMouse(base){accepted=true} }
+				if accepted { continue }
+			}
+			if i.OnScroll!=nil {
+				lines:=int(pe.Scroll.Y/float32(lineHeight))
+				if lines==0 {
+					if pe.Scroll.Y<0 { lines=-1 } else { lines=1 }
+				}
+				i.OnScroll(lines)
+			}
+		case pointer.Cancel:
+			i.mousePressed=false
 		}
 	}
 
@@ -107,6 +186,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot) {
 func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
 	stack:=clip.Rect{Max:size}.Push(gtx.Ops)
 	event.Op(gtx.Ops,&i.tag)
+	event.Op(gtx.Ops,&i.mouseTag)
 	key.InputHintOp{Tag:&i.tag,Hint:key.HintText}.Add(gtx.Ops)
 	i.click.Add(gtx.Ops)
 	stack.Pop()
@@ -229,4 +309,18 @@ func itoaSmall(v int)string{
 	var b strings.Builder
 	b.WriteByte(byte('0'+v/10));b.WriteByte(byte('0'+v%10))
 	return b.String()
+}
+
+
+func mouseButton(buttons pointer.Buttons)(govt.MouseButton,bool){
+	switch {
+	case buttons&pointer.ButtonPrimary!=0:
+		return govt.MouseLeft,true
+	case buttons&pointer.ButtonTertiary!=0:
+		return govt.MouseMiddle,true
+	case buttons&pointer.ButtonSecondary!=0:
+		return govt.MouseRight,true
+	default:
+		return govt.MouseNone,false
+	}
 }
