@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/goprotocol"
@@ -16,9 +17,11 @@ import (
 )
 
 const (
-	defaultReplayBytes = 8 * 1024 * 1024
-	readBlockBytes     = 64 * 1024
-	replayEventOverhead = 64
+	defaultReplayBytes   = 8 * 1024 * 1024
+	readBlockBytes       = 128 * 1024
+	rawReadQueueCapacity = 64
+	outputBatchDelay     = time.Millisecond
+	replayEventOverhead  = 64
 )
 
 type Terminal struct {
@@ -37,8 +40,9 @@ type Terminal struct {
 
 	seq    atomic.Uint64
 	closed     chan struct{}
-	readerDone chan struct{}
-	once       sync.Once
+	readerDone    chan struct{}
+	resizeRequests chan resizeRequest
+	once          sync.Once
 }
 
 type Registry struct {
@@ -90,7 +94,8 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		replayLimit: r.replayLimit,
 		subs:        make(map[uint64]*subscriber),
 		closed:      make(chan struct{}),
-		readerDone:  make(chan struct{}),
+		readerDone:     make(chan struct{}),
+		resizeRequests: make(chan resizeRequest),
 	}
 	r.mu.Lock()
 	r.terms[t.ID] = t
@@ -164,16 +169,28 @@ func (t *Terminal) Write(data []byte) error {
 	return err
 }
 
+type resizeRequest struct {
+	size goprotocol.TerminalSize
+	done chan error
+}
+
 func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
-	size = size.Normalized()
-	if err := pty.Setsize(t.ptmx, &pty.Winsize{Rows: uint16(size.Lines), Cols: uint16(size.Columns)}); err != nil {
-		return err
+	req:=resizeRequest{size:size.Normalized(),done:make(chan error,1)}
+	select {
+	case t.resizeRequests<-req:
+	case <-t.readerDone:
+		return io.ErrClosedPipe
+	case <-t.closed:
+		return io.ErrClosedPipe
 	}
-	t.mu.Lock()
-	t.size = size
-	t.mu.Unlock()
-	t.publish(goprotocol.TerminalEvent{Kind: goprotocol.ResizeEvent, Size: size})
-	return nil
+	select {
+	case err:=<-req.done:
+		return err
+	case <-t.readerDone:
+		return io.ErrClosedPipe
+	case <-t.closed:
+		return io.ErrClosedPipe
+	}
 }
 
 func (t *Terminal) Replay() []goprotocol.TerminalEvent {
@@ -232,21 +249,149 @@ func (t *Terminal) Close() error {
 
 func (t *Terminal) readLoop() {
 	defer close(t.readerDone)
-	buf := make([]byte, readBlockBytes)
-	for {
-		gometrics.PTYReadCalls.Add(1)
-		n, err := t.ptmx.Read(buf)
-		if n > 0 {
-			gometrics.PTYBytesRead.Add(uint64(n))
-			data := append([]byte(nil), buf[:n]...)
-			t.publish(goprotocol.TerminalEvent{
-				Kind: goprotocol.OutputEvent,
-				Size: t.Size(),
-				Data: data,
-			})
+
+	raw:=make(chan []byte,rawReadQueueCapacity)
+	free:=make(chan []byte,rawReadQueueCapacity)
+	go t.rawReadLoop(raw,free)
+
+	timer:=time.NewTimer(time.Hour)
+	if !timer.Stop(){
+		select{case <-timer.C:default:}
+	}
+	defer timer.Stop()
+	var timerC <-chan time.Time
+	var batch []byte
+
+	stopTimer:=func(){
+		if timerC==nil{return}
+		if !timer.Stop(){
+			select{case <-timer.C:default:}
 		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
+		timerC=nil
+	}
+	flush:=func(){
+		if len(batch)==0{
+			stopTimer()
+			return
+		}
+		data:=batch
+		batch=nil
+		stopTimer()
+		t.publish(goprotocol.TerminalEvent{
+			Kind:goprotocol.OutputEvent,
+			Size:t.Size(),
+			Data:data,
+		})
+	}
+	returnRaw:=func(chunk []byte){
+		if cap(chunk)<readBlockBytes{return}
+		chunk=chunk[:readBlockBytes]
+		select{
+		case free<-chunk:
+		default:
+		}
+	}
+	appendChunk:=func(chunk []byte){
+		if len(chunk)==0{return}
+		if batch==nil{
+			batch=make([]byte,0,readBlockBytes)
+		}
+		batch=append(batch,chunk...)
+		returnRaw(chunk)
+		if len(batch)>=readBlockBytes{
+			flush()
+			return
+		}
+		if timerC==nil{
+			timer.Reset(outputBatchDelay)
+			timerC=timer.C
+		}
+	}
+	drainObserved:=func(){
+		for {
+			select{
+			case chunk,ok:=<-raw:
+				if !ok{return}
+				appendChunk(chunk)
+			default:
+				return
+			}
+		}
+	}
+
+	for {
+		select{
+		case chunk,ok:=<-raw:
+			if !ok{
+				flush()
+				return
+			}
+			appendChunk(chunk)
+		case <-timerC:
+			timerC=nil
+			flush()
+		case req:=<-t.resizeRequests:
+			// Serialize resize with every PTY block already observed by the
+			// reader. This matches the Rust worker's authoritative stream
+			// ordering: Output(old geometry) -> Resize -> Output(new geometry).
+			drainObserved()
+			flush()
+			err:=pty.Setsize(t.ptmx,&pty.Winsize{
+				Rows:uint16(req.size.Lines),
+				Cols:uint16(req.size.Columns),
+			})
+			if err==nil{
+				t.mu.Lock()
+				t.size=req.size
+				t.mu.Unlock()
+				t.publish(goprotocol.TerminalEvent{
+					Kind:goprotocol.ResizeEvent,
+					Size:req.size,
+				})
+			}
+			req.done<-err
+		case <-t.closed:
+			// Closing ptmx wakes the raw reader. Keep draining until it closes
+			// so bytes already returned by the kernel still precede Exit.
+			for chunk:=range raw{
+				appendChunk(chunk)
+			}
+			flush()
+			return
+		}
+	}
+}
+
+func (t *Terminal) rawReadLoop(out chan<- []byte,free <-chan []byte){
+	defer close(out)
+	for {
+		var buf []byte
+		select{
+		case buf=<-free:
+		default:
+			buf=make([]byte,readBlockBytes)
+		}
+		if cap(buf)<readBlockBytes{
+			buf=make([]byte,readBlockBytes)
+		}else{
+			buf=buf[:readBlockBytes]
+		}
+
+		gometrics.PTYReadCalls.Add(1)
+		n,err:=t.ptmx.Read(buf)
+		if n>0{
+			gometrics.PTYBytesRead.Add(uint64(n))
+			out<-buf[:n]
+			buf=nil
+		}
+		if buf!=nil{
+			select{
+			case <-t.closed:
+			default:
+			}
+		}
+		if err!=nil{
+			if !errors.Is(err,io.EOF){
 				// Darwin/Linux PTYs commonly surface EIO after child exit.
 			}
 			return
