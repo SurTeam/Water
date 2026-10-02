@@ -252,7 +252,7 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 		liveImages[terminalImage.ID]=struct{}{}
 		imageOp,ok:=v.imageCache[terminalImage.ID]
 		if !ok {
-			rgba:=&image.RGBA{
+			rgba:=&image.NRGBA{
 				Pix:terminalImage.RGBA,
 				Stride:terminalImage.PixelWidth*4,
 				Rect:image.Rect(0,0,terminalImage.PixelWidth,terminalImage.PixelHeight),
