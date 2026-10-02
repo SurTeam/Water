@@ -500,7 +500,6 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			if term.emu==nil {term.mu.Unlock();return}
 			term.emu.Scroll(lines)
 			term.snapshot=term.emu.Snapshot()
-			term.selection=Selection{}
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
 		},
@@ -509,7 +508,12 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			if clickCount>=2 {
 				term.selection=MultiClickSelection(term.snapshot,col,row,clickCount)
 			} else {
-				term.selection=Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+				absoluteRow:=term.snapshot.YDisp+row
+				term.selection=Selection{
+					AnchorCol:col,AnchorRow:absoluteRow,
+					FocusCol:col,FocusRow:absoluteRow,
+					Active:true,Absolute:true,
+				}
 			}
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
@@ -518,7 +522,11 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			term.mu.Lock()
 			if term.selection.Active {
 				term.selection.FocusCol=col
-				term.selection.FocusRow=row
+				if term.selection.Absolute {
+					term.selection.FocusRow=term.snapshot.YDisp+row
+				} else {
+					term.selection.FocusRow=row
+				}
 			}
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
@@ -527,8 +535,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			term.mu.Lock()
 			if term.selection.Active {
 				term.selection.FocusCol=col
-				term.selection.FocusRow=row
-				if term.selection.AnchorCol==col && term.selection.AnchorRow==row {
+				focusRow:=row
+				if term.selection.Absolute {focusRow=term.snapshot.YDisp+row}
+				term.selection.FocusRow=focusRow
+				if term.selection.AnchorCol==col && term.selection.AnchorRow==focusRow {
 					term.selection=Selection{}
 				}
 			}
@@ -537,9 +547,16 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		},
 		OnCopy:func()string{
 			term.mu.RLock()
-			text:=SelectedText(term.snapshot,term.selection)
+			selection:=term.selection
+			snapshot:=term.snapshot
+			emu:=term.emu
 			term.mu.RUnlock()
-			return text
+			if !selection.Active{return ""}
+			if selection.Absolute && emu!=nil {
+				startCol,startRow,endCol,endRow:=selection.normalized()
+				return emu.SelectionText(startRow,startCol,endRow,endCol)
+			}
+			return SelectedText(snapshot,selection)
 		},
 		OnHyperlink:func(uri string){
 			c.activateHyperlink(uri)
