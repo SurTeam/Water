@@ -2,6 +2,7 @@ package goprotocol
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 
 	"github.com/google/uuid"
@@ -63,5 +64,20 @@ func TestTerminalFrameHandlesShortWritesWithoutCopies(t *testing.T){
 	}
 	if !bytes.Equal(got.Data,want.Data){
 		t.Fatalf("output mismatch: got %d bytes want %d",len(got.Data),len(want.Data))
+	}
+}
+
+
+func TestJSONFrameHandlesShortWrites(t *testing.T){
+	writer:=&shortWriter{max:3}
+	want:=Success(77,map[string]any{"value":"water"})
+	if err:=WriteJSON(writer,want);err!=nil{t.Fatal(err)}
+	frame,err:=ReadFrame(&writer.buf)
+	if err!=nil{t.Fatal(err)}
+	if frame.Terminal!=nil{t.Fatal("JSON frame decoded as terminal frame")}
+	var got WireMessage
+	if err:=json.Unmarshal(frame.JSON,&got);err!=nil{t.Fatal(err)}
+	if got.RequestID!=77 || got.OK==nil || !*got.OK{
+		t.Fatalf("decoded reply = %#v",got)
 	}
 }
