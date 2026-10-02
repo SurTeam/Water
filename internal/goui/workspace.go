@@ -64,6 +64,7 @@ type terminalClient struct {
 	rows int
 	view *TerminalView
 	input *TerminalInput
+	selection Selection
 }
 
 func (t *terminalClient) close() {
@@ -413,6 +414,8 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	view.Theme.Foreground=configColor(c.config.Theme.TerminalForeground,0xe4e4e4)
 	view.Theme.Background=configColor(c.config.Theme.TerminalBackground,0x2c2c2c)
 	view.Theme.Cursor=configColor(c.config.Theme.CursorBackground,0xe4e4e4)
+	view.Theme.Selection=configColor(c.config.Theme.Accent,0x5e81ac)
+	view.Theme.Selection.A=0x88
 	term:=&terminalClient{
 		id:summary.TerminalID,emu:emu,lastSeq:last,
 		cols:attached.Size.Columns,rows:attached.Size.Lines,
@@ -420,6 +423,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	}
 	term.input=&TerminalInput{
 		OnInput:func(data []byte){
+			term.mu.Lock()
+			term.selection=Selection{}
+			term.mu.Unlock()
 			_ = c.session.DispatchAsync(map[string]any{
 				"type":"terminal.send_bytes",
 				"terminal_id":summary.TerminalID,
@@ -431,6 +437,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			if term.emu==nil {term.mu.Unlock();return false}
 			accepted:=term.emu.Mouse(ev)
 			term.snapshot=term.emu.Snapshot()
+			if accepted { term.selection=Selection{} }
 			term.mu.Unlock()
 			if accepted { c.flushVTResponses(term) }
 			if accepted && c.invalidate!=nil { c.invalidate() }
@@ -441,8 +448,42 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			if term.emu==nil {term.mu.Unlock();return}
 			term.emu.Scroll(lines)
 			term.snapshot=term.emu.Snapshot()
+			term.selection=Selection{}
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
+		},
+		OnSelectionStart:func(col,row int){
+			term.mu.Lock()
+			term.selection=Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+			term.mu.Unlock()
+			if c.invalidate!=nil { c.invalidate() }
+		},
+		OnSelectionMove:func(col,row int){
+			term.mu.Lock()
+			if term.selection.Active {
+				term.selection.FocusCol=col
+				term.selection.FocusRow=row
+			}
+			term.mu.Unlock()
+			if c.invalidate!=nil { c.invalidate() }
+		},
+		OnSelectionEnd:func(col,row int){
+			term.mu.Lock()
+			if term.selection.Active {
+				term.selection.FocusCol=col
+				term.selection.FocusRow=row
+				if term.selection.AnchorCol==col && term.selection.AnchorRow==row {
+					term.selection=Selection{}
+				}
+			}
+			term.mu.Unlock()
+			if c.invalidate!=nil { c.invalidate() }
+		},
+		OnCopy:func()string{
+			term.mu.RLock()
+			text:=SelectedText(term.snapshot,term.selection)
+			term.mu.RUnlock()
+			return text
 		},
 	}
 	term.snapshot=emu.Snapshot()
@@ -487,10 +528,12 @@ func (c *WorkspaceClient) applyTerminalEvent(push goclient.TerminalPush) {
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
 		term.emu.Write(push.Event.Data)
+		term.selection=Selection{}
 	case goprotocol.ResizeEvent:
 		term.emu.Resize(push.Event.Size.Columns,push.Event.Size.Lines)
 		term.cols=push.Event.Size.Columns
 		term.rows=push.Event.Size.Lines
+		term.selection=Selection{}
 	}
 	term.snapshot=term.emu.Snapshot()
 	term.mu.Unlock()
@@ -517,6 +560,7 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 	prev:=old.emu
 	old.emu=next
 	old.snapshot=next.Snapshot()
+	old.selection=Selection{}
 	old.lastSeq=last
 	old.cols=attached.Size.Columns
 	old.rows=attached.Size.Lines
@@ -688,13 +732,14 @@ func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node 
 	}
 	term.mu.RLock()
 	snapshot:=term.snapshot
+	selection:=term.selection
 	term.mu.RUnlock()
 
 	c.ensureTerminalSize(gtx,term)
 	cellWidth:=gtx.Dp(term.view.CellWidth)
 	lineHeight:=gtx.Dp(term.view.LineHeight)
 	term.input.Process(gtx,snapshot,cellWidth,lineHeight)
-	dims:=term.view.Layout(gtx,th,snapshot)
+	dims:=term.view.Layout(gtx,th,snapshot,selection)
 	term.input.Add(gtx,dims.Size)
 	return dims
 }
