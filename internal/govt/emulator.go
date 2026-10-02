@@ -162,7 +162,7 @@ func (e *Emulator) pruneLinksLocked() {
 	for row:=0;row<buf.Lines.Length();row++{
 		line:=buf.Lines.Get(row)
 		if line==nil{continue}
-		for col:=0;col<line.Length();col++{
+		for col:=0;col<line.Len;col++{
 			line.LoadCell(col,&raw)
 			if raw.Extended==nil{continue}
 			if id:=raw.Extended.URLID();id!=0{live[id]=struct{}{}}
