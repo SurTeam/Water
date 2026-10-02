@@ -46,6 +46,10 @@ jobs:
           cache-dependency-path: go.mod
       - name: Select stable Rust
         run: rustup default stable
+      - name: Install Rust server shell fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zsh
       - run: go mod tidy
 
       - name: Record runner versions
