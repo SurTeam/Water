@@ -70,6 +70,7 @@ const (
 	hitNewWorkspace
 	hitNewTab
 	hitPane
+	hitConnection
 )
 
 type automationHit struct {
@@ -83,6 +84,16 @@ type hyperlinkPrompt struct {
 	Destination string
 	Working     bool
 	Error       string
+}
+
+type ConnectionEntry struct {
+	ID               uuid.UUID
+	Name             string
+	Kind             string
+	Status           string
+	SocketPath       string
+	RemoteSocketPath string
+	Destination      string
 }
 
 type terminalClient struct {
@@ -127,6 +138,12 @@ type WorkspaceClient struct {
 	newWorkspace widget.Clickable
 	newTab widget.Clickable
 
+	connectionMu sync.RWMutex
+	connectionID uuid.UUID
+	connectionEntries []ConnectionEntry
+	connectionClicks map[uuid.UUID]*widget.Clickable
+	onActivateConnection func(uuid.UUID)
+
 	hyperlinkMu sync.Mutex
 	hyperlinkPrompt *hyperlinkPrompt
 	hyperlinkConfirm widget.Clickable
@@ -151,7 +168,52 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 		terminals: make(map[uuid.UUID]*terminalClient),
 		workspaceClicks: make(map[uuid.UUID]*widget.Clickable),
 		tabClicks: make(map[uuid.UUID]*widget.Clickable),
+		connectionClicks: make(map[uuid.UUID]*widget.Clickable),
 	}
+}
+
+func (c *WorkspaceClient) SetConnectionSwitcher(id uuid.UUID, entries []ConnectionEntry, activate func(uuid.UUID)) {
+	c.connectionMu.Lock()
+	c.connectionID=id
+	c.connectionEntries=append(c.connectionEntries[:0],entries...)
+	c.onActivateConnection=activate
+	for key:=range c.connectionClicks {
+		found:=false
+		for _,entry:=range entries {
+			if entry.ID==key {found=true;break}
+		}
+		if !found {delete(c.connectionClicks,key)}
+	}
+	c.connectionMu.Unlock()
+	if c.invalidate!=nil{c.invalidate()}
+}
+
+func (c *WorkspaceClient) connectionSnapshot()(uuid.UUID,[]ConnectionEntry,func(uuid.UUID)){
+	c.connectionMu.RLock()
+	id:=c.connectionID
+	entries:=append([]ConnectionEntry(nil),c.connectionEntries...)
+	activate:=c.onActivateConnection
+	c.connectionMu.RUnlock()
+	return id,entries,activate
+}
+
+func (c *WorkspaceClient) connectionListResponse() map[string]any {
+	active,entries,_:=c.connectionSnapshot()
+	out:=make([]map[string]any,0,len(entries))
+	for _,entry:=range entries{
+		item:=map[string]any{
+			"id":entry.ID,
+			"name":entry.Name,
+			"kind":entry.Kind,
+			"status":entry.Status,
+			"active":entry.ID==active,
+		}
+		if entry.SocketPath!=""{item["socket_path"]=entry.SocketPath}
+		if entry.RemoteSocketPath!=""{item["remote_socket_path"]=entry.RemoteSocketPath}
+		if entry.Destination!=""{item["destination"]=entry.Destination}
+		out=append(out,item)
+	}
+	return map[string]any{"connections":out}
 }
 
 func (c *WorkspaceClient) Close() {
@@ -243,7 +305,7 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 		if err:=json.Unmarshal(params,&p);err!=nil{return nil,err}
 		return c.Screenshot(p.Path)
 	case "connection.list":
-		return map[string]any{"connections":[]any{}},nil
+		return c.connectionListResponse(),nil
 	default:
 		return nil,fmt.Errorf("unsupported UI method %q",method)
 	}
@@ -305,6 +367,7 @@ func automationHitKindName(kind automationHitKind)string{
 	case hitNewWorkspace:return "new_workspace"
 	case hitNewTab:return "new_tab"
 	case hitPane:return "pane"
+	case hitConnection:return "connection"
 	default:return "unknown"
 	}
 }
