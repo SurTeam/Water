@@ -49,6 +49,17 @@ jobs:
       - run: go test ./cmd/...
       - run: go vet ./...
       - run: bash -n scripts/build-go-macos-app.sh scripts/build-go-embedded-servers.sh
+      - name: Smoke-build native macOS Go app bundle
+        if: runner.os == 'macOS'
+        env:
+          WATER_APP_VARIANT: dev
+          WATER_APP_VERSION: ci
+          CODESIGN_SKIP: "1"
+        run: |
+          bash scripts/build-go-macos-app.sh
+          test -x "dist/Water Dev.app/Contents/MacOS/water-dev"
+          test -x "dist/Water Dev.app/Contents/MacOS/water-srv-dev"
+          test -s "dist/Water Dev-ci-macOS-arm64.zip"
 
 
   compat:
