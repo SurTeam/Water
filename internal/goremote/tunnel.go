@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/google/uuid"
@@ -122,8 +123,8 @@ func (t *Tunnel) compatible() bool {
 	}
 	return info.ProtocolVersion == goprotocol.ProtocolVersion &&
 		info.APISignature == goprotocol.APISignature &&
-		info.BuildVariant == "dev" &&
-		info.ServerVersion == "go-rewrite"
+		info.BuildVariant == gobuild.Variant &&
+		info.ServerVersion == gobuild.Version
 }
 
 func (t *Tunnel) Close() error {
@@ -147,8 +148,27 @@ func remoteControlSocket(destination string) string {
 	}
 	return filepath.Join(
 		os.TempDir(),
-		fmt.Sprintf("water-go-vgo-rewrite-p%d-%016x.sock", goprotocol.ProtocolVersion, stableID(destination)),
+		fmt.Sprintf(
+			"water-go-%s-p%d-%016x-%016x.sock",
+			buildIdentityToken(),
+			goprotocol.ProtocolVersion,
+			stableID(gobuild.Version+"|"+gobuild.Variant),
+			stableID(destination),
+		),
 	)
+}
+
+func buildIdentityToken() string {
+	value:=strings.ToLower(strings.TrimSpace(gobuild.Variant))
+	if value==""{value="dev"}
+	var b strings.Builder
+	for _,r:=range value{
+		if (r>='a'&&r<='z')||(r>='0'&&r<='9')||r=='-'||r=='_'{
+			b.WriteRune(r)
+		}
+	}
+	if b.Len()==0{return "dev"}
+	return b.String()
 }
 
 func stableID(value string) uint64 {
