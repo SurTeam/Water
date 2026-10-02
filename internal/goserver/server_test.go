@@ -2,6 +2,8 @@ package goserver_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,5 +100,112 @@ func TestServerClientTerminalRoundTrip(t *testing.T) {
 	}
 	if state.StateRevision == 0 || len(state.Workspaces) == 0 {
 		t.Fatalf("unexpected model state: %#v", state)
+	}
+}
+
+
+func TestUIForwardingAndEventList(t *testing.T) {
+	socket := filepath.Join("/tmp", "water-go-ui-test-"+uuid.New().String()+".sock")
+	srv := goserver.New(socket)
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+	defer func() {
+		_ = srv.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("server did not stop")
+		}
+	}()
+
+	client := goclient.New(socket)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var pong map[string]any
+		if err := client.Call("ping", map[string]any{}, &pong); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("server never became ready")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	gui, err := client.OpenSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gui.Close()
+
+	replyDone := make(chan error, 1)
+	go func() {
+		for push := range gui.Pushes {
+			if push.Method != "push.ui" {
+				continue
+			}
+			var inner struct {
+				Method string `json:"method"`
+			}
+			if err := json.Unmarshal(push.Params, &inner); err != nil {
+				replyDone <- err
+				return
+			}
+			if inner.Method != "ui.snapshot" {
+				replyDone <- fmt.Errorf("unexpected UI method %q", inner.Method)
+				return
+			}
+			replyDone <- gui.ReplySuccess(push.RequestID, map[string]any{
+				"window_count":      1,
+				"has_active_window": true,
+			})
+			return
+		}
+		replyDone <- fmt.Errorf("GUI session closed before push.ui")
+	}()
+
+	var snapshot struct {
+		WindowCount     int  `json:"window_count"`
+		HasActiveWindow bool `json:"has_active_window"`
+	}
+	if err := client.Call("ui.snapshot", map[string]any{}, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-replyDone; err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.WindowCount != 1 || !snapshot.HasActiveWindow {
+		t.Fatalf("unexpected snapshot: %#v", snapshot)
+	}
+
+	if err := client.Dispatch(map[string]any{"type": "workspace.create"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var events []struct {
+		Sequence      uint64         `json:"sequence"`
+		StateRevision uint64         `json:"state_revision"`
+		Kind          map[string]any `json:"kind"`
+	}
+	if err := client.Call("event.list", map[string]any{"after_sequence": 0}, &events); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) == 0 {
+		t.Fatal("expected application event")
+	}
+	last := events[len(events)-1]
+	if last.Sequence == 0 || last.StateRevision == 0 {
+		t.Fatalf("invalid event metadata: %#v", last)
+	}
+	if got, _ := last.Kind["type"].(string); got != "workspace_created" {
+		t.Fatalf("unexpected event kind: %#v", last.Kind)
+	}
+
+	var metrics map[string]any
+	if err := client.Call("debug.metrics", map[string]any{}, &metrics); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"state_dumps", "model_snapshot_pushes", "terminal_stream_events"} {
+		if _, ok := metrics[key]; !ok {
+			t.Fatalf("missing metric %q", key)
+		}
 	}
 }
