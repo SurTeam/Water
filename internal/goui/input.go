@@ -291,9 +291,14 @@ func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
 	stack.Pop()
 }
 
+func (i *TerminalInput) CompositionState()(string,bool){
+	if !i.composing{return "",false}
+	return i.pendingComposition,true
+}
+
 func (i *TerminalInput) CompositionText()string{
-	if !i.composing{return ""}
-	return i.pendingComposition
+	text,_:=i.CompositionState()
+	return text
 }
 
 func (i *TerminalInput) Focus(gtx layout.Context) {
