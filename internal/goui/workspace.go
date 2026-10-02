@@ -535,7 +535,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 func applyWireEvent(emu *govt.Emulator,ev goprotocol.WireTerminalEvent) {
 	switch ev.Type {
 	case "output":
-		if data,err:=base64.StdEncoding.DecodeString(ev.Bytes);err==nil{emu.Write(data)}
+		if data,err:=base64.StdEncoding.DecodeString(ev.Bytes);err==nil{emu.WriteReplay(data)}
 	case "resize":
 		emu.Resize(ev.Columns,ev.Lines)
 	}
