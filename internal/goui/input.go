@@ -291,6 +291,11 @@ func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
 	stack.Pop()
 }
 
+func (i *TerminalInput) CompositionText()string{
+	if !i.composing{return ""}
+	return i.pendingComposition
+}
+
 func (i *TerminalInput) Focus(gtx layout.Context) {
 	gtx.Execute(key.FocusCmd{Tag:&i.tag})
 }
