@@ -15,12 +15,15 @@ import (
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/clip"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/gohyperlink"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/govt"
@@ -75,6 +78,13 @@ type automationHit struct {
 	ID   uuid.UUID
 }
 
+type hyperlinkPrompt struct {
+	URI         string
+	Destination string
+	Working     bool
+	Error       string
+}
+
 type terminalClient struct {
 	id uuid.UUID
 	mu sync.RWMutex
@@ -101,6 +111,7 @@ type WorkspaceClient struct {
 	session *goclient.Session
 	invalidate func()
 	config goconfig.AppConfig
+	remoteDestination string
 
 	mu sync.RWMutex
 	state gomodel.StateDump
@@ -115,6 +126,12 @@ type WorkspaceClient struct {
 	tabClicks map[uuid.UUID]*widget.Clickable
 	newWorkspace widget.Clickable
 	newTab widget.Clickable
+
+	hyperlinkMu sync.Mutex
+	hyperlinkPrompt *hyperlinkPrompt
+	hyperlinkConfirm widget.Clickable
+	hyperlinkCancel widget.Clickable
+	hyperlinkScrim widget.Clickable
 }
 
 func NewWorkspaceClient(session *goclient.Session, invalidate func()) *WorkspaceClient {
@@ -122,10 +139,15 @@ func NewWorkspaceClient(session *goclient.Session, invalidate func()) *Workspace
 }
 
 func NewWorkspaceClientWithConfig(session *goclient.Session, invalidate func(), config goconfig.AppConfig) *WorkspaceClient {
+	return NewWorkspaceClientWithConnection(session,invalidate,config,"")
+}
+
+func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func(), config goconfig.AppConfig, remoteDestination string) *WorkspaceClient {
 	return &WorkspaceClient{
 		session: session,
 		invalidate: invalidate,
 		config: config.Normalized(),
+		remoteDestination: strings.TrimSpace(remoteDestination),
 		terminals: make(map[uuid.UUID]*terminalClient),
 		workspaceClicks: make(map[uuid.UUID]*widget.Clickable),
 		tabClicks: make(map[uuid.UUID]*widget.Clickable),
