@@ -11,8 +11,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Live terminal events keep the existing UUID / sequence / geometry layout.
 - Operation IDs remain UUIDs.
 - PTY output, resize, and exit share one strictly ordered sequence.
+- Worker and decoded-client terminal queues are both bounded to 64 events.
 - The server owns PTYs and bounded replay; clients own VT emulation,
-  viewport state, selection/presentation state, and terminal query replies.
+  viewport state, selection/presentation state, graphics, and terminal query
+  replies.
 
 ## Go stack
 
@@ -31,7 +33,7 @@ benchmark oracle while replacing both the Water client and server in Go.
 - Unix-domain control server with version/build compatibility checks.
 - WT4 binary terminal output/resize/exit frames.
 - PTY spawn, input, resize, strict output-before-exit sequencing, bounded
-  replay, attach/detach, subscriber backpressure, and replay resync.
+  replay, attach/detach, 64-event subscriber backpressure, and replay resync.
 - UUID operation registry with bounded history.
 - Revisioned application state and `push.snapshot` GUI sessions.
 - Workspace, tab, pane-tree, surface, terminal, pane movement/promotion,
@@ -43,53 +45,87 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 ### Client and UI
 
-- Short-lived RPC client and long-lived GUI session client.
+- Short-lived RPC client and long-lived GUI session client with a 64-event
+  decoded terminal queue.
 - Headless xterm-go emulator with 256/RGB colors, cell attributes, wide cells,
-  OSC hyperlink IDs, alternate-screen state, row hashes, scrollback, and
-  terminal title tracking.
-- VT-generated DA/DSR/mouse replies are sent back to the PTY.
+  OSC 8 URIs, alternate-screen state, row hashes, wrapped-row metadata,
+  scrollback, and terminal title tracking.
+- Attach replay is side-effect free; VT-generated DA/DSR/mouse replies are
+  written back to the PTY only for live input.
 - Gio workspace/sidebar/tab/pane UI backed by server snapshot pushes.
 - Cached row/style-run terminal renderer instead of rebuilding the whole
   terminal as one string.
 - Keyboard input, Ctrl/Alt sequences, function keys, application-cursor mode,
   IME composition, bracketed paste, DEC mouse tracking, and local scrollback.
+- Character drag selection, Rust-style repeated-click word/segment expansion,
+  CJK segmentation, wide-cell handling, wrapped-line copy semantics, and
+  clipboard copy-or-interrupt behavior.
+- OSC 8 hyperlink activation with platform-shortcut/Shift selection rules,
+  safe target validation, local default-application opening, and remote
+  `file://` download through the existing SSH ControlMaster before opening.
+- Kitty graphics, iTerm2 inline image, and Sixel parsing/rendering with Gio
+  texture caching, ordered cursor effects, erase handling, and cell-pixel
+  queries.
 - Window-driven PTY resize.
+- Real `ui.click` routing through Gio's input router rather than a hand-coded
+  logical acknowledgement.
 - Real offscreen Gio screenshot rendering through `gpu/headless`.
 
-### Remote, config, CLI, and diagnostics
+### Remote, config, CLI, diagnostics, and packaging
 
 - Config loading/defaults for startup, server lifecycle, shell, terminal,
   features, shortcuts, and theme.
-- OpenSSH ControlMaster remote tunnel and embedded Go server payload build.
-- Agent detection/projection.
+- OpenSSH ControlMaster remote tunnel and versioned embedded Go server payloads
+  for Darwin/Linux on amd64/arm64.
+- Agent detection/projection, including shell `exec -a` aliases.
 - `water ctl` Go command surface for state/info/server/debug/connections,
   workspace/tab/pane/surface/terminal/operation/UI/scenario controls.
 - Existing Water scenario JSON format is understood by the Go CLI.
-- Hot-path counters for PTY reads, terminal stream bytes/events, queues,
-  replay, snapshot pushes, and client processing.
-- macOS/Linux Go CI, protocol/model/server/client/VT/UI tests, and end-to-end
-  real PTY tests.
+- Native macOS Go `.app` packaging with the same Water/Water Dev bundle and
+  binary names consumed by the existing codesign/release workflow.
+- Hot-path counters for PTY reads, terminal stream bytes/events, replay,
+  snapshot pushes, and client processing.
+
+### Validation gates
+
+- macOS/Linux unit, vet, protocol/model/server/client/VT/UI, and real-PTY tests.
+- The full existing scenario suite is gated on both Linux and macOS, including
+  the zsh and agent fixtures.
+- A bidirectional Rust/Go compatibility job starts the opposite-language
+  server and exercises typed/generic control RPCs plus the live WT4 stream.
+  The covered headless surface includes info/state/events/debug/connections,
+  operations, terminal snapshot/replay/contains/wait-exit, attach/detach, and
+  command dispatch.
+- A dedicated performance job runs a 32 MB direct/server terminal workload,
+  verifies sequence continuity, 64-event queue caps, the 8 MiB replay bound,
+  and a conservative shared-runner throughput gate. It also measures resize
+  and Ctrl-C-to-exit latency while stdout is flooded.
+- Example shared-runner measurements observed while adding the gate:
+  - 26.8 MB/s direct vs 23.6 MB/s server (87.8% retention).
+  - 16.1 MB/s direct vs 13.0 MB/s server (80.6% retention) under a noisier run.
+  - 0.66 ms resize and 0.81 ms Ctrl-C-to-exit during output flood.
+  These are CI smoke measurements, not substitutes for the formal same-machine
+  Rust-vs-Go benchmark.
 
 ## Remaining parity work
 
-The branch is not merge-ready until these remaining gaps are closed:
+The branch is much closer to replacement, but these gaps still matter:
 
-- Make `ui.click` coordinate automation inject a real Gio pointer click
-  instead of returning only a logical acknowledgement.
-- Complete terminal selection/copy behavior and hyperlink activation/download
-  behavior in Gio.
-- Add graphics/image protocol rendering parity where the Rust terminal
-  supports it.
-- Run and gate the full existing scenario suite, including platform-dependent
-  zsh and agent fixtures, through the Go CLI/server.
-- Add systematic Rust-client ↔ Go-server and Go-client ↔ Rust-server
-  compatibility tests for every control method and binary terminal event.
-- Close remaining debug-memory accounting gaps such as visible-cell, surface,
-  shaping-cache, and image-cache counts.
-- Reproduce release packaging/signing/application-bundle workflows for the Go
-  binaries.
-- Meet the existing terminal streaming latency, throughput, memory, and
-  backpressure performance gates before replacing the Rust implementation.
+- Convert terminal selection endpoints from viewport-relative rows to stable
+  buffer/absolute coordinates so a selection can survive viewport scrolling
+  and support correct edge autoscroll across off-screen scrollback.
+- Finish any remaining GUI-only Rust/Go compatibility coverage that requires
+  a real window rather than the headless control server.
+- Close debug-memory accounting gaps that live only in the GUI process,
+  especially shaping-cache and rendered image-cache accounting.
+- Add macOS notarization/stapling to the release workflow. The Go app already
+  reuses the existing bundle names and codesign/release flow, but the current
+  workflow does not notarize either implementation.
+- Run a formal same-machine Rust-vs-Go benchmark with the same ANSI-heavy
+  61.4 MB / 500 MB fixtures and publish p50/p95/p99, allocation, RSS, and
+  sustained-memory results. The CI performance job is intentionally a
+  conservative regression gate, not a benchmark publication.
 
-Do not merge `go-rewrite` into `main` until the parity and performance gates
-above are green.
+Do not merge `go-rewrite` into `main` until the remaining selection,
+GUI-memory, notarization, and formal benchmark work above is closed or
+explicitly waived.
