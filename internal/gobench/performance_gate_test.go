@@ -262,3 +262,146 @@ func numberMetric(metrics map[string]any, key string) float64 {
 		return 0
 	}
 }
+
+
+func TestTerminalInteractionPerformanceGate(t *testing.T) {
+	if testing.Short() {
+		t.Skip("performance gate is disabled in short mode")
+	}
+
+	socket := filepath.Join("/tmp", "water-go-interaction-"+uuid.New().String()+".sock")
+	server := goserver.New(socket)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.ListenAndServe() }()
+	defer func() {
+		_ = server.Close()
+		select {
+		case <-serveDone:
+		case <-time.After(time.Second):
+		}
+	}()
+
+	client := goclient.New(socket)
+	waitPerformanceServer(t, client)
+
+	var spawned struct {
+		TerminalID uuid.UUID `json:"terminal_id"`
+	}
+	if err := client.Dispatch(map[string]any{
+		"type": "terminal.spawn",
+		"program": "/bin/sh",
+		"args": []string{"-c", "read _; exec yes WATER_INTERACTION_FLOOD"},
+		"columns": 80,
+		"lines": 24,
+	}, &spawned); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := client.OpenSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	var attached struct {
+		LastSeq uint64 `json:"last_seq"`
+	}
+	if err := session.Attach(spawned.TerminalID, &attached); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.DispatchAsync(map[string]any{
+		"type": "terminal.send_text",
+		"terminal_id": spawned.TerminalID,
+		"text": "\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	lastSeq := attached.LastSeq
+	waitDeadline := time.NewTimer(3 * time.Second)
+	defer waitDeadline.Stop()
+	for {
+		select {
+		case push := <-session.Events:
+			if push.TerminalID != spawned.TerminalID || push.Event.Seq <= lastSeq {
+				continue
+			}
+			if lastSeq != 0 && push.Event.Seq != lastSeq+1 {
+				t.Fatalf("interaction stream sequence gap: previous=%d next=%d", lastSeq, push.Event.Seq)
+			}
+			lastSeq = push.Event.Seq
+			if push.Event.Kind == goprotocol.OutputEvent && len(push.Event.Data) > 1024 {
+				goto floodReady
+			}
+		case <-waitDeadline.C:
+			t.Fatal("terminal flood did not become ready")
+		}
+	}
+
+floodReady:
+	resizeStart := time.Now()
+	if err := client.Dispatch(map[string]any{
+		"type": "terminal.resize",
+		"terminal_id": spawned.TerminalID,
+		"columns": 100,
+		"lines": 31,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	resizeLatency := waitInteractionEvent(t, session, spawned.TerminalID, &lastSeq, func(ev goprotocol.TerminalEvent) bool {
+		return ev.Kind == goprotocol.ResizeEvent && ev.Size.Columns == 100 && ev.Size.Lines == 31
+	}, 2*time.Second, resizeStart)
+
+	inputStart := time.Now()
+	if err := client.Dispatch(map[string]any{
+		"type": "terminal.send_bytes",
+		"terminal_id": spawned.TerminalID,
+		"bytes": []int{3},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	inputLatency := waitInteractionEvent(t, session, spawned.TerminalID, &lastSeq, func(ev goprotocol.TerminalEvent) bool {
+		return ev.Kind == goprotocol.ExitEvent
+	}, 2*time.Second, inputStart)
+
+	t.Logf("terminal interaction: resize=%s ctrl-c-to-exit=%s", resizeLatency, inputLatency)
+	if resizeLatency > 250*time.Millisecond {
+		t.Fatalf("resize latency %s exceeds 250ms gate", resizeLatency)
+	}
+	if inputLatency > time.Second {
+		t.Fatalf("Ctrl-C to exit latency %s exceeds 1s gate", inputLatency)
+	}
+}
+
+func waitInteractionEvent(
+	t *testing.T,
+	session *goclient.Session,
+	terminalID uuid.UUID,
+	lastSeq *uint64,
+	match func(goprotocol.TerminalEvent) bool,
+	timeout time.Duration,
+	start time.Time,
+) time.Duration {
+	t.Helper()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for {
+		select {
+		case push, ok := <-session.Events:
+			if !ok {
+				t.Fatal("interaction terminal stream closed")
+			}
+			if push.TerminalID != terminalID || push.Event.Seq <= *lastSeq {
+				continue
+			}
+			if *lastSeq != 0 && push.Event.Seq != *lastSeq+1 {
+				t.Fatalf("interaction stream sequence gap: previous=%d next=%d", *lastSeq, push.Event.Seq)
+			}
+			*lastSeq = push.Event.Seq
+			if match(push.Event) {
+				return time.Since(start)
+			}
+		case <-timer.C:
+			t.Fatalf("timed out after %s waiting for interaction event", timeout)
+		}
+	}
+}
