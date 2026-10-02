@@ -91,7 +91,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb libgl1-mesa-dri \
+            xvfb xclip xdotool libgl1-mesa-dri \
             libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
             libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev libvulkan1 \
             libxcursor-dev libxfixes-dev \
