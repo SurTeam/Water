@@ -122,11 +122,17 @@ func SelectedText(snap govt.Snapshot, selection Selection) string {
 		if row==endRow { right=endCol }
 		if left<0{left=0};if right>=snap.Cols{right=snap.Cols-1}
 		if left>right{continue}
+		var rowText strings.Builder
 		for col:=left;col<=right && col<len(line.Cells);col++ {
 			cell:=line.Cells[col]
 			if cell.Width==0 { continue }
-			if cell.Text=="" { out.WriteByte(' ') } else { out.WriteString(cell.Text) }
+			if cell.Text=="" { rowText.WriteByte(' ') } else { rowText.WriteString(cell.Text) }
 		}
+		text:=rowText.String()
+		if right==snap.Cols-1 {
+			text=strings.TrimRight(text," ")
+		}
+		out.WriteString(text)
 	}
 	return out.String()
 }
