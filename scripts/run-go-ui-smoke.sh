@@ -190,7 +190,7 @@ if [[ -z "$window_id" ]]; then
   exit 1
 fi
 read -r pane_x pane_y <<<"$pane_hit"
-xdotool windowactivate --sync "$window_id"
+xdotool windowfocus --sync "$window_id"
 xdotool mousemove --window "$window_id" "$pane_x" "$pane_y" click 1
 printf '%s' 'echo WATER_CLIPBOARD_SMOKE' | xclip -selection clipboard
 xdotool key --window "$window_id" ctrl+v
