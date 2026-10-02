@@ -357,6 +357,7 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"terminal_graphics_bytes":graphicsBytes,
 		"frame_size":[]int{frameSize.X,frameSize.Y},
 		"automation_hits":hits,
+		"connections":c.connectionListResponse()["connections"],
 	}
 }
 
@@ -1036,6 +1037,33 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,st
 		y+=dims.Size.Y
 		return dims
 	}))
+	activeConnection,connections,activateConnection:=c.connectionSnapshot()
+	if len(connections)>1 {
+		for _,connection:=range connections {
+			entry:=connection
+			c.connectionMu.Lock()
+			click:=c.connectionClicks[entry.ID]
+			if click==nil{click=new(widget.Clickable);c.connectionClicks[entry.ID]=click}
+			c.connectionMu.Unlock()
+			for click.Clicked(gtx){
+				if activateConnection!=nil{activateConnection(entry.ID)}
+			}
+			items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+				top:=y
+				label:=entry.Name
+				if entry.ID==activeConnection{label="● "+label}else{label="○ "+label}
+				if entry.Status!="" && entry.Status!="connected"{label+=" ("+entry.Status+")"}
+				button:=material.Button(th,click,label)
+				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(4)}.Layout(gtx,button.Layout)
+				c.hitRegions=append(c.hitRegions,automationHit{
+					Rect:image.Rect(0,top,gtx.Constraints.Max.X,top+dims.Size.Y),
+					Kind:hitConnection,ID:entry.ID,
+				})
+				y+=dims.Size.Y
+				return dims
+			}))
+		}
+	}
 	for _,workspace:=range state.Workspaces {
 		w:=workspace
 		click:=c.workspaceClicks[w.ID]
