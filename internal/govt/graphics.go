@@ -748,7 +748,7 @@ func drawSixel(canvas *sixelCanvas, x *int, y int, ch byte, color [4]byte) {
 			canvas.set(*x, y+bit, color)
 		}
 	}
-	*x++
+	*x = *x + 1
 }
 
 func sixelNumber(data []byte) (int, int) {
