@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -299,3 +300,18 @@ func configDirName(buildVariant string)string{
 
 func clamp(v,lo,hi int)int{if v<lo{return lo};if v>hi{return hi};return v}
 func clampFloat(v,lo,hi float32)float32{if v<lo{return lo};if v>hi{return hi};return v}
+
+
+func ParseColor(value string,fallback uint32)uint32{
+	value=strings.TrimSpace(value)
+	value=strings.TrimPrefix(value,"#")
+	value=strings.TrimPrefix(value,"0x")
+	value=strings.TrimPrefix(value,"0X")
+	if len(value)==3{
+		value=string([]byte{value[0],value[0],value[1],value[1],value[2],value[2]})
+	}
+	if len(value)!=6{return fallback}
+	parsed,err:=strconv.ParseUint(value,16,32)
+	if err!=nil{return fallback}
+	return uint32(parsed)
+}
