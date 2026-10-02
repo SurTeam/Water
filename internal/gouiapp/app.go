@@ -110,27 +110,22 @@ func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,bu
 	// terminal attachments are closed before an embedded/detached server stops.
 	defer multi.Close()
 
-	multi.SetRemoteConnector(func(rawDestination string) error {
+	remoteFactory:=func(rawDestination string)(goui.ConnectionEntry,*goui.WorkspaceClient,func(),error){
 		destination,err:=goremote.ValidateDestination(rawDestination)
-		if err!=nil{return err}
+		if err!=nil{return goui.ConnectionEntry{},nil,nil,err}
 		for _,entry:=range multi.ConnectionEntries(){
 			if entry.Kind=="remote" && entry.Destination==destination{
-				return fmt.Errorf("remote connection %s is already open",destination)
+				return goui.ConnectionEntry{},nil,nil,fmt.Errorf("remote connection %s is already open",destination)
 			}
 		}
 		tunnel,err:=goremote.Connect(destination)
-		if err!=nil{return fmt.Errorf("connect remote Water server %s: %w",destination,err)}
+		if err!=nil{return goui.ConnectionEntry{},nil,nil,fmt.Errorf("connect remote Water server %s: %w",destination,err)}
 		session,err:=tunnel.Client().OpenSession()
 		if err!=nil{
 			_ = tunnel.Close()
-			return fmt.Errorf("open remote Water session %s: %w",destination,err)
+			return goui.ConnectionEntry{},nil,nil,fmt.Errorf("open remote Water session %s: %w",destination,err)
 		}
 		view:=goui.NewWorkspaceClientWithConnection(session,w.Invalidate,cfg,destination)
-		if err:=view.Bootstrap();err!=nil{
-			_ = session.Close()
-			_ = tunnel.Close()
-			return fmt.Errorf("bootstrap remote Water workspace %s: %w",destination,err)
-		}
 		entry:=goui.ConnectionEntry{
 			ID:uuid.New(),
 			Name:destination,
@@ -144,40 +139,15 @@ func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,bu
 			_ = session.Close()
 			_ = tunnel.Close()
 		}
-		if err:=multi.AddConnection(entry,view,closeRemote,true);err!=nil{
-			closeRemote()
-			return err
-		}
-		go view.Run()
-		return nil
-	})
+		return entry,view,closeRemote,nil
+	}
+	multi.SetRemoteConnector(remoteFactory)
 
 	for _,rawDestination:=range sshDestinations{
-		destination,err:=goremote.ValidateDestination(rawDestination)
+		entry,view,closeRemote,err:=remoteFactory(rawDestination)
 		if err!=nil{return fmt.Errorf("SSH destination %q: %w",rawDestination,err)}
-		tunnel,err:=goremote.Connect(destination)
-		if err!=nil{return fmt.Errorf("connect remote Water server %s: %w",destination,err)}
-		session,err:=tunnel.Client().OpenSession()
-		if err!=nil{
-			_ = tunnel.Close()
-			return fmt.Errorf("open remote Water session %s: %w",destination,err)
-		}
-		view:=goui.NewWorkspaceClientWithConnection(session,w.Invalidate,cfg,destination)
-		entry:=goui.ConnectionEntry{
-			ID:uuid.New(),
-			Name:destination,
-			Kind:"remote",
-			Status:"connected",
-			SocketPath:tunnel.LocalSocket(),
-			RemoteSocketPath:tunnel.RemoteSocket(),
-			Destination:destination,
-		}
-		closeRemote:=func(){
-			_ = session.Close()
-			_ = tunnel.Close()
-		}
 		if err:=multi.AddConnection(entry,view,closeRemote,true);err!=nil{
-			closeRemote()
+			if closeRemote!=nil{closeRemote()}
 			return err
 		}
 	}
