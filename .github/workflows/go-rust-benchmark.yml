@@ -49,6 +49,7 @@ jobs:
 
       - name: Record runner versions
         run: |
+          mkdir -p target
           {
             uname -a
             go version
