@@ -225,6 +225,13 @@ func ptr[T any](v T) *T { return &v }
 
 func (m *Model) bump() { m.revision++ }
 
+func (m *Model) Revision() uint64 {
+	m.mu.RLock()
+	revision := m.revision
+	m.mu.RUnlock()
+	return revision
+}
+
 func (m *Model) CreateWorkspace(title string) uuid.UUID {
 	m.mu.Lock()
 	defer m.mu.Unlock()
