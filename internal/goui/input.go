@@ -2,14 +2,17 @@ package goui
 
 import (
 	"image"
+	"io"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"gioui.org/gesture"
+	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
+	"gioui.org/io/transfer"
 	"gioui.org/layout"
 	"gioui.org/op/clip"
 
@@ -117,6 +120,8 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 	allMods := key.ModCtrl | key.ModAlt | key.ModShift | key.ModCommand | key.ModSuper
 	filters := []event.Filter{
 		key.FocusFilter{Target:&i.tag},
+		transfer.TargetFilter{Target:&i.tag,Type:"application/text"},
+		key.Filter{Focus:&i.tag,Name:"V",Required:key.ModShortcut},
 		key.Filter{Focus:&i.tag, Name:key.NameReturn, Optional:allMods},
 		key.Filter{Focus:&i.tag, Name:key.NameEnter, Optional:allMods},
 		key.Filter{Focus:&i.tag, Name:key.NameEscape, Optional:allMods},
@@ -150,6 +155,21 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		ev, ok := gtx.Event(filters...)
 		if !ok { break }
 		switch ev := ev.(type) {
+		case transfer.DataEvent:
+			reader:=ev.Open()
+			if reader==nil { continue }
+			data,err:=io.ReadAll(reader)
+			_ = reader.Close()
+			if err!=nil || len(data)==0 { continue }
+			if snap.BracketedPaste {
+				wrapped:=make([]byte,0,len(data)+12)
+				wrapped=append(wrapped,[]byte("[200~")...)
+				wrapped=append(wrapped,data...)
+				wrapped=append(wrapped,[]byte("[201~")...)
+				i.emit(wrapped)
+			} else {
+				i.emit(data)
+			}
 		case key.FocusEvent:
 			if !ev.Focus {
 				i.composing=false
@@ -173,7 +193,12 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				i.emit([]byte(ev.Text))
 			}
 		case key.Event:
-			if ev.State!=key.Press || ev.Modifiers.Contain(key.ModCommand) || ev.Modifiers.Contain(key.ModSuper) {
+			if ev.State!=key.Press { continue }
+			if ev.Name=="V" && ev.Modifiers.Contain(key.ModShortcut) {
+				gtx.Execute(clipboard.ReadCmd{Tag:&i.tag})
+				continue
+			}
+			if ev.Modifiers.Contain(key.ModCommand) || ev.Modifiers.Contain(key.ModSuper) {
 				continue
 			}
 			if seq:=EncodeKey(ev,snap.ApplicationCursor);len(seq)>0 {
