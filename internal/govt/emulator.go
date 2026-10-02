@@ -63,6 +63,7 @@ const (
 	MouseMiddle
 	MouseRight
 	MouseWheel
+	MouseNone
 )
 
 type MouseAction uint8
@@ -198,6 +199,8 @@ func (e *Emulator) Mouse(ev MouseEvent) bool {
 		button=xterm.MouseButtonRight
 	case MouseWheel:
 		button=xterm.MouseButtonWheel
+	case MouseNone:
+		button=xterm.MouseButtonNone
 	}
 	action:=xterm.MouseActionDown
 	switch ev.Action {
