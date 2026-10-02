@@ -3,6 +3,7 @@ package gouiapp
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,7 +46,7 @@ func Run(arguments []string, buildVariant string) error {
 	}
 
 	runErr:=make(chan error,1)
-	go func(){runErr<-runWindow(socket,configPath,cfg)}()
+	go func(){runErr<-runWindow(socket,configPath,cfg,buildVariant)}()
 	app.Main()
 	select{
 	case err:=<-runErr:
@@ -55,7 +56,7 @@ func Run(arguments []string, buildVariant string) error {
 	}
 }
 
-func runWindow(socket,configPath string,cfg goconfig.AppConfig) error {
+func runWindow(socket,configPath string,cfg goconfig.AppConfig,buildVariant string) error {
 	w:=new(app.Window)
 	w.Option(
 		app.Title("Water"),
@@ -63,7 +64,7 @@ func runWindow(socket,configPath string,cfg goconfig.AppConfig) error {
 		app.MinSize(unit.Dp(cfg.Startup.WindowMinWidth),unit.Dp(cfg.Startup.WindowMinHeight)),
 	)
 
-	session,embedded,ownsDetached,err:=connectOrStart(socket,configPath,cfg)
+	session,embedded,ownsDetached,err:=connectOrStart(socket,configPath,cfg,buildVariant)
 	if err!=nil{return err}
 	if embedded!=nil{defer embedded.Close()}
 	defer session.Close()
@@ -91,9 +92,13 @@ func runWindow(socket,configPath string,cfg goconfig.AppConfig) error {
 	}
 }
 
-func connectOrStart(socket,configPath string,cfg goconfig.AppConfig)(*goclient.Session,*goserver.Server,bool,error){
+func connectOrStart(socket,configPath string,cfg goconfig.AppConfig,buildVariant string)(*goclient.Session,*goserver.Server,bool,error){
 	client:=goclient.New(socket)
 	if session,err:=client.OpenSession();err==nil{return session,nil,false,nil}
+	if conn,err:=net.DialTimeout("unix",socket,250*time.Millisecond);err==nil{
+		_ = conn.Close()
+		return nil,nil,false,fmt.Errorf("control socket belongs to an incompatible server: %s",socket)
+	}
 	if !cfg.Server.AutoStart{
 		return nil,nil,false,fmt.Errorf("server is not available at %s and auto_start is disabled",socket)
 	}
@@ -114,7 +119,7 @@ func connectOrStart(socket,configPath string,cfg goconfig.AppConfig)(*goclient.S
 		return session,srv,false,nil
 	}
 
-	if err:=startDetachedServer(socket,configPath);err!=nil{return nil,nil,false,err}
+	if err:=startDetachedServer(socket,configPath,buildVariant);err!=nil{return nil,nil,false,err}
 	session,err:=waitForSession(socket,5*time.Second)
 	if err!=nil{return nil,nil,false,err}
 	return session,nil,true,nil
@@ -133,12 +138,12 @@ func waitForSession(socket string,timeout time.Duration)(*goclient.Session,error
 	return nil,fmt.Errorf("server at %s did not become ready: %w",socket,last)
 }
 
-func startDetachedServer(socket,configPath string)error{
+func startDetachedServer(socket,configPath,buildVariant string)error{
 	exe,err:=os.Executable();if err!=nil{return err}
 	dir:=filepath.Dir(exe)
-	candidates:=[]string{
-		filepath.Join(dir,"water-server"),
-		filepath.Join(dir,"water-srv-dev"),
+	candidates:=[]string{filepath.Join(dir,"water-server"),filepath.Join(dir,"water-srv-dev")}
+	if buildVariant!="release"{
+		candidates[0],candidates[1]=candidates[1],candidates[0]
 	}
 	serverPath:=""
 	for _,candidate:=range candidates{
@@ -153,6 +158,11 @@ func startDetachedServer(socket,configPath string)error{
 		}else{
 			return fmt.Errorf("water-server executable not found next to %s or in PATH",exe)
 		}
+	}
+	variantOut,err:=exec.Command(serverPath,"--build-variant").Output()
+	if err!=nil{return fmt.Errorf("inspect sibling water-server: %w",err)}
+	if got:=strings.TrimSpace(string(variantOut));got!=buildVariant{
+		return fmt.Errorf("sibling water-server variant %q does not match GUI variant %q",got,buildVariant)
 	}
 	cmd:=exec.Command(
 		serverPath,
