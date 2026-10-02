@@ -412,13 +412,33 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		cols:attached.Size.Columns,rows:attached.Size.Lines,
 		view:view,
 	}
-	term.input=&TerminalInput{OnInput:func(data []byte){
-		_ = c.session.DispatchAsync(map[string]any{
-			"type":"terminal.send_bytes",
-			"terminal_id":summary.TerminalID,
-			"bytes":bytesAsInts(data),
-		})
-	}}
+	term.input=&TerminalInput{
+		OnInput:func(data []byte){
+			_ = c.session.DispatchAsync(map[string]any{
+				"type":"terminal.send_bytes",
+				"terminal_id":summary.TerminalID,
+				"bytes":bytesAsInts(data),
+			})
+		},
+		OnMouse:func(ev govt.MouseEvent)bool{
+			term.mu.Lock()
+			if term.emu==nil {term.mu.Unlock();return false}
+			accepted:=term.emu.Mouse(ev)
+			term.snapshot=term.emu.Snapshot()
+			term.mu.Unlock()
+			if accepted { c.flushVTResponses(term) }
+			if accepted && c.invalidate!=nil { c.invalidate() }
+			return accepted
+		},
+		OnScroll:func(lines int){
+			term.mu.Lock()
+			if term.emu==nil {term.mu.Unlock();return}
+			term.emu.Scroll(lines)
+			term.snapshot=term.emu.Snapshot()
+			term.mu.Unlock()
+			if c.invalidate!=nil { c.invalidate() }
+		},
+	}
 	term.snapshot=emu.Snapshot()
 	c.flushVTResponses(term)
 
@@ -657,7 +677,9 @@ func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node 
 	term.mu.RUnlock()
 
 	c.ensureTerminalSize(gtx,term)
-	term.input.Process(gtx,snapshot)
+	cellWidth:=gtx.Dp(term.view.CellWidth)
+	lineHeight:=gtx.Dp(term.view.LineHeight)
+	term.input.Process(gtx,snapshot,cellWidth,lineHeight)
 	dims:=term.view.Layout(gtx,th,snapshot)
 	term.input.Add(gtx,dims.Size)
 	return dims
