@@ -34,6 +34,6 @@ jobs:
       - run: go mod tidy
       - name: Build remote payloads
         run: bash scripts/build-go-embedded-servers.sh
-      - run: go test ./internal/goprotocol ./internal/goagent ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
+      - run: go test ./internal/goprotocol ./internal/goagent ./internal/goconfig ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
