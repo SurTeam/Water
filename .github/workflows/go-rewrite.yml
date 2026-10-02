@@ -12,6 +12,7 @@ on:
       - "tests/go_server_compat.rs"
       - "tests/scenarios/**"
       - "scripts/run-go-scenario-suite.sh"
+      - "scripts/run-go-ui-smoke.sh"
       - "src/control/**"
       - "src/command/**"
       - "src/terminal/**"
@@ -143,3 +144,26 @@ jobs:
       - run: go mod tidy
       - name: Gate terminal throughput and backpressure
         run: go test ./internal/gobench -run 'TestTerminal.*PerformanceGate' -count=1 -v
+
+
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+          cache-dependency-path: go.mod
+      - name: Install Gio and virtual-display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             xvfb libgl1-mesa-dri             libxkbcommon-dev libwayland-dev libx11-xcb-dev             libxkbcommon-x11-dev libegl1-mesa-dev libgles2-mesa-dev             libvulkan-dev libxcursor-dev libxfixes-dev
+      - run: go mod tidy
+      - name: Build Go desktop client
+        run: |
+          mkdir -p target/go-ui-smoke
+          go build -o target/go-ui-smoke/water ./cmd/water
+      - name: Exercise real Gio window through Xvfb
+        run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-go-ui-smoke.sh
