@@ -504,9 +504,13 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
 		},
-		OnSelectionStart:func(col,row int){
+		OnSelectionStart:func(col,row,clickCount int){
 			term.mu.Lock()
-			term.selection=Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+			if clickCount>=2 {
+				term.selection=MultiClickSelection(term.snapshot,col,row,clickCount)
+			} else {
+				term.selection=Selection{AnchorCol:col,AnchorRow:row,FocusCol:col,FocusRow:row,Active:true}
+			}
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
 		},
