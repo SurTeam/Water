@@ -73,6 +73,7 @@ jobs:
           go test ./internal/gobench             -run TestTerminalInteractionPerformanceGate             -count="$RUNS"             -v             2>&1 | tee target/go-terminal-interaction.log
 
       - name: Rust 64 MB direct/server completion
+        if: always()
         env:
           WATER_BENCH: "1"
           WATER_BENCH_WARMUPS: ${{ inputs.warmups || '1' }}
@@ -84,6 +85,7 @@ jobs:
           cargo test --release --no-default-features             --test bench_terminal bench_completion_parity             -- --ignored --nocapture             2>&1 | tee target/rust-terminal-64mb.log
 
       - name: Rust interaction under output flood
+        if: always()
         env:
           WATER_BENCH: "1"
           WATER_BENCH_WARMUPS: ${{ inputs.warmups || '1' }}
@@ -93,6 +95,7 @@ jobs:
           cargo test --release --no-default-features             --test bench_terminal bench_interaction_parity             -- --ignored --nocapture             2>&1 | tee target/rust-terminal-interaction.log
 
       - name: Upload raw benchmark logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: go-rust-terminal-benchmark-${{ github.run_id }}
