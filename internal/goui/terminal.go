@@ -6,6 +6,7 @@ import (
 	"sync"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -375,7 +376,7 @@ func (v *TerminalView) CacheStats() TerminalViewCacheStats {
 	}
 }
 
-func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot, selection Selection) layout.Dimensions {
+func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot, selection Selection, composition string) layout.Dimensions {
 	cellWidth := gtx.Dp(v.CellWidth)
 	lineHeight := gtx.Dp(v.LineHeight)
 	width := snap.Cols * cellWidth
@@ -493,6 +494,31 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 		if _,ok:=liveImages[id];!ok { delete(v.imageCache,id) }
 	}
 	v.mu.Unlock()
+
+	if composition!="" && snap.CursorY>=0 && snap.CursorY<snap.Rows &&
+		snap.CursorX>=0 && snap.CursorX<snap.Cols {
+		x:=snap.CursorX*cellWidth
+		y:=snap.CursorY*lineHeight
+		columns:=utf8.RuneCountInString(composition)
+		if columns<1{columns=1}
+		spanWidth:=columns*cellWidth
+		if maxWidth:=width-x;spanWidth>maxWidth{spanWidth=maxWidth}
+		if spanWidth>0 {
+			paint.FillShape(gtx.Ops,v.Theme.Background,clip.Rect(image.Rect(x,y,x+spanWidth,y+lineHeight)).Op())
+			tr:=op.Offset(image.Pt(x,y)).Push(gtx.Ops)
+			child:=gtx
+			child.Constraints.Min=image.Point{}
+			child.Constraints.Max=image.Pt(spanWidth,lineHeight)
+			label:=material.Label(th,v.FontSize,composition)
+			label.MaxLines=1
+			label.Color=v.Theme.Foreground
+			label.Font.Typeface=font.Typeface(v.FontFamily)
+			label.Layout(child)
+			tr.Pop()
+			underlineY:=y+lineHeight-2
+			paint.FillShape(gtx.Ops,v.Theme.Foreground,clip.Rect(image.Rect(x,underlineY,x+spanWidth,underlineY+1)).Op())
+		}
+	}
 
 	if !snap.CursorHide && snap.CursorY >= 0 && snap.CursorY < snap.Rows &&
 		snap.CursorX >= 0 && snap.CursorX < snap.Cols {
