@@ -91,6 +91,7 @@ type Emulator struct {
 
 	responseMu sync.Mutex
 	responses  [][]byte
+	suppressResponses bool
 
 	titleMu sync.RWMutex
 	title   string
@@ -117,20 +118,10 @@ func New(cols, rows, scrollback int) *Emulator {
 		),
 	}
 	e.term.OnData(func(data string) {
-		if data == "" {
-			return
-		}
-		e.responseMu.Lock()
-		e.responses = append(e.responses, []byte(data))
-		e.responseMu.Unlock()
+		e.enqueueResponse([]byte(data))
 	})
 	e.term.OnBinary(func(data string) {
-		if data == "" {
-			return
-		}
-		e.responseMu.Lock()
-		e.responses = append(e.responses, []byte(data))
-		e.responseMu.Unlock()
+		e.enqueueResponse([]byte(data))
 	})
 	e.term.OnTitleChange(func(title string) {
 		e.titleMu.Lock()
@@ -147,11 +138,29 @@ func (e *Emulator) Close() {
 }
 
 func (e *Emulator) Write(p []byte) {
+	e.write(p,false)
+}
+
+func (e *Emulator) WriteReplay(p []byte) {
+	e.write(p,true)
+}
+
+func (e *Emulator) write(p []byte,replay bool) {
 	e.mu.Lock()
+	previous:=e.suppressResponses
+	e.suppressResponses=replay
 	e.links.feed(p)
 	_, _ = e.term.Write(p)
 	e.pruneLinksLocked()
+	e.suppressResponses=previous
 	e.mu.Unlock()
+}
+
+func (e *Emulator) enqueueResponse(data []byte) {
+	if len(data)==0 || e.suppressResponses { return }
+	e.responseMu.Lock()
+	e.responses=append(e.responses,append([]byte(nil),data...))
+	e.responseMu.Unlock()
 }
 
 func (e *Emulator) pruneLinksLocked() {
