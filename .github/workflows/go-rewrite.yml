@@ -9,6 +9,10 @@ on:
       - "go.sum"
       - "cmd/**"
       - "internal/go*/**"
+      - "tests/go_server_compat.rs"
+      - "src/control/**"
+      - "src/command/**"
+      - "src/terminal/**"
       - ".github/workflows/go-rewrite.yml"
 
 jobs:
@@ -37,3 +41,29 @@ jobs:
       - run: go test ./internal/goprotocol ./internal/goagent ./internal/goconfig ./internal/gomodel ./internal/goremote ./internal/goterminal ./internal/goserver ./internal/goclient ./internal/govt ./internal/goui
       - run: go test ./cmd/...
       - run: go vet ./...
+
+
+  compat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+      - name: Select stable Rust
+        run: rustup default stable
+      - name: Build Go server
+        run: |
+          mkdir -p target/compat
+          go build -o target/compat/water-go-server ./cmd/water-server
+      - name: Build headless Rust server
+        run: cargo build --no-default-features --bin water-server
+      - name: Go client to Rust server
+        env:
+          WATER_RUST_SERVER_BIN: ${{ github.workspace }}/target/debug/water-server
+        run: go test ./internal/goclient -run TestGoClientAgainstRustServer -count=1 -v
+      - name: Rust client to Go server
+        env:
+          WATER_GO_SERVER_BIN: ${{ github.workspace }}/target/compat/water-go-server
+        run: cargo test --no-default-features --test go_server_compat -- --nocapture
