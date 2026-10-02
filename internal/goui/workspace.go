@@ -545,6 +545,25 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			term.mu.Unlock()
 			if c.invalidate!=nil { c.invalidate() }
 		},
+		OnSelectionAutoScroll:func(col,row,lines int){
+			term.mu.Lock()
+			if term.emu==nil || !term.selection.Active {
+				term.mu.Unlock()
+				return
+			}
+			before:=term.snapshot.YDisp
+			term.emu.Scroll(lines)
+			term.snapshot=term.emu.Snapshot()
+			term.selection.FocusCol=col
+			if term.selection.Absolute {
+				term.selection.FocusRow=term.snapshot.YDisp+row
+			} else {
+				term.selection.FocusRow=row
+			}
+			changed:=before!=term.snapshot.YDisp
+			term.mu.Unlock()
+			if changed && c.invalidate!=nil { c.invalidate() }
+		},
 		OnCopy:func()string{
 			term.mu.RLock()
 			selection:=term.selection
