@@ -1,0 +1,99 @@
+name: go-rewrite-ui
+
+on:
+  push:
+    branches: [go-rewrite]
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "cmd/**"
+      - "internal/goclient/**"
+      - "internal/goconfig/**"
+      - "internal/goprotocol/**"
+      - "internal/goserver/**"
+      - "internal/goui/**"
+      - "internal/gouiapp/**"
+      - "scripts/run-go-ui-smoke.sh"
+      - "scripts/run-go-rust-ui-smoke.sh"
+      - "scripts/run-rust-go-ui-smoke.sh"
+      - "src/control/**"
+      - "src/ui/**"
+      - ".github/workflows/go-rewrite-ui.yml"
+  pull_request:
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "cmd/**"
+      - "internal/goclient/**"
+      - "internal/goconfig/**"
+      - "internal/goprotocol/**"
+      - "internal/goserver/**"
+      - "internal/goui/**"
+      - "internal/gouiapp/**"
+      - "scripts/run-go-ui-smoke.sh"
+      - "scripts/run-go-rust-ui-smoke.sh"
+      - "scripts/run-rust-go-ui-smoke.sh"
+      - "src/control/**"
+      - "src/ui/**"
+      - ".github/workflows/go-rewrite-ui.yml"
+
+concurrency:
+  group: go-rewrite-ui-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ui-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+          cache-dependency-path: go.mod
+
+      - name: Install Gio, GPUI, and virtual-display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb xclip xdotool libgl1-mesa-dri \
+            libxkbcommon-dev libwayland-dev libx11-xcb-dev libxkbcommon-x11-dev \
+            libegl1-mesa-dev libgles2-mesa-dev libvulkan-dev libvulkan1 \
+            libxcursor-dev libxfixes-dev \
+            libasound2-dev libfontconfig-dev libglib2.0-dev libssl-dev libva-dev libzstd-dev \
+            cmake clang lld llvm
+
+      - run: go mod tidy
+
+      - name: Select stable Rust
+        run: rustup default stable
+
+      - name: Build Rust server and GUI
+        run: |
+          cargo build --no-default-features --bin water-server
+          cargo build --features runtime-screenshot --bin water
+
+      - name: Build Go desktop client and server
+        run: |
+          mkdir -p target/go-ui-smoke
+          go build -o target/go-ui-smoke/water ./cmd/water
+          go build -o target/go-ui-smoke/water-server ./cmd/water-server
+
+      - name: Exercise real Gio window through Xvfb
+        run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-go-ui-smoke.sh
+
+      - name: Exercise Go GUI against Rust server through Xvfb
+        env:
+          WATER_RUST_SERVER_BIN: ${{ github.workspace }}/target/debug/water-server
+        run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-go-rust-ui-smoke.sh
+
+      - name: Exercise Rust GUI against Go server through Xvfb
+        env:
+          WATER_RUST_GUI_BIN: ${{ github.workspace }}/target/debug/water
+          GO_SERVER_BIN: ${{ github.workspace }}/target/go-ui-smoke/water-server
+        run: xvfb-run -a -s "-screen 0 1280x800x24" bash scripts/run-rust-go-ui-smoke.sh
