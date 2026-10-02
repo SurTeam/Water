@@ -83,7 +83,7 @@ type appEvent struct {
 
 func (s *Server) emitEvent(kind map[string]any) {
 	seq:=s.eventSeq.Add(1)
-	revision:=s.model.Dump().StateRevision
+	revision:=s.model.Revision()
 	event:=appEvent{Sequence:seq,StateRevision:revision,Kind:kind}
 	s.eventsMu.Lock()
 	const maxEvents=4096
