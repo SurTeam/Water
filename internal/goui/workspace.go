@@ -1195,7 +1195,12 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context,th *material.Theme,st
 
 		if !showRemote {
 			items=append(items,layout.Rigid(func(gtx layout.Context)layout.Dimensions{
+				top:=y
 				dims:=layout.Inset{Left:unit.Dp(8),Right:unit.Dp(8),Bottom:unit.Dp(8)}.Layout(gtx,material.Button(th,&c.newRemote,"+ Remote").Layout)
+				c.hitRegions=append(c.hitRegions,automationHit{
+					Rect:image.Rect(0,top,gtx.Constraints.Max.X,top+dims.Size.Y),
+					Kind:hitNewRemote,
+				})
 				y+=dims.Size.Y
 				return dims
 			}))
