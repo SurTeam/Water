@@ -421,6 +421,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	var attached terminalAttach
 	if err:=c.session.Attach(summary.TerminalID,&attached);err!=nil{return}
 	emu:=govt.New(attached.Size.Columns,attached.Size.Lines,c.config.Terminal.ScrollbackLines)
+	emu.SetCellSize(
+		max(1,int(c.config.Terminal.FontSize*0.6)),
+		max(1,int(c.config.Terminal.LineHeight)),
+	)
 	last:=uint64(0)
 	for _,ev:=range attached.Replay {
 		if ev.Seq<=last {continue}
@@ -582,6 +586,10 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 	var attached terminalAttach
 	if err:=c.session.Attach(id,&attached);err!=nil{return}
 	next:=govt.New(attached.Size.Columns,attached.Size.Lines,c.config.Terminal.ScrollbackLines)
+	next.SetCellSize(
+		max(1,int(c.config.Terminal.FontSize*0.6)),
+		max(1,int(c.config.Terminal.LineHeight)),
+	)
 	var last uint64
 	for _,ev:=range attached.Replay {
 		if ev.Seq<=last{continue}
@@ -814,12 +822,11 @@ func (c *WorkspaceClient) layoutPane(gtx layout.Context,th *material.Theme,node 
 		label:=material.Label(th,unit.Sp(14),"Attaching terminal…")
 		return layout.Center.Layout(gtx,label.Layout)
 	}
+	c.ensureTerminalSize(gtx,term)
 	term.mu.RLock()
 	snapshot:=term.snapshot
 	selection:=term.selection
 	term.mu.RUnlock()
-
-	c.ensureTerminalSize(gtx,term)
 	cellWidth:=gtx.Dp(term.view.CellWidth)
 	lineHeight:=gtx.Dp(term.view.LineHeight)
 	term.input.Process(gtx,snapshot,cellWidth,lineHeight)
@@ -838,6 +845,7 @@ func (c *WorkspaceClient) ensureTerminalSize(gtx layout.Context,term *terminalCl
 	if rows<1{rows=1};if rows>256{rows=256}
 
 	term.mu.Lock()
+	term.emu.SetCellSize(cellWidth,lineHeight)
 	if cols==term.cols&&rows==term.rows{term.mu.Unlock();return}
 	term.cols,term.rows=cols,rows
 	term.emu.Resize(cols,rows)
