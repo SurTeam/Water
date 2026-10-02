@@ -23,6 +23,7 @@ type MultiWorkspaceClient struct {
 	connections map[uuid.UUID]*managedWorkspaceClient
 	active uuid.UUID
 	closed bool
+	connectRemote func(string) error
 }
 
 func NewMultiWorkspaceClient(invalidate func()) *MultiWorkspaceClient {
@@ -30,6 +31,14 @@ func NewMultiWorkspaceClient(invalidate func()) *MultiWorkspaceClient {
 		invalidate: invalidate,
 		connections: make(map[uuid.UUID]*managedWorkspaceClient),
 	}
+}
+
+func (m *MultiWorkspaceClient) SetRemoteConnector(connect func(string) error) {
+	m.mu.Lock()
+	m.connectRemote=connect
+	m.syncSwitchersLocked()
+	m.mu.Unlock()
+	if m.invalidate!=nil{m.invalidate()}
 }
 
 func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *WorkspaceClient, closeFn func(), activate bool) error {
@@ -183,7 +192,10 @@ func (m *MultiWorkspaceClient) syncSwitchersLocked() {
 	entries:=m.entriesLocked()
 	active:=m.active
 	activate:=func(id uuid.UUID){ _ = m.ActivateConnection(id) }
+	connect:=m.connectRemote
+	remove:=func(id uuid.UUID)bool{return m.RemoveConnection(id)}
 	for _,connection:=range m.connections{
 		connection.view.SetConnectionSwitcher(active,entries,activate)
+		connection.view.SetConnectionActions(connect,remove)
 	}
 }
