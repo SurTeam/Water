@@ -205,6 +205,7 @@ func BenchmarkTerminalServer4Pane64MB(b *testing.B) {
 		ids:=make([]uuid.UUID,0,multiPaneCount)
 		emus:=make(map[uuid.UUID]*govt.Emulator,multiPaneCount)
 		lastSeq:=make(map[uuid.UUID]uint64,multiPaneCount)
+		paneBytes:=make(map[uuid.UUID]int64,multiPaneCount)
 		lastSnapshot:=make(map[uuid.UUID]time.Time,multiPaneCount)
 		gaps:=make([]time.Duration,0,1024)
 
@@ -247,10 +248,15 @@ func BenchmarkTerminalServer4Pane64MB(b *testing.B) {
 				emu:=emus[push.TerminalID]
 				if emu==nil{continue}
 				if push.Event.Seq<=lastSeq[push.TerminalID]{continue}
+				if previous:=lastSeq[push.TerminalID];previous!=0 && push.Event.Seq!=previous+1{
+					b.Fatalf("multi-pane server sequence gap terminal=%s previous=%d next=%d",push.TerminalID,previous,push.Event.Seq)
+				}
 				lastSeq[push.TerminalID]=push.Event.Seq
 				switch push.Event.Kind{
 				case goprotocol.OutputEvent:
-					total+=int64(len(push.Event.Data))
+					n:=int64(len(push.Event.Data))
+					total+=n
+					paneBytes[push.TerminalID]+=n
 					emu.Write(push.Event.Data)
 				case goprotocol.ResizeEvent:
 					emu.Resize(push.Event.Size.Columns,push.Event.Size.Lines)
@@ -274,6 +280,11 @@ func BenchmarkTerminalServer4Pane64MB(b *testing.B) {
 			}
 		}
 		if !timer.Stop(){select{case <-timer.C:default:}}
+		for _,id:=range ids{
+			if paneBytes[id]<int64(multiPaneBytes){
+				b.Fatalf("multi-pane server terminal %s bytes = %d, want at least %d",id,paneBytes[id],multiPaneBytes)
+			}
+		}
 		if total<int64(benchBytes){b.Fatalf("multi-pane server bytes = %d, want at least %d",total,benchBytes)}
 		duration:=time.Since(start)
 		b.ReportMetric(float64(total)/duration.Seconds()/1e6,"MB/s")
