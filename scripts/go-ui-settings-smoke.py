@@ -3,6 +3,7 @@
 import json
 import os
 import platform
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ config = directory / "config.json"
 shell = next((p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists()), "/bin/sh")
 config.write_text(json.dumps({
     "startup": {"window_width": 960, "window_height": 640},
+    "terminal": {"font_family": "Sarasa Term SC Nerd Font"} if platform.system() == "Darwin" and (Path.home()/"Library/Fonts/sarasa-term-sc-regular-nerd-font.ttf").exists() else {},
     "server": {"detached": False, "detach_on_quit": False},
     "shell": {"program": shell, "args": ["-f"] if shell.endswith("zsh") else []},
     "future_setting": {"keep": True},
@@ -71,8 +73,88 @@ def edit(label, value):
     assert ctl("ui", "key", "text:" + value)["handled"], "field edit: " + label
 
 try:
-    wait(lambda s: s.get("frame_active_terminal") not in (None, "00000000-0000-0000-0000-000000000000"), "initial terminal")
-    ctl("ui", "key", "cmd-,")
+    initial = wait(lambda s: s.get("frame_active_terminal") not in (None, "00000000-0000-0000-0000-000000000000"), "initial terminal")
+    assert initial["renderer"] == "ebitengine"
+    assert initial["custom_titlebar"] and not initial["window_decorated"], {k: initial[k] for k in ("renderer", "window_decorated", "custom_titlebar")}
+    if json.loads(config.read_text()).get("terminal", {}).get("font_family") == "Sarasa Term SC Nerd Font":
+        font = initial["terminal_font"]
+        assert font["status"] == "ready" and font["resolved_family"].replace(" ", "") == "SarasaTermSCNerdFont", font
+        assert font["path"].endswith("sarasa-term-sc-regular-nerd-font.ttf"), font
+        for name, suffix in (("bold", "bold"), ("italic", "italic"), ("bold_italic", "bolditalic")):
+            resolved = initial["terminal_font_styles"][name]
+            assert resolved["status"] == "ready" and resolved["path"].endswith("sarasa-term-sc-"+suffix+"-nerd-font.ttf"), resolved
+        print("font_verified=" + font["path"], flush=True)
+    terminal = initial["frame_active_terminal"]
+    pane = initial["frame_focused_pane"]
+    # Capture bytes in a real raw PTY so shell editing cannot mask bad encoding.
+    python = str(Path.home() / ".venv/bin/python")
+    key_probes = [("Up", b"\x1b[A"), ("Down", b"\x1b[B"), ("Left", b"\x1b[D"), ("Right", b"\x1b[C"),
+                  ("Backspace", b"\x7f"), ("Delete", b"\x1b[3~"), ("Insert", b"\x1b[2~"),
+                  ("Home", b"\x1b[H"), ("End", b"\x1b[F"), ("PageUp", b"\x1b[5~"), ("PageDown", b"\x1b[6~"),
+                  ("Tab", b"\t"), ("shift-Tab", b"\x1b[Z"), ("Return", b"\r"), ("Escape", b"\x1b"),
+                  ("ctrl-a", b"\x01"), ("ctrl-c", b"\x03"), ("ctrl-z", b"\x1a"), ("ctrl-2", b"\x00"),
+                  ("ctrl-[", b"\x1b"), ("ctrl-\\", b"\x1c"), ("ctrl-]", b"\x1d"), ("ctrl-6", b"\x1e"), ("ctrl-minus", b"\x1f"),
+                  ("alt-x", b"\x1bx"), ("alt-shift-x", b"\x1bX"), ("alt-'", b"\x1b'"), ("alt-;", b"\x1b;"),
+                  ("ctrl-alt-c", b"\x1b\x03"), ("ctrl-shift-Up", b"\x1b[1;6A"), ("alt-Backspace", b"\x1b\x7f"),
+                  ("F1", b"\x1bOP"), ("F12", b"\x1b[24~"), ("F13", b"\x1b[25~"), ("F20", b"\x1b[34~"), ("F24", b"\x1b[45~")]
+    expected_bytes = b"".join(data for _, data in key_probes)
+    raw_probe = """import os, termios, tty
+old = termios.tcgetattr(0)
+try:
+    tty.setraw(0)
+    print('WATER_' + 'RAW_READY', flush=True)
+    data = b''
+    while len(data) < COUNT:
+        data += os.read(0, COUNT-len(data))
+finally:
+    termios.tcsetattr(0, termios.TCSANOW, old)
+print('WATER_KEYS_' + data.hex(), flush=True)
+""".replace("COUNT", str(len(expected_bytes)))
+    ctl("pane", "input", "--pane", pane, "--text", python+" -c "+shlex.quote(raw_probe)+"\n")
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_RAW_READY", "--timeout-ms", "5000")
+    for key, _ in key_probes:
+        assert ctl("ui", "key", key)["handled"], key
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_KEYS_"+expected_bytes.hex(), "--timeout-ms", "5000")
+    interrupt_probe = """import time
+print('WATER_' + 'INTERRUPT_READY', flush=True)
+try:
+    time.sleep(30)
+except KeyboardInterrupt:
+    print('WATER_' + 'INTERRUPTED', flush=True)
+"""
+    ctl("pane", "input", "--pane", pane, "--text", python+" -c "+shlex.quote(interrupt_probe)+"\n")
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_INTERRUPT_READY", "--timeout-ms", "5000")
+    assert ctl("ui", "key", "ctrl-c")["handled"]
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_INTERRUPTED", "--timeout-ms", "5000")
+    font_demo = "printf '\\033[2J\\033[HRegular  gypqj  0123456789  Il1 O0  => !=\\n\\033[1mBold     gypqj  0123456789  Il1 O0\\033[0m\\n\\033[3mItalic   gypqj  0123456789  Il1 O0\\033[0m\\n中文：更纱黑体  水\\nNerd:        \\n'\n"
+    ctl("pane", "input", "--pane", pane, "--text", font_demo)
+    ctl("terminal", "contains", "--terminal", terminal, "Nerd:", "--timeout-ms", "5000")
+    ctl("ui", "screenshot", "--output", str(directory / "font.png"))
+    ctl("ui", "key", "ctrl-l")
+    tabs = [h for h in initial["automation_hits"] if h["kind"] == "tab"]
+    assert tabs and all(h["rect"][3] <= initial["titlebar_height"] for h in tabs), "tabs must share the titlebar"
+    assert initial["titlebar_height"] == 36 * initial["frame_size"][0] / initial["window_size"][0]
+    titlebar = next(h for h in initial["automation_hits"] if h["kind"] == "titlebar")
+    x0, y0, x1, y1 = titlebar["rect"]
+    # Use the dedicated blank gap between window controls and integrated tabs.
+    scale = initial["frame_size"][0] / initial["window_size"][0]
+    x, y = x0+2*scale, initial["titlebar_height"]/2
+    original_position = initial["window_position"]
+    assert ctl("ui", "drag", "--x", str(x), "--y", str(y), "--to-x", str(x+60), "--to-y", str(y+30))["handled"]
+    wait(lambda s: s["window_position"] != original_position, "custom titlebar moved window")
+    assert ctl("ui", "click", "--x", str(x), "--y", str(y), "--click-count", "2")["handled"]
+    wait(lambda s: s["window_maximized"], "custom maximize")
+    hit(kind="window_maximize")
+    restored = wait(lambda s: not s["window_maximized"] and s["window_size"] == initial["window_size"], "custom restore")
+    assert not restored["window_decorated"], "restoring must retain our custom titlebar"
+    width, height = restored["frame_size"]
+    assert ctl("ui", "drag", "--x", str(width-2), "--y", str(height*.8), "--to-x", str(width+58), "--to-y", str(height*.8))["handled"]
+    enlarged = wait(lambda s: s["window_size"][0] > restored["window_size"][0], "custom border resize")
+    width, height = enlarged["frame_size"]
+    assert ctl("ui", "drag", "--x", str(width-2), "--y", str(height*.8), "--to-x", str(width-62), "--to-y", str(height*.8))["handled"]
+    wait(lambda s: s["window_size"] == initial["window_size"], "custom border restored size")
+    ctl("ui", "screenshot", "--output", str(directory / "workspace.png"))
+    hit(kind="settings")
     wait(lambda s: s.get("settings_visible"), "settings open")
     ctl("ui", "screenshot", "--output", str(directory / "settings.png"))
     edit("Terminal.FontSize", "18")
@@ -83,6 +165,9 @@ try:
     edit("Theme.TerminalBackground", "#182838")
     edit("Theme.1", "#ee5566")
     hit(label="category:Shortcuts")
+    edit("Shortcuts.HideWindow", "cmd-alt-w")
+    edit("Shortcuts.MinimizeWindow", "cmd-alt-m")
+    edit("Shortcuts.IgnoreQuit", "cmd-alt-q")
     edit("Shortcuts.SplitDown", "ctrl-alt-s")
     hit(label="save")
     saved = wait(lambda s: not s.get("settings_visible") and s.get("effective_config", {}).get("ui", {}).get("sidebar_width") == 240, "saved settings projected")
@@ -90,9 +175,12 @@ try:
     assert persisted["future_setting"]["keep"]
     assert persisted["theme"]["terminal_background"] == "#182838"
     assert persisted["shortcuts"]["split_down"] == "ctrl-alt-s"
+    assert persisted["shortcuts"]["hide_window"] == "cmd-alt-w"
+    if platform.system() == "Darwin":
+        wait(lambda s: s["native_menu"].get("items", {}).get("hide-window", {}).get("modifiers") == (1 << 20 | 1 << 19), "native menu reflects updated shortcut")
     assert persisted["terminal"]["font_size"] == 18
     assert persisted["theme"]["ansi_colors"][1] == "#ee5566"
-    ctl("ui", "key", "cmd-\\")
+    hit(kind="split_right")
     split = wait(lambda s: len([h for h in s.get("automation_hits", []) if h["kind"] == "pane"]) == 2, "horizontal split")
     divider = next(h for h in split["automation_hits"] if h["kind"] == "divider")
     before = [h["rect"][2]-h["rect"][0] for h in split["automation_hits"] if h["kind"] == "pane"]
@@ -120,7 +208,14 @@ try:
     wait(lambda s: s.get("settings_visible"), "reopen settings")
     ctl("ui", "key", "Escape")
     wait(lambda s: not s.get("settings_visible"), "cancel settings")
-    print("PASS settings persistence, runtime appearance, configured splitting, divider drag, pane promotion, numbered tabs, workspace cycling, cancel", flush=True)
+    hit(kind="window_minimize")
+    wait(lambda s: s["window_minimized"], "custom minimize")
+    hit(kind="window_maximize")
+    restored = wait(lambda s: not s["window_minimized"], "restore minimized window")
+    assert not restored["window_decorated"]
+    hit(kind="window_close")
+    assert gui.wait(timeout=5) == 0, "custom close must exit cleanly"
+    print("PASS complete terminal key matrix and process interrupt; font family/styles, mini integrated titlebar tabs, move, maximize/restore, border resize, minimize, close; settings persistence, runtime appearance, configured splitting, divider drag, pane promotion, numbered tabs, workspace cycling, cancel", flush=True)
     print("artifacts=" + str(directory), flush=True)
 finally:
     try:

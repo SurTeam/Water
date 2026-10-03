@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gioui.org/f32"
@@ -81,6 +82,19 @@ const (
 	hitSplitRight
 	hitSplitDown
 	hitDivider
+	hitWindowClose
+	hitWindowMinimize
+	hitWindowMaximize
+	hitTitlebar
+	hitRemoteSubmit
+	hitRemoteField
+	hitHyperlinkConfirm
+	hitHyperlinkCancel
+	hitSidebarResize
+	hitAgent
+	hitRenameField
+	hitRenameSave
+	hitRenameCancel
 )
 
 type automationHit struct {
@@ -132,6 +146,7 @@ func (t *terminalClient) close() {
 }
 
 type WorkspaceClient struct {
+	native               atomic.Pointer[EbitengineWindow]
 	session              *goclient.Session
 	invalidate           func()
 	config               goconfig.AppConfig
@@ -205,6 +220,7 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 		session:                    session,
 		invalidate:                 invalidate,
 		config:                     config.Normalized(),
+		sidebarHidden:              !config.UI.SidebarVisible,
 		remoteDestination:          strings.TrimSpace(remoteDestination),
 		terminals:                  make(map[uuid.UUID]*terminalClient),
 		workspaceClicks:            make(map[uuid.UUID]*widget.Clickable),
@@ -367,6 +383,9 @@ func (c *WorkspaceClient) handleUIPush(msg goprotocol.WireMessage) {
 }
 
 func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage) (any, error) {
+	if window := c.native.Load(); window != nil && strings.HasPrefix(method, "ui.") {
+		return window.request(c, method, params)
+	}
 	switch method {
 	case "ui.snapshot":
 		return c.uiSnapshot(), nil
@@ -574,6 +593,32 @@ func automationHitKindName(kind automationHitKind) string {
 		return "split_down"
 	case hitDivider:
 		return "divider"
+	case hitWindowClose:
+		return "window_close"
+	case hitWindowMinimize:
+		return "window_minimize"
+	case hitWindowMaximize:
+		return "window_maximize"
+	case hitTitlebar:
+		return "titlebar"
+	case hitRemoteSubmit:
+		return "remote_submit"
+	case hitRemoteField:
+		return "remote_field"
+	case hitHyperlinkConfirm:
+		return "hyperlink_confirm"
+	case hitHyperlinkCancel:
+		return "hyperlink_cancel"
+	case hitSidebarResize:
+		return "sidebar_resize"
+	case hitAgent:
+		return "agent"
+	case hitRenameField:
+		return "rename_field"
+	case hitRenameSave:
+		return "rename_save"
+	case hitRenameCancel:
+		return "rename_cancel"
 	default:
 		return "unknown"
 	}
@@ -905,6 +950,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			})
 		},
 		OnMouse: func(ev govt.MouseEvent) bool {
+			if !c.hyperlinkConfig().Features.MouseReporting {
+				return false
+			}
 			term.mu.Lock()
 			if term.emu == nil {
 				term.mu.Unlock()
@@ -938,6 +986,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 		},
 		OnSelectionStart: func(col, row, clickCount int) {
+			if !c.hyperlinkConfig().Features.Selection {
+				return
+			}
 			term.mu.Lock()
 			if clickCount >= 2 {
 				term.selection = MultiClickSelection(term.snapshot, col, row, clickCount)
@@ -955,6 +1006,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 		},
 		OnSelectionMove: func(col, row int) {
+			if !c.hyperlinkConfig().Features.Selection {
+				return
+			}
 			term.mu.Lock()
 			if term.selection.Active {
 				term.selection.FocusCol = col
@@ -970,6 +1024,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 		},
 		OnSelectionEnd: func(col, row int) {
+			if !c.hyperlinkConfig().Features.Selection {
+				return
+			}
 			term.mu.Lock()
 			if term.selection.Active {
 				term.selection.FocusCol = col
@@ -988,6 +1045,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 		},
 		OnSelectionAutoScroll: func(col, row, lines int) {
+			if !c.hyperlinkConfig().Features.Selection {
+				return
+			}
 			term.mu.Lock()
 			if term.emu == nil || !term.selection.Active {
 				term.mu.Unlock()
@@ -1009,6 +1069,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 		},
 		OnCopy: func() string {
+			if !c.hyperlinkConfig().Features.Selection {
+				return ""
+			}
 			term.mu.RLock()
 			selection := term.selection
 			snapshot := term.snapshot
@@ -1027,15 +1090,6 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			c.activateHyperlink(uri)
 		},
 	}
-	if !c.config.Features.MouseReporting {
-		term.input.OnMouse = nil
-	}
-	if !c.config.Features.Selection {
-		term.input.OnSelectionStart = nil
-		term.input.OnSelectionMove = nil
-		term.input.OnSelectionEnd = nil
-		term.input.OnCopy = nil
-	}
 	term.snapshot = emu.Snapshot()
 	c.flushVTResponses(term)
 
@@ -1050,15 +1104,16 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 }
 
 func (c *WorkspaceClient) activateHyperlink(uri string) {
+	cfg := c.hyperlinkConfig()
 	uri = strings.TrimSpace(uri)
-	if uri == "" || !c.config.Terminal.Hyperlinks {
+	if uri == "" || !cfg.Terminal.Hyperlinks {
 		return
 	}
 	destination := ""
 	if c.remoteDestination != "" && strings.HasPrefix(uri, "file://") {
 		destination = c.remoteDestination
 	}
-	if destination != "" && !c.config.Terminal.RemoteHyperlinkAutoDownload {
+	if destination != "" && !cfg.Terminal.RemoteHyperlinkAutoDownload {
 		c.hyperlinkMu.Lock()
 		c.hyperlinkPrompt = &hyperlinkPrompt{URI: uri, Destination: destination}
 		c.hyperlinkMu.Unlock()
@@ -1068,6 +1123,13 @@ func (c *WorkspaceClient) activateHyperlink(uri string) {
 		return
 	}
 	c.runHyperlink(uri, destination)
+}
+
+func (c *WorkspaceClient) hyperlinkConfig() goconfig.AppConfig {
+	if c.settingsStore != nil {
+		return *c.settingsStore.value.Load()
+	}
+	return c.config
 }
 
 func (c *WorkspaceClient) confirmHyperlink() {
@@ -1097,6 +1159,7 @@ func (c *WorkspaceClient) cancelHyperlink() {
 }
 
 func (c *WorkspaceClient) runHyperlink(uri, destination string) {
+	cfg := c.hyperlinkConfig()
 	go func() {
 		var err error
 		if destination != "" {
@@ -1104,7 +1167,7 @@ func (c *WorkspaceClient) runHyperlink(uri, destination string) {
 			path, err = gohyperlink.DownloadRemote(
 				destination,
 				uri,
-				c.config.Terminal.HyperlinkDownloadDirectory,
+				cfg.Terminal.HyperlinkDownloadDirectory,
 			)
 			if err == nil {
 				err = gohyperlink.OpenPath(path)
@@ -1456,14 +1519,18 @@ func (c *WorkspaceClient) layoutHyperlinkOverlay(gtx layout.Context, th *materia
 func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, state gomodel.StateDump) layout.Dimensions {
 	copyTheme := *th
 	th = &copyTheme
-	th.Palette.ContrastBg = configColor(c.currentConfig().Theme.SidebarWorkspaceBackground, 0x1d2124)
 	th.Palette.ContrastFg = th.Palette.Fg
 	items := make([]layout.FlexChild, 0, len(state.Workspaces)+8)
 	y := 0
-	header := material.Label(th, unit.Sp(16), "Water")
+	header := material.Label(th, unit.Sp(18), "water")
 	header.Font.Weight = 600
 	items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-		dims := layout.UniformInset(unit.Dp(12)).Layout(gtx, header.Layout)
+		dims := layout.Inset{Left: 20, Right: 16, Top: 22, Bottom: 8}.Layout(gtx, header.Layout)
+		y += dims.Size.Y
+		return dims
+	}))
+	items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		dims := sectionLabel(gtx, th, "CONNECTIONS")
 		y += dims.Size.Y
 		return dims
 	}))
@@ -1514,10 +1581,12 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 				dims := layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(4)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
 						layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-							button := material.Button(th, click, label)
+							button := chromeButton(th, click, label)
+							button.FillWidth = true
 							button.Background = configColor(c.currentConfig().Theme.SidebarConnectionBackground, 0x202427)
 							if entry.ID == activeConnection {
 								button.Background = configColor(c.currentConfig().Theme.SidebarConnectionActiveBackground, 0x222927)
+								button.Selected = true
 							}
 							return button.Layout(gtx)
 						}),
@@ -1525,7 +1594,7 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 							if entry.Kind != "remote" {
 								return layout.Dimensions{}
 							}
-							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, material.Button(th, disconnect, "×").Layout)
+							return layout.Inset{Left: unit.Dp(4)}.Layout(gtx, chromeButton(th, disconnect, "×").Layout)
 						}),
 					)
 				})
@@ -1603,7 +1672,7 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 		if !showRemote {
 			items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				top := y
-				dims := layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(8)}.Layout(gtx, material.Button(th, &c.newRemote, "+ Remote").Layout)
+				dims := layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(8)}.Layout(gtx, chromeButton(th, &c.newRemote, "+ Connect remote").Layout)
 				c.hitRegions = append(c.hitRegions, automationHit{
 					Rect: image.Rect(0, top, gtx.Constraints.Max.X, top+dims.Size.Y),
 					Kind: hitNewRemote,
@@ -1615,7 +1684,7 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 			items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 				dims := layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(8)}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 					children := []layout.FlexChild{
-						layout.Rigid(material.Editor(th, &c.remoteEditor, "user@host").Layout),
+						layout.Rigid(chromeEditor(th, &c.remoteEditor, "user@host")),
 						layout.Rigid(layout.Spacer{Height: unit.Dp(6)}.Layout),
 					}
 					if remoteError != "" {
@@ -1629,9 +1698,9 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 					} else {
 						children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 							return layout.Flex{Axis: layout.Horizontal}.Layout(gtx,
-								layout.Flexed(1, material.Button(th, &c.remoteConnect, "Connect").Layout),
+								layout.Flexed(1, chromeButton(th, &c.remoteConnect, "Connect").Layout),
 								layout.Rigid(layout.Spacer{Width: unit.Dp(6)}.Layout),
-								layout.Rigid(material.Button(th, &c.remoteCancel, "Cancel").Layout),
+								layout.Rigid(chromeButton(th, &c.remoteCancel, "Cancel").Layout),
 							)
 						}))
 					}
@@ -1643,6 +1712,11 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 		}
 	}
 
+	items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		dims := sectionLabel(gtx, th, "WORKSPACES")
+		y += dims.Size.Y
+		return dims
+	}))
 	for _, workspace := range state.Workspaces {
 		w := workspace
 		click := c.workspaceClicks[w.ID]
@@ -1655,9 +1729,12 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 		}
 		items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			top := y
-			button := material.Button(th, click, w.Title)
+			button := chromeButton(th, click, w.Title)
+			button.FillWidth = true
+			button.Background = configColor(c.currentConfig().Theme.SidebarWorkspaceBackground, 0x1d2124)
 			if state.ActiveWorkspace != nil && w.ID == *state.ActiveWorkspace {
 				button.Background = configColor(c.currentConfig().Theme.SidebarWorkspaceActiveBackground, 0x29332f)
+				button.Selected = true
 			}
 			dims := layout.Inset{Left: unit.Dp(8), Right: unit.Dp(8), Bottom: unit.Dp(4)}.Layout(gtx, button.Layout)
 			c.hitRegions = append(c.hitRegions, automationHit{
@@ -1670,7 +1747,7 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 	}
 	items = append(items, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 		top := y
-		button := material.Button(th, &c.newWorkspace, "+ Workspace")
+		button := chromeButton(th, &c.newWorkspace, "+ New workspace")
 		dims := layout.UniformInset(unit.Dp(8)).Layout(gtx, button.Layout)
 		c.hitRegions = append(c.hitRegions, automationHit{
 			Rect: image.Rect(0, top, gtx.Constraints.Max.X, top+dims.Size.Y),
@@ -1678,6 +1755,14 @@ func (c *WorkspaceClient) layoutSidebar(gtx layout.Context, th *material.Theme, 
 		})
 		y += dims.Size.Y
 		return dims
+	}))
+	items = append(items, layout.Flexed(1, layout.Spacer{}.Layout), layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+		chromeRule(gtx, th)
+		return layout.Inset{Left: 20, Right: 12, Top: 14, Bottom: 16}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
+			label := material.Label(th, unit.Sp(10), "WATER  /  TERMINAL")
+			label.Color = mixColor(th.Palette.Bg, th.Palette.Fg, .4)
+			return label.Layout(gtx)
+		})
 	}))
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx, items...)
 }
@@ -1745,7 +1830,6 @@ func activeTab(workspace gomodel.WorkspaceDump) *gomodel.TabDump {
 func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, workspace gomodel.WorkspaceDump, origin image.Point) layout.Dimensions {
 	copyTheme := *th
 	th = &copyTheme
-	th.Palette.ContrastBg = configColor(c.currentConfig().Theme.TabInactiveBackground, 0x191c1e)
 	th.Palette.ContrastFg = th.Palette.Fg
 	children := make([]layout.FlexChild, 0, len(workspace.Tabs)+1)
 	x := 0
@@ -1761,9 +1845,11 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 		}
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			left := x
-			button := material.Button(th, click, t.Title)
+			button := chromeButton(th, click, t.Title)
+			button.Background = configColor(c.currentConfig().Theme.TabInactiveBackground, 0x191c1e)
 			if workspace.ActiveTab != nil && t.ID == *workspace.ActiveTab {
 				button.Background = configColor(c.currentConfig().Theme.TabActiveBackground, 0x252b2a)
+				button.Selected = true
 			}
 			dims := layout.Inset{Left: unit.Dp(4), Top: unit.Dp(4), Bottom: unit.Dp(4)}.Layout(gtx, button.Layout)
 			c.hitRegions = append(c.hitRegions, automationHit{
@@ -1776,7 +1862,7 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 	}
 	children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 		left := x
-		button := material.Button(th, &c.newTab, "+")
+		button := chromeButton(th, &c.newTab, "+")
 		button.Background = configColor(c.currentConfig().Theme.TabAddBackground, 0x2b3032)
 		dims := layout.UniformInset(unit.Dp(4)).Layout(gtx, button.Layout)
 		c.hitRegions = append(c.hitRegions, automationHit{
@@ -1786,6 +1872,12 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 		x += dims.Size.X
 		return dims
 	}))
+	spacerWidth := 0
+	children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
+		spacerWidth = gtx.Constraints.Min.X
+		return layout.Dimensions{Size: gtx.Constraints.Min}
+	}))
+	toolbarStart := len(c.hitRegions)
 	for _, control := range []struct {
 		button *widget.Clickable
 		label  string
@@ -1796,13 +1888,24 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 		control := control
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			left := x
-			dims := material.Button(th, control.button, control.label).Layout(gtx)
+			button := chromeButton(th, control.button, control.label)
+			button.Compact = true
+			dims := layout.Inset{Top: 4, Bottom: 4, Right: 4}.Layout(gtx, button.Layout)
 			c.hitRegions = append(c.hitRegions, automationHit{Rect: image.Rect(origin.X+left, origin.Y, origin.X+left+dims.Size.X, origin.Y+dims.Size.Y), Kind: control.kind})
 			x += dims.Size.X
 			return dims
 		}))
 	}
-	return layout.Flex{Axis: layout.Horizontal}.Layout(gtx, children...)
+	dims := layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
+	// Rigid children are measured before the flexible spacer. Only translate
+	// toolbar hits created in this layout, after its actual width is known.
+	for i := toolbarStart; i < len(c.hitRegions); i++ {
+		if c.hitRegions[i].Kind == hitSplitRight || c.hitRegions[i].Kind == hitSplitDown || c.hitRegions[i].Kind == hitSettings {
+			c.hitRegions[i].Rect = c.hitRegions[i].Rect.Add(image.Pt(spacerWidth, 0))
+		}
+	}
+	chromeOffset(gtx, image.Pt(0, dims.Size.Y-1), func() { chromeRule(gtx, th) })
+	return dims
 }
 
 func (c *WorkspaceClient) layoutPane(gtx layout.Context, th *material.Theme, node *paneTree, tab gomodel.TabDump, origin image.Point) layout.Dimensions {

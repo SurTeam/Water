@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATER_BIN="${WATER_BIN:-$ROOT/target/go-ui-smoke/water}"
 PYTHON="${WATER_PYTHON:-$HOME/.venv/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+TEST_SHELL="$(command -v zsh || true)"
+[[ ! -x /opt/homebrew/bin/zsh ]] || TEST_SHELL=/opt/homebrew/bin/zsh
+[[ -n "$TEST_SHELL" ]] || { echo "error: zsh is required for the GUI smoke" >&2; exit 1; }
 case "$(uname -s)" in
   Darwin) ;;
   Linux)
@@ -43,7 +46,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cat >"$CONFIG" <<'JSON'
+cat >"$CONFIG" <<JSON
 {
   "startup": {
     "initial_workspace": true,
@@ -59,8 +62,8 @@ cat >"$CONFIG" <<'JSON'
     "detach_on_quit": false
   },
   "shell": {
-    "program": "/bin/sh",
-    "args": ["-l"]
+    "program": "$TEST_SHELL",
+    "args": ["-f"]
   }
 }
 JSON
@@ -81,7 +84,7 @@ for _ in $(seq 1 240); do
 done
 "$WATER_BIN" --socket "$SOCKET" ping >/dev/null
 
-# Wait for a real Gio frame to populate actual clickable geometry.
+# Wait for a real Ebitengine frame to populate actual clickable geometry.
 hit=""
 for _ in $(seq 1 240); do
   if ! kill -0 "$gui_pid" 2>/dev/null; then
@@ -108,7 +111,7 @@ PY
 done
 
 if [[ -z "$hit" ]]; then
-  echo "real Gio frame never exposed new_workspace hit geometry" >&2
+  echo "real Ebitengine frame never exposed new_workspace hit geometry" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   cat "$LOG" >&2 || true
   exit 1
@@ -141,7 +144,7 @@ PY
   sleep 0.025
 done
 if [[ "$changed" != "1" ]]; then
-  echo "real Gio pointer click did not create a workspace" >&2
+  echo "real Ebitengine pointer click did not create a workspace" >&2
   cat "$SNAPSHOT" >&2 || true
   cat "$STATE_AFTER" >&2 || true
   cat "$LOG" >&2 || true
@@ -200,7 +203,7 @@ fi
 read -r pane_x pane_y <<<"$pane_hit"
 "$WATER_BIN" --socket "$SOCKET" ui click --x "$pane_x" --y "$pane_y" >/dev/null
 
-# Control input goes through Gio TerminalInput and the command dispatcher.
+# Control input goes through the native Ebitengine handler and dispatcher.
 # This validates client/server delivery; native clipboard/IME are manual gates.
 marker="WATER_Go_KEY_SMOKE_$$"
 "$WATER_BIN" --socket "$SOCKET" ui key "text:printf 'WATER_Go_%s\\n' 'KEY_SMOKE_$$'" >/dev/null
@@ -209,7 +212,7 @@ if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
     --terminal "$terminal_id" \
     --text "$marker" \
     --timeout-ms 5000 >/dev/null; then
-  echo "Gio control keyboard input did not reach the PTY" >&2
+  echo "Ebitengine control keyboard input did not reach the PTY" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   cat "$STATE_AFTER" >&2 2>/dev/null || true
   cat "$LOG" >&2 || true
@@ -236,7 +239,7 @@ PY
   sleep 0.025
 done
 if [[ -z "$remote_hit" ]]; then
-  echo "real Gio frame never exposed new_remote hit geometry" >&2
+  echo "real Ebitengine frame never exposed new_remote hit geometry" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   cat "$LOG" >&2 || true
   exit 1
@@ -261,7 +264,7 @@ PY
   sleep 0.025
 done
 if [[ "$remote_form" != "1" ]]; then
-  echo "real Gio pointer click did not open the runtime remote form" >&2
+  echo "real Ebitengine pointer click did not open the runtime remote form" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   cat "$LOG" >&2 || true
   exit 1
@@ -273,5 +276,5 @@ import pathlib, sys
 data=pathlib.Path(sys.argv[1]).read_bytes()
 if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":
     raise SystemExit("screenshot is not a PNG")
-print(f"real Gio UI smoke passed; screenshot bytes={len(data)}")
+print(f"real Ebitengine UI smoke passed; screenshot bytes={len(data)}")
 PY

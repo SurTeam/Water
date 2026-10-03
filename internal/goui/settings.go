@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"gioui.org/unit"
 	"gioui.org/widget"
 	"gioui.org/widget/material"
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goconfig"
 )
 
@@ -106,7 +108,7 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 			field := value.Type().Field(i)
 			v := value.Field(i)
 			// The ANSI palette is presented as 16 individual colors below.
-			if (v.Kind() == reflect.Slice && group != "Shell") || field.Name == "ControlSocket" || field.Name == "SocketPath" {
+			if (v.Kind() == reflect.Slice && group != "Shell") || v.Kind() == reflect.Map {
 				continue
 			}
 			f := settingsField{group: group, name: field.Name, label: settingsLabel(field.Name), kind: v.Kind()}
@@ -128,6 +130,17 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 			}
 			c.settings.fields = append(c.settings.fields, f)
 		}
+	}
+	keys := make([]string, 0, len(cfg.Theme.AgentColors))
+	for kind := range cfg.Theme.AgentColors {
+		keys = append(keys, kind)
+	}
+	sort.Strings(keys)
+	for _, kind := range keys {
+		f := settingsField{group: "Theme", name: "AgentColors." + kind, label: goagent.Label(goagent.Kind(kind)) + " color", kind: reflect.String}
+		f.editor.SingleLine = true
+		f.editor.SetText(cfg.Theme.AgentColors[kind])
+		c.settings.fields = append(c.settings.fields, f)
 	}
 	for i := 0; i < 16; i++ {
 		f := settingsField{group: "Theme", name: fmt.Sprint(i), label: fmt.Sprintf("ANSI color %d", i)}
@@ -182,8 +195,28 @@ func settingsLabel(name string) string {
 	return out.String()
 }
 
+func settingsApplyKind(f settingsField) string {
+	if f.group == "Startup" && strings.HasPrefix(f.name, "Window") {
+		return "New windows"
+	}
+	if f.group == "Startup" || f.group == "Server" || f.group == "Shell" {
+		return "Restart"
+	}
+	if f.group == "Terminal" {
+		switch f.name {
+		case "DefaultColumns", "DefaultLines", "ScrollbackLines", "InactiveScrollbackLines", "MaxTotalScrollbackBytes", "ReplayHistoryBytes":
+			return "Restart"
+		}
+	}
+	return "Applies immediately"
+}
+
 func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 	cfg := s.draft
+	cfg.Theme.AgentColors = map[string]string{}
+	for kind, color := range s.draft.Theme.AgentColors {
+		cfg.Theme.AgentColors[kind] = color
+	}
 	cfg.Theme.ANSIColors = make([]string, 16)
 	for i := range s.fields {
 		f := &s.fields[i]
@@ -197,6 +230,10 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 			}
 			if index, err := strconv.Atoi(f.name); err == nil {
 				cfg.Theme.ANSIColors[index] = text
+				continue
+			}
+			if strings.HasPrefix(f.name, "AgentColors.") {
+				cfg.Theme.AgentColors[strings.TrimPrefix(f.name, "AgentColors.")] = text
 				continue
 			}
 		}
@@ -465,6 +502,7 @@ func applyViewConfig(view *TerminalView, cfg goconfig.AppConfig) {
 	view.Theme.Background = configColor(cfg.Theme.TerminalBackground, 0x2c2c2c)
 	view.Theme.Foreground = configColor(cfg.Theme.TerminalForeground, 0xe4e4e4)
 	view.Theme.Cursor = configColor(cfg.Theme.CursorBackground, 0xe4e4e4)
+	view.Theme.CursorForeground = configColor(cfg.Theme.CursorForeground, 0x2c2c2c)
 	view.Theme.InactiveCursor = configColor(cfg.Theme.InactiveCursor, 0x555555)
 	view.Theme.InverseForeground = configColor(cfg.Theme.InverseForeground, 0x2c2c2c)
 	view.Theme.InverseBackground = configColor(cfg.Theme.InverseBackground, 0xe4e4e4)

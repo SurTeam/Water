@@ -80,13 +80,46 @@ type TerminalConfig struct {
 }
 
 type UIConfig struct {
-	SidebarWidth     float32 `json:"sidebar_width"`
-	PanePadding      float32 `json:"pane_padding"`
-	PaneMargin       float32 `json:"pane_margin"`
-	PaneCornerRadius float32 `json:"pane_corner_radius"`
-	PaneDividerWidth float32 `json:"pane_divider_width"`
-	UIFontSize       float32 `json:"font_size"`
-	UIFontFamily     string  `json:"font_family"`
+	SidebarVisible                 bool    `json:"sidebar_visible"`
+	SidebarShowAgentCount          bool    `json:"sidebar_show_agent_count"`
+	DimInactivePanes               bool    `json:"dim_inactive_panes"`
+	TabBarVerticalWheelScroll      bool    `json:"tab_bar_vertical_wheel_scroll"`
+	WorkspaceNavigationAcrossHosts bool    `json:"workspace_navigation_across_hosts"`
+	SidebarMinWidth                float32 `json:"sidebar_min_width"`
+	SidebarMaxWidth                float32 `json:"sidebar_max_width"`
+	SidebarResizeHandleWidth       float32 `json:"sidebar_resize_handle_width"`
+	TitlebarHeight                 float32 `json:"titlebar_height"`
+	TabHeight                      float32 `json:"tab_height"`
+	SidebarHeaderHeight            float32 `json:"sidebar_header_height"`
+	WindowPadding                  float32 `json:"window_padding"`
+	SidebarSurfaceMargin           float32 `json:"sidebar_surface_margin"`
+	SidebarAgentRowGap             float32 `json:"sidebar_agent_row_gap"`
+	SidebarAgentPadding            float32 `json:"sidebar_agent_padding"`
+	SidebarHostHeaderHeight        float32 `json:"sidebar_host_header_height"`
+	SidebarHostWorkspaceGap        float32 `json:"sidebar_host_workspace_gap"`
+	SidebarAgentRowWidth           float32 `json:"sidebar_agent_row_width"`
+	SidebarWorkspaceRowPadding     float32 `json:"sidebar_workspace_row_padding"`
+	SidebarAgentRowPadding         float32 `json:"sidebar_agent_row_padding"`
+	SidebarAgentRowHeight          float32 `json:"sidebar_agent_row_height"`
+	SidebarWorkspaceGap            float32 `json:"sidebar_workspace_gap"`
+	SidebarMargin                  float32 `json:"sidebar_margin"`
+	SidebarCardGap                 float32 `json:"sidebar_card_gap"`
+	SidebarCardPadding             float32 `json:"sidebar_card_padding"`
+	SidebarRowPadding              float32 `json:"sidebar_row_padding"`
+	TitlebarPadding                float32 `json:"titlebar_padding"`
+	TitlebarGap                    float32 `json:"titlebar_gap"`
+	TabGap                         float32 `json:"tab_gap"`
+	TabPadding                     float32 `json:"tab_padding"`
+	WindowCornerRadius             float32 `json:"window_corner_radius"`
+	SidebarCardRadius              float32 `json:"sidebar_card_radius"`
+	SidebarWorkspaceRadius         float32 `json:"sidebar_workspace_radius"`
+	SidebarWidth                   float32 `json:"sidebar_width"`
+	PanePadding                    float32 `json:"pane_padding"`
+	PaneMargin                     float32 `json:"pane_margin"`
+	PaneCornerRadius               float32 `json:"pane_corner_radius"`
+	PaneDividerWidth               float32 `json:"pane_divider_width"`
+	UIFontSize                     float32 `json:"font_size"`
+	UIFontFamily                   string  `json:"font_family"`
 }
 
 func (u *UIConfig) UnmarshalJSON(data []byte) error {
@@ -110,6 +143,13 @@ func (u *UIConfig) UnmarshalJSON(data []byte) error {
 }
 
 type ShortcutConfig struct {
+	NewWindow         string `json:"new_window"`
+	ConnectRemote     string `json:"connect_remote"`
+	RenameWorkspace   string `json:"rename_workspace"`
+	RenameTab         string `json:"rename_tab"`
+	HideWindow        string `json:"hide_window"`
+	MinimizeWindow    string `json:"minimize_window"`
+	IgnoreQuit        string `json:"ignore_quit"`
 	SwitchTab         string `json:"switch_tab"`
 	NextWorkspace     string `json:"next_workspace"`
 	PreviousWorkspace string `json:"previous_workspace"`
@@ -135,29 +175,38 @@ type ShortcutConfig struct {
 }
 
 type ThemeConfig struct {
-	SelectionBackground               string   `json:"selection_background"`
-	InactiveCursor                    string   `json:"inactive_cursor"`
-	InverseForeground                 string   `json:"inverse_foreground"`
-	InverseBackground                 string   `json:"inverse_background"`
-	PaneBackground                    string   `json:"pane_background"`
-	ActivePaneBorder                  string   `json:"active_pane_border"`
-	InactivePaneBorder                string   `json:"inactive_pane_border"`
-	AccentForeground                  string   `json:"accent_foreground"`
-	TabActiveBackground               string   `json:"tab_active_background"`
-	TabInactiveBackground             string   `json:"tab_inactive_background"`
-	TabAddBackground                  string   `json:"tab_add_background"`
-	SidebarConnectionBackground       string   `json:"sidebar_connection_background"`
-	SidebarConnectionActiveBackground string   `json:"sidebar_connection_active_background"`
-	SidebarWorkspaceBackground        string   `json:"sidebar_workspace_background"`
-	SidebarWorkspaceActiveBackground  string   `json:"sidebar_workspace_active_background"`
-	ANSIColors                        []string `json:"ansi_colors,omitempty"`
-	TerminalBackground                string   `json:"terminal_background"`
-	TerminalForeground                string   `json:"terminal_foreground"`
-	CursorBackground                  string   `json:"cursor_background"`
-	ChromeBackground                  string   `json:"chrome_background"`
-	Accent                            string   `json:"accent"`
-	UIForeground                      string   `json:"ui_foreground"`
-	SidebarBackground                 string   `json:"sidebar_background"`
+	CursorForeground                  string            `json:"cursor_foreground"`
+	SidebarConnectionActiveBorder     string            `json:"sidebar_connection_active_border"`
+	SidebarConnectionInactiveBorder   string            `json:"sidebar_connection_inactive_border"`
+	SidebarConnectionOfflineColor     string            `json:"sidebar_connection_offline_color"`
+	SidebarConnectionOfflineBorder    string            `json:"sidebar_connection_offline_border"`
+	SidebarAgentBackground            string            `json:"sidebar_agent_background"`
+	SidebarAgentActiveBackground      string            `json:"sidebar_agent_active_background"`
+	SidebarDragIndicatorColor         string            `json:"sidebar_drag_indicator_color"`
+	AgentColors                       map[string]string `json:"agent_colors"`
+	SelectionBackground               string            `json:"selection_background"`
+	InactiveCursor                    string            `json:"inactive_cursor"`
+	InverseForeground                 string            `json:"inverse_foreground"`
+	InverseBackground                 string            `json:"inverse_background"`
+	PaneBackground                    string            `json:"pane_background"`
+	ActivePaneBorder                  string            `json:"active_pane_border"`
+	InactivePaneBorder                string            `json:"inactive_pane_border"`
+	AccentForeground                  string            `json:"accent_foreground"`
+	TabActiveBackground               string            `json:"tab_active_background"`
+	TabInactiveBackground             string            `json:"tab_inactive_background"`
+	TabAddBackground                  string            `json:"tab_add_background"`
+	SidebarConnectionBackground       string            `json:"sidebar_connection_background"`
+	SidebarConnectionActiveBackground string            `json:"sidebar_connection_active_background"`
+	SidebarWorkspaceBackground        string            `json:"sidebar_workspace_background"`
+	SidebarWorkspaceActiveBackground  string            `json:"sidebar_workspace_active_background"`
+	ANSIColors                        []string          `json:"ansi_colors,omitempty"`
+	TerminalBackground                string            `json:"terminal_background"`
+	TerminalForeground                string            `json:"terminal_foreground"`
+	CursorBackground                  string            `json:"cursor_background"`
+	ChromeBackground                  string            `json:"chrome_background"`
+	Accent                            string            `json:"accent"`
+	UIForeground                      string            `json:"ui_foreground"`
+	SidebarBackground                 string            `json:"sidebar_background"`
 }
 
 func Default() AppConfig {
@@ -190,14 +239,26 @@ func Default() AppConfig {
 			HyperlinkDownloadDirectory: "~/Downloads/Water",
 		},
 		UI: UIConfig{
-			SidebarWidth:     200,
-			PanePadding:      10,
-			PaneMargin:       5,
-			PaneCornerRadius: 14,
-			PaneDividerWidth: 2,
-			UIFontSize:       14,
+			SidebarVisible: true, SidebarShowAgentCount: true, DimInactivePanes: true,
+			SidebarMinWidth: 170, SidebarMaxWidth: 420, SidebarResizeHandleWidth: 6,
+			TitlebarHeight: 36, TabHeight: 24, SidebarHeaderHeight: 24,
+			WindowPadding: 10, SidebarMargin: 6, SidebarCardGap: 8, SidebarCardPadding: 8,
+			SidebarRowPadding: 12, TitlebarPadding: 10, TitlebarGap: 8, TabGap: 5, TabPadding: 12,
+			WindowCornerRadius: 16, SidebarCardRadius: 14, SidebarWorkspaceRadius: 8,
+			SidebarAgentRowGap: 3, SidebarAgentPadding: 6, SidebarHostHeaderHeight: 28,
+			SidebarHostWorkspaceGap: 8, SidebarAgentRowWidth: .8,
+			SidebarWorkspaceRowPadding: 10, SidebarAgentRowPadding: 10, SidebarAgentRowHeight: 28,
+			SidebarWorkspaceGap: 4,
+			SidebarWidth:        200,
+			PanePadding:         10,
+			PaneMargin:          5,
+			PaneCornerRadius:    6,
+			PaneDividerWidth:    2,
+			UIFontSize:          12,
 		},
 		Shortcuts: ShortcutConfig{
+			NewWindow: "cmd-n", ConnectRemote: "cmd-shift-k", RenameWorkspace: "cmd-shift-e", RenameTab: "cmd-shift-t",
+			HideWindow: "cmd-w", MinimizeWindow: "cmd-m", IgnoreQuit: "cmd-q",
 			SwitchTab: "cmd-#", NextWorkspace: "ctrl-tab", PreviousWorkspace: "ctrl-shift-tab",
 			OpenSettings: "cmd-,", SplitRight: "cmd-\\", SplitDown: "cmd--",
 			NextTab: "cmd-]", PreviousTab: "cmd-[", ToggleSidebar: "cmd-e",
@@ -216,19 +277,24 @@ func Default() AppConfig {
 			ScrollPageDown:   "shift-pagedown",
 		},
 		Theme: ThemeConfig{
+			CursorForeground: "#1e1e20", SidebarConnectionActiveBorder: "#45454a",
+			SidebarConnectionInactiveBorder: "#303034", SidebarConnectionOfflineColor: "#ef7d83",
+			SidebarConnectionOfflineBorder: "#70444a", SidebarAgentBackground: "#242426",
+			SidebarAgentActiveBackground: "#353539", SidebarDragIndicatorColor: "#8eaeed",
+			AgentColors:         DefaultAgentColors(),
 			SelectionBackground: "#555555", InactiveCursor: "#555555",
 			InverseForeground: "#2c2c2c", InverseBackground: "#e4e4e4",
-			PaneBackground: "#2c2c2c", ActivePaneBorder: "#72d6ab", InactivePaneBorder: "#42484a",
-			AccentForeground: "#111714", TabActiveBackground: "#252b2a", TabInactiveBackground: "#191c1e", TabAddBackground: "#2b3032",
-			SidebarConnectionBackground: "#202427", SidebarConnectionActiveBackground: "#222927",
-			SidebarWorkspaceBackground: "#1d2124", SidebarWorkspaceActiveBackground: "#29332f",
-			TerminalBackground: "#2c2c2c",
+			PaneBackground: "#1e1e20", ActivePaneBorder: "#45454a", InactivePaneBorder: "#303034",
+			AccentForeground: "#ffffff", TabActiveBackground: "#414145", TabInactiveBackground: "#28282b", TabAddBackground: "#28282b",
+			SidebarConnectionBackground: "#252528", SidebarConnectionActiveBackground: "#353539",
+			SidebarWorkspaceBackground: "#252528", SidebarWorkspaceActiveBackground: "#353539",
+			TerminalBackground: "#1e1e20",
 			TerminalForeground: "#e4e4e4",
 			CursorBackground:   "#e4e4e4",
-			ChromeBackground:   "#121416",
-			Accent:             "#72d6ab",
+			ChromeBackground:   "#28282b",
+			Accent:             "#8eaeed",
 			UIForeground:       "#e6eaea",
-			SidebarBackground:  "#171a1c",
+			SidebarBackground:  "#252528",
 		},
 	}.Normalized()
 }
@@ -253,6 +319,11 @@ func DefaultShellArgs(program string) []string {
 }
 
 func (c AppConfig) Normalized() AppConfig {
+	agentColors := DefaultAgentColors()
+	for kind, value := range c.Theme.AgentColors {
+		agentColors[kind] = value
+	}
+	c.Theme.AgentColors = agentColors
 	c.Shell.Program = strings.TrimSpace(c.Shell.Program)
 	if c.Shell.Program == "" {
 		c.Shell.Program = DefaultShellProgram()
@@ -272,12 +343,12 @@ func (c AppConfig) Normalized() AppConfig {
 		c.Terminal.FontFamily = "Sarasa Term SC"
 	}
 	c.Terminal.FontSize = clampFloat(c.Terminal.FontSize, 8, 48)
-	c.UI.SidebarWidth = clampFloat(c.UI.SidebarWidth, 120, 480)
-	c.UI.PanePadding = clampFloat(c.UI.PanePadding, 1, 40)
-	c.UI.PaneMargin = clampFloat(c.UI.PaneMargin, 0, 30)
-	c.UI.PaneCornerRadius = clampFloat(c.UI.PaneCornerRadius, 0, 40)
-	c.UI.PaneDividerWidth = clampFloat(c.UI.PaneDividerWidth, 1, 20)
-	c.UI.UIFontSize = clampFloat(c.UI.UIFontSize, 10, 24)
+	c.UI = c.UI.normalized()
+	c.UI.PanePadding = clampFloat(c.UI.PanePadding, 0, 48)
+	c.UI.PaneMargin = clampFloat(c.UI.PaneMargin, 0, 32)
+	c.UI.PaneCornerRadius = clampFloat(c.UI.PaneCornerRadius, 0, 48)
+	c.UI.PaneDividerWidth = clampFloat(c.UI.PaneDividerWidth, 1, 16)
+	c.UI.UIFontSize = clampFloat(c.UI.UIFontSize, 8, 32)
 	c.Terminal.LineHeight = clampFloat(c.Terminal.LineHeight, 8, 64)
 	c.Startup.WindowMinWidth = clampFloat(c.Startup.WindowMinWidth, 200, 4096)
 	c.Startup.WindowMinHeight = clampFloat(c.Startup.WindowMinHeight, 120, 4096)

@@ -6,7 +6,32 @@ This is the operational reference for contributors and users who need commands. 
 
 Use stable Rust with Rust 2024 support. macOS builds need Xcode's Metal Toolchain. macOS app packaging also needs `rustup`, Zig, `cargo-zigbuild`, `gzip`, and `rg` for the embedded server targets. Linux GUI checks require an available display and the matching GPUI platform feature; do not assume that a Linux host has no X11/GPU.
 
-## Run the GUI
+## Run the Go GUI (Ebitengine)
+
+The Go GUI uses Ebitengine 2.10 with a custom titlebar, window controls, resizing, terminal renderer and settings panels. It requires the Go version in `go.mod` and a native desktop display. Installed terminal font families are resolved from the system font directories; bundled Go fonts provide the fallback. The Rust GUI below remains a separate GPUI implementation.
+
+```sh
+mkdir -p target/go-ui-smoke
+go build -o target/go-ui-smoke/water ./cmd/water
+go build -o target/go-ui-smoke/water-server ./cmd/water-server
+target/go-ui-smoke/water
+
+# Real native-window checks through Water's control API, in owned instances.
+bash scripts/run-go-ui-smoke.sh
+WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-settings-smoke.py
+WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-lifecycle-smoke.py
+WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-parity-smoke.py
+```
+
+The settings smoke verifies navigation, editing, Ctrl/Alt combinations and function-key bytes in a real raw PTY, Ctrl+C process interruption, titlebar-integrated tabs, undecorated native-window state, titlebar drag and double-click, maximize/restore, border resize, minimize and close, together with settings and pane operations. Regression tests classify every physical key, check keypad and modified-key encoding, and verify font metadata/style selection and collection face indices. The UI uses one compact 36-dp toolbar with tabs and window controls, without a bottom status bar; macOS uses the system interface font by default. Font lookup reads internal family/subfamily names instead of guessing from filenames. `ui snapshot` reports `terminal_font` and `terminal_font_styles` with the actual file, style, collection index and fallback/loading status. `ui screenshot` captures Ebitengine's rendered frame, including the custom titlebar. Native clipboard and IME candidate-window acceptance still use the manual checks in `scripts/run-go-ime-manual.sh`; control-injected text does not substitute for OS input-method validation.
+
+On macOS, the application menu follows the configured `hide_window` and `minimize_window` shortcuts. Defaults are Cmd+W to hide, Cmd+M to minimize, Cmd+Q to ignore quitting, and Cmd+H to focus the left pane. **Quit GUI** follows the existing `detach_on_quit` policy; **Quit GUI and Local Server** explicitly shuts down the attached local server before closing the GUI. Remote servers retain their own lifecycle. The lifecycle smoke invokes actual native menu items and verifies that the owned server PID and socket disappear. `water ctl ui menu quit-and-server` invokes the same menu item; `ui menu show-window` restores a hidden or minimized window. `ui snapshot` includes native menu state and shutdown errors. Terminal row height and baseline account for ascent and descent across font styles, with configured line height as a minimum.
+
+The Go settings panel covers every field exposed by the Rust settings schema, including sidebar, host/workspace/agent geometry, agent colors, dimming, tab-wheel behavior, cross-host workspace navigation and window shortcuts. Each control indicates whether it applies immediately, to new windows or after restarting. Existing override documents and unknown keys survive saving. Cmd+N starts a separate native GUI process attached to the current server, loading the saved window preferences. Workspace and tab rename dialogs use the normal command dispatcher; sidebar Agent rows activate their owning connection, tab and pane.
+
+Rounded windows use Ebitengine screen transparency, a cached alpha mask and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
+
+## Run the Rust GUI
 
 ```sh
 # Default dev GUI; normal cargo build uses the dev identity.

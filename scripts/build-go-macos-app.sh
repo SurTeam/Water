@@ -14,7 +14,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "error: the Gio macOS app must be built natively on macOS" >&2
+  echo "error: the Ebitengine macOS app must be built natively on macOS" >&2
   exit 1
 fi
 

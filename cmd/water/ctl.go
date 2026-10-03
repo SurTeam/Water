@@ -138,10 +138,21 @@ func runConnections(ctx cliContext, args []string) error {
 
 func runUI(ctx cliContext, args []string) error {
 	if len(args) == 0 {
-		return errors.New("ui requires key, state, screenshot, wheel, or click")
+		return errors.New("ui requires key, state, screenshot, wheel, click, or menu")
 	}
 	var out any
 	switch args[0] {
+	case "menu":
+		action, ok := option(args, "--action")
+		if !ok && len(args) > 1 {
+			action = args[1]
+		}
+		if action == "" {
+			return errors.New("ui menu requires an action")
+		}
+		if err := ctx.client.Call("ui.menu", map[string]any{"action": action}, &out); err != nil {
+			return err
+		}
 	case "key", "keystroke":
 		value, ok := option(args, "--keystroke")
 		if !ok && len(args) > 1 && !strings.HasPrefix(args[1], "-") {
@@ -1124,6 +1135,10 @@ func terminalPositionals(args []string) []string {
 	var out []string
 	valueFlags := map[string]bool{"--pane": true, "--terminal": true, "--columns": true, "--lines": true, "--timeout-ms": true, "--program": true, "--text": true, "--hex": true}
 	for i := 1; i < len(args); i++ {
+		if args[i] == "--" {
+			out = append(out, args[i+1:]...)
+			break
+		}
 		if valueFlags[args[i]] {
 			i++
 			continue

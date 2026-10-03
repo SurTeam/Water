@@ -3,6 +3,7 @@ package goui
 import (
 	"image"
 	"io"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -563,6 +564,11 @@ func EncodeKey(ev key.Event, applicationCursor bool) []byte {
 			return []byte("\x1b[3;" + itoaSmall(modParam) + "~")
 		}
 		return []byte("\x1b[3~")
+	case key.Name("Insert"):
+		if modified {
+			return []byte("\x1b[2;" + itoaSmall(modParam) + "~")
+		}
+		return []byte("\x1b[2~")
 	case key.NamePageUp:
 		if modified {
 			return []byte("\x1b[5;" + itoaSmall(modParam) + "~")
@@ -584,7 +590,7 @@ func EncodeKey(ev key.Event, applicationCursor bool) []byte {
 			}
 			return []byte{0x1b, 'O', final}
 		}
-		codes := []string{"15", "17", "18", "19", "20", "21", "23", "24"}
+		codes := []string{"15", "17", "18", "19", "20", "21", "23", "24", "25", "26", "28", "29", "31", "32", "33", "34", "42", "43", "44", "45"}
 		code := codes[fn-5]
 		if modified {
 			return []byte("\x1b[" + code + ";" + itoaSmall(modParam) + "~")
@@ -607,6 +613,9 @@ func EncodeKey(ev key.Event, applicationCursor bool) []byte {
 		}
 	}
 	if mods.Contain(key.ModAlt) && !mods.Contain(key.ModCtrl) {
+		if !mods.Contain(key.ModShift) {
+			name = string(unicode.ToLower(r))
+		}
 		return append([]byte{0x1b}, []byte(name)...)
 	}
 	return nil
@@ -635,15 +644,28 @@ func controlByte(r rune) (byte, bool) {
 		return 0x7f, true
 	case r == ' ':
 		return 0, true
+	case r == '2':
+		return 0, true
+	case r == '3':
+		return 0x1b, true
+	case r == '4':
+		return 0x1c, true
+	case r == '5':
+		return 0x1d, true
+	case r == '6':
+		return 0x1e, true
+	case r == '7', r == '/', r == '-':
+		return 0x1f, true
+	case r == '8':
+		return 0x7f, true
 	}
 	return 0, false
 }
 
 func functionKeyNumber(name key.Name) int {
-	names := []key.Name{key.NameF1, key.NameF2, key.NameF3, key.NameF4, key.NameF5, key.NameF6, key.NameF7, key.NameF8, key.NameF9, key.NameF10, key.NameF11, key.NameF12}
-	for idx, candidate := range names {
-		if name == candidate {
-			return idx + 1
+	if strings.HasPrefix(string(name), "F") {
+		if n, err := strconv.Atoi(string(name)[1:]); err == nil && n >= 1 && n <= 24 {
+			return n
 		}
 	}
 	return 0

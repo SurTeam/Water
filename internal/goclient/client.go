@@ -41,11 +41,24 @@ func marshalParams(params any) (json.RawMessage, error) {
 }
 
 func (c *Client) Call(method string, params any, out any) error {
-	conn, err := net.Dial("unix", c.SocketPath)
+	return c.call(method, params, out, 0)
+}
+
+// CallTimeout bounds both connection setup and the RPC exchange.
+func (c *Client) CallTimeout(method string, params any, out any, timeout time.Duration) error {
+	return c.call(method, params, out, timeout)
+}
+
+func (c *Client) call(method string, params any, out any, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	conn, err := net.DialTimeout("unix", c.SocketPath, timeout)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	if timeout > 0 {
+		_ = conn.SetDeadline(deadline)
+	}
 
 	requestID := c.nextID.Add(1)
 	raw, err := marshalParams(params)

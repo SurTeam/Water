@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATER_BIN="${WATER_BIN:-$ROOT/target/go-scenarios/water}"
 WATER_SERVER_BIN="${WATER_SERVER_BIN:-$ROOT/target/go-scenarios/water-server}"
 REQUIRE_ALL="${WATER_SCENARIO_REQUIRE_ALL:-0}"
+TEST_SHELL="$(command -v zsh || true)"
+[[ ! -x /opt/homebrew/bin/zsh ]] || TEST_SHELL=/opt/homebrew/bin/zsh
+[[ -n "$TEST_SHELL" ]] || { echo "error: zsh is required for scenarios" >&2; exit 1; }
 # Darwin Unix sockets have a short path limit; TMPDIR/runner paths can exceed it.
 TMP_ROOT="$(mktemp -d /tmp/water-go-scenarios.XXXXXX)"
 mkdir -p "$TMP_ROOT"
@@ -33,15 +36,15 @@ if [[ ! -x "$WATER_SERVER_BIN" ]]; then
 fi
 
 config="$TMP_ROOT/config.json"
-cat >"$config" <<'JSON'
+cat >"$config" <<JSON
 {
   "startup": {
     "initial_workspace": false,
     "initial_terminal": false
   },
   "shell": {
-    "program": "/bin/sh",
-    "args": ["-l"]
+    "program": "$TEST_SHELL",
+    "args": ["-f"]
   },
   "server": {
     "detached": false,

@@ -12,10 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"gioui.org/app"
-	"gioui.org/op"
-	"gioui.org/unit"
-	"gioui.org/widget/material"
+	"github.com/hajimehoshi/ebiten/v2"
 
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
@@ -59,15 +56,7 @@ func Run(arguments []string, buildVariant string) error {
 	}
 	socket = resolveGUISocket(socket, cfg, buildVariant)
 
-	runErr := make(chan error, 1)
-	go func() { runErr <- runWindowWithConnections(socket, configPath, cfg, buildVariant, sshDestinations) }()
-	app.Main()
-	select {
-	case err := <-runErr:
-		return err
-	default:
-		return nil
-	}
+	return runWindowWithConnections(socket, configPath, cfg, buildVariant, sshDestinations)
 }
 
 func runWindow(socket, configPath string, cfg goconfig.AppConfig, buildVariant string) error {
@@ -83,25 +72,41 @@ func runWindowWithConnection(socket, configPath string, cfg goconfig.AppConfig, 
 }
 
 func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig, buildVariant string, sshDestinations []string) error {
-	w := new(app.Window)
-	w.Option(
-		app.Title("Water"),
-		app.Size(unit.Dp(cfg.Startup.WindowWidth), unit.Dp(cfg.Startup.WindowHeight)),
-		app.MinSize(unit.Dp(cfg.Startup.WindowMinWidth), unit.Dp(cfg.Startup.WindowMinHeight)),
-	)
-
-	multi := goui.NewMultiWorkspaceClient(w.Invalidate)
+	multi := goui.NewMultiWorkspaceClient(nil)
+	w := goui.NewEbitengineWindow(multi, cfg)
+	w.SetNewWindowHandler(func() error {
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		args := []string{"--control-socket", socket, "--config", configPath}
+		for _, destination := range sshDestinations {
+			args = append(args, "--ssh", destination)
+		}
+		command := exec.Command(executable, args...)
+		command.Env = os.Environ()
+		if err := command.Start(); err != nil {
+			return err
+		}
+		go func() { _ = command.Wait() }()
+		return nil
+	})
+	defer w.Close()
 	settingsStore := goui.NewSettingsStore(cfg)
 
 	localSession, embedded, ownsDetached, localErr := connectOrStart(socket, configPath, cfg, buildVariant)
 	if localErr == nil {
+		w.SetQuitServerHandler(func() error {
+			return goclient.New(socket).CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
+		})
 		if embedded != nil {
 			defer embedded.Close()
 		}
 		if embedded == nil && ownsDetached && !cfg.Server.DetachOnQuit {
 			defer func() { _ = goclient.New(socket).Call("server.shutdown", map[string]any{}, nil) }()
 		}
-		localView := goui.NewWorkspaceClientWithConnection(localSession, w.Invalidate, cfg, "")
+		localView := goui.NewWorkspaceClientWithConnection(localSession, nil, cfg, "")
+		w.Attach(localView)
 		localView.SetConfigPath(configPath)
 		localView.SetSettingsStore(settingsStore)
 		if err := multi.AddConnection(goui.ConnectionEntry{
@@ -140,7 +145,8 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			_ = tunnel.Close()
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("open remote Water session %s: %w", destination, err)
 		}
-		view := goui.NewWorkspaceClientWithConnection(session, w.Invalidate, cfg, destination)
+		view := goui.NewWorkspaceClientWithConnection(session, nil, cfg, destination)
+		w.Attach(view)
 		view.SetConfigPath(configPath)
 		view.SetSettingsStore(settingsStore)
 		entry := goui.ConnectionEntry{
@@ -184,19 +190,14 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	}
 	multi.Run()
 
-	th := material.NewTheme()
-	var ops op.Ops
-	for {
-		switch e := w.Event().(type) {
-		case app.DestroyEvent:
-			return e.Err
-		case app.FrameEvent:
-			gtx := app.NewContext(&ops, e)
-			multi.Layout(gtx, th)
-			e.Frame(&ops)
-			ops.Reset()
-		}
-	}
+	ebiten.SetWindowTitle("Water")
+	ebiten.SetWindowDecorated(false)
+	ebiten.SetWindowSize(int(cfg.Startup.WindowWidth), int(cfg.Startup.WindowHeight))
+	ebiten.SetWindowSizeLimits(int(cfg.Startup.WindowMinWidth), int(cfg.Startup.WindowMinHeight), -1, -1)
+	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
+	ebiten.SetWindowClosingHandled(true)
+	ebiten.SetRunnableOnUnfocused(true)
+	return ebiten.RunGameWithOptions(w, &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant})
 }
 
 func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVariant string) (*goclient.Session, *goserver.Server, bool, error) {

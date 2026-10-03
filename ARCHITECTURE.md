@@ -16,6 +16,12 @@
 
 ## 运行时分层
 
+Go GUI 的入口为 [`internal/gouiapp/app.go`](internal/gouiapp/app.go)，窗口、标题栏、控件、终端纹理和原生输入由 [`internal/goui/ebiten_window.go`](internal/goui/ebiten_window.go)、[`ebiten_layout.go`](internal/goui/ebiten_layout.go)、[`ebiten_terminal.go`](internal/goui/ebiten_terminal.go)、[`ebiten_input.go`](internal/goui/ebiten_input.go) 实现。运行时使用 Ebitengine，不创建 Gio 窗口，也不把 Gio 帧转成纹理。既有 `WorkspaceClient` 继续持有 connection、终端模拟、Settings 和选择状态；共享 VT 编码器和旧 Gio 布局保留用于兼容性测试。
+
+窗口使用无系统装饰模式。关闭、最小化、最大化/恢复、标题栏拖动和边缘缩放由客户端处理。原生输入与 `water ctl ui` 进入同一套事件处理器，控制请求经过有界队列进入 `Update`，截图读取真实 `Draw` 帧；PNG 编码、配置保存、SSH 和字体文件加载在帧循环外进行。模型变更仍只通过 connection 所属 session 的 dispatcher/channel。
+
+Go 设置字段与 Rust 配置 schema 有自动对照检查。圆角通过透明窗口、缓存 alpha mask 和 macOS content layer 裁剪实现，原生菜单和 layer 操作经过有界 main-queue bridge。标题栏/标签/侧栏几何、Agent 配色和行为设置投影到客户端；侧栏工作区重排、重命名和 Agent 聚焦仍向对象所属 connection 发送命令。Ebitengine 单进程窗口限制下，新窗口使用同变体 GUI 子进程连接已有 server；UI control 转发始终作用于该窗口当前活动的 connection。
+
 ```text
 GUI / water ctl / scenario / remote client
         │  对象所属 connection 的 CommandTransport

@@ -11,6 +11,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 	"image"
+	"image/color"
 	"reflect"
 )
 
@@ -42,7 +43,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			return s.scrim.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				paint.FillShape(gtx.Ops, configColor(c.currentConfig().Theme.ChromeBackground, 0x121416), clip.Rect{Max: gtx.Constraints.Max}.Op())
+				paint.FillShape(gtx.Ops, color.NRGBA{A: 190}, clip.Rect{Max: gtx.Constraints.Max}.Op())
 				return layout.Dimensions{Size: gtx.Constraints.Max}
 			})
 		}),
@@ -53,6 +54,9 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 			gtx.Constraints.Min.X = width
 			gtx.Constraints.Max.X = width
 			gtx.Constraints.Min.Y = gtx.Constraints.Max.Y
+			card := image.Rectangle{Max: image.Pt(width, gtx.Constraints.Max.Y)}
+			paint.FillShape(gtx.Ops, mixColor(th.Palette.Bg, th.Palette.Fg, .14), clip.UniformRRect(card, gtx.Dp(10)).Op(gtx.Ops))
+			paint.FillShape(gtx.Ops, th.Palette.Bg, clip.UniformRRect(card.Inset(1), gtx.Dp(10)).Op(gtx.Ops))
 			return layout.UniformInset(unit.Dp(16)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
 				height := gtx.Constraints.Max.Y
 				contentWidth := gtx.Constraints.Max.X
@@ -68,7 +72,9 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 						for i, name := range groups {
 							i, name := i, name
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								button := material.Button(th, &s.tabs[i], name)
+								button := chromeButton(th, &s.tabs[i], name)
+								button.Background = configColor(c.currentConfig().Theme.SidebarWorkspaceActiveBackground, 0x29332f)
+								button.Selected = s.group == i
 								if s.group != i {
 									button.Background = configColor(c.currentConfig().Theme.SidebarBackground, 0x171a1c)
 									button.Color = th.Palette.Fg
@@ -109,13 +115,13 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 									if f.kind == reflect.Bool {
 										dims = material.CheckBox(th, &f.toggle, "").Layout(gtx)
 									} else if f.group == "Theme" {
-										dims = layout.Flex{Alignment: layout.Middle}.Layout(gtx, layout.Flexed(1, material.Editor(th, &f.editor, "").Layout), layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+										dims = layout.Flex{Alignment: layout.Middle}.Layout(gtx, layout.Flexed(1, chromeEditor(th, &f.editor, "")), layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 											size := image.Pt(gtx.Dp(28), gtx.Dp(28))
 											paint.FillShape(gtx.Ops, configColor(f.editor.Text(), 0x555555), clip.UniformRRect(image.Rectangle{Max: size}, gtx.Dp(4)).Op(gtx.Ops))
 											return layout.Dimensions{Size: size}
 										}))
 									} else {
-										dims = material.Editor(th, &f.editor, "").Layout(gtx)
+										dims = chromeEditor(th, &f.editor, "")(gtx)
 									}
 									if s.requestFocus && s.focus == fields[index] {
 										gtx.Execute(key.FocusCmd{Tag: &f.editor})
@@ -152,7 +158,12 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 						}{{&s.save, label, "save"}, {&s.cancel, "Cancel", "cancel"}, {&s.defaults, "Defaults", "defaults"}} {
 							control := control
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								dims := material.Button(th, control.button, control.label).Layout(gtx)
+								button := chromeButton(th, control.button, control.label)
+								if control.name == "save" {
+									button.Background = th.Palette.ContrastBg
+									button.Color = th.Palette.ContrastFg
+								}
+								dims := button.Layout(gtx)
 								y := origin.Y + height - footerHeight
 								track(control.name, image.Rect(x, y, x+dims.Size.X, y+dims.Size.Y))
 								x += dims.Size.X

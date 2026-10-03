@@ -21,6 +21,7 @@ import (
 )
 
 type TerminalTheme struct {
+	CursorForeground  color.NRGBA
 	InactiveCursor    color.NRGBA
 	InverseForeground color.NRGBA
 	InverseBackground color.NRGBA

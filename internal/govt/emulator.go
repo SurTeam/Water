@@ -45,13 +45,15 @@ type Row struct {
 }
 
 type Snapshot struct {
-	Cols       int
-	Rows       int
-	CursorX    int
-	CursorY    int
-	CursorHide bool
-	YBase      int
-	YDisp      int
+	Cols              int
+	Rows              int
+	CursorX           int
+	CursorY           int
+	CursorHide        bool
+	CursorStyle       string
+	CursorBlink       bool
+	YBase             int
+	YDisp             int
 	AltScreen         bool
 	ApplicationCursor bool
 	BracketedPaste    bool
@@ -93,15 +95,15 @@ type Emulator struct {
 	mu   sync.RWMutex
 	term *xterm.Terminal
 
-	responseMu sync.Mutex
-	responses  [][]byte
+	responseMu        sync.Mutex
+	responses         [][]byte
 	suppressResponses bool
 
 	titleMu sync.RWMutex
 	title   string
 
-	links    *osc8Tracker
-	graphics *graphicsState
+	links                *osc8Tracker
+	graphics             *graphicsState
 	pendingCellSizeQuery []byte
 }
 
@@ -116,7 +118,7 @@ func New(cols, rows, scrollback int) *Emulator {
 		scrollback = 2000
 	}
 	e := &Emulator{
-		links: newOSC8Tracker(),
+		links:    newOSC8Tracker(),
 		graphics: newGraphicsState(),
 		term: xterm.New(
 			xterm.WithCols(cols),
@@ -141,67 +143,85 @@ func New(cols, rows, scrollback int) *Emulator {
 func (e *Emulator) Close() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.graphics!=nil { e.graphics.close() }
+	if e.graphics != nil {
+		e.graphics.close()
+	}
 	e.term.Dispose()
 }
 
 func (e *Emulator) Write(p []byte) {
-	e.write(p,false)
+	e.write(p, false)
 }
 
 func (e *Emulator) WriteReplay(p []byte) {
-	e.write(p,true)
+	e.write(p, true)
 }
 
-func (e *Emulator) write(p []byte,replay bool) {
+func (e *Emulator) write(p []byte, replay bool) {
 	e.mu.Lock()
-	previous:=e.suppressResponses
-	e.suppressResponses=replay
+	previous := e.suppressResponses
+	e.suppressResponses = replay
 	if e.canFastWriteOrdinary(p) {
-		_,_=e.term.Write(p)
+		_, _ = e.term.Write(p)
 		e.pruneLinksLocked()
-		e.suppressResponses=previous
+		e.suppressResponses = previous
 		e.mu.Unlock()
 		return
 	}
 
-	p=e.filterCellSizeQueryLocked(p)
+	p = e.filterCellSizeQueryLocked(p)
 	e.applyGraphicsEraseLocked(p)
 	e.links.feed(p)
 
-	events:=e.graphics.parser.feed(p)
-	consumed:=0
-	for _,event:=range events {
-		end:=event.endOffset
-		if end<consumed {end=consumed}
-		if end>len(p) {end=len(p)}
-		if end>consumed {
-			_,_ = e.term.Write(p[consumed:end])
+	events := e.graphics.parser.feed(p)
+	consumed := 0
+	for _, event := range events {
+		end := event.endOffset
+		if end < consumed {
+			end = consumed
 		}
-		rows,response:=e.graphics.handle(e.term,event)
-		if len(response)>0 { e.enqueueResponse(response) }
-		if rows>0 {
-			advance:=make([]byte,0,2+rows)
-			advance=append(advance,'\r','\n')
-			for n:=1;n<rows;n++ { advance=append(advance,'\n') }
-			_,_ = e.term.Write(advance)
+		if end > len(p) {
+			end = len(p)
 		}
-		consumed=end
+		if end > consumed {
+			_, _ = e.term.Write(p[consumed:end])
+		}
+		rows, response := e.graphics.handle(e.term, event)
+		if len(response) > 0 {
+			e.enqueueResponse(response)
+		}
+		if rows > 0 {
+			advance := make([]byte, 0, 2+rows)
+			advance = append(advance, '\r', '\n')
+			for n := 1; n < rows; n++ {
+				advance = append(advance, '\n')
+			}
+			_, _ = e.term.Write(advance)
+		}
+		consumed = end
 	}
-	if consumed<len(p) {
-		_,_ = e.term.Write(p[consumed:])
+	if consumed < len(p) {
+		_, _ = e.term.Write(p[consumed:])
 	}
 	e.pruneLinksLocked()
-	e.suppressResponses=previous
+	e.suppressResponses = previous
 	e.mu.Unlock()
 }
 
-func (e *Emulator) canFastWriteOrdinary(p []byte)bool{
-	if len(p)==0 || len(e.pendingCellSizeQuery)!=0 {return false}
-	if e.graphics!=nil && len(e.graphics.parser.buffer)!=0{return false}
-	if e.links!=nil && e.links.parser.state!=osc8Normal{return false}
-	for _,b:=range p {
-		if b==0x1b || b>=0x80{return false}
+func (e *Emulator) canFastWriteOrdinary(p []byte) bool {
+	if len(p) == 0 || len(e.pendingCellSizeQuery) != 0 {
+		return false
+	}
+	if e.graphics != nil && len(e.graphics.parser.buffer) != 0 {
+		return false
+	}
+	if e.links != nil && e.links.parser.state != osc8Normal {
+		return false
+	}
+	for _, b := range p {
+		if b == 0x1b || b >= 0x80 {
+			return false
+		}
 	}
 	return true
 }
@@ -245,57 +265,79 @@ func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
 }
 
 func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
-	if e.graphics==nil || len(p)==0 || bytes.IndexByte(p,0x1b)<0 { return }
-	if bytes.Contains(p,[]byte("\x1b[3J")) {
+	if e.graphics == nil || len(p) == 0 || bytes.IndexByte(p, 0x1b) < 0 {
+		return
+	}
+	if bytes.Contains(p, []byte("\x1b[3J")) {
 		e.graphics.eraseScrollback(e.term)
 	}
-	if e.term.IsAltBufferActive() && bytes.Contains(p,[]byte("\x1b[2J")) {
+	if e.term.IsAltBufferActive() && bytes.Contains(p, []byte("\x1b[2J")) {
 		e.graphics.eraseVisible(e.term)
 	}
 }
 
-func itoaPositive(v int)string {
-	if v<=0{return "0"}
+func itoaPositive(v int) string {
+	if v <= 0 {
+		return "0"
+	}
 	var buf [20]byte
-	i:=len(buf)
-	for v>0 { i--;buf[i]=byte('0'+v%10);v/=10 }
+	i := len(buf)
+	for v > 0 {
+		i--
+		buf[i] = byte('0' + v%10)
+		v /= 10
+	}
 	return string(buf[i:])
 }
 
 func (e *Emulator) enqueueResponse(data []byte) {
-	if len(data)==0 || e.suppressResponses { return }
+	if len(data) == 0 || e.suppressResponses {
+		return
+	}
 	e.responseMu.Lock()
-	e.responses=append(e.responses,append([]byte(nil),data...))
+	e.responses = append(e.responses, append([]byte(nil), data...))
 	e.responseMu.Unlock()
 }
 
 func (e *Emulator) pruneLinksLocked() {
-	if e.links==nil || (len(e.links.uriByID)==0 && e.links.activeID==0){return}
-	buf:=e.term.Buffer()
-	live:=make(map[int]struct{})
+	if e.links == nil || (len(e.links.uriByID) == 0 && e.links.activeID == 0) {
+		return
+	}
+	buf := e.term.Buffer()
+	live := make(map[int]struct{})
 	var raw xterm.CellData
-	for row:=0;row<buf.Lines.Length();row++{
-		line:=buf.Lines.Get(row)
-		if line==nil{continue}
-		for col:=0;col<line.Len;col++{
-			line.LoadCell(col,&raw)
-			if raw.Extended==nil{continue}
-			if id:=raw.Extended.URLID();id!=0{live[id]=struct{}{}}
+	for row := 0; row < buf.Lines.Length(); row++ {
+		line := buf.Lines.Get(row)
+		if line == nil {
+			continue
+		}
+		for col := 0; col < line.Len; col++ {
+			line.LoadCell(col, &raw)
+			if raw.Extended == nil {
+				continue
+			}
+			if id := raw.Extended.URLID(); id != 0 {
+				live[id] = struct{}{}
+			}
 		}
 	}
 	e.links.prune(live)
 }
 
-func (e *Emulator) SetCellSize(width,height int) {
+func (e *Emulator) SetCellSize(width, height int) {
 	e.mu.Lock()
-	if e.graphics!=nil { e.graphics.setCellSize(width,height) }
+	if e.graphics != nil {
+		e.graphics.setCellSize(width, height)
+	}
 	e.mu.Unlock()
 }
 
 func (e *Emulator) ImageBytes() int {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	if e.graphics==nil { return 0 }
+	if e.graphics == nil {
+		return 0
+	}
 	return e.graphics.storedBytes
 }
 
@@ -317,45 +359,75 @@ func (e *Emulator) ScrollToBottom() {
 	e.mu.Unlock()
 }
 
-func (e *Emulator) SelectionText(startRow,startCol,endRow,endCol int) string {
+func (e *Emulator) SelectionText(startRow, startCol, endRow, endCol int) string {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if startRow>endRow || (startRow==endRow && startCol>endCol) {
-		startRow,endRow=endRow,startRow
-		startCol,endCol=endCol,startCol
+	if startRow > endRow || (startRow == endRow && startCol > endCol) {
+		startRow, endRow = endRow, startRow
+		startCol, endCol = endCol, startCol
 	}
-	buf:=e.term.Buffer()
-	if buf==nil || buf.Lines.Length()==0 { return "" }
-	cols:=e.term.Cols()
-	if cols<=0 { return "" }
-	if startRow<0 { startRow=0 }
-	if endRow>=buf.Lines.Length() { endRow=buf.Lines.Length()-1 }
-	if startRow>endRow { return "" }
+	buf := e.term.Buffer()
+	if buf == nil || buf.Lines.Length() == 0 {
+		return ""
+	}
+	cols := e.term.Cols()
+	if cols <= 0 {
+		return ""
+	}
+	if startRow < 0 {
+		startRow = 0
+	}
+	if endRow >= buf.Lines.Length() {
+		endRow = buf.Lines.Length() - 1
+	}
+	if startRow > endRow {
+		return ""
+	}
 
 	var out strings.Builder
 	var raw xterm.CellData
-	for row:=startRow;row<=endRow;row++ {
-		line:=buf.Lines.Get(row)
-		if line==nil { continue }
-		left,right:=0,cols-1
-		if row==startRow { left=startCol }
-		if row==endRow { right=endCol }
-		if left<0 { left=0 }
-		if right>=cols { right=cols-1 }
-		if left>right { continue }
+	for row := startRow; row <= endRow; row++ {
+		line := buf.Lines.Get(row)
+		if line == nil {
+			continue
+		}
+		left, right := 0, cols-1
+		if row == startRow {
+			left = startCol
+		}
+		if row == endRow {
+			right = endCol
+		}
+		if left < 0 {
+			left = 0
+		}
+		if right >= cols {
+			right = cols - 1
+		}
+		if left > right {
+			continue
+		}
 
 		var rowText strings.Builder
-		for col:=left;col<=right && col<line.Len;col++ {
-			line.LoadCell(col,&raw)
-			if raw.GetWidth()==0 { continue }
-			text:=raw.GetChars()
-			if text=="" { rowText.WriteByte(' ') } else { rowText.WriteString(text) }
+		for col := left; col <= right && col < line.Len; col++ {
+			line.LoadCell(col, &raw)
+			if raw.GetWidth() == 0 {
+				continue
+			}
+			text := raw.GetChars()
+			if text == "" {
+				rowText.WriteByte(' ')
+			} else {
+				rowText.WriteString(text)
+			}
 		}
-		out.WriteString(strings.TrimRight(rowText.String()," "))
-		if row!=endRow {
-			next:=buf.Lines.Get(row+1)
-			if next==nil || !next.IsWrapped { out.WriteByte('\n') }
+		out.WriteString(strings.TrimRight(rowText.String(), " "))
+		if row != endRow {
+			next := buf.Lines.Get(row + 1)
+			if next == nil || !next.IsWrapped {
+				out.WriteByte('\n')
+			}
 		}
 	}
 	return out.String()
@@ -386,28 +458,28 @@ func (e *Emulator) Mouse(ev MouseEvent) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	button:=xterm.MouseButtonLeft
+	button := xterm.MouseButtonLeft
 	switch ev.Button {
 	case MouseMiddle:
-		button=xterm.MouseButtonMiddle
+		button = xterm.MouseButtonMiddle
 	case MouseRight:
-		button=xterm.MouseButtonRight
+		button = xterm.MouseButtonRight
 	case MouseWheel:
-		button=xterm.MouseButtonWheel
+		button = xterm.MouseButtonWheel
 	case MouseNone:
-		button=xterm.MouseButtonNone
+		button = xterm.MouseButtonNone
 	}
-	action:=xterm.MouseActionDown
+	action := xterm.MouseActionDown
 	switch ev.Action {
 	case MouseUp:
-		action=xterm.MouseActionUp
+		action = xterm.MouseActionUp
 	case MouseMove:
-		action=xterm.MouseActionMove
+		action = xterm.MouseActionMove
 	}
 	return e.term.TriggerMouseEvent(xterm.CoreMouseEvent{
-		Col:ev.Col,Row:ev.Row,X:ev.X,Y:ev.Y,
-		Button:button,Action:action,
-		Ctrl:ev.Ctrl,Alt:ev.Alt,Shift:ev.Shift,
+		Col: ev.Col, Row: ev.Row, X: ev.X, Y: ev.Y,
+		Button: button, Action: action,
+		Ctrl: ev.Ctrl, Alt: ev.Alt, Shift: ev.Shift,
 	})
 }
 
@@ -437,6 +509,14 @@ func (e *Emulator) Snapshot() Snapshot {
 		RowsData:   make([]Row, term.Rows()),
 	}
 	modes := term.DecPrivateModes()
+	s.CursorStyle = "block"
+	s.CursorBlink = true
+	if modes.CursorStyle != nil {
+		s.CursorStyle = string(*modes.CursorStyle)
+	}
+	if modes.CursorBlinkOverride != nil {
+		s.CursorBlink = *modes.CursorBlinkOverride
+	}
 	s.ApplicationCursor = modes.ApplicationCursorKeys
 	s.BracketedPaste = modes.BracketedPasteMode
 	s.MouseTracking = modes.MouseTrackingMode
@@ -496,8 +576,8 @@ func (e *Emulator) Snapshot() Snapshot {
 		}
 		s.RowsData[row] = Row{Cells: cells, Hash: h.Sum64(), Wrapped: line.IsWrapped}
 	}
-	if e.graphics!=nil {
-		s.Images=e.graphics.snapshot(term,s.RowsData)
+	if e.graphics != nil {
+		s.Images = e.graphics.snapshot(term, s.RowsData)
 	}
 	return s
 }

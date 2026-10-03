@@ -2,6 +2,7 @@ package goui
 
 import (
 	"image"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -76,11 +77,13 @@ func automationInputEvent(spec string) (event.Event, bool) {
 	}
 	name := parts[len(parts)-1]
 	names := map[string]key.Name{
+		"space": key.Name(" "),
 		"minus": key.Name("-"),
 		"enter": key.NameReturn, "return": key.NameReturn,
 		"tab": key.NameTab, "escape": key.NameEscape, "esc": key.NameEscape,
 		"backspace": key.NameDeleteBackward, "delete": key.NameDeleteForward,
-		"up": key.NameUpArrow, "down": key.NameDownArrow,
+		"insert": key.Name("Insert"),
+		"up":     key.NameUpArrow, "down": key.NameDownArrow,
 		"left": key.NameLeftArrow, "right": key.NameRightArrow,
 		"home": key.NameHome, "end": key.NameEnd,
 		"pageup": key.NamePageUp, "pagedown": key.NamePageDown,
@@ -89,6 +92,11 @@ func automationInputEvent(spec string) (event.Event, bool) {
 		"f9": key.NameF9, "f10": key.NameF10, "f11": key.NameF11, "f12": key.NameF12,
 	}
 	keyName, ok := names[name]
+	if !ok && strings.HasPrefix(name, "f") {
+		if n, err := strconv.Atoi(name[1:]); err == nil && n >= 13 && n <= 24 {
+			keyName, ok = key.Name(strings.ToUpper(name)), true
+		}
+	}
 	if !ok {
 		if utf8.RuneCountInString(name) != 1 {
 			return nil, false

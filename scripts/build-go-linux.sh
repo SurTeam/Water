@@ -11,7 +11,7 @@ root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "error: the Gio Linux package must be built natively on Linux" >&2
+  echo "error: the Ebitengine Linux package must be built natively on Linux" >&2
   exit 1
 fi
 
