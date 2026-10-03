@@ -136,24 +136,6 @@ jobs:
             -benchmem \
             2>&1 | tee target/go-terminal-4pane-server.log
 
-      - name: Profile Go direct CPU and allocation hot spots
-        run: |
-          set -o pipefail
-          go test ./internal/gobench \
-            -run '^$' \
-            -bench 'BenchmarkTerminalDirect64MB$' \
-            -benchtime=1x \
-            -count=1 \
-            -cpuprofile=target/go-terminal-direct.cpu \
-            -memprofile=target/go-terminal-direct.mem \
-            2>&1 | tee target/go-terminal-direct-profile.log
-          go tool pprof -top -cum -nodecount=40 \
-            target/go-terminal-direct.cpu \
-            2>&1 | tee target/go-terminal-direct-cpu.txt
-          go tool pprof -top -alloc_space -nodecount=30 \
-            target/go-terminal-direct.mem \
-            2>&1 | tee target/go-terminal-direct-alloc.txt
-
       - name: Go interaction under output flood
         env:
           RUNS: ${{ inputs.runs || '3' }}
@@ -251,14 +233,51 @@ jobs:
             target/go-terminal-4pane-direct.log
             target/go-terminal-4pane-server.log
             target/go-terminal-interaction.log
-            target/go-terminal-direct-profile.log
-            target/go-terminal-direct-cpu.txt
-            target/go-terminal-direct.cpu
-            target/go-terminal-direct-alloc.txt
-            target/go-terminal-direct.mem
             target/rust-terminal-64mb.log
             target/rust-terminal-ansi-64mb.log
             target/rust-terminal-unicode-64mb.log
             target/rust-terminal-4pane.log
             target/rust-terminal-interaction.log
+          if-no-files-found: error
+
+  profile-go:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+          cache-dependency-path: go.mod
+      - run: go mod tidy
+      - name: Profile Go direct CPU and allocation hot spots
+        run: |
+          mkdir -p target
+          set -o pipefail
+          go test ./internal/gobench \
+            -run '^$' \
+            -bench 'BenchmarkTerminalDirect64MB$' \
+            -benchtime=1x \
+            -count=1 \
+            -cpuprofile=target/go-terminal-direct.cpu \
+            -memprofile=target/go-terminal-direct.mem \
+            2>&1 | tee target/go-terminal-direct-profile.log
+          go tool pprof -top -cum -nodecount=40 \
+            target/go-terminal-direct.cpu \
+            2>&1 | tee target/go-terminal-direct-cpu.txt
+          go tool pprof -top -alloc_space -nodecount=30 \
+            target/go-terminal-direct.mem \
+            2>&1 | tee target/go-terminal-direct-alloc.txt
+      - name: Upload Go profile artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-terminal-profile-${{ github.run_id }}
+          path: |
+            target/go-terminal-direct-profile.log
+            target/go-terminal-direct-cpu.txt
+            target/go-terminal-direct.cpu
+            target/go-terminal-direct-alloc.txt
+            target/go-terminal-direct.mem
           if-no-files-found: error
