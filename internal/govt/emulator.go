@@ -157,6 +157,14 @@ func (e *Emulator) write(p []byte,replay bool) {
 	e.mu.Lock()
 	previous:=e.suppressResponses
 	e.suppressResponses=replay
+	if e.canFastWriteOrdinary(p) {
+		_,_=e.term.Write(p)
+		e.pruneLinksLocked()
+		e.suppressResponses=previous
+		e.mu.Unlock()
+		return
+	}
+
 	p=e.filterCellSizeQueryLocked(p)
 	e.applyGraphicsEraseLocked(p)
 	e.links.feed(p)
@@ -186,6 +194,16 @@ func (e *Emulator) write(p []byte,replay bool) {
 	e.pruneLinksLocked()
 	e.suppressResponses=previous
 	e.mu.Unlock()
+}
+
+func (e *Emulator) canFastWriteOrdinary(p []byte)bool{
+	if len(p)==0 || len(e.pendingCellSizeQuery)!=0 {return false}
+	if e.graphics!=nil && len(e.graphics.parser.buffer)!=0{return false}
+	if e.links!=nil && e.links.parser.state!=osc8Normal{return false}
+	for _,b:=range p {
+		if b==0x1b || b>=0x80{return false}
+	}
+	return true
 }
 
 func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
