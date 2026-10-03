@@ -282,6 +282,19 @@ func (w *EbitengineWindow) Update() error {
 }
 
 func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
+	// Ebitengine does not swap buffers for hidden or fully occluded windows.
+	// Continuing to draw accumulates graphics commands until restore, including automatic
+	// screen clears. Leave the retained frame untouched while Update and the
+	// terminal workers keep running. Explicit screenshots still render once.
+	invisible := false
+	if w.platform != nil {
+		state := w.platform.Snapshot()
+		invisible = state["hidden"] == true || state["occluded"] == true
+	}
+	if (invisible || ebiten.IsWindowMinimized()) && len(w.shots) == 0 {
+		return
+	}
+	screen.Clear()
 	if c := w.active(); c != nil {
 		w.layout(c, screen)
 		visible := map[uuid.UUID]bool{}
@@ -386,9 +399,11 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["window_size"] = []int{ww, wh}
 		state["window_maximized"] = ebiten.IsWindowMaximized()
 		state["window_minimized"] = ebiten.IsWindowMinimized()
+		state["window_focused"] = ebiten.IsFocused()
 		state["custom_titlebar"] = true
 		state["native_menu"] = w.platform.Snapshot()
 		state["application_hidden"] = w.platform.Snapshot()["hidden"]
+		state["window_occluded"] = w.platform.Snapshot()["occluded"]
 		state["quit_error"] = w.quitError
 		state["quitting_server"] = w.quitResult != nil
 		state["titlebar_height"] = w.titleHeight(c)

@@ -197,6 +197,9 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowClosingHandled(true)
 	ebiten.SetRunnableOnUnfocused(true)
+	// Hidden windows keep Update running to service control and terminal input.
+	// Draw owns clearing so an invisible frame submits no graphics commands.
+	ebiten.SetScreenClearedEveryFrame(false)
 	return ebiten.RunGameWithOptions(w, &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant})
 }
 

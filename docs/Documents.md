@@ -21,7 +21,34 @@ bash scripts/run-go-ui-smoke.sh
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-settings-smoke.py
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-lifecycle-smoke.py
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-parity-smoke.py
+
+# Continuous output with real application switching and increasing background intervals.
+~/.venv/bin/python scripts/go-ui-background-smoke.py
 ```
+
+The macOS background smoke runs a continuous ANSI output command in an isolated
+dev GUI and switches to Google Chrome for 2, 5, 10, 20 and 40 seconds. It confirms
+that Water loses focus and macOS reports complete occlusion, then returns through
+the real Show Water action and Launch Services. A private, unsigned test bundle
+lets Launch Services identify the owned GUI; it is never installed. The test
+checks output sequence progress, actual screenshot rendering, keyboard response
+and a shell input/output round-trip. Requests exceeding 500 ms trigger thread
+sampling. GUI/server PIDs, binary identity, latency records and screenshots go
+under `/tmp/water-background.*`; only owned Water processes are closed.
+
+Use `--external-app` to select a different installed application that covers the
+test window, `--background-steps 2,5,10,20,40` to set increasing intervals, and
+`--config-template PATH` to copy terminal and appearance settings into the
+isolated configuration. Workloads include `plain`, `ansi`, `unicode`,
+`hyperlinks` and `idle`; `--rate-mib` controls the output rate. Use
+`--background-steps 80,180` for longer background periods; the output command's
+lifetime grows with the requested intervals. `--background-mode hide` and
+`minimize` separately exercise those native actions. This extended
+reproduction intentionally exceeds the usual one-minute test limit. A slow
+control reply or screenshot does not by itself prove a GUI hang: CLI/transport
+and PNG encoding contribute to these timings, and a thread sample identifies
+where the delay occurs. The test does not run `brew upgrade` or change installed
+packages.
 
 The settings smoke verifies navigation, editing, Ctrl/Alt combinations and function-key bytes in a real raw PTY, Ctrl+C process interruption, titlebar-integrated tabs, undecorated native-window state, titlebar drag and double-click, maximize/restore, border resize, minimize and close, together with settings and pane operations. Regression tests classify every physical key, check keypad and modified-key encoding, and verify font metadata/style selection and collection face indices. The UI uses one compact 36-dp toolbar with tabs and window controls, without a bottom status bar; macOS uses the system interface font by default. Font lookup reads internal family/subfamily names instead of guessing from filenames. `ui snapshot` reports `terminal_font` and `terminal_font_styles` with the actual file, style, collection index and fallback/loading status. `ui screenshot` captures Ebitengine's rendered frame, including the custom titlebar. Native clipboard and IME candidate-window acceptance still use the manual checks in `scripts/run-go-ime-manual.sh`; control-injected text does not substitute for OS input-method validation.
 
@@ -36,6 +63,24 @@ The Go settings panel covers every field exposed by the Rust settings schema, in
 Rounded windows use Ebitengine screen transparency, a cached alpha mask and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
 
 ## Run the Rust GUI
+
+For intermittent macOS beachballs when returning to a background window, monitor
+the existing GUI through its control API and capture its stacks while a request
+is slow:
+
+```sh
+~/.venv/bin/python scripts/diagnose-gui-stalls.py \
+  --water /Applications/Water.app/Contents/MacOS/water --duration 60
+```
+
+Use the running dev bundle's `water-dev` executable for dev, and `--socket` for
+an explicit control socket. The monitor requires exactly one GUI at the supplied
+executable path. It sends only `ui state`, never terminal input or window actions,
+and samples that GUI if a probe exceeds 500 ms. The private temporary report
+directory contains latency records, build/server identity and any macOS thread
+samples; terminal content is not requested. CLI startup and control transport
+contribute to the measured latency, so a slow probe alone does not prove a GUI
+hang. A run without a slow probe does not rule out intermittent stalls.
 
 ```sh
 # Default dev GUI; normal cargo build uses the dev identity.

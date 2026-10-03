@@ -219,6 +219,10 @@ func (p *macNativePlatform) publish() {
 	}
 	snapshot := map[string]any{"ready": p.installed, "hidden": macSend(macApplication(), "isHidden") != 0, "items": items}
 	if p.layer != 0 {
+		snapshot["window_number"] = uintptr(macSend(p.window, "windowNumber"))
+		// NSWindowOcclusionStateVisible is bit 1: an absent bit means the
+		// entire window is covered, hidden, minimized, or on another Space.
+		snapshot["occluded"] = macSend(p.window, "occlusionState")&(1<<1) == 0
 		snapshot["window_corner_radius"] = objc.Send[float64](p.layer, objc.RegisterName("cornerRadius"))
 		snapshot["window_masks_to_bounds"] = macSend(p.layer, "masksToBounds") != 0
 		snapshot["window_opaque"] = macSend(p.window, "isOpaque") != 0
@@ -238,6 +242,9 @@ func (p *macNativePlatform) Show() {
 	p.onMain(func() {
 		macSend(macApplication(), "unhide:", objc.ID(0))
 		macSend(macApplication(), "activateIgnoringOtherApps:", true)
+		if p.window != 0 {
+			macSend(p.window, "makeKeyAndOrderFront:", objc.ID(0))
+		}
 		p.publish()
 	})
 }
