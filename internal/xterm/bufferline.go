@@ -191,13 +191,13 @@ func (bl *BufferLine) SetCell(index int, cell *CellData) {
 	if cell.Content&ContentIsCombinedMask != 0 {
 		bl.ensureCombined()
 		bl.combined[index] = cell.CombinedData
-	} else {
+	} else if bl.combined!=nil {
 		delete(bl.combined, index)
 	}
 	if cell.Bg&BgFlagHasExtended != 0 {
 		bl.ensureExtendedAttrs()
 		bl.extendedAttrs[index] = cell.Extended
-	} else {
+	} else if bl.extendedAttrs!=nil {
 		delete(bl.extendedAttrs, index)
 	}
 	si := index * cellSize
@@ -208,11 +208,11 @@ func (bl *BufferLine) SetCell(index int, cell *CellData) {
 
 // SetCellFromCodepoint sets a cell from a codepoint, width, and attribute data.
 func (bl *BufferLine) SetCellFromCodepoint(index int, codePoint uint32, width int, attrs *AttributeData) {
-	delete(bl.combined, index)
+	if bl.combined!=nil { delete(bl.combined, index) }
 	if attrs.Bg&BgFlagHasExtended != 0 {
 		bl.ensureExtendedAttrs()
 		bl.extendedAttrs[index] = attrs.Extended
-	} else {
+	} else if bl.extendedAttrs!=nil {
 		delete(bl.extendedAttrs, index)
 	}
 	si := index * cellSize
