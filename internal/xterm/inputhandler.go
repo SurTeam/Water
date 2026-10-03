@@ -353,29 +353,31 @@ func (h *InputHandler) Parse(data []byte) {
 	cursorStartX := h.activeBuffer().X
 	cursorStartY := h.activeBuffer().Y
 
-	// Resize parse buffer if needed.
-	if len(h.parseBuffer) < len(data) {
-		newSize := len(data)
-		if newSize > maxParseBufferLength {
-			newSize = maxParseBufferLength
-		}
-		h.parseBuffer = make([]uint32, newSize)
-	}
-
 	h.dirtyRowTracker.ClearRange()
 
-	if len(data) > maxParseBufferLength {
-		for i := 0; i < len(data); i += maxParseBufferLength {
-			end := i + maxParseBufferLength
-			if end > len(data) {
-				end = len(data)
+	if !h.tryParsePlainASCII(data) {
+		// Resize parse buffer only when the full VT/UTF-8 path is needed.
+		if len(h.parseBuffer) < len(data) {
+			newSize := len(data)
+			if newSize > maxParseBufferLength {
+				newSize = maxParseBufferLength
 			}
-			n := h.utf8Decoder.Decode(data[i:end], h.parseBuffer)
+			h.parseBuffer = make([]uint32, newSize)
+		}
+
+		if len(data) > maxParseBufferLength {
+			for i := 0; i < len(data); i += maxParseBufferLength {
+				end := i + maxParseBufferLength
+				if end > len(data) {
+					end = len(data)
+				}
+				n := h.utf8Decoder.Decode(data[i:end], h.parseBuffer)
+				h.parser.Parse(h.parseBuffer, n)
+			}
+		} else {
+			n := h.utf8Decoder.Decode(data, h.parseBuffer)
 			h.parser.Parse(h.parseBuffer, n)
 		}
-	} else {
-		n := h.utf8Decoder.Decode(data, h.parseBuffer)
-		h.parser.Parse(h.parseBuffer, n)
 	}
 
 	if h.activeBuffer().X != cursorStartX || h.activeBuffer().Y != cursorStartY {
@@ -390,6 +392,90 @@ func (h *InputHandler) Parse(data []byte) {
 			End:   min(viewportEnd, h.bufferService.Rows-1),
 		})
 	}
+}
+
+func (h *InputHandler) tryParsePlainASCII(data []byte)bool{
+	if h.parser.CurrentState()!=ParserStateGround ||
+		h.charsetService.Charset!=nil ||
+		h.coreService.Modes.InsertMode ||
+		!h.coreService.DecPrivateModes.Wraparound ||
+		h.optionsService.Options.ScreenReaderMode ||
+		h.curAttrData.Extended!=nil {
+		return false
+	}
+	for _,b:=range data {
+		if b=='\r' || b=='\n' || (b>=0x20 && b<=0x7e) {
+			continue
+		}
+		return false
+	}
+
+	start:=0
+	for i,b:=range data {
+		if b!='\r' && b!='\n' {continue}
+		if i>start {h.printASCIIBytes(data[start:i])}
+		if b=='\r' {
+			h.CarriageReturn()
+		} else {
+			h.LineFeed()
+		}
+		h.parser.precedingJoinState=0
+		start=i+1
+	}
+	if start<len(data){h.printASCIIBytes(data[start:])}
+	return true
+}
+
+func (h *InputHandler) printASCIIBytes(data []byte){
+	if len(data)==0{return}
+	buf:=h.activeBuffer()
+	cols:=h.bufferService.Cols
+	curAttr:=&h.curAttrData
+	bufferRow:=buf.Lines.Get(buf.YBase+buf.Y)
+	if bufferRow==nil{return}
+
+	h.dirtyRowTracker.MarkDirty(buf.Y)
+	if buf.X>0 && bufferRow.GetWidth(buf.X-1)==2 {
+		bufferRow.SetCellFromCodepoint(buf.X-1,0,1,curAttr)
+	}
+
+	wrote:=false
+	for len(data)>0 {
+		if buf.X>=cols {
+			buf.X=0
+			buf.Y++
+			if buf.Y==buf.ScrollBottom+1 {
+				buf.Y--
+				h.bufferService.Scroll(h.eraseAttrData(),true)
+			} else {
+				if buf.Y>=h.bufferService.Rows {
+					buf.Y=h.bufferService.Rows-1
+				}
+				line:=buf.Lines.Get(buf.YBase+buf.Y)
+				if line!=nil{line.IsWrapped=true}
+			}
+			bufferRow=buf.Lines.Get(buf.YBase+buf.Y)
+			if bufferRow==nil{break}
+		}
+
+		room:=cols-buf.X
+		if room<=0{continue}
+		count:=len(data)
+		if count>room{count=room}
+		bufferRow.setASCIIBytes(buf.X,data[:count],curAttr)
+		buf.X+=count
+		data=data[count:]
+		wrote=true
+	}
+
+	if wrote {
+		h.parser.precedingJoinState=CreatePropertyValue(0,1,false)
+	}
+	if bufferRow!=nil && buf.X<cols &&
+		bufferRow.GetWidth(buf.X)==0 && bufferRow.HasContent(buf.X)==0 {
+		bufferRow.SetCellFromCodepoint(buf.X,0,1,curAttr)
+	}
+	h.dirtyRowTracker.MarkDirty(buf.Y)
 }
 
 // ParseString is a convenience method that accepts a string.
