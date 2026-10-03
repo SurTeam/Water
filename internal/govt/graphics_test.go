@@ -159,3 +159,64 @@ func TestAltScreenEraseRemovesImagePlacement(t *testing.T) {
 		t.Fatalf("image count after alt-screen erase=%d",got)
 	}
 }
+
+
+func TestGraphicsParserDropsPlainTextCarry(t *testing.T) {
+	var parser graphicsParser
+	if events:=parser.feed(bytes.Repeat([]byte("plain-water-output\n"),4096));len(events)!=0{
+		t.Fatalf("plain text produced graphics events: %#v",events)
+	}
+	if len(parser.buffer)!=0{
+		t.Fatalf("plain text retained %d graphics carry bytes",len(parser.buffer))
+	}
+}
+
+func TestGraphicsParserPreservesSplitIntroducersOnly(t *testing.T) {
+	var parser graphicsParser
+	if events:=parser.feed([]byte("plain\x1b"));len(events)!=0{
+		t.Fatalf("split ESC produced early events: %#v",events)
+	}
+	if got:=string(parser.buffer);got!="\x1b"{
+		t.Fatalf("ESC carry = %q",got)
+	}
+	if events:=parser.feed([]byte("_"));len(events)!=0{
+		t.Fatalf("split Kitty prefix produced early events: %#v",events)
+	}
+	if got:=string(parser.buffer);got!="\x1b_"{
+		t.Fatalf("Kitty prefix carry = %q",got)
+	}
+	events:=parser.feed([]byte("Ga=T;abc\x1b\\"))
+	if len(events)!=1 || events[0].kind!=graphicsKitty || string(events[0].payload)!="a=T;abc"{
+		t.Fatalf("split Kitty event = %#v",events)
+	}
+}
+
+func TestGraphicsParserDoesNotTreatSplitUTF8ContinuationAsC1(t *testing.T) {
+	var parser graphicsParser
+	// U+009F encodes as C2 9F. Split exactly between those bytes, then put a
+	// literal G after it; without UTF-8 carry this can be mistaken for raw
+	// C1 APC (9F) + Kitty selector G.
+	if events:=parser.feed([]byte{0xc2});len(events)!=0{
+		t.Fatalf("UTF-8 lead produced graphics event: %#v",events)
+	}
+	if len(parser.buffer)!=1 || parser.buffer[0]!=0xc2{
+		t.Fatalf("UTF-8 lead carry = %x",parser.buffer)
+	}
+	if events:=parser.feed([]byte{0x9f,'G','x'});len(events)!=0{
+		t.Fatalf("UTF-8 continuation misdetected as C1 Kitty: %#v",events)
+	}
+	if len(parser.buffer)!=0{
+		t.Fatalf("completed UTF-8 text retained carry: %x",parser.buffer)
+	}
+}
+
+func TestGraphicsParserSupportsSplitRawC1Kitty(t *testing.T) {
+	var parser graphicsParser
+	if events:=parser.feed([]byte{0x9f});len(events)!=0{
+		t.Fatalf("raw C1 APC produced early event: %#v",events)
+	}
+	events:=parser.feed(append([]byte("Ga=T;abc"),0x9c))
+	if len(events)!=1 || events[0].kind!=graphicsKitty || string(events[0].payload)!="a=T;abc"{
+		t.Fatalf("raw C1 Kitty event = %#v",events)
+	}
+}
