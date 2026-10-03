@@ -1,6 +1,7 @@
 package govt
 
 import (
+	"bytes"
 	"hash/fnv"
 	"strings"
 	"sync"
@@ -189,7 +190,7 @@ func (e *Emulator) write(p []byte,replay bool) {
 
 func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
 	const query="\x1b[16t"
-	if len(e.pendingCellSizeQuery)==0 && !bytesContains(p,[]byte{0x1b}) {
+	if len(e.pendingCellSizeQuery)==0 && bytes.IndexByte(p,0x1b)<0 {
 		return p
 	}
 	input:=make([]byte,0,len(e.pendingCellSizeQuery)+len(p))
@@ -220,26 +221,13 @@ func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
 }
 
 func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
-	if e.graphics==nil || len(p)==0 { return }
-	if bytesContains(p,[]byte("\x1b[3J")) {
+	if e.graphics==nil || len(p)==0 || bytes.IndexByte(p,0x1b)<0 { return }
+	if bytes.Contains(p,[]byte("\x1b[3J")) {
 		e.graphics.eraseScrollback(e.term)
 	}
-	if e.term.IsAltBufferActive() && bytesContains(p,[]byte("\x1b[2J")) {
+	if e.term.IsAltBufferActive() && bytes.Contains(p,[]byte("\x1b[2J")) {
 		e.graphics.eraseVisible(e.term)
 	}
-}
-
-func bytesContains(haystack,needle []byte)bool {
-	if len(needle)==0{return true}
-	if len(haystack)<len(needle){return false}
-	for i:=0;i+len(needle)<=len(haystack);i++ {
-		match:=true
-		for j:=range needle {
-			if haystack[i+j]!=needle[j]{match=false;break}
-		}
-		if match{return true}
-	}
-	return false
 }
 
 func itoaPositive(v int)string {
