@@ -6,11 +6,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"gioui.org/f32"
 	"gioui.org/io/event"
 	"gioui.org/io/input"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/widget/material"
 
 	"github.com/SurTeam/Water/internal/govt"
 )
@@ -49,6 +52,10 @@ func automationInputEvent(spec string) (event.Event, bool) {
 	}
 	spec = strings.ReplaceAll(strings.ToLower(spec), "page-up", "pageup")
 	spec = strings.ReplaceAll(spec, "page-down", "pagedown")
+	// A trailing hyphen is the key itself (Rust's default split-down: cmd--).
+	if strings.HasSuffix(spec, "--") {
+		spec = strings.TrimSuffix(spec, "-") + "minus"
+	}
 	parts := strings.Split(spec, "-")
 	var mods key.Modifiers
 	for _, part := range parts[:len(parts)-1] {
@@ -69,6 +76,7 @@ func automationInputEvent(spec string) (event.Event, bool) {
 	}
 	name := parts[len(parts)-1]
 	names := map[string]key.Name{
+		"minus": key.Name("-"),
 		"enter": key.NameReturn, "return": key.NameReturn,
 		"tab": key.NameTab, "escape": key.NameEscape, "esc": key.NameEscape,
 		"backspace": key.NameDeleteBackward, "delete": key.NameDeleteForward,
@@ -88,4 +96,79 @@ func automationInputEvent(spec string) (event.Event, bool) {
 		keyName = key.Name(strings.ToUpper(name))
 	}
 	return key.Event{Name: keyName, Modifiers: mods, State: key.Press}, true
+}
+
+func shortcutMatches(ev key.Event, spec string) bool {
+	parsed, ok := automationInputEvent(spec)
+	if !ok {
+		return false
+	}
+	want, ok := parsed.(key.Event)
+	return ok && ev.Name == want.Name && ev.Modifiers == want.Modifiers
+}
+
+func (c *WorkspaceClient) automationDrag(x, y, toX, toY float32) bool {
+	c.layoutMu.Lock()
+	defer c.layoutMu.Unlock()
+	var router input.Router
+	th := material.NewTheme()
+	now := time.Now()
+	frame := func() {
+		var ops op.Ops
+		gtx := layout.Context{Ops: &ops, Source: router.Source(), Metric: c.frameMetric, Constraints: layout.Exact(c.frameSize), Now: now}
+		c.hitRegions = c.hitRegions[:0]
+		c.layoutUnlocked(gtx, th)
+		router.Frame(&ops)
+	}
+	frame()
+	allowed := false
+	for _, hit := range c.hitRegions {
+		if hit.Kind == hitDivider && image.Pt(int(x), int(y)).In(hit.Rect) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed || c.settings.visible {
+		return false
+	}
+	for _, ev := range []pointer.Event{
+		{Kind: pointer.Press, Position: f32.Pt(x, y), Buttons: pointer.ButtonPrimary},
+		// Gio derives Drag from a raw Move while the primary button is held.
+		{Kind: pointer.Move, Position: f32.Pt(toX, toY), Buttons: pointer.ButtonPrimary},
+		{Kind: pointer.Release, Position: f32.Pt(toX, toY)},
+	} {
+		ev.Source = pointer.Mouse
+		ev.PointerID = 1
+		router.Queue(ev)
+		frame()
+	}
+	if c.invalidate != nil {
+		c.invalidate()
+	}
+	return true
+}
+
+func (c *WorkspaceClient) automationSettingsWheel(x, y, dx, dy float32) bool {
+	c.layoutMu.Lock()
+	defer c.layoutMu.Unlock()
+	if !c.settings.visible {
+		return false
+	}
+	var router input.Router
+	th := material.NewTheme()
+	frame := func() {
+		var ops op.Ops
+		gtx := layout.Context{Ops: &ops, Source: router.Source(), Metric: c.frameMetric, Constraints: layout.Exact(c.frameSize), Now: time.Now()}
+		c.hitRegions = c.hitRegions[:0]
+		c.layoutUnlocked(gtx, th)
+		router.Frame(&ops)
+	}
+	frame()
+	router.Queue(pointer.Event{Kind: pointer.Scroll, Source: pointer.Mouse, PointerID: 1, Position: f32.Pt(x, y), Scroll: f32.Pt(dx, dy)})
+	frame()
+	frame()
+	if c.invalidate != nil {
+		c.invalidate()
+	}
+	return true
 }

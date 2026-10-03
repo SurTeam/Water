@@ -184,6 +184,13 @@ that rendering is the limiting stage before investing in a renderer migration.
 
 ## Reproduction and local artifacts
 
+After settings, split layout, configurable shortcuts and theme integration,
+the same native GUI probe reports **0.648 / 0.630 / 0.675 s** `real` (median
+**0.648 s**). The probe again checks client consumption through the final
+server output sequence. This is a separate idle-machine run after functional
+regression tests, using the original script unchanged. GUI artifacts are in
+`/tmp/water-cat-perf.q8mxj_m1`.
+
 ```sh
 WATER_GO_BENCH_COMMAND='cat /Users/clearain/tmp/computer_use/benchmark.data' \
   go test ./internal/gobench -run '^$' \

@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goprotocol"
@@ -120,11 +121,26 @@ func (c *Client) Dispatch(command any, out any) error {
 
 const terminalEventQueueCapacity = 64
 
+const sessionSendQueueCapacity = 64
+const sessionSendQueueBytes = goprotocol.MaxFrameBytes
+
+var ErrSessionBackpressure = errors.New("session send queue is full")
+
+type pendingSessionFrame struct {
+	message goprotocol.WireMessage
+	cost    int
+	written chan error
+}
+
 type Session struct {
-	conn   net.Conn
-	mu     sync.Mutex
-	nextID atomic.Uint64
-	Build  string
+	conn          net.Conn
+	writeMu       sync.Mutex
+	outbound      chan pendingSessionFrame
+	queuedBytes   int
+	errMu         sync.Mutex
+	terminalError error
+	nextID        atomic.Uint64
+	Build         string
 
 	Events chan TerminalPush
 	Pushes chan goprotocol.WireMessage
@@ -146,13 +162,15 @@ func (c *Client) OpenSession() (*Session, error) {
 		return nil, err
 	}
 	s := &Session{
-		conn:    conn,
-		Build:   c.Build,
-		Events:  make(chan TerminalPush, terminalEventQueueCapacity),
-		Pushes:  make(chan goprotocol.WireMessage, 64),
-		replies: make(map[uint64]chan goprotocol.WireMessage),
-		done:    make(chan struct{}),
+		conn:     conn,
+		Build:    c.Build,
+		Events:   make(chan TerminalPush, terminalEventQueueCapacity),
+		Pushes:   make(chan goprotocol.WireMessage, 64),
+		replies:  make(map[uint64]chan goprotocol.WireMessage),
+		done:     make(chan struct{}),
+		outbound: make(chan pendingSessionFrame, sessionSendQueueCapacity),
 	}
+	go s.writeLoop()
 	go s.readLoop()
 
 	var result map[string]any
@@ -190,9 +208,7 @@ func (s *Session) Call(method string, params any, out any) error {
 		s.replyMu.Unlock()
 	}()
 
-	s.mu.Lock()
-	err = goprotocol.WriteJSON(s.conn, req)
-	s.mu.Unlock()
+	err = s.enqueue(req, true)
 	if err != nil {
 		return err
 	}
@@ -220,12 +236,13 @@ func (s *Session) Call(method string, params any, out any) error {
 func (s *Session) readLoop() {
 	defer close(s.Events)
 	defer close(s.Pushes)
-	defer close(s.done)
+	defer s.Close()
 	defer s.failReplies()
 
 	for {
 		frame, err := goprotocol.ReadFrame(s.conn)
 		if err != nil {
+			_ = s.closeWithError(err)
 			return
 		}
 		if frame.Terminal != nil {
@@ -282,10 +299,7 @@ func (s *Session) DispatchAsync(command any) error {
 		Method:          "command.dispatch",
 		Params:          params,
 	}
-	s.mu.Lock()
-	err = goprotocol.WriteJSON(s.conn, req)
-	s.mu.Unlock()
-	return err
+	return s.enqueue(req, false)
 }
 
 func (s *Session) Dispatch(command any, out any) error {
@@ -329,10 +343,7 @@ func (s *Session) ReplySuccess(requestID uint64, result any) error {
 		OK:              &ok,
 		Result:          raw,
 	}
-	s.mu.Lock()
-	err = goprotocol.WriteJSON(s.conn, reply)
-	s.mu.Unlock()
-	return err
+	return s.enqueue(reply, true)
 }
 
 func (s *Session) ReplyFailure(requestID uint64, code, message string) error {
@@ -344,10 +355,7 @@ func (s *Session) ReplyFailure(requestID uint64, code, message string) error {
 		OK:              &ok,
 		Error:           &goprotocol.RPCError{Code: code, Message: message},
 	}
-	s.mu.Lock()
-	err := goprotocol.WriteJSON(s.conn, reply)
-	s.mu.Unlock()
-	return err
+	return s.enqueue(reply, true)
 }
 
 func (s *Session) Attach(id uuid.UUID, out any) error {
@@ -359,9 +367,104 @@ func (s *Session) Detach(id uuid.UUID) error {
 }
 
 func (s *Session) Close() error {
+	return s.closeWithError(errors.New("session closed"))
+}
+
+func (s *Session) closeWithError(cause error) error {
 	var err error
 	s.once.Do(func() {
+		s.writeMu.Lock()
+		s.errMu.Lock()
+		s.terminalError = cause
+		s.errMu.Unlock()
+		close(s.done)
+		s.writeMu.Unlock()
 		err = s.conn.Close()
 	})
 	return err
+}
+
+func (s *Session) Err() error { s.errMu.Lock(); defer s.errMu.Unlock(); return s.terminalError }
+
+// Enqueue never performs socket I/O. One writer preserves accepted frame order.
+// Saturation ends the session explicitly instead of dropping input silently.
+func (s *Session) enqueue(message goprotocol.WireMessage, wait bool) error {
+	cost := len(message.Params) + len(message.Result) + len(message.Method) + len(message.BuildVariant) + 256
+	if message.Error != nil {
+		cost += len(message.Error.Code) + len(message.Error.Message)
+	}
+	frame := pendingSessionFrame{message: message, cost: cost}
+	if wait {
+		frame.written = make(chan error, 1)
+	}
+	s.writeMu.Lock()
+	select {
+	case <-s.done:
+		s.writeMu.Unlock()
+		return errors.New("session closed")
+	default:
+	}
+	if frame.cost > sessionSendQueueBytes-s.queuedBytes {
+		s.writeMu.Unlock()
+		_ = s.closeWithError(ErrSessionBackpressure)
+		return ErrSessionBackpressure
+	}
+	select {
+	case s.outbound <- frame:
+		s.queuedBytes += frame.cost
+		s.writeMu.Unlock()
+	default:
+		s.writeMu.Unlock()
+		_ = s.closeWithError(ErrSessionBackpressure)
+		return ErrSessionBackpressure
+	}
+	if !wait {
+		return nil
+	}
+	select {
+	case err := <-frame.written:
+		return err
+	case <-s.done:
+		return errors.New("session closed")
+	}
+}
+
+func (s *Session) writeLoop() {
+	defer func() {
+		_ = s.Close()
+		s.writeMu.Lock()
+		defer s.writeMu.Unlock()
+		for {
+			select {
+			case frame := <-s.outbound:
+				if frame.written != nil {
+					frame.written <- errors.New("session closed")
+				}
+			default:
+				s.queuedBytes = 0
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case <-s.done:
+			return
+		case frame := <-s.outbound:
+			s.writeMu.Lock()
+			s.queuedBytes -= frame.cost
+			s.writeMu.Unlock()
+			err := s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err == nil {
+				err = goprotocol.WriteJSON(s.conn, frame.message)
+			}
+			if frame.written != nil {
+				frame.written <- err
+			}
+			if err != nil {
+				_ = s.closeWithError(err)
+				return
+			}
+		}
+	}
 }

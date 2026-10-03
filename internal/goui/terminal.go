@@ -3,8 +3,8 @@ package goui
 import (
 	"image"
 	"image/color"
-	"sync"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -21,11 +21,14 @@ import (
 )
 
 type TerminalTheme struct {
-	Foreground color.NRGBA
-	Background color.NRGBA
-	Cursor     color.NRGBA
-	Selection  color.NRGBA
-	Palette    [256]color.NRGBA
+	InactiveCursor    color.NRGBA
+	InverseForeground color.NRGBA
+	InverseBackground color.NRGBA
+	Foreground        color.NRGBA
+	Background        color.NRGBA
+	Cursor            color.NRGBA
+	Selection         color.NRGBA
+	Palette           [256]color.NRGBA
 }
 
 func DefaultTerminalTheme() TerminalTheme {
@@ -46,6 +49,9 @@ func DefaultTerminalTheme() TerminalTheme {
 		{0x8f, 0xbc, 0xbb, 0xff}, {0xec, 0xef, 0xf4, 0xff},
 	}
 	copy(t.Palette[:16], base[:])
+	t.InverseForeground = t.Background
+	t.InverseBackground = t.Foreground
+	t.InactiveCursor = color.NRGBA{R: 0x55, G: 0x55, B: 0x55, A: 0xff}
 	steps := [6]uint8{0, 95, 135, 175, 215, 255}
 	index := 16
 	for _, r := range steps {
@@ -100,49 +106,79 @@ type Selection struct {
 	Absolute  bool
 }
 
-func (s Selection) normalized() (startCol,startRow,endCol,endRow int) {
-	startCol,startRow=s.AnchorCol,s.AnchorRow
-	endCol,endRow=s.FocusCol,s.FocusRow
-	if startRow>endRow || (startRow==endRow && startCol>endCol) {
-		startCol,endCol=endCol,startCol
-		startRow,endRow=endRow,startRow
+func (s Selection) normalized() (startCol, startRow, endCol, endRow int) {
+	startCol, startRow = s.AnchorCol, s.AnchorRow
+	endCol, endRow = s.FocusCol, s.FocusRow
+	if startRow > endRow || (startRow == endRow && startCol > endCol) {
+		startCol, endCol = endCol, startCol
+		startRow, endRow = endRow, startRow
 	}
 	return
 }
 
 func SelectedText(snap govt.Snapshot, selection Selection) string {
-	if !selection.Active || snap.Rows<=0 || snap.Cols<=0 { return "" }
-	startCol,startRow,endCol,endRow:=selection.normalized()
-	if selection.Absolute {
-		startRow-=snap.YDisp
-		endRow-=snap.YDisp
+	if !selection.Active || snap.Rows <= 0 || snap.Cols <= 0 {
+		return ""
 	}
-	if startRow<0{startRow=0};if endRow>=snap.Rows{endRow=snap.Rows-1}
-	if startRow>endRow{return ""}
+	startCol, startRow, endCol, endRow := selection.normalized()
+	if selection.Absolute {
+		startRow -= snap.YDisp
+		endRow -= snap.YDisp
+	}
+	if startRow < 0 {
+		startRow = 0
+	}
+	if endRow >= snap.Rows {
+		endRow = snap.Rows - 1
+	}
+	if startRow > endRow {
+		return ""
+	}
 
 	var out strings.Builder
-	for row:=startRow;row<=endRow;row++ {
-		if row<0 || row>=len(snap.RowsData) { continue }
-		line:=snap.RowsData[row]
-		left,right:=0,snap.Cols-1
-		if row==startRow { left=startCol }
-		if row==endRow { right=endCol }
-		if left<0{left=0};if right>=snap.Cols{right=snap.Cols-1}
-		if left>right{continue}
+	for row := startRow; row <= endRow; row++ {
+		if row < 0 || row >= len(snap.RowsData) {
+			continue
+		}
+		line := snap.RowsData[row]
+		left, right := 0, snap.Cols-1
+		if row == startRow {
+			left = startCol
+		}
+		if row == endRow {
+			right = endCol
+		}
+		if left < 0 {
+			left = 0
+		}
+		if right >= snap.Cols {
+			right = snap.Cols - 1
+		}
+		if left > right {
+			continue
+		}
 
 		var rowText strings.Builder
-		for col:=left;col<=right && col<len(line.Cells);col++ {
-			cell:=line.Cells[col]
-			if cell.Width==0 { continue }
-			if cell.Text=="" { rowText.WriteByte(' ') } else { rowText.WriteString(cell.Text) }
+		for col := left; col <= right && col < len(line.Cells); col++ {
+			cell := line.Cells[col]
+			if cell.Width == 0 {
+				continue
+			}
+			if cell.Text == "" {
+				rowText.WriteByte(' ')
+			} else {
+				rowText.WriteString(cell.Text)
+			}
 		}
-		out.WriteString(strings.TrimRight(rowText.String()," "))
-		if row!=endRow {
+		out.WriteString(strings.TrimRight(rowText.String(), " "))
+		if row != endRow {
 			// xterm marks the following physical row as wrapped when this
 			// row soft-wraps into it. Soft wraps must not become clipboard
 			// newlines.
-			nextWrapped:=row+1<len(snap.RowsData) && snap.RowsData[row+1].Wrapped
-			if !nextWrapped { out.WriteByte('\n') }
+			nextWrapped := row+1 < len(snap.RowsData) && snap.RowsData[row+1].Wrapped
+			if !nextWrapped {
+				out.WriteByte('\n')
+			}
 		}
 	}
 	return out.String()
@@ -158,182 +194,240 @@ const (
 )
 
 type selectionSegment struct {
-	start int
-	end int
-	class selectionWordClass
+	start                  int
+	end                    int
+	class                  selectionWordClass
 	contiguousFromPrevious bool
 }
 
 type selectionCharacter struct {
-	row int
-	col int
-	text string
+	row   int
+	col   int
+	text  string
 	class selectionWordClass
 }
 
-func MultiClickSelection(snap govt.Snapshot,col,row,clickCount int) Selection {
-	absoluteRow:=snap.YDisp+row
-	fallback:=Selection{
-		AnchorCol:col,AnchorRow:absoluteRow,
-		FocusCol:col,FocusRow:absoluteRow,
-		Active:true,Absolute:true,
+func MultiClickSelection(snap govt.Snapshot, col, row, clickCount int) Selection {
+	absoluteRow := snap.YDisp + row
+	fallback := Selection{
+		AnchorCol: col, AnchorRow: absoluteRow,
+		FocusCol: col, FocusRow: absoluteRow,
+		Active: true, Absolute: true,
 	}
-	if clickCount<2 || row<0 || row>=len(snap.RowsData) || col<0 || col>=snap.Cols {
+	if clickCount < 2 || row < 0 || row >= len(snap.RowsData) || col < 0 || col >= snap.Cols {
 		return fallback
 	}
-	level:=(clickCount-2)/2
-	chars,clicked:=selectionLogicalLine(snap,col,row)
-	if len(chars)==0 || clicked<0 { return fallback }
-	segments:=selectionSegments(chars)
-	segmentIndex:=-1
-	for index,segment:=range segments {
-		if clicked>=segment.start && clicked<segment.end {segmentIndex=index;break}
+	level := (clickCount - 2) / 2
+	chars, clicked := selectionLogicalLine(snap, col, row)
+	if len(chars) == 0 || clicked < 0 {
+		return fallback
 	}
-	if segmentIndex<0 { return fallback }
-	first,last:=segmentIndex,segmentIndex
-	for n:=0;n<level;n++ {
-		left:=selectionExpandLeft(segments,first)
-		right:=selectionExpandRight(segments,last)
-		if left<0 && right<0 {break}
-		if left>=0 {first=left}
-		if right>=0 {last=right}
+	segments := selectionSegments(chars)
+	segmentIndex := -1
+	for index, segment := range segments {
+		if clicked >= segment.start && clicked < segment.end {
+			segmentIndex = index
+			break
+		}
 	}
-	start:=chars[segments[first].start]
-	finish:=chars[segments[last].end-1]
+	if segmentIndex < 0 {
+		return fallback
+	}
+	first, last := segmentIndex, segmentIndex
+	for n := 0; n < level; n++ {
+		left := selectionExpandLeft(segments, first)
+		right := selectionExpandRight(segments, last)
+		if left < 0 && right < 0 {
+			break
+		}
+		if left >= 0 {
+			first = left
+		}
+		if right >= 0 {
+			last = right
+		}
+	}
+	start := chars[segments[first].start]
+	finish := chars[segments[last].end-1]
 	return Selection{
-		AnchorCol:start.col,AnchorRow:snap.YDisp+start.row,
-		FocusCol:finish.col,FocusRow:snap.YDisp+finish.row,
-		Active:true,Absolute:true,
+		AnchorCol: start.col, AnchorRow: snap.YDisp + start.row,
+		FocusCol: finish.col, FocusRow: snap.YDisp + finish.row,
+		Active: true, Absolute: true,
 	}
 }
 
-func selectionLogicalLine(snap govt.Snapshot,col,row int)([]selectionCharacter,int){
-	first,last:=row,row
-	for first>0 && first<len(snap.RowsData) && snap.RowsData[first].Wrapped { first-- }
-	for last+1<len(snap.RowsData) && snap.RowsData[last+1].Wrapped { last++ }
+func selectionLogicalLine(snap govt.Snapshot, col, row int) ([]selectionCharacter, int) {
+	first, last := row, row
+	for first > 0 && first < len(snap.RowsData) && snap.RowsData[first].Wrapped {
+		first--
+	}
+	for last+1 < len(snap.RowsData) && snap.RowsData[last+1].Wrapped {
+		last++
+	}
 
-	chars:=make([]selectionCharacter,0,(last-first+1)*snap.Cols)
-	clicked:=-1
-	for y:=first;y<=last;y++ {
-		line:=snap.RowsData[y]
-		for x:=0;x<snap.Cols && x<len(line.Cells);x++ {
-			cell:=line.Cells[x]
-			if cell.Width==0 { continue }
-			text:=cell.Text
-			if text=="" {text=" "}
-			r,_:=utf8FirstRune(text)
-			entry:=selectionCharacter{row:y,col:x,text:text,class:selectionClass(r)}
-			if y==row && (x==col || (cell.Width==2 && col==x+1)) {clicked=len(chars)}
-			chars=append(chars,entry)
+	chars := make([]selectionCharacter, 0, (last-first+1)*snap.Cols)
+	clicked := -1
+	for y := first; y <= last; y++ {
+		line := snap.RowsData[y]
+		for x := 0; x < snap.Cols && x < len(line.Cells); x++ {
+			cell := line.Cells[x]
+			if cell.Width == 0 {
+				continue
+			}
+			text := cell.Text
+			if text == "" {
+				text = " "
+			}
+			r, _ := utf8FirstRune(text)
+			entry := selectionCharacter{row: y, col: x, text: text, class: selectionClass(r)}
+			if y == row && (x == col || (cell.Width == 2 && col == x+1)) {
+				clicked = len(chars)
+			}
+			chars = append(chars, entry)
 		}
 	}
-	if clicked<0 && col>0 && row>=0 && row<len(snap.RowsData) {
-		line:=snap.RowsData[row]
-		if col<len(line.Cells) && line.Cells[col].Width==0 {
-			for index:=range chars {
-				if chars[index].row==row && chars[index].col==col-1 {clicked=index;break}
+	if clicked < 0 && col > 0 && row >= 0 && row < len(snap.RowsData) {
+		line := snap.RowsData[row]
+		if col < len(line.Cells) && line.Cells[col].Width == 0 {
+			for index := range chars {
+				if chars[index].row == row && chars[index].col == col-1 {
+					clicked = index
+					break
+				}
 			}
 		}
 	}
-	return chars,clicked
+	return chars, clicked
 }
 
-func selectionSegments(chars []selectionCharacter)[]selectionSegment{
-	if len(chars)==0{return nil}
-	segments:=make([]selectionSegment,0,len(chars))
-	start:=0
-	for end:=1;end<=len(chars);end++ {
-		split:=end==len(chars)
+func selectionSegments(chars []selectionCharacter) []selectionSegment {
+	if len(chars) == 0 {
+		return nil
+	}
+	segments := make([]selectionSegment, 0, len(chars))
+	start := 0
+	for end := 1; end <= len(chars); end++ {
+		split := end == len(chars)
 		if !split {
-			split=chars[end-1].class!=chars[end].class ||
-				!selectionCharactersAdjacent(chars[end-1],chars[end])
+			split = chars[end-1].class != chars[end].class ||
+				!selectionCharactersAdjacent(chars[end-1], chars[end])
 		}
-		if !split {continue}
-		segments=append(segments,selectionSegment{
-			start:start,end:end,class:chars[start].class,
-			contiguousFromPrevious:start>0 && selectionCharactersAdjacent(chars[start-1],chars[start]),
+		if !split {
+			continue
+		}
+		segments = append(segments, selectionSegment{
+			start: start, end: end, class: chars[start].class,
+			contiguousFromPrevious: start > 0 && selectionCharactersAdjacent(chars[start-1], chars[start]),
 		})
-		start=end
+		start = end
 	}
 	return segments
 }
 
-func selectionCharactersAdjacent(left,right selectionCharacter)bool{
-	if left.row==right.row {
-		return right.col==left.col+1 || right.col==left.col+2
+func selectionCharactersAdjacent(left, right selectionCharacter) bool {
+	if left.row == right.row {
+		return right.col == left.col+1 || right.col == left.col+2
 	}
-	return right.row==left.row+1 && right.col==0
+	return right.row == left.row+1 && right.col == 0
 }
 
-func selectionExpandLeft(segments []selectionSegment,index int)int{
-	if index<0 || index>=len(segments){return -1}
-	current:=segments[index]
-	if current.class==selectionWhitespace{return -1}
-	if current.class==selectionPunctuation {
-		if index==0{return -1}
-		previous:=segments[index-1]
-		if current.contiguousFromPrevious && selectionTextClass(previous.class){return index-1}
+func selectionExpandLeft(segments []selectionSegment, index int) int {
+	if index < 0 || index >= len(segments) {
 		return -1
 	}
-	if index<2{return -1}
-	punctuation:=segments[index-1]
-	word:=segments[index-2]
+	current := segments[index]
+	if current.class == selectionWhitespace {
+		return -1
+	}
+	if current.class == selectionPunctuation {
+		if index == 0 {
+			return -1
+		}
+		previous := segments[index-1]
+		if current.contiguousFromPrevious && selectionTextClass(previous.class) {
+			return index - 1
+		}
+		return -1
+	}
+	if index < 2 {
+		return -1
+	}
+	punctuation := segments[index-1]
+	word := segments[index-2]
 	if current.contiguousFromPrevious &&
 		punctuation.contiguousFromPrevious &&
-		punctuation.class==selectionPunctuation &&
-		selectionTextClass(word.class) {return index-2}
+		punctuation.class == selectionPunctuation &&
+		selectionTextClass(word.class) {
+		return index - 2
+	}
 	return -1
 }
 
-func selectionExpandRight(segments []selectionSegment,index int)int{
-	if index<0 || index>=len(segments){return -1}
-	current:=segments[index]
-	if current.class==selectionWhitespace{return -1}
-	if current.class==selectionPunctuation {
-		next:=index+1
-		if next<len(segments) && segments[next].contiguousFromPrevious && selectionTextClass(segments[next].class){
+func selectionExpandRight(segments []selectionSegment, index int) int {
+	if index < 0 || index >= len(segments) {
+		return -1
+	}
+	current := segments[index]
+	if current.class == selectionWhitespace {
+		return -1
+	}
+	if current.class == selectionPunctuation {
+		next := index + 1
+		if next < len(segments) && segments[next].contiguousFromPrevious && selectionTextClass(segments[next].class) {
 			return next
 		}
 		return -1
 	}
-	punctuationIndex:=index+1
-	wordIndex:=index+2
-	if wordIndex>=len(segments){return -1}
-	punctuation:=segments[punctuationIndex]
-	word:=segments[wordIndex]
-	if punctuation.class==selectionPunctuation &&
+	punctuationIndex := index + 1
+	wordIndex := index + 2
+	if wordIndex >= len(segments) {
+		return -1
+	}
+	punctuation := segments[punctuationIndex]
+	word := segments[wordIndex]
+	if punctuation.class == selectionPunctuation &&
 		punctuation.contiguousFromPrevious &&
 		word.contiguousFromPrevious &&
-		selectionTextClass(word.class) {return wordIndex}
+		selectionTextClass(word.class) {
+		return wordIndex
+	}
 	return -1
 }
 
-func selectionTextClass(class selectionWordClass)bool{
-	return class==selectionCJK || class==selectionAlphanumeric
+func selectionTextClass(class selectionWordClass) bool {
+	return class == selectionCJK || class == selectionAlphanumeric
 }
 
-func selectionClass(r rune)selectionWordClass{
-	if unicode.IsSpace(r){return selectionWhitespace}
-	if selectionIsCJK(r){return selectionCJK}
-	if unicode.IsLetter(r)||unicode.IsDigit(r){return selectionAlphanumeric}
+func selectionClass(r rune) selectionWordClass {
+	if unicode.IsSpace(r) {
+		return selectionWhitespace
+	}
+	if selectionIsCJK(r) {
+		return selectionCJK
+	}
+	if unicode.IsLetter(r) || unicode.IsDigit(r) {
+		return selectionAlphanumeric
+	}
 	return selectionPunctuation
 }
 
-func selectionIsCJK(r rune)bool{
-	v:=uint32(r)
-	return v>=0x1100&&v<=0x11ff ||
-		v>=0x3040&&v<=0x30ff ||
-		v>=0x3130&&v<=0x318f ||
-		v>=0x3400&&v<=0x4dbf ||
-		v>=0x4e00&&v<=0x9fff ||
-		v>=0xac00&&v<=0xd7af ||
-		v>=0xf900&&v<=0xfaff ||
-		v>=0x20000&&v<=0x2fa1f
+func selectionIsCJK(r rune) bool {
+	v := uint32(r)
+	return v >= 0x1100 && v <= 0x11ff ||
+		v >= 0x3040 && v <= 0x30ff ||
+		v >= 0x3130 && v <= 0x318f ||
+		v >= 0x3400 && v <= 0x4dbf ||
+		v >= 0x4e00 && v <= 0x9fff ||
+		v >= 0xac00 && v <= 0xd7af ||
+		v >= 0xf900 && v <= 0xfaff ||
+		v >= 0x20000 && v <= 0x2fa1f
 }
 
-func utf8FirstRune(value string)(rune,int){
-	for _,r:=range value{return r,len(string(r))}
-	return ' ',1
+func utf8FirstRune(value string) (rune, int) {
+	for _, r := range value {
+		return r, len(string(r))
+	}
+	return ' ', 1
 }
 
 type TerminalView struct {
@@ -343,6 +437,8 @@ type TerminalView struct {
 	LineHeight unit.Dp
 	FontFamily string
 	Hyperlinks bool
+	Ligatures  bool
+	Focused    bool
 
 	mu         sync.Mutex
 	cache      map[int]preparedRow
@@ -357,13 +453,15 @@ func NewTerminalView() *TerminalView {
 		LineHeight: unit.Dp(20),
 		FontFamily: "monospace",
 		Hyperlinks: true,
+		Ligatures:  true,
+		Focused:    true,
 		cache:      make(map[int]preparedRow),
 		imageCache: make(map[uint64]paint.ImageOp),
 	}
 }
 
 type TerminalViewCacheStats struct {
-	PreparedRows int
+	PreparedRows  int
 	ImageTextures int
 }
 
@@ -371,7 +469,7 @@ func (v *TerminalView) CacheStats() TerminalViewCacheStats {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return TerminalViewCacheStats{
-		PreparedRows: len(v.cache),
+		PreparedRows:  len(v.cache),
 		ImageTextures: len(v.imageCache),
 	}
 }
@@ -406,9 +504,9 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 			rect := image.Rect(x0, y, x1, y+lineHeight)
 			paint.FillShape(gtx.Ops, bg.color, clip.Rect(rect).Op())
 		}
-		if left,right,ok:=selectionColumnsForSnapshot(snap,selection,rowIndex);ok {
-			rect:=image.Rect(left*cellWidth,y,(right+1)*cellWidth,y+lineHeight)
-			paint.FillShape(gtx.Ops,v.Theme.Selection,clip.Rect(rect).Op())
+		if left, right, ok := selectionColumnsForSnapshot(snap, selection, rowIndex); ok {
+			rect := image.Rect(left*cellWidth, y, (right+1)*cellWidth, y+lineHeight)
+			paint.FillShape(gtx.Ops, v.Theme.Selection, clip.Rect(rect).Op())
 		}
 		for _, run := range prepared.text {
 			if run.text == "" {
@@ -454,69 +552,77 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 	for row := len(snap.RowsData); row < len(v.cache); row++ {
 		delete(v.cache, row)
 	}
-	liveImages:=make(map[uint64]struct{},len(snap.Images))
-	for _,terminalImage:=range snap.Images {
-		if terminalImage.PixelWidth<=0 || terminalImage.PixelHeight<=0 ||
-			terminalImage.SourceWidth<=0 || terminalImage.SourceHeight<=0 ||
-			len(terminalImage.RGBA)<terminalImage.PixelWidth*terminalImage.PixelHeight*4 {
+	liveImages := make(map[uint64]struct{}, len(snap.Images))
+	for _, terminalImage := range snap.Images {
+		if terminalImage.PixelWidth <= 0 || terminalImage.PixelHeight <= 0 ||
+			terminalImage.SourceWidth <= 0 || terminalImage.SourceHeight <= 0 ||
+			len(terminalImage.RGBA) < terminalImage.PixelWidth*terminalImage.PixelHeight*4 {
 			continue
 		}
-		liveImages[terminalImage.ID]=struct{}{}
-		imageOp,ok:=v.imageCache[terminalImage.ID]
+		liveImages[terminalImage.ID] = struct{}{}
+		imageOp, ok := v.imageCache[terminalImage.ID]
 		if !ok {
-			rgba:=&image.NRGBA{
-				Pix:terminalImage.RGBA,
-				Stride:terminalImage.PixelWidth*4,
-				Rect:image.Rect(0,0,terminalImage.PixelWidth,terminalImage.PixelHeight),
+			rgba := &image.NRGBA{
+				Pix:    terminalImage.RGBA,
+				Stride: terminalImage.PixelWidth * 4,
+				Rect:   image.Rect(0, 0, terminalImage.PixelWidth, terminalImage.PixelHeight),
 			}
-			imageOp=paint.NewImageOp(rgba)
-			v.imageCache[terminalImage.ID]=imageOp
+			imageOp = paint.NewImageOp(rgba)
+			v.imageCache[terminalImage.ID] = imageOp
 		}
-		left:=terminalImage.Column*cellWidth
-		top:=terminalImage.Row*lineHeight
-		destWidth:=terminalImage.Width*cellWidth
-		destHeight:=terminalImage.Height*lineHeight
-		if destWidth<=0 || destHeight<=0 { continue }
-		right:=left+destWidth
-		bottom:=top+destHeight
-		clipStack:=clip.Rect(image.Rect(left,top,right,bottom)).Push(gtx.Ops)
-		scaleX:=float32(destWidth)/float32(terminalImage.SourceWidth)
-		scaleY:=float32(destHeight)/float32(terminalImage.SourceHeight)
-		imageX:=float32(left)-float32(terminalImage.SourceX)*scaleX
-		imageY:=float32(top)-float32(terminalImage.SourceY)*scaleY
-		transform:=op.Affine(f32.NewAffine2D(scaleX,0,imageX,0,scaleY,imageY)).Push(gtx.Ops)
+		left := terminalImage.Column * cellWidth
+		top := terminalImage.Row * lineHeight
+		destWidth := terminalImage.Width * cellWidth
+		destHeight := terminalImage.Height * lineHeight
+		if destWidth <= 0 || destHeight <= 0 {
+			continue
+		}
+		right := left + destWidth
+		bottom := top + destHeight
+		clipStack := clip.Rect(image.Rect(left, top, right, bottom)).Push(gtx.Ops)
+		scaleX := float32(destWidth) / float32(terminalImage.SourceWidth)
+		scaleY := float32(destHeight) / float32(terminalImage.SourceHeight)
+		imageX := float32(left) - float32(terminalImage.SourceX)*scaleX
+		imageY := float32(top) - float32(terminalImage.SourceY)*scaleY
+		transform := op.Affine(f32.NewAffine2D(scaleX, 0, imageX, 0, scaleY, imageY)).Push(gtx.Ops)
 		imageOp.Add(gtx.Ops)
 		paint.PaintOp{}.Add(gtx.Ops)
 		transform.Pop()
 		clipStack.Pop()
 	}
-	for id:=range v.imageCache {
-		if _,ok:=liveImages[id];!ok { delete(v.imageCache,id) }
+	for id := range v.imageCache {
+		if _, ok := liveImages[id]; !ok {
+			delete(v.imageCache, id)
+		}
 	}
 	v.mu.Unlock()
 
-	if composition!="" && snap.CursorY>=0 && snap.CursorY<snap.Rows &&
-		snap.CursorX>=0 && snap.CursorX<snap.Cols {
-		x:=snap.CursorX*cellWidth
-		y:=snap.CursorY*lineHeight
-		columns:=utf8.RuneCountInString(composition)
-		if columns<1{columns=1}
-		spanWidth:=columns*cellWidth
-		if maxWidth:=width-x;spanWidth>maxWidth{spanWidth=maxWidth}
-		if spanWidth>0 {
-			paint.FillShape(gtx.Ops,v.Theme.Background,clip.Rect(image.Rect(x,y,x+spanWidth,y+lineHeight)).Op())
-			tr:=op.Offset(image.Pt(x,y)).Push(gtx.Ops)
-			child:=gtx
-			child.Constraints.Min=image.Point{}
-			child.Constraints.Max=image.Pt(spanWidth,lineHeight)
-			label:=material.Label(th,v.FontSize,composition)
-			label.MaxLines=1
-			label.Color=v.Theme.Foreground
-			label.Font.Typeface=font.Typeface(v.FontFamily)
+	if composition != "" && snap.CursorY >= 0 && snap.CursorY < snap.Rows &&
+		snap.CursorX >= 0 && snap.CursorX < snap.Cols {
+		x := snap.CursorX * cellWidth
+		y := snap.CursorY * lineHeight
+		columns := utf8.RuneCountInString(composition)
+		if columns < 1 {
+			columns = 1
+		}
+		spanWidth := columns * cellWidth
+		if maxWidth := width - x; spanWidth > maxWidth {
+			spanWidth = maxWidth
+		}
+		if spanWidth > 0 {
+			paint.FillShape(gtx.Ops, v.Theme.Background, clip.Rect(image.Rect(x, y, x+spanWidth, y+lineHeight)).Op())
+			tr := op.Offset(image.Pt(x, y)).Push(gtx.Ops)
+			child := gtx
+			child.Constraints.Min = image.Point{}
+			child.Constraints.Max = image.Pt(spanWidth, lineHeight)
+			label := material.Label(th, v.FontSize, composition)
+			label.MaxLines = 1
+			label.Color = v.Theme.Foreground
+			label.Font.Typeface = font.Typeface(v.FontFamily)
 			label.Layout(child)
 			tr.Pop()
-			underlineY:=y+lineHeight-2
-			paint.FillShape(gtx.Ops,v.Theme.Foreground,clip.Rect(image.Rect(x,underlineY,x+spanWidth,underlineY+1)).Op())
+			underlineY := y + lineHeight - 2
+			paint.FillShape(gtx.Ops, v.Theme.Foreground, clip.Rect(image.Rect(x, underlineY, x+spanWidth, underlineY+1)).Op())
 		}
 	}
 
@@ -525,7 +631,11 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 		x := snap.CursorX * cellWidth
 		y := snap.CursorY * lineHeight
 		rect := image.Rect(x, y+lineHeight-2, x+cellWidth, y+lineHeight)
-		paint.FillShape(gtx.Ops, v.Theme.Cursor, clip.Rect(rect).Op())
+		cursor := v.Theme.Cursor
+		if !v.Focused {
+			cursor = v.Theme.InactiveCursor
+		}
+		paint.FillShape(gtx.Ops, cursor, clip.Rect(rect).Op())
 	}
 
 	return layout.Dimensions{Size: gtx.Constraints.Constrain(size)}
@@ -574,7 +684,7 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 		if width < 1 {
 			width = 1
 		}
-		if currentText != nil && currentText.style == style &&
+		if v.Ligatures && currentText != nil && currentText.style == style &&
 			currentText.startColumn+currentText.spanColumns == column {
 			currentText.text += text
 			currentText.spanColumns += width
@@ -595,6 +705,12 @@ func (v *TerminalView) resolveColors(cell govt.Cell) (color.NRGBA, color.NRGBA) 
 	fg := resolveColor(cell.FG, v.Theme.Foreground, v.Theme)
 	bg := resolveColor(cell.BG, v.Theme.Background, v.Theme)
 	if cell.Inverse {
+		if cell.BG.Mode == govt.ColorDefault {
+			bg = v.Theme.InverseForeground
+		}
+		if cell.FG.Mode == govt.ColorDefault {
+			fg = v.Theme.InverseBackground
+		}
 		return bg, fg
 	}
 	return fg, bg
@@ -617,22 +733,37 @@ func resolveColor(c govt.Color, fallback color.NRGBA, theme TerminalTheme) color
 	return fallback
 }
 
-
-func selectionColumns(selection Selection,row,cols int)(int,int,bool){
-	if !selection.Active || cols<=0 { return 0,0,false }
-	startCol,startRow,endCol,endRow:=selection.normalized()
-	if row<startRow || row>endRow { return 0,0,false }
-	left,right:=0,cols-1
-	if row==startRow { left=startCol }
-	if row==endRow { right=endCol }
-	if left<0{left=0};if right>=cols{right=cols-1}
-	if left>right{return 0,0,false}
-	return left,right,true
+func selectionColumns(selection Selection, row, cols int) (int, int, bool) {
+	if !selection.Active || cols <= 0 {
+		return 0, 0, false
+	}
+	startCol, startRow, endCol, endRow := selection.normalized()
+	if row < startRow || row > endRow {
+		return 0, 0, false
+	}
+	left, right := 0, cols-1
+	if row == startRow {
+		left = startCol
+	}
+	if row == endRow {
+		right = endCol
+	}
+	if left < 0 {
+		left = 0
+	}
+	if right >= cols {
+		right = cols - 1
+	}
+	if left > right {
+		return 0, 0, false
+	}
+	return left, right, true
 }
 
-
-func selectionColumnsForSnapshot(snap govt.Snapshot,selection Selection,viewportRow int)(int,int,bool){
-	row:=viewportRow
-	if selection.Absolute { row=snap.YDisp+viewportRow }
-	return selectionColumns(selection,row,snap.Cols)
+func selectionColumnsForSnapshot(snap govt.Snapshot, selection Selection, viewportRow int) (int, int, bool) {
+	row := viewportRow
+	if selection.Absolute {
+		row = snap.YDisp + viewportRow
+	}
+	return selectionColumns(selection, row, snap.Cols)
 }

@@ -49,6 +49,10 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 - Short-lived RPC client and long-lived GUI session client with a 64-event
   decoded terminal queue.
+- Session writes run on one worker with a 64-frame / 16 MiB queue and a bounded
+  write deadline. GUI command dispatch performs no socket I/O. Saturation
+  explicitly disconnects the session; full event queues and pending calls are
+  awakened by close, and the window projects the disconnected state.
 - Headless xterm-go emulator with 256/RGB colors, cell attributes, wide cells,
   OSC 8 URIs, alternate-screen state, row hashes, wrapped-row metadata,
   scrollback, and terminal title tracking.
@@ -79,8 +83,24 @@ benchmark oracle while replacing both the Water client and server in Go.
   texture caching, ordered cursor effects, erase handling, and cell-pixel
   queries.
 - Window-driven PTY resize.
+- Settings panel (`cmd-,` or the Settings button), with terminal/font, pane/UI,
+  shortcut, theme/16-color ANSI palette, and startup/shell/server sections.
+  Saves are asynchronous and atomic, retaining unknown fields and the existing
+  override envelope. Appearance/shortcuts apply across Local and remote views;
+  startup, server and history settings require restart.
+- Split buttons and configured split-right/split-down keys (`cmd-\\`, `cmd--`),
+  directional focus, pane promotion/close, tab cycling, numbered tab bindings
+  (`cmd-1` through `cmd-9`, `cmd-0`), workspace cycling and sidebar toggling.
+  Dividers preview locally during drag and commit through `pane.resize_split`.
+- Live font/geometry/theme changes invalidate cached resolved colors and resize
+  the client emulator and PTY through the existing ordered command path.
+- Core Rust-compatible theme fields include selection, inverse default colors,
+  inactive cursors, pane borders, tab surfaces and sidebar cards. UI fonts read
+  Rust's `font_size` / `font_family` keys and the earlier Go `ui_font_size` alias.
 - Real `ui.click` routing through Gio's input router rather than a hand-coded
   logical acknowledgement.
+- `water ctl ui drag` routes raw press/move/release through Gio's router; the
+  native settings smoke test uses the same editor and divider input paths.
 - Real offscreen Gio screenshot rendering through `gpu/headless`.
 
 ### Remote, config, CLI, diagnostics, and packaging
@@ -214,6 +234,25 @@ benchmark oracle while replacing both the Water client and server in Go.
   keys continue through the normal input handler.
 - Native OS clipboard and system IME behavior remain manual validation gates;
   control input does not establish native input-method or clipboard parity.
+- Settings/split regression also passes in the native window: save and reload
+  font/line height/sidebar width/colors, preserve unknown configuration fields,
+  apply a custom split shortcut, drag a divider, promote a pane, switch numbered
+  tabs/workspaces, and cancel the settings dialog. Unit coverage additionally
+  checks editor focus across control/native routers and edits arriving in the
+  same input batch as Save. Reproduce after building `target/go-ui-smoke/water`:
+
+  ```sh
+  caffeinate -du ~/.venv/bin/python scripts/go-ui-settings-smoke.py
+  ```
+
+  On Linux, omit `caffeinate` and use an existing display session. The macOS
+  wrapper holds a temporary display-awake assertion for the test lifetime:
+  this machine reported zero active displays after idle sleep, which prevents
+  Gio from creating its display link. It does not inject GUI input.
+- After settings/split integration, the unchanged `testTermCat` script reports
+  0.648 / 0.630 / 0.675 s `real` (median 0.648 s), with the client sequence
+  verified through the final marker. Full Go tests, `go vet`, affected-package
+  race tests, all four scenarios and the existing GUI smoke pass again.
 
 The automated rewrite gates now cover the headless protocol, terminal stream,
 scenario suite, performance smoke tests, selection/scrollback behavior,
