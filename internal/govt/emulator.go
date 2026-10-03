@@ -207,35 +207,41 @@ func (e *Emulator) canFastWriteOrdinary(p []byte)bool{
 }
 
 func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
-	const query="\x1b[16t"
-	if len(e.pendingCellSizeQuery)==0 && bytes.IndexByte(p,0x1b)<0 {
-		return p
+	const query = "\x1b[16t"
+	input := p
+	if len(e.pendingCellSizeQuery) != 0 {
+		input = make([]byte, 0, len(e.pendingCellSizeQuery)+len(p))
+		input = append(input, e.pendingCellSizeQuery...)
+		input = append(input, p...)
 	}
-	input:=make([]byte,0,len(e.pendingCellSizeQuery)+len(p))
-	input=append(input,e.pendingCellSizeQuery...)
-	e.pendingCellSizeQuery=e.pendingCellSizeQuery[:0]
-	input=append(input,p...)
-	filtered:=make([]byte,0,len(input))
-	for i:=0;i<len(input); {
-		remaining:=input[i:]
-		if len(remaining)<len(query) && string(query[:len(remaining)])==string(remaining) {
-			e.pendingCellSizeQuery=append(e.pendingCellSizeQuery,remaining...)
+	// Retain only a suffix that can complete the query in a later chunk.
+	// All other ANSI data can pass through without copying or per-byte work.
+	carry := 0
+	for n := min(len(input), len(query)-1); n > 0; n-- {
+		if bytes.Equal(input[len(input)-n:], []byte(query[:n])) {
+			carry = n
 			break
 		}
-		if len(remaining)>=len(query) && string(remaining[:len(query)])==query {
-			width,height:=8,16
-			if e.graphics!=nil {
-				width=maxInt(e.graphics.cellWidth,1)
-				height=maxInt(e.graphics.cellHeight,1)
-			}
-			e.enqueueResponse([]byte("\x1b[6;"+itoaPositive(height)+";"+itoaPositive(width)+"t"))
-			i+=len(query)
-			continue
-		}
-		filtered=append(filtered,input[i])
-		i++
 	}
-	return filtered
+	e.pendingCellSizeQuery = append(e.pendingCellSizeQuery[:0], input[len(input)-carry:]...)
+	input = input[:len(input)-carry]
+	index := bytes.Index(input, []byte(query))
+	if index < 0 {
+		return input
+	}
+	filtered := make([]byte, 0, len(input)-len(query))
+	for index >= 0 {
+		filtered = append(filtered, input[:index]...)
+		width, height := 8, 16
+		if e.graphics != nil {
+			width = maxInt(e.graphics.cellWidth, 1)
+			height = maxInt(e.graphics.cellHeight, 1)
+		}
+		e.enqueueResponse([]byte("\x1b[6;" + itoaPositive(height) + ";" + itoaPositive(width) + "t"))
+		input = input[index+len(query):]
+		index = bytes.Index(input, []byte(query))
+	}
+	return append(filtered, input...)
 }
 
 func (e *Emulator) applyGraphicsEraseLocked(p []byte) {

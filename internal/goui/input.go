@@ -26,6 +26,7 @@ type TerminalInput struct {
 	mouseTag struct{}
 
 	OnInput          func([]byte)
+	OnShortcut       func(key.Event) bool
 	OnMouse          func(govt.MouseEvent) bool
 	OnScroll         func(int)
 	OnSelectionStart func(col,row,clickCount int)
@@ -255,6 +256,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			i.imeInitialized=false
 		case key.Event:
 			if ev.State!=key.Press { continue }
+			if i.OnShortcut!=nil && i.OnShortcut(ev) { continue }
 			if ev.Name=="V" && ev.Modifiers.Contain(key.ModShortcut) {
 				gtx.Execute(clipboard.ReadCmd{Tag:&i.tag})
 				continue

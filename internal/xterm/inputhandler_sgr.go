@@ -166,17 +166,23 @@ func (h *InputHandler) charAttributes(params *Params) bool {
 func (h *InputHandler) processSGR0(attr *AttributeData) {
 	attr.Fg = 0
 	attr.Bg = 0
-	if attr.Extended==nil {
+	if attr.Extended == nil {
+		return
+	}
+	// Ordinary underline needs no side table. Drop reset visual state instead
+	// of allocating an empty object that every later SGR 0 would clone again.
+	if attr.Extended.urlID == 0 && attr.Extended.ext&ExtFlagVariantOffset == 0 {
+		attr.Extended = nil
 		return
 	}
 	// SGR 0 resets visual decoration but must not terminate an OSC 8
 	// hyperlink. Clone only when extended state actually exists so ordinary
 	// color/style resets remain allocation-free while already-emitted cells
 	// keep their immutable extended attributes.
-	attr.Extended=attr.Extended.Clone()
+	attr.Extended = attr.Extended.Clone()
 	attr.Extended.SetUnderlineStyle(UnderlineStyleNone)
-	uc:=attr.Extended.UnderlineColor()
-	uc&=^(AttrCMMask|AttrRGBMask)
+	uc := attr.Extended.UnderlineColor()
+	uc &= ^(AttrCMMask | AttrRGBMask)
 	attr.Extended.SetUnderlineColor(uc)
 	attr.UpdateExtended()
 }
@@ -274,20 +280,27 @@ func (h *InputHandler) extractColor(params *Params, pos int, attr *AttributeData
 
 // processUnderline sets the underline style on extended attrs.
 func (h *InputHandler) processUnderline(style int32, attr *AttributeData) {
-	attr.Extended = attr.extended().Clone()
-
 	// default to single underline for out-of-range or -1
 	if style < 0 || style > 5 {
 		style = 1
 	}
 
-	attr.Extended.SetUnderlineStyle(UnderlineStyle(style))
 	attr.Fg |= FgFlagUnderline
 
 	// 0 deactivates underline
 	if style == 0 {
 		attr.Fg &= ^FgFlagUnderline
 	}
+	// The packed foreground flag already represents single underline. Keep
+	// extended storage only for a special style, color, variant or hyperlink.
+	extended := attr.extended()
+	if style <= 1 && extended.urlID == 0 && extended.ext & ^ExtFlagUnderlineStyle == 0 {
+		attr.Extended = nil
+		attr.Bg &^= BgFlagHasExtended
+		return
+	}
+	attr.Extended = extended.Clone()
+	attr.Extended.SetUnderlineStyle(UnderlineStyle(style))
 
 	attr.UpdateExtended()
 }

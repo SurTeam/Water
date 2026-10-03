@@ -149,14 +149,26 @@ type graphicsParser struct {
 }
 
 func (p *graphicsParser) feed(input []byte) []graphicsEvent {
-	if len(input)==0{return nil}
+	if len(input) == 0 {
+		return nil
+	}
 	// Ordinary terminal text is overwhelmingly ASCII/UTF-8 without graphics
 	// control introducers. When no parser carry exists, avoid the full graphics
 	// scanner unless the chunk contains ESC or any high byte that could encode
 	// a C1 control. This keeps the graphics feature effectively free for plain
 	// terminal output while preserving Unicode/C1 correctness.
-	if len(p.buffer)==0 && !hasPotentialGraphicsByte(input) {
+	if len(p.buffer) == 0 && !hasPotentialGraphicsByte(input) {
 		return nil
+	}
+	if len(p.buffer) == 0 {
+		if _, _, found := findGraphicsStart(input); !found {
+			// Styled text does not need to be copied into a graphics buffer.
+			// Preserve only a split introducer/UTF-8 suffix for the next read.
+			if retain := graphicsCarryLen(input); retain > 0 {
+				p.buffer = append(p.buffer, input[len(input)-retain:]...)
+			}
+			return nil
+		}
 	}
 
 	previousLen := len(p.buffer)
@@ -167,10 +179,10 @@ func (p *graphicsParser) feed(input []byte) []graphicsEvent {
 		start, kind, ok := findGraphicsStart(p.buffer)
 		if !ok {
 			retain := graphicsCarryLen(p.buffer)
-			if retain==0 {
-				p.buffer=p.buffer[:0]
-			} else if splitAt:=len(p.buffer)-retain;splitAt>0 {
-				p.buffer=append(p.buffer[:0],p.buffer[splitAt:]...)
+			if retain == 0 {
+				p.buffer = p.buffer[:0]
+			} else if splitAt := len(p.buffer) - retain; splitAt > 0 {
+				p.buffer = append(p.buffer[:0], p.buffer[splitAt:]...)
 			}
 			break
 		}
@@ -271,7 +283,9 @@ func graphicsCarryLen(data []byte)int{
 func findGraphicsStart(data []byte) (int, graphicsKind, bool) {
 	for i := 0; i < len(data); i++ {
 		if data[i] != 0x1b {
-			if !isUTF8Continuation(data, i) {
+			// Only a graphics C1 introducer needs UTF-8 boundary validation.
+			// ASCII/style text must not call the decoder for every byte.
+			if (data[i] == 0x9f || data[i] == 0x9d || data[i] == 0x90) && !isUTF8Continuation(data, i) {
 				if data[i] == 0x9f && i+1 < len(data) && data[i+1] == 'G' {
 					return i, graphicsKitty, true
 				}

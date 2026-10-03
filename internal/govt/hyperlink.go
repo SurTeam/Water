@@ -1,6 +1,9 @@
 package govt
 
-import "strings"
+import (
+	"bytes"
+	"strings"
+)
 
 const maxOSC8Bytes = 64 * 1024
 
@@ -22,33 +25,37 @@ func newOSC8Tracker()*osc8Tracker{
 	}
 }
 
-func (t *osc8Tracker) feed(data []byte){
-	for _,event:=range t.parser.feed(data){
-		if event.uri=="" {
-			if strings.TrimSpace(event.params)=="" {t.activeID=0}
+func (t *osc8Tracker) feed(data []byte) {
+	for _, event := range t.parser.feed(data) {
+		if event.uri == "" {
+			if strings.TrimSpace(event.params) == "" {
+				t.activeID = 0
+			}
 			continue
 		}
-		if t.activeID!=0{t.activeID=0}
-		idParam:=""
-		for _,param:=range strings.Split(event.params,":"){
-			if strings.HasPrefix(param,"id="){
-				idParam=strings.TrimPrefix(param,"id=")
+		if t.activeID != 0 {
+			t.activeID = 0
+		}
+		idParam := ""
+		for _, param := range strings.Split(event.params, ":") {
+			if strings.HasPrefix(param, "id=") {
+				idParam = strings.TrimPrefix(param, "id=")
 				break
 			}
 		}
-		if idParam!=""{
-			key:=idParam+";;"+event.uri
-			if id,ok:=t.entriesWithID[key];ok{
-				t.activeID=id
+		if idParam != "" {
+			key := idParam + ";;" + event.uri
+			if id, ok := t.entriesWithID[key]; ok {
+				t.activeID = id
 				continue
 			}
-			id:=t.allocate(event.uri)
-			t.entriesWithID[key]=id
-			t.keyByID[id]=key
-			t.activeID=id
+			id := t.allocate(event.uri)
+			t.entriesWithID[key] = id
+			t.keyByID[id] = key
+			t.activeID = id
 			continue
 		}
-		t.activeID=t.allocate(event.uri)
+		t.activeID = t.allocate(event.uri)
 	}
 }
 
@@ -91,6 +98,15 @@ const(
 )
 
 func (p *osc8Parser) feed(data []byte)[]osc8Event{
+	if len(data)>0 && (p.state==osc8Normal || p.state==osc8Escape) &&
+		!(p.state==osc8Escape && data[0]==']') &&
+		bytes.IndexByte(data,0x9d)<0 && !bytes.Contains(data,[]byte("\x1b]")) {
+		// An ordinary CSI/SGR chunk cannot open an OSC. Keep a trailing ESC
+		// pending, but avoid a state-machine dispatch for every text byte.
+		p.state=osc8Normal
+		if data[len(data)-1]==0x1b{p.state=osc8Escape}
+		return nil
+	}
 	var out []osc8Event
 	for _,b:=range data{
 		switch p.state{

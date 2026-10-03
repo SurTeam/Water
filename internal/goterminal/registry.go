@@ -43,6 +43,7 @@ type Terminal struct {
 	closed     chan struct{}
 	readerDone    chan struct{}
 	resizeRequests chan resizeRequest
+	rawFlushRequests chan rawFlushRequest
 	once          sync.Once
 }
 
@@ -87,16 +88,25 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 	if err != nil {
 		return nil, err
 	}
+	pollable, err := makePollablePTY(ptmx)
+	if err != nil {
+		_ = ptmx.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
+		_ = cmd.Wait()
+		return nil, err
+	}
+	ptmx = pollable
 	t := &Terminal{
-		ID:          uuid.New(),
-		cmd:         cmd,
-		ptmx:        ptmx,
-		size:        size,
-		replayLimit: r.replayLimit,
-		subs:        make(map[uint64]*subscriber),
-		closed:      make(chan struct{}),
-		readerDone:     make(chan struct{}),
-		resizeRequests: make(chan resizeRequest),
+		ID:               uuid.New(),
+		cmd:              cmd,
+		ptmx:             ptmx,
+		size:             size,
+		replayLimit:      r.replayLimit,
+		subs:             make(map[uint64]*subscriber),
+		closed:           make(chan struct{}),
+		readerDone:       make(chan struct{}),
+		resizeRequests:   make(chan resizeRequest),
+		rawFlushRequests: make(chan rawFlushRequest, 1),
 	}
 	r.mu.Lock()
 	r.terms[t.ID] = t
@@ -175,6 +185,11 @@ type resizeRequest struct {
 	done chan error
 }
 
+type rawFlushRequest struct {
+	ready chan struct{}
+	resume chan struct{}
+}
+
 func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
 	req:=resizeRequest{size:size.Normalized(),done:make(chan error,1)}
 	select {
@@ -251,103 +266,141 @@ func (t *Terminal) Close() error {
 func (t *Terminal) readLoop() {
 	defer close(t.readerDone)
 
-	raw:=make(chan []byte,rawReadQueueCapacity)
-	free:=make(chan []byte,rawReadQueueCapacity)
-	for i:=0;i<rawReadQueueCapacity;i++{
-		free<-make([]byte,readBlockBytes)
+	raw := make(chan []byte, rawReadQueueCapacity)
+	free := make(chan []byte, rawReadQueueCapacity)
+	for i := 0; i < rawReadQueueCapacity; i++ {
+		free <- make([]byte, readBlockBytes)
 	}
-	go t.rawReadLoop(raw,free)
+	rawReaderDone := make(chan struct{})
+	go func() { defer close(rawReaderDone); t.rawReadLoop(raw, free) }()
 
-	idleTimer:=time.NewTimer(time.Hour)
-	maxTimer:=time.NewTimer(time.Hour)
-	if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
-	if !maxTimer.Stop(){select{case <-maxTimer.C:default:}}
+	idleTimer := time.NewTimer(time.Hour)
+	maxTimer := time.NewTimer(time.Hour)
+	if !idleTimer.Stop() {
+		select {
+		case <-idleTimer.C:
+		default:
+		}
+	}
+	if !maxTimer.Stop() {
+		select {
+		case <-maxTimer.C:
+		default:
+		}
+	}
 	defer idleTimer.Stop()
 	defer maxTimer.Stop()
-	var idleC,maxC <-chan time.Time
+	var idleC, maxC <-chan time.Time
 
 	// Hold reader-owned blocks until flush, then allocate exactly the number of
 	// immutable bytes retained by replay/subscribers. This avoids reserving a
 	// full 128 KiB event buffer for every partially-filled micro-burst.
-	pending:=make([][]byte,0,rawReadQueueCapacity)
-	pendingBytes:=0
+	pending := make([][]byte, 0, rawReadQueueCapacity)
+	pendingBytes := 0
 
-	stopIdle:=func(){
-		if idleC==nil{return}
-		if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
-		idleC=nil
-	}
-	stopMax:=func(){
-		if maxC==nil{return}
-		if !maxTimer.Stop(){select{case <-maxTimer.C:default:}}
-		maxC=nil
-	}
-	resetIdle:=func(){
-		if idleC!=nil {
-			if !idleTimer.Stop(){select{case <-idleTimer.C:default:}}
+	stopIdle := func() {
+		if idleC == nil {
+			return
 		}
-		idleTimer.Reset(outputBatchIdle)
-		idleC=idleTimer.C
-	}
-	startMax:=func(){
-		if maxC!=nil{return}
-		maxTimer.Reset(outputBatchMaxAge)
-		maxC=maxTimer.C
-	}
-	returnPending:=func(){
-		for _,chunk:=range pending{
-			if cap(chunk)>=readBlockBytes{
-				free<-chunk[:readBlockBytes]
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
 			}
 		}
-		pending=pending[:0]
-		pendingBytes=0
+		idleC = nil
 	}
-	flush:=func(){
-		if pendingBytes==0{
+	stopMax := func() {
+		if maxC == nil {
+			return
+		}
+		if !maxTimer.Stop() {
+			select {
+			case <-maxTimer.C:
+			default:
+			}
+		}
+		maxC = nil
+	}
+	resetIdle := func() {
+		if idleC != nil {
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+		}
+		idleTimer.Reset(outputBatchIdle)
+		idleC = idleTimer.C
+	}
+	startMax := func() {
+		if maxC != nil {
+			return
+		}
+		maxTimer.Reset(outputBatchMaxAge)
+		maxC = maxTimer.C
+	}
+	returnPending := func() {
+		for _, chunk := range pending {
+			if cap(chunk) >= readBlockBytes {
+				free <- chunk[:readBlockBytes]
+			}
+		}
+		pending = pending[:0]
+		pendingBytes = 0
+	}
+	flush := func() {
+		if pendingBytes == 0 {
 			stopIdle()
 			stopMax()
 			return
 		}
-		data:=make([]byte,pendingBytes)
-		offset:=0
-		for _,chunk:=range pending{
-			offset+=copy(data[offset:],chunk)
+		data := make([]byte, pendingBytes)
+		offset := 0
+		for _, chunk := range pending {
+			offset += copy(data[offset:], chunk)
 		}
 		returnPending()
 		stopIdle()
 		stopMax()
 		t.publish(goprotocol.TerminalEvent{
-			Kind:goprotocol.OutputEvent,
-			Size:t.Size(),
-			Data:data,
+			Kind: goprotocol.OutputEvent,
+			Size: t.Size(),
+			Data: data,
 		})
 	}
-	appendChunk:=func(chunk []byte){
-		if len(chunk)==0{
-			if cap(chunk)>=readBlockBytes{free<-chunk[:readBlockBytes]}
+	appendChunk := func(chunk []byte) {
+		if len(chunk) == 0 {
+			if cap(chunk) >= readBlockBytes {
+				free <- chunk[:readBlockBytes]
+			}
 			return
 		}
-		if pendingBytes>0 && pendingBytes+len(chunk)>readBlockBytes{
+		if pendingBytes > 0 && pendingBytes+len(chunk) > readBlockBytes {
 			flush()
 		}
-		if pendingBytes==0{startMax()}
-		pending=append(pending,chunk)
-		pendingBytes+=len(chunk)
-		if pendingBytes>=readBlockBytes{
+		if pendingBytes == 0 {
+			startMax()
+		}
+		pending = append(pending, chunk)
+		pendingBytes += len(chunk)
+		if pendingBytes >= readBlockBytes {
 			flush()
-		}else{
+		} else {
 			// Match the Rust worker's micro-burst semantics: each useful read
 			// extends the idle window, while max age still bounds a continuous
 			// stream to five milliseconds.
 			resetIdle()
 		}
 	}
-	drainObserved:=func(){
+	drainObserved := func() {
 		for {
-			select{
-			case chunk,ok:=<-raw:
-				if !ok{return}
+			select {
+			case chunk, ok := <-raw:
+				if !ok {
+					return
+				}
 				appendChunk(chunk)
 			default:
 				return
@@ -356,43 +409,72 @@ func (t *Terminal) readLoop() {
 	}
 
 	for {
-		select{
-		case chunk,ok:=<-raw:
-			if !ok{
+		select {
+		case chunk, ok := <-raw:
+			if !ok {
 				flush()
 				return
 			}
 			appendChunk(chunk)
 		case <-idleC:
-			idleC=nil
+			idleC = nil
 			flush()
 		case <-maxC:
-			maxC=nil
+			maxC = nil
 			flush()
-		case req:=<-t.resizeRequests:
+		case req := <-t.resizeRequests:
+			// Pause the raw reader at a block boundary. A micro-burst can hold
+			// bytes outside raw, and those must keep their old geometry too.
+			barrier := rawFlushRequest{ready: make(chan struct{}), resume: make(chan struct{})}
+			select {
+			case t.rawFlushRequests <- barrier:
+			case <-rawReaderDone:
+			}
+			_ = t.ptmx.SetReadDeadline(time.Now())
+		waiting:
+			for {
+				select {
+				case chunk, ok := <-raw:
+					if !ok {
+						break waiting
+					}
+					appendChunk(chunk)
+				case <-barrier.ready:
+					break waiting
+				case <-rawReaderDone:
+					break waiting
+				case <-idleC:
+					idleC = nil
+					flush()
+				case <-maxC:
+					maxC = nil
+					flush()
+				}
+			}
 			// Serialize resize with every PTY block already observed by the
 			// reader. This matches the Rust worker's authoritative stream
 			// ordering: Output(old geometry) -> Resize -> Output(new geometry).
 			drainObserved()
 			flush()
-			err:=pty.Setsize(t.ptmx,&pty.Winsize{
-				Rows:uint16(req.size.Lines),
-				Cols:uint16(req.size.Columns),
+			err := pty.Setsize(t.ptmx, &pty.Winsize{
+				Rows: uint16(req.size.Lines),
+				Cols: uint16(req.size.Columns),
 			})
-			if err==nil{
+			if err == nil {
 				t.mu.Lock()
-				t.size=req.size
+				t.size = req.size
 				t.mu.Unlock()
 				t.publish(goprotocol.TerminalEvent{
-					Kind:goprotocol.ResizeEvent,
-					Size:req.size,
+					Kind: goprotocol.ResizeEvent,
+					Size: req.size,
 				})
 			}
-			req.done<-err
+			close(barrier.resume)
+			req.done <- err
 		case <-t.closed:
 			// Closing ptmx wakes the raw reader. Keep draining until it closes
 			// so bytes already returned by the kernel still precede Exit.
-			for chunk:=range raw{
+			for chunk := range raw {
 				appendChunk(chunk)
 			}
 			flush()
@@ -401,26 +483,104 @@ func (t *Terminal) readLoop() {
 	}
 }
 
-func (t *Terminal) rawReadLoop(out chan<- []byte,free <-chan []byte){
+func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 	defer close(out)
+	raw, err := t.ptmx.SyscallConn()
+	if err != nil {
+		return
+	}
 	var buf []byte
+	pause := func(request rawFlushRequest) bool {
+		_ = t.ptmx.SetReadDeadline(time.Time{})
+		close(request.ready)
+		select {
+		case <-request.resume:
+			return true
+		case <-t.closed:
+			return false
+		}
+	}
 	for {
-		if buf==nil{
-			buf=<-free
-		}
-		buf=buf[:readBlockBytes]
-
-		gometrics.PTYReadCalls.Add(1)
-		n,err:=t.ptmx.Read(buf)
-		if n>0{
-			gometrics.PTYBytesRead.Add(uint64(n))
-			out<-buf[:n]
-			buf=nil
-		}
-		if err!=nil{
-			if !errors.Is(err,io.EOF){
-				// Darwin/Linux PTYs commonly surface EIO after child exit.
+		select {
+		case request := <-t.rawFlushRequests:
+			if !pause(request) {
+				return
 			}
+		default:
+		}
+		if buf == nil {
+			select {
+			case buf = <-free:
+			case request := <-t.rawFlushRequests:
+				if !pause(request) {
+					return
+				}
+				continue
+			case <-t.closed:
+				return
+			}
+		}
+		buf = buf[:readBlockBytes]
+
+		n := 0
+		var readErr error
+		// Drain immediately available bytes into one reader-owned block. Only
+		// park when the block is empty; a short read must not trigger a channel
+		// handoff/timer reset for every ~1 KiB Darwin PTY fragment.
+		err := raw.Read(func(fd uintptr) bool {
+			var burstStarted, lastData time.Time
+			wouldBlocks := 0
+			for n < len(buf) {
+				gometrics.PTYReadCalls.Add(1)
+				count, callErr := syscall.Read(int(fd), buf[n:])
+				if count > 0 {
+					n += count
+					gometrics.PTYBytesRead.Add(uint64(count))
+					lastData = time.Now()
+					if burstStarted.IsZero() {
+						burstStarted = lastData
+					}
+					wouldBlocks = 0
+				}
+				if errors.Is(callErr, syscall.EINTR) {
+					continue
+				}
+				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
+					if n == 0 {
+						return false
+					}
+					// Match the existing Rust reader's bounded successful-data
+					// micro-burst. Never spin on empty/spurious readiness.
+					wouldBlocks++
+					now := time.Now()
+					if wouldBlocks >= 64 || now.Sub(lastData) >= outputBatchIdle || now.Sub(burstStarted) >= outputBatchMaxAge {
+						return true
+					}
+					continue
+				}
+				if callErr != nil {
+					readErr = callErr
+					return true
+				}
+				if count == 0 {
+					readErr = io.EOF
+					return true
+				}
+				if time.Since(burstStarted) >= outputBatchMaxAge {
+					return true
+				}
+			}
+			return true
+		})
+		if n > 0 {
+			out <- buf[:n]
+			buf = nil
+		}
+		if err != nil || readErr != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			// Darwin/Linux PTYs commonly surface EIO after child exit.
 			return
 		}
 	}

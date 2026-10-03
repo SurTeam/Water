@@ -29,7 +29,7 @@ const (
 
 func terminalBenchmarkCommand() string {
 	if command:=os.Getenv("WATER_GO_BENCH_COMMAND");command!="" { return command }
-	return "yes WATER_GO_BENCH | head -c 64000000"
+	return bufferedTerminalCommand("WATER_GO_BENCH", benchBytes)
 }
 
 func BenchmarkTerminalDirect64MB(b *testing.B) {
@@ -149,7 +149,7 @@ func reportPTYReadMetrics(b *testing.B,callsStart,bytesStart uint64){
 
 func multiPaneBenchmarkCommand() string {
 	if command:=os.Getenv("WATER_GO_MULTI_BENCH_COMMAND");command!="" { return command }
-	return "yes WATER_GO_MULTI | head -c 16000000"
+	return bufferedTerminalCommand("WATER_GO_MULTI", multiPaneBytes)
 }
 
 type multiPaneResult struct {

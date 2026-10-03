@@ -37,8 +37,6 @@ func (values *stringListFlag) Set(value string) error {
 	return nil
 }
 
-var localConnectionID=uuid.MustParse("00000000-0000-0000-0000-000000000001")
-
 func Run(arguments []string, buildVariant string) error {
 	var socket string
 	var configPath string
@@ -94,7 +92,7 @@ func runWindowWithConnections(socket,configPath string,cfg goconfig.AppConfig,bu
 		}
 		localView:=goui.NewWorkspaceClientWithConnection(localSession,w.Invalidate,cfg,"")
 		if err:=multi.AddConnection(goui.ConnectionEntry{
-			ID:localConnectionID,
+			ID:uuid.New(),
 			Name:"Local",
 			Kind:"local",
 			Status:"connected",

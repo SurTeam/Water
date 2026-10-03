@@ -3,7 +3,20 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATER_BIN="${WATER_BIN:-$ROOT/target/go-ui-smoke/water}"
-TMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/water-go-ui-smoke-$$"
+PYTHON="${WATER_PYTHON:-$HOME/.venv/bin/python}"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+case "$(uname -s)" in
+  Darwin) ;;
+  Linux)
+    [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]] || {
+      echo "error: GUI smoke requires DISPLAY or WAYLAND_DISPLAY" >&2
+      exit 1
+    }
+    ;;
+  *) echo "error: GUI smoke supports macOS and Linux" >&2; exit 1 ;;
+esac
+# Keep control socket paths below Darwin's Unix socket path limit.
+TMP_ROOT="$(mktemp -d /tmp/water-go-ui-smoke.XXXXXX)"
 SOCKET="$TMP_ROOT/water.sock"
 CONFIG="$TMP_ROOT/config.json"
 LOG="$TMP_ROOT/water-gui.log"
@@ -56,6 +69,11 @@ JSON
 gui_pid=$!
 
 for _ in $(seq 1 240); do
+  if ! kill -0 "$gui_pid" 2>/dev/null; then
+    echo "Water GUI exited before control readiness" >&2
+    cat "$LOG" >&2 || true
+    exit 1
+  fi
   if "$WATER_BIN" --socket "$SOCKET" ping >/dev/null 2>&1; then
     break
   fi
@@ -66,8 +84,13 @@ done
 # Wait for a real Gio frame to populate actual clickable geometry.
 hit=""
 for _ in $(seq 1 240); do
+  if ! kill -0 "$gui_pid" 2>/dev/null; then
+    echo "Water GUI exited before its first frame" >&2
+    cat "$LOG" >&2 || true
+    exit 1
+  fi
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
-    hit="$(python3 - "$SNAPSHOT" <<'PY'
+    hit="$("$PYTHON" - "$SNAPSHOT" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 for hit in data.get("automation_hits", []):
@@ -93,7 +116,7 @@ fi
 
 read -r click_x click_y <<<"$hit"
 "$WATER_BIN" --socket "$SOCKET" state >"$STATE_BEFORE"
-before_count="$(python3 - "$STATE_BEFORE" <<'PY'
+before_count="$("$PYTHON" - "$STATE_BEFORE" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 print(len(data.get("workspaces", [])))
@@ -105,7 +128,7 @@ PY
 changed=0
 for _ in $(seq 1 160); do
   "$WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER"
-  after_count="$(python3 - "$STATE_AFTER" <<'PY'
+  after_count="$("$PYTHON" - "$STATE_AFTER" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 print(len(data.get("workspaces", [])))
@@ -125,15 +148,13 @@ if [[ "$changed" != "1" ]]; then
   exit 1
 fi
 
-# Exercise the real X11 clipboard and keyboard path rather than the internal
-# automation helpers. Focus the visible terminal pane, put a shell command in
-# the clipboard, press Ctrl+V, then Return, and verify the PTY output.
+# Resolve the terminal from the same rendered revision as its hit geometry.
 pane_hit=""
 terminal_id=""
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null &&
      "$WATER_BIN" --socket "$SOCKET" state >"$STATE_AFTER" 2>/dev/null; then
-    pane_info="$(python3 - "$SNAPSHOT" "$STATE_AFTER" <<'PY'
+    pane_info="$("$PYTHON" - "$SNAPSHOT" "$STATE_AFTER" <<'PY'
 import json, sys
 snapshot=json.load(open(sys.argv[1]))
 state=json.load(open(sys.argv[2]))
@@ -176,52 +197,21 @@ if [[ -z "$pane_hit" || -z "$terminal_id" ]]; then
   exit 1
 fi
 
-window_id="$(xdotool search --onlyvisible --name 'Water' 2>/dev/null | head -n1 || true)"
-if [[ -z "$window_id" ]]; then
-  echo "could not find visible Water X11 window" >&2
-  exit 1
-fi
 read -r pane_x pane_y <<<"$pane_hit"
-xdotool windowfocus --sync "$window_id"
-xdotool mousemove --window "$window_id" "$pane_x" "$pane_y" click 1
-sleep 0.15
+"$WATER_BIN" --socket "$SOCKET" ui click --x "$pane_x" --y "$pane_y" >/dev/null
 
-# First prove that the real X11 keyboard/focus path reaches Gio and the PTY.
-xdotool type --delay 3 'echo WATER_X11_KEY_SMOKE'
-xdotool key Return
+# Control input goes through Gio TerminalInput and the command dispatcher.
+# This validates client/server delivery; native clipboard/IME are manual gates.
+marker="WATER_Go_KEY_SMOKE_$$"
+"$WATER_BIN" --socket "$SOCKET" ui key "text:printf 'WATER_Go_%s\\n' 'KEY_SMOKE_$$'" >/dev/null
+"$WATER_BIN" --socket "$SOCKET" ui key Return >/dev/null
 if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
     --terminal "$terminal_id" \
-    --text WATER_X11_KEY_SMOKE \
+    --text "$marker" \
     --timeout-ms 5000 >/dev/null; then
-  echo "real X11 keyboard input did not reach the PTY" >&2
-  echo "window_id=$window_id focused=$(xdotool getwindowfocus 2>/dev/null || true) pane=$pane_hit terminal=$terminal_id" >&2
+  echo "Gio control keyboard input did not reach the PTY" >&2
   cat "$SNAPSHOT" >&2 2>/dev/null || true
   cat "$STATE_AFTER" >&2 2>/dev/null || true
-  cat "$LOG" >&2 || true
-  exit 1
-fi
-
-# Then isolate the clipboard path. Verify the X selection itself before asking
-# Gio to read it, and send the shortcut to the already-focused window.
-clipboard_text='echo WATER_CLIPBOARD_SMOKE'
-printf '%s' "$clipboard_text" | xclip -selection clipboard
-sleep 0.1
-clipboard_readback="$(xclip -selection clipboard -o 2>/dev/null || true)"
-if [[ "$clipboard_readback" != "$clipboard_text" ]]; then
-  echo "X11 clipboard self-check failed: got '$clipboard_readback'" >&2
-  exit 1
-fi
-
-xdotool key ctrl+v
-sleep 0.15
-xdotool key Return
-
-if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
-    --terminal "$terminal_id" \
-    --text WATER_CLIPBOARD_SMOKE \
-    --timeout-ms 5000 >/dev/null; then
-  echo "real Gio clipboard paste did not reach the PTY after keyboard path succeeded" >&2
-  echo "window_id=$window_id focused=$(xdotool getwindowfocus 2>/dev/null || true) pane=$pane_hit terminal=$terminal_id" >&2
   cat "$LOG" >&2 || true
   exit 1
 fi
@@ -229,7 +219,7 @@ fi
 remote_hit=""
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
-    remote_hit="$(python3 - "$SNAPSHOT" <<'PY'
+    remote_hit="$("$PYTHON" - "$SNAPSHOT" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 for hit in data.get("automation_hits", []):
@@ -258,7 +248,7 @@ read -r remote_x remote_y <<<"$remote_hit"
 remote_form=0
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
-    remote_form="$(python3 - "$SNAPSHOT" <<'PY'
+    remote_form="$("$PYTHON" - "$SNAPSHOT" <<'PY'
 import json, sys
 data=json.load(open(sys.argv[1]))
 print(1 if data.get("remote_form_visible") else 0)
@@ -278,7 +268,7 @@ if [[ "$remote_form" != "1" ]]; then
 fi
 
 "$WATER_BIN" --socket "$SOCKET" ui screenshot --output "$SCREENSHOT" >/dev/null
-python3 - "$SCREENSHOT" <<'PY'
+"$PYTHON" - "$SCREENSHOT" <<'PY'
 import pathlib, sys
 data=pathlib.Path(sys.argv[1]).read_bytes()
 if len(data) < 8 or data[:8] != b"\x89PNG\r\n\x1a\n":

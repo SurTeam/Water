@@ -26,6 +26,13 @@ type performanceSample struct {
 	queueCap   int
 }
 
+// Buffer the producer's writes without changing the byte stream. BSD yes
+// writes one line at a time, making Darwin PTY syscall overhead dominate the
+// emulator/transport measurement. dd combines those writes on both platforms.
+func bufferedTerminalCommand(marker string, size int) string {
+	return fmt.Sprintf("yes %s | head -c %d | dd obs=65536 2>/dev/null", marker, size)
+}
+
 func (s performanceSample) mbps() float64 {
 	if s.duration <= 0 {
 		return 0
@@ -82,7 +89,7 @@ func measureDirectPerformance(t *testing.T) performanceSample {
 
 	term, err := registry.Spawn(
 		"/bin/sh",
-		[]string{"-c", fmt.Sprintf("read _; yes WATER_GO_PERF | head -c %d", performanceGateBytes)},
+		[]string{"-c", "read _; " + bufferedTerminalCommand("WATER_GO_PERF", performanceGateBytes)},
 		goprotocol.TerminalSize{Columns: 80, Lines: 24},
 	)
 	if err != nil {
@@ -124,6 +131,9 @@ func measureDirectPerformance(t *testing.T) performanceSample {
 			case goprotocol.ResizeEvent:
 				emu.Resize(ev.Size.Columns, ev.Size.Lines)
 			case goprotocol.ExitEvent:
+				if total < performanceGateBytes {
+					t.Fatalf("direct terminal received %d bytes, want at least %d", total, performanceGateBytes)
+				}
 				_ = emu.Snapshot()
 				return performanceSample{
 					bytes: total, duration: time.Since(start),
@@ -161,7 +171,7 @@ func measureServerPerformance(t *testing.T) performanceSample {
 	if err := client.Dispatch(map[string]any{
 		"type": "terminal.spawn",
 		"program": "/bin/sh",
-		"args": []string{"-c", fmt.Sprintf("read _; yes WATER_GO_PERF | head -c %d", performanceGateBytes)},
+		"args": []string{"-c", "read _; " + bufferedTerminalCommand("WATER_GO_PERF", performanceGateBytes)},
 		"columns": 80,
 		"lines": 24,
 	}, &spawned); err != nil {
@@ -226,6 +236,9 @@ func measureServerPerformance(t *testing.T) performanceSample {
 			case goprotocol.ResizeEvent:
 				emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)
 			case goprotocol.ExitEvent:
+				if total < performanceGateBytes {
+					t.Fatalf("server terminal received %d bytes, want at least %d", total, performanceGateBytes)
+				}
 				_ = emu.Snapshot()
 				var metrics map[string]any
 				if err := client.Call("debug.metrics", map[string]any{}, &metrics); err != nil {

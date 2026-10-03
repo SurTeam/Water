@@ -86,41 +86,48 @@ func TestApplyStateIgnoresOlderRevision(t *testing.T){
 }
 
 
-func TestUISnapshotReportsOnlyActiveTerminalIMEState(t *testing.T){
-	activeID:=uuid.New()
-	inactiveID:=uuid.New()
-	client:=&WorkspaceClient{
-		terminals:map[uuid.UUID]*terminalClient{
-			activeID:{
-				id:activeID,
-				imePreedit:"输入法测试Water2026",
-				imeComposing:true,
+func TestUISnapshotReportsOnlyActiveTerminalIMEState(t *testing.T) {
+	activeID := uuid.New()
+	inactiveID := uuid.New()
+	client := &WorkspaceClient{
+		terminals: map[uuid.UUID]*terminalClient{
+			activeID: {
+				id:           activeID,
+				lastSeq:      42,
+				imePreedit:   "输入法测试Water2026",
+				imeComposing: true,
 			},
-			inactiveID:{
-				id:inactiveID,
-				imePreedit:"wrong",
-				imeComposing:true,
+			inactiveID: {
+				id:           inactiveID,
+				imePreedit:   "wrong",
+				imeComposing: true,
 			},
 		},
-		frameActiveTerminal:activeID,
+		frameActiveTerminal: activeID,
 	}
 
-	snapshot:=client.uiSnapshot()
-	if got,ok:=snapshot["ime_preedit"].(string);!ok || got!="输入法测试Water2026"{
-		t.Fatalf("ime_preedit = %#v",snapshot["ime_preedit"])
+	snapshot := client.uiSnapshot()
+	if got := snapshot["active_terminal_last_seq"]; got != uint64(42) {
+		t.Fatalf("active terminal sequence = %#v", got)
 	}
-	if got,ok:=snapshot["ime_composing"].(bool);!ok || !got{
-		t.Fatalf("ime_composing = %#v",snapshot["ime_composing"])
+	if got, ok := snapshot["ime_preedit"].(string); !ok || got != "输入法测试Water2026" {
+		t.Fatalf("ime_preedit = %#v", snapshot["ime_preedit"])
+	}
+	if got, ok := snapshot["ime_composing"].(bool); !ok || !got {
+		t.Fatalf("ime_composing = %#v", snapshot["ime_composing"])
 	}
 
 	client.layoutMu.Lock()
-	client.frameActiveTerminal=uuid.Nil
+	client.frameActiveTerminal = uuid.Nil
 	client.layoutMu.Unlock()
-	snapshot=client.uiSnapshot()
-	if got:=snapshot["ime_preedit"];got!=""{
-		t.Fatalf("inactive frame leaked preedit: %#v",got)
+	snapshot = client.uiSnapshot()
+	if got := snapshot["active_terminal_last_seq"]; got != uint64(0) {
+		t.Fatalf("inactive frame sequence = %#v", got)
 	}
-	if got:=snapshot["ime_composing"];got!=false{
-		t.Fatalf("inactive frame leaked composing state: %#v",got)
+	if got := snapshot["ime_preedit"]; got != "" {
+		t.Fatalf("inactive frame leaked preedit: %#v", got)
+	}
+	if got := snapshot["ime_composing"]; got != false {
+		t.Fatalf("inactive frame leaked composing state: %#v", got)
 	}
 }

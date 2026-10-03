@@ -155,12 +155,12 @@ func TestOrdinaryTerminalFastPathKeepsActiveOSC8Link(t *testing.T){
 	e:=New(20,2,100)
 	defer e.Close()
 
-	e.Write([]byte("]8;;https://example.com/fast\"))
+	e.Write([]byte("\x1b]8;;https://example.com/fast\x1b\\"))
 	if !e.canFastWriteOrdinary([]byte("linked\r\n")){
 		t.Fatal("ordinary ASCII/control chunk did not qualify for fast path")
 	}
 	e.Write([]byte("linked"))
-	e.Write([]byte("]8;;\"))
+	e.Write([]byte("\x1b]8;;\x1b\\"))
 
 	snap:=e.Snapshot()
 	for col:=0;col<len("linked");col++{

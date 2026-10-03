@@ -176,13 +176,60 @@ benchmark oracle while replacing both the Water client and server in Go.
 
 ## Remaining parity work
 
+### Native macOS verification, 2026-10-03
+
+- Core ANSI/PTY optimization now reduces the exact local `testTermCat` workload
+  from 1.879/1.933 s to 0.792/0.799 s median in matched direct/server headless
+  runs. The native GUI runs the unchanged script in 0.753/0.685/0.653 s `real`;
+  its client consumed sequence is verified through the final marker. See
+  [testtermcat-performance.md](testtermcat-performance.md) for measurement
+  boundaries, allocation changes, bounded reader batching/resize barriers,
+  validation, and remaining GUI/Linux verification limits.
+- Restored the module checksum lockfile and indirect dependency declarations;
+  repaired malformed OSC 8 escape literals in the VT regression tests.
+- Full Go tests, `go vet`, client/server/PTY/VT/UI race checks, and all four
+  existing scenarios pass on native Darwin arm64 with Go 1.27.1.
+- Default throughput producers now buffer identical text through
+  `dd obs=65536`. BSD `yes` otherwise produces tiny PTY reads that measure
+  generator/kernel overhead rather than terminal processing. The 32 MB gate
+  also verifies that both paths receive the complete payload before Exit.
+  Historical throughput numbers above used the previous producer and should
+  not be compared directly with the buffered default. Command overrides still
+  permit the original producer for matched Rust/Go comparisons.
+- Scenario and Go UI smoke harnesses use unique short `/tmp` paths to avoid
+  Darwin Unix-socket path limits under long system/runner temporary paths.
+- Native Darwin arm64 GUI smoke now **passes** in an awake desktop session:
+  a real Gio frame exposes hit geometry, `ui.click` creates a workspace and
+  opens the remote form, control keyboard input reaches the PTY, and a
+  1920×1280 PNG screenshot renders successfully. The earlier sleeping-display
+  display-link failure remains an environment limitation, not a passing gate.
+- The Go GUI smoke now runs on macOS and Linux through Water's own control
+  API, with no system input injection. Terminal control keys use Gio's focused
+  `TerminalInput` handler; regression coverage verifies mixed-case/UTF-8 text,
+  application-cursor mode, modified keys, and function keys. Local GUI
+  connection identities now use complete random UUIDv4 values.
+- Configured workspace/tab/pane shortcuts now also run from real focused Gio
+  key events, through the same command dispatch used by control automation.
+  Handled shortcuts are consumed before terminal encoding; unmatched terminal
+  keys continue through the normal input handler.
+- Native OS clipboard and system IME behavior remain manual validation gates;
+  control input does not establish native input-method or clipboard parity.
+
 The automated rewrite gates now cover the headless protocol, terminal stream,
 scenario suite, performance smoke tests, selection/scrollback behavior,
 graphics, multi-connection remote transport, Linux/macOS package construction,
-bidirectional Rust/Go control+WT4 compatibility, and bidirectional real-window
-keyboard/clipboard/screenshot behavior under Xvfb.
+bidirectional Rust/Go control+WT4 compatibility, and real-window
+control-input/click/screenshot behavior. Earlier cross-language Xvfb harnesses
+also exercised keyboard/clipboard behavior; the portable Go-only smoke does
+not substitute for native OS clipboard validation.
 
 Only credentialed/manual environment validation remains:
+
+- **Native clipboard session.** Select and copy terminal text, paste through
+  the configured platform shortcut, and verify the exact UTF-8 result in the
+  PTY. The automated input handler tests cover clipboard transfer and
+  bracketed-paste framing, but the portable smoke does not drive the OS
+  clipboard or claim this manual gate has passed.
 
 - **Native system IME session.** Deterministic Gio IME state-machine coverage is
   automated, including caret/snippet publication, preedit isolation/rendering,
@@ -226,7 +273,8 @@ Only credentialed/manual environment validation remains:
   the ticket, re-extracts the final archive, and verifies the signed/stapled
   bundle before publication.
 
-Do not merge `go-rewrite` into `main` until the credentialed Apple path and
-one true system-IME desktop session are executed or explicitly waived. All
+Do not merge `go-rewrite` into `main` until the credentialed Apple path,
+native clipboard, and one true system-IME desktop session are executed or
+explicitly waived. All
 other protocol, scenario, performance, packaging, cross-language, and
 real-window compatibility gates are automated.

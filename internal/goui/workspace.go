@@ -12,6 +12,7 @@ import (
 
 	"gioui.org/f32"
 	"gioui.org/io/input"
+	"gioui.org/io/key"
 	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
@@ -355,79 +356,87 @@ func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage)
 
 func (c *WorkspaceClient) uiSnapshot() map[string]any {
 	c.mu.RLock()
-	terms:=make([]*terminalClient,0,len(c.terminals))
-	for _,term:=range c.terminals{terms=append(terms,term)}
+	terms := make([]*terminalClient, 0, len(c.terminals))
+	for _, term := range c.terminals {
+		terms = append(terms, term)
+	}
 	c.mu.RUnlock()
 
 	c.layoutMu.Lock()
-	hits:=make([]map[string]any,0,len(c.hitRegions))
-	for _,hit:=range c.hitRegions{
-		hits=append(hits,map[string]any{
-			"kind":automationHitKindName(hit.Kind),
-			"id":hit.ID,
-			"rect":[]int{hit.Rect.Min.X,hit.Rect.Min.Y,hit.Rect.Max.X,hit.Rect.Max.Y},
+	hits := make([]map[string]any, 0, len(c.hitRegions))
+	for _, hit := range c.hitRegions {
+		hits = append(hits, map[string]any{
+			"kind": automationHitKindName(hit.Kind),
+			"id":   hit.ID,
+			"rect": []int{hit.Rect.Min.X, hit.Rect.Min.Y, hit.Rect.Max.X, hit.Rect.Max.Y},
 		})
 	}
-	frameSize:=c.frameSize
-	frameStateRevision:=c.frameStateRevision
-	frameActiveWorkspace:=c.frameActiveWorkspace
-	frameFocusedPane:=c.frameFocusedPane
-	frameActiveTerminal:=c.frameActiveTerminal
+	frameSize := c.frameSize
+	frameStateRevision := c.frameStateRevision
+	frameActiveWorkspace := c.frameActiveWorkspace
+	frameFocusedPane := c.frameFocusedPane
+	frameActiveTerminal := c.frameActiveTerminal
 	c.layoutMu.Unlock()
 
-	visibleCells:=0
-	preparedRows:=0
-	imageTextures:=0
-	graphicsBytes:=0
-	activeIMEPreedit:=""
-	activeIMEComposing:=false
-	for _,term:=range terms{
+	visibleCells := 0
+	preparedRows := 0
+	imageTextures := 0
+	graphicsBytes := 0
+	activeIMEPreedit := ""
+	activeIMEComposing := false
+	activeTerminalLastSeq := uint64(0)
+	for _, term := range terms {
 		term.mu.RLock()
-		snapshot:=term.snapshot
-		emu:=term.emu
-		view:=term.view
-		imePreedit:=term.imePreedit
-		imeComposing:=term.imeComposing
-		termID:=term.id
+		snapshot := term.snapshot
+		emu := term.emu
+		view := term.view
+		imePreedit := term.imePreedit
+		imeComposing := term.imeComposing
+		termID := term.id
+		lastSeq := term.lastSeq
 		term.mu.RUnlock()
-		if termID==frameActiveTerminal {
-			activeIMEPreedit=imePreedit
-			activeIMEComposing=imeComposing
+		if termID == frameActiveTerminal {
+			activeTerminalLastSeq = lastSeq
+			activeIMEPreedit = imePreedit
+			activeIMEComposing = imeComposing
 		}
-		visibleCells+=snapshot.Cols*snapshot.Rows
-		if emu!=nil{graphicsBytes+=emu.ImageBytes()}
-		if view!=nil{
-			stats:=view.CacheStats()
-			preparedRows+=stats.PreparedRows
-			imageTextures+=stats.ImageTextures
+		visibleCells += snapshot.Cols * snapshot.Rows
+		if emu != nil {
+			graphicsBytes += emu.ImageBytes()
+		}
+		if view != nil {
+			stats := view.CacheStats()
+			preparedRows += stats.PreparedRows
+			imageTextures += stats.ImageTextures
 		}
 	}
 	c.connectionMu.RLock()
-	remoteFormVisible:=c.remoteFormVisible
-	remoteConnecting:=c.remoteConnecting
-	remoteError:=c.remoteError
+	remoteFormVisible := c.remoteFormVisible
+	remoteConnecting := c.remoteConnecting
+	remoteError := c.remoteError
 	c.connectionMu.RUnlock()
 
 	return map[string]any{
-		"window_count":1,
-		"has_active_window":true,
-		"attached_terminal_count":len(terms),
-		"visible_cells":visibleCells,
-		"prepared_row_cache_entries":preparedRows,
-		"image_texture_cache_entries":imageTextures,
-		"terminal_graphics_bytes":graphicsBytes,
-		"frame_size":[]int{frameSize.X,frameSize.Y},
-		"frame_state_revision":frameStateRevision,
-		"frame_active_workspace":frameActiveWorkspace,
-		"frame_focused_pane":frameFocusedPane,
-		"frame_active_terminal":frameActiveTerminal,
-		"ime_preedit":activeIMEPreedit,
-		"ime_composing":activeIMEComposing,
-		"automation_hits":hits,
-		"connections":c.connectionListResponse()["connections"],
-		"remote_form_visible":remoteFormVisible,
-		"remote_connecting":remoteConnecting,
-		"remote_error":remoteError,
+		"window_count":                1,
+		"has_active_window":           true,
+		"attached_terminal_count":     len(terms),
+		"visible_cells":               visibleCells,
+		"prepared_row_cache_entries":  preparedRows,
+		"image_texture_cache_entries": imageTextures,
+		"terminal_graphics_bytes":     graphicsBytes,
+		"frame_size":                  []int{frameSize.X, frameSize.Y},
+		"frame_state_revision":        frameStateRevision,
+		"frame_active_workspace":      frameActiveWorkspace,
+		"frame_focused_pane":          frameFocusedPane,
+		"frame_active_terminal":       frameActiveTerminal,
+		"active_terminal_last_seq":    activeTerminalLastSeq,
+		"ime_preedit":                 activeIMEPreedit,
+		"ime_composing":               activeIMEComposing,
+		"automation_hits":             hits,
+		"connections":                 c.connectionListResponse()["connections"],
+		"remote_form_visible":         remoteFormVisible,
+		"remote_connecting":           remoteConnecting,
+		"remote_error":                remoteError,
 	}
 }
 
@@ -447,6 +456,22 @@ func automationHitKindName(kind automationHitKind)string{
 }
 
 func (c *WorkspaceClient) dispatchAutomationKeystroke(spec string)bool{
+	if c.dispatchShortcut(spec){return true}
+	id,ok:=c.activeTerminalID()
+	if !ok{return false}
+	c.layoutMu.Lock()
+	defer c.layoutMu.Unlock()
+	c.mu.RLock()
+	term:=c.terminals[id]
+	c.mu.RUnlock()
+	if term==nil || term.input==nil{return false}
+	term.mu.RLock()
+	snapshot:=term.snapshot
+	term.mu.RUnlock()
+	return routeAutomationInput(term.input,snapshot,spec)
+}
+
+func (c *WorkspaceClient) dispatchShortcut(spec string)bool{
 	key:=strings.ToLower(strings.TrimSpace(spec))
 	switch key {
 	case strings.ToLower(c.config.Shortcuts.NewTerminalTab), "command-t", "ctrl-shift-t":
@@ -470,42 +495,24 @@ func (c *WorkspaceClient) dispatchAutomationKeystroke(spec string)bool{
 	case strings.ToLower(c.config.Shortcuts.FocusDown), "cmd-down", "command-down":
 		return c.focusDirection("down")
 	}
-	data:=automationKeyBytes(key)
-	if len(data)==0{return false}
-	id,ok:=c.activeTerminalID()
-	if !ok{return false}
-	_ = c.session.DispatchAsync(map[string]any{
-		"type":"terminal.send_bytes",
-		"terminal_id":id,
-		"bytes":bytesAsInts(data),
-	})
-	return true
+	return false
 }
 
-func automationKeyBytes(spec string)[]byte{
-	switch spec {
-	case "enter","return": return []byte("\r")
-	case "tab": return []byte("\t")
-	case "escape","esc": return []byte{0x1b}
-	case "backspace": return []byte{0x7f}
-	case "up": return []byte("\x1b[A")
-	case "down": return []byte("\x1b[B")
-	case "right": return []byte("\x1b[C")
-	case "left": return []byte("\x1b[D")
-	case "home": return []byte("\x1b[H")
-	case "end": return []byte("\x1b[F")
-	case "pageup","page-up": return []byte("\x1b[5~")
-	case "pagedown","page-down": return []byte("\x1b[6~")
-	case "ctrl-l": return []byte{0x0c}
-	case "ctrl-c": return []byte{0x03}
-	case "ctrl-d": return []byte{0x04}
-	case "ctrl-z": return []byte{0x1a}
+func (c *WorkspaceClient) dispatchWindowShortcut(ev key.Event)bool{
+	shortcuts:=c.config.Shortcuts
+	for _,spec:=range []string{
+		shortcuts.NewTerminalTab,shortcuts.NewWorkspace,shortcuts.ClosePane,
+		shortcuts.PromotePaneToTab,shortcuts.FocusLeft,shortcuts.FocusRight,
+		shortcuts.FocusUp,shortcuts.FocusDown,
+	}{
+		parsed,ok:=automationInputEvent(spec)
+		if !ok{continue}
+		want,ok:=parsed.(key.Event)
+		if ok && ev.Name==want.Name && ev.Modifiers==want.Modifiers{
+			return c.dispatchShortcut(spec)
+		}
 	}
-	if strings.HasPrefix(spec,"text:"){
-		return []byte(strings.TrimPrefix(spec,"text:"))
-	}
-	if len([]rune(spec))==1{return []byte(spec)}
-	return nil
+	return false
 }
 
 func (c *WorkspaceClient) focusDirection(direction string)bool{
@@ -673,6 +680,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		view:view,
 	}
 	term.input=&TerminalInput{
+		OnShortcut:c.dispatchWindowShortcut,
 		BracketedPaste:c.config.Features.BracketedPaste,
 		Hyperlinks:c.config.Terminal.Hyperlinks,
 		HyperlinkCommandClick:c.config.Terminal.HyperlinkCommandClick,

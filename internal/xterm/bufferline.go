@@ -346,6 +346,27 @@ func (bl *BufferLine) ReplaceCells(start, end int, fillCell *CellData, respectPr
 	if end < bl.Len && bl.GetWidth(end-1) == 2 {
 		bl.SetCellFromCodepoint(end, 0, 1, &fillCell.AttributeData)
 	}
+	if fillCell.Content&ContentIsCombinedMask == 0 && fillCell.Bg&BgFlagHasExtended == 0 {
+		end = min(end, bl.Len)
+		// Packed cells need only three stores. Sparse metadata is cleared once
+		// per range instead of probing two maps on every erased column.
+		for column := range bl.combined {
+			if column >= start && column < end {
+				delete(bl.combined, column)
+			}
+		}
+		for column := range bl.extendedAttrs {
+			if column >= start && column < end {
+				delete(bl.extendedAttrs, column)
+			}
+		}
+		for index := start * cellSize; index < end*cellSize; index += cellSize {
+			bl.data[index+cellContent] = fillCell.Content
+			bl.data[index+cellFg] = fillCell.Fg
+			bl.data[index+cellBg] = fillCell.Bg
+		}
+		return
+	}
 	for start < end && start < bl.Len {
 		bl.SetCell(start, fillCell)
 		start++
