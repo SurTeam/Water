@@ -58,6 +58,7 @@ type nativeView struct {
 	rename                                   *nativeRename
 }
 type nativeDrag struct {
+	sidebarWidth                    float32
 	kind                            automationHitKind
 	hit                             automationHit
 	split                           nativeSplit

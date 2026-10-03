@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -11,6 +12,48 @@ import (
 	"golang.org/x/image/font/gofont/gomono"
 	"golang.org/x/image/font/gofont/goregular"
 )
+
+func TestNativeFontFamiliesPreserveFallbackOrder(t *testing.T) {
+	got := nativeFontFamilies(" Go Mono , Go, , go mono, Apple Color Emoji ")
+	want := []string{"Go Mono", "Go", "Apple Color Emoji"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("font chain = %v, want %v", got, want)
+	}
+	f := testNativeFonts(nil)
+	f.loaded[fontKey{family: "Go Mono"}] = fontSource(gomono.TTF)
+	f.loaded[fontKey{family: "Go"}] = fontSource(goregular.TTF)
+	f.loaded[fontKey{family: "Missing"}] = nil
+	for _, names := range []string{"Go Mono, Go", "Go, Go Mono", "Missing, Go Mono, Go"} {
+		face := f.face(names, 24, true, false, false)
+		first := "Go Mono"
+		if names == "Go, Go Mono" {
+			first = "Go"
+		}
+		width, _ := text.Measure("iiiMMM", face, 0)
+		primaryWidth, _ := text.Measure("iiiMMM", &text.GoTextFace{Source: f.loaded[fontKey{family: first}], Size: 24}, 0)
+		if width != primaryWidth {
+			t.Fatalf("%s: first available font did not win: %g != %g", names, width, primaryWidth)
+		}
+	}
+}
+
+func TestNativeFontChainFallsBackPerGlyph(t *testing.T) {
+	path := "/System/Library/Fonts/Apple Color Emoji.ttc"
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("system emoji font unavailable")
+	}
+	f := testNativeFonts(readNativeFontRecords(path))
+	f.loaded[fontKey{family: "Go Mono"}] = fontSource(gomono.TTF)
+	f.loaded[fontKey{family: "Apple Color Emoji"}] = f.load(fontKey{family: "Apple Color Emoji"})
+	if f.loaded[fontKey{family: "Apple Color Emoji"}] == nil {
+		t.Fatal("emoji collection did not load")
+	}
+	face := f.face("Go Mono, Apple Color Emoji", 24, true, false, false)
+	glyphs := text.AppendLazyGlyphs(nil, "A🍺B", face, nil)
+	if len(glyphs) != 3 || !glyphs[1].Colored() || glyphs[1].GID == 0 || glyphs[0].Colored() || glyphs[2].Colored() {
+		t.Fatalf("fallback did not select emoji only for the missing glyph: %+v", glyphs)
+	}
+}
 
 func testNativeFonts(records []nativeFontRecord) *nativeFonts {
 	return &nativeFonts{records: records, loaded: map[fontKey]*text.GoTextFaceSource{},

@@ -204,6 +204,28 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 		}
 		h.dirtyRowTracker.MarkDirty(0)
 	case 2: // erase all
+		if buf.HasScrollback() && !respectProtect {
+			// Shell clear-screen (Ctrl+L) clears the live viewport while
+			// retaining its contents in bounded history, as in Water's
+			// Rust terminal. CSI 3 J remains the explicit history erase.
+			last := h.bufferService.Rows - 1
+			for last >= 0 && buf.Lines.Get(buf.YBase+last).GetTrimmedLength() == 0 {
+				last--
+			}
+			for n := 0; n <= last; n++ {
+				full := buf.Lines.IsFull()
+				buf.Lines.Push(buf.GetBlankLine(h.eraseAttrData(), false))
+				if !full {
+					buf.YBase++
+				} else if h.bufferService.IsUserScrolling {
+					buf.YDisp = max(0, buf.YDisp-1)
+				}
+			}
+			if !h.bufferService.IsUserScrolling {
+				buf.YDisp = buf.YBase
+			}
+			h.bufferService.OnScrollEmitter.Fire(buf.YDisp)
+		}
 		j := h.bufferService.Rows
 		h.dirtyRowTracker.MarkDirty(j - 1)
 		for j > 0 {

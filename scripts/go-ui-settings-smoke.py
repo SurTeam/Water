@@ -92,7 +92,7 @@ try:
                   ("Backspace", b"\x7f"), ("Delete", b"\x1b[3~"), ("Insert", b"\x1b[2~"),
                   ("Home", b"\x1b[H"), ("End", b"\x1b[F"), ("PageUp", b"\x1b[5~"), ("PageDown", b"\x1b[6~"),
                   ("Tab", b"\t"), ("shift-Tab", b"\x1b[Z"), ("Return", b"\r"), ("Escape", b"\x1b"),
-                  ("ctrl-a", b"\x01"), ("ctrl-c", b"\x03"), ("ctrl-z", b"\x1a"), ("ctrl-2", b"\x00"),
+                  ("ctrl-a", b"\x01"), ("ctrl-c", b"\x03"), ("ctrl-l", b"\x0c"), ("ctrl-z", b"\x1a"), ("ctrl-2", b"\x00"),
                   ("ctrl-[", b"\x1b"), ("ctrl-\\", b"\x1c"), ("ctrl-]", b"\x1d"), ("ctrl-6", b"\x1e"), ("ctrl-minus", b"\x1f"),
                   ("alt-x", b"\x1bx"), ("alt-shift-x", b"\x1bX"), ("alt-'", b"\x1b'"), ("alt-;", b"\x1b;"),
                   ("ctrl-alt-c", b"\x1b\x03"), ("ctrl-shift-Up", b"\x1b[1;6A"), ("alt-Backspace", b"\x1b\x7f"),
@@ -159,6 +159,8 @@ except KeyboardInterrupt:
     ctl("ui", "screenshot", "--output", str(directory / "settings.png"))
     edit("Terminal.FontSize", "18")
     edit("Terminal.LineHeight", "22")
+    font_chain = "Sarasa Term SC Nerd Font, Apple Color Emoji" if platform.system() == "Darwin" else "Go Mono, Noto Color Emoji"
+    edit("Terminal.FontFamily", font_chain)
     hit(label="category:UI")
     edit("UI.SidebarWidth", "240")
     hit(label="category:Theme")
@@ -179,9 +181,18 @@ except KeyboardInterrupt:
     if platform.system() == "Darwin":
         wait(lambda s: s["native_menu"].get("items", {}).get("hide-window", {}).get("modifiers") == (1 << 20 | 1 << 19), "native menu reflects updated shortcut")
     assert persisted["terminal"]["font_size"] == 18
+    assert persisted["terminal"]["font_family"] == font_chain
     assert persisted["theme"]["ansi_colors"][1] == "#ee5566"
     hit(kind="split_right")
     split = wait(lambda s: len([h for h in s.get("automation_hits", []) if h["kind"] == "pane"]) == 2, "horizontal split")
+    scale = split["frame_size"][0] / split["window_size"][0]
+    ui = split["effective_config"]["ui"]
+    panes = [h for h in split["automation_hits"] if h["kind"] == "pane"]
+    expected_top = split["titlebar_height"] + round((ui["window_padding"] + ui["pane_padding"]) * scale)
+    assert all(abs(h["rect"][1] - expected_top) <= 1 for h in panes), "split panes must not reserve a process header"
+    left_pane = min(panes, key=lambda h: h["rect"][0])
+    resize = next(h for h in split["automation_hits"] if h["kind"] == "sidebar_resize")
+    assert abs(left_pane["rect"][0] - round(ui["pane_padding"] * scale) - resize["rect"][2]) <= 1, "sidebar gap must only reserve the resize handle"
     divider = next(h for h in split["automation_hits"] if h["kind"] == "divider")
     before = [h["rect"][2]-h["rect"][0] for h in split["automation_hits"] if h["kind"] == "pane"]
     x0, y0, x1, y1 = divider["rect"]

@@ -137,10 +137,23 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 					styleIndex += 2
 				}
 				face := faces[styleIndex]
-				op := &text.DrawOptions{}
-				op.GeoM.Translate(float64(bounds.Min.X), cell.baseline-face.Metrics().HAscent)
-				op.ColorScale.ScaleWithColor(fg)
-				text.Draw(target.SubImage(bounds).(*ebiten.Image), run.text, face, op)
+				if rects, block := terminalDrawingRects(run.text, bounds.Dx(), lh); block {
+					for _, rect := range rects {
+						nativeRect(target, rect.Add(bounds.Min), fg)
+					}
+				} else {
+					op := &text.DrawOptions{}
+					if terminalEmoji(run.text) {
+						width, height := text.Measure(run.text, face, 0)
+						scale := min(1., float64(bounds.Dx())/max(1., width), float64(lh)/max(1., height))
+						op.GeoM.Scale(scale, scale)
+						op.GeoM.Translate(float64(bounds.Min.X)+(float64(bounds.Dx())-width*scale)/2, (float64(lh)-height*scale)/2)
+					} else {
+						op.GeoM.Translate(float64(bounds.Min.X), cell.baseline-face.Metrics().HAscent)
+					}
+					op.ColorScale.ScaleWithColor(fg)
+					text.Draw(target.SubImage(bounds).(*ebiten.Image), run.text, face, op)
+				}
 				if run.style.underline {
 					nativeRect(target, image.Rect(bounds.Min.X, lh-2, bounds.Max.X, lh-1), fg)
 				}
@@ -214,10 +227,16 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 				if snap.CursorY < len(snap.RowsData) && snap.CursorX < len(snap.RowsData[snap.CursorY].Cells) {
 					glyph := snap.RowsData[snap.CursorY].Cells[snap.CursorX].Text
 					if glyph != "" {
-						op := &text.DrawOptions{}
-						op.GeoM.Translate(float64(x), float64(y)+cell.baseline-faces[0].Metrics().HAscent)
-						op.ColorScale.ScaleWithColor(v.Theme.CursorForeground)
-						text.Draw(dst.SubImage(cursorRect.Intersect(dst.Bounds())).(*ebiten.Image), glyph, faces[0], op)
+						if rects, drawing := terminalDrawingRects(glyph, cw, lh); drawing {
+							for _, rect := range rects {
+								nativeRect(dst, rect.Add(image.Pt(x, y)).Intersect(cursorRect).Intersect(dst.Bounds()), v.Theme.CursorForeground)
+							}
+						} else {
+							op := &text.DrawOptions{}
+							op.GeoM.Translate(float64(x), float64(y)+cell.baseline-faces[0].Metrics().HAscent)
+							op.ColorScale.ScaleWithColor(v.Theme.CursorForeground)
+							text.Draw(dst.SubImage(cursorRect.Intersect(dst.Bounds())).(*ebiten.Image), glyph, faces[0], op)
+						}
 					}
 				}
 			}

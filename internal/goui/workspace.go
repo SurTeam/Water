@@ -942,7 +942,14 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		OnInput: func(data []byte) {
 			term.mu.Lock()
 			term.selection = Selection{}
+			if term.emu != nil {
+				term.emu.ScrollToBottom()
+				term.snapshot = term.emu.Snapshot()
+			}
 			term.mu.Unlock()
+			if c.invalidate != nil {
+				c.invalidate()
+			}
 			_ = c.session.DispatchAsync(map[string]any{
 				"type":        "terminal.send_bytes",
 				"terminal_id": summary.TerminalID,

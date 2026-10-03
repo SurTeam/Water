@@ -2,7 +2,11 @@ package xterm
 
 // Ported from xterm.js src/common/services/UnicodeService.ts and src/common/input/UnicodeV6.ts.
 
-import "unicode/utf8"
+import (
+	"unicode/utf8"
+
+	"golang.org/x/text/width"
+)
 
 // bmpCombining is the list of BMP combining character ranges (Unicode 6.0).
 var bmpCombining = [][2]int{
@@ -153,11 +157,16 @@ func (u *UnicodeService) Wcwidth(cp rune) int {
 	if num < 127 {
 		return 1
 	}
+	if num < 65536 && bmpWidthTable[num] == 0 || num >= 65536 && bisearch(num, highCombining) {
+		return 0
+	}
+	// The original Unicode 6 table predates wide emoji such as Homebrew's
+	// beer mug. Use the current East Asian width data for these characters.
+	if kind := width.LookupRune(cp).Kind(); kind == width.EastAsianWide || kind == width.EastAsianFullwidth {
+		return 2
+	}
 	if num < 65536 {
 		return int(bmpWidthTable[num])
-	}
-	if bisearch(num, highCombining) {
-		return 0
 	}
 	if (num >= 0x20000 && num <= 0x2fffd) || (num >= 0x30000 && num <= 0x3fffd) {
 		return 2

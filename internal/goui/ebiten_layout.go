@@ -5,10 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"os"
-	"path/filepath"
 	"reflect"
-	"strings"
 	"time"
 
 	"gioui.org/unit"
@@ -163,7 +160,8 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 		w.label(dst, c, image.Rect(controlsEnd, w.dp(10), sideWidth-w.dp(14), titleHeight), "Water", 11, muted, true)
 		w.drawSidebar(c, dst, image.Rect(0, titleHeight, sideWidth, w.size.Y), sidebar)
 		handle := w.dp(float64(cfg.UI.SidebarResizeHandleWidth))
-		w.hit(c, image.Rect(sideWidth-handle/2, titleHeight, sideWidth+(handle+1)/2, w.size.Y), hitSidebarResize, uuid.Nil, "sidebar-resize")
+		edge := sideWidth - w.dp(float64(cfg.UI.WindowPadding))
+		w.hit(c, image.Rect(edge, titleHeight, edge+handle, w.size.Y), hitSidebarResize, uuid.Nil, "sidebar-resize")
 	} else {
 		v.sidebarRect = image.Rectangle{}
 	}
@@ -228,7 +226,13 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 			var root paneTree
 			if json.Unmarshal(tab.Tree, &root) == nil {
 				pad := w.dp(float64(cfg.UI.WindowPadding))
-				w.layoutNativePane(c, dst, &root, *tab, image.Rect(sideWidth+pad, titleHeight+pad, w.size.X-pad, w.size.Y-pad), nil)
+				left := pad
+				if sideWidth > 0 {
+					// The sidebar already owns its trailing window inset. Use
+					// the resize handle here instead of a second outer inset.
+					left = sideWidth - pad + w.dp(float64(cfg.UI.SidebarResizeHandleWidth))
+				}
+				w.layoutNativePane(c, dst, &root, *tab, image.Rect(left, titleHeight+pad, w.size.X-pad, w.size.Y-pad), nil)
 			}
 		}
 	} else {
@@ -361,11 +365,9 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 		border = configColor(cfg.Theme.ActivePaneBorder, 0x35483f)
 	}
 	radius := w.dp(float64(cfg.UI.PaneCornerRadius))
-	header := 0
 	if len(path) > 0 {
 		w.round(dst, r, radius, border)
 		w.round(dst, r.Inset(1), max(0, radius-1), configColor(cfg.Theme.PaneBackground, 0x1e1e20))
-		header = w.dp(28)
 	} else {
 		w.round(dst, r, radius, configColor(cfg.Theme.PaneBackground, 0x1e1e20))
 	}
@@ -376,22 +378,7 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 		return
 	}
 	summary := node.Terminal.Summary
-	name := summary.ProcessName
-	if name == "" {
-		name = filepath.Base(cfg.Shell.Program)
-	}
-	cwd := summary.CWD
-	if home, _ := os.UserHomeDir(); home != "" {
-		cwd = strings.Replace(cwd, home, "~", 1)
-	}
-	if header > 0 {
-		w.label(dst, c, image.Rect(r.Min.X+w.dp(12), r.Min.Y+w.dp(7), r.Min.X+w.dp(130), r.Min.Y+header), name, 9, muted, false)
-		w.label(dst, c, image.Rect(r.Min.X+w.dp(140), r.Min.Y+w.dp(7), r.Max.X-w.dp(12), r.Min.Y+header), cwd, 9, muted, false)
-	}
 	content := r.Inset(w.dp(float64(cfg.UI.PanePadding)))
-	if header > 0 {
-		content.Min.Y = r.Min.Y + header + w.dp(4)
-	}
 	c.mu.RLock()
 	term := c.terminals[summary.TerminalID]
 	c.mu.RUnlock()

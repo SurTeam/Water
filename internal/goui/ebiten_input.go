@@ -68,7 +68,7 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 				w.drag = &nativeDrag{kind: hitDivider, hit: h, split: s, start: p}
 			}
 		case hitSidebarResize:
-			w.drag = &nativeDrag{kind: hitSidebarResize, hit: h, start: p}
+			w.drag = &nativeDrag{kind: hitSidebarResize, hit: h, start: p, sidebarWidth: w.view(c).sidebarWidth}
 		case hitWorkspace:
 			if count == 2 {
 				if view := w.connectionView(nativeUUID(h.Label)); view != nil {
@@ -173,7 +173,8 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 	switch d.kind {
 	case hitSidebarResize:
 		cfg := c.currentConfig()
-		w.view(c).sidebarWidth = min(cfg.UI.SidebarMaxWidth, max(cfg.UI.SidebarMinWidth, float32(float64(p.X)/w.scale)))
+		width := d.sidebarWidth + float32(float64(p.X-d.start.X)/w.scale)
+		w.view(c).sidebarWidth = min(cfg.UI.SidebarMaxWidth, max(cfg.UI.SidebarMinWidth, width))
 	case hitTitlebar:
 		// Cursor coordinates are relative to the moving window. Convert back
 		// to desktop coordinates each tick so a stationary cursor stays stable.

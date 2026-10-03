@@ -686,6 +686,7 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 			width = 1
 		}
 		if v.Ligatures && currentText != nil && currentText.style == style &&
+			!terminalCellGlyph(text) && !terminalCellGlyph(currentText.text) &&
 			currentText.startColumn+currentText.spanColumns == column {
 			currentText.text += text
 			currentText.spanColumns += width

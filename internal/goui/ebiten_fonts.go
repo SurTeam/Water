@@ -44,6 +44,7 @@ type nativeFonts struct {
 	ui          *text.GoTextFaceSource
 	mono        [4]*text.GoTextFaceSource
 	fallback    *text.GoTextFaceSource
+	emoji       *text.GoTextFaceSource
 }
 
 func fontName(s string) string {
@@ -53,6 +54,20 @@ func fontName(s string) string {
 		}
 		return -1
 	}, s)
+}
+
+func nativeFontFamilies(value string) []string {
+	var families []string
+	seen := map[string]bool{}
+	for _, family := range strings.Split(value, ",") {
+		family = strings.TrimSpace(family)
+		key := strings.ToLower(family)
+		if family != "" && !seen[key] {
+			families = append(families, family)
+			seen[key] = true
+		}
+	}
+	return families
 }
 func fontSource(data []byte) *text.GoTextFaceSource {
 	source, _ := text.NewGoTextFaceSource(bytes.NewReader(data))
@@ -81,7 +96,9 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 	if source := f.load(fontKey{family: "SFNS"}); source != nil {
 		f.ui = source
 	}
-	for _, family := range []string{cfg.Terminal.FontFamily, cfg.UI.UIFontFamily, "Sarasa UI SC", "PingFang", "Noto Sans CJK"} {
+	families := append(nativeFontFamilies(cfg.Terminal.FontFamily), nativeFontFamilies(cfg.UI.UIFontFamily)...)
+	families = append(families, "Sarasa UI SC", "PingFang", "Noto Sans CJK")
+	for _, family := range families {
 		for _, style := range []fontKey{{family: family}, {family: family, bold: true}, {family: family, italic: true}, {family: family, bold: true, italic: true}} {
 			if family != "" {
 				f.loaded[style] = f.load(style)
@@ -91,6 +108,14 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 	for _, family := range []string{"Sarasa UI SC", "PingFang", "Noto Sans CJK"} {
 		if s := f.loaded[fontKey{family: family}]; s != nil {
 			f.fallback = s
+			break
+		}
+	}
+	// Emoji must precede patched monospace fonts for emoji cells: some Nerd
+	// Font patches supply a visible placeholder instead of a missing glyph.
+	for _, family := range []string{"Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Noto Emoji"} {
+		if source := f.load(fontKey{family: family}); source != nil {
+			f.emoji = source
 			break
 		}
 	}
@@ -253,6 +278,26 @@ func (f *nativeFonts) load(k fontKey) *text.GoTextFaceSource {
 }
 
 func (f *nativeFonts) resolution(k fontKey) map[string]any {
+	if families := nativeFontFamilies(k.family); len(families) > 1 || len(families) == 1 && families[0] != k.family {
+		chain := make([]map[string]any, 0, len(families))
+		var primary map[string]any
+		for _, family := range families {
+			r := f.resolution(fontKey{family, k.bold, k.italic})
+			chain = append(chain, r)
+			if primary == nil && r["status"] == "ready" {
+				primary = r
+			}
+		}
+		if primary == nil {
+			primary = chain[0]
+		}
+		result := make(map[string]any, len(primary)+1)
+		for key, value := range primary {
+			result[key] = value
+		}
+		result["requested_family"], result["fallback_chain"] = k.family, chain
+		return result
+	}
 	f.mu.RLock()
 	record, ok := f.resolved[k]
 	source, loaded := f.loaded[k]
@@ -275,11 +320,54 @@ func (f *nativeFonts) resolution(k fontKey) map[string]any {
 		"style": record.style, "path": record.path, "face_index": record.index, "status": status}
 }
 func (f *nativeFonts) face(family string, size float64, mono, bold, italic bool, ligatures ...bool) text.Face {
-	k := fontKey{family, bold, italic}
+	var faces []text.Face
+	seen := map[*text.GoTextFaceSource]bool{}
+	makeFace := func(source *text.GoTextFaceSource) {
+		if source == nil || seen[source] {
+			return
+		}
+		seen[source] = true
+		face := &text.GoTextFace{Source: source, Size: size}
+		if len(ligatures) > 0 && !ligatures[0] {
+			face.SetFeature(text.MustParseTag("liga"), 0)
+			face.SetFeature(text.MustParseTag("calt"), 0)
+		}
+		faces = append(faces, face)
+	}
+	for _, family := range nativeFontFamilies(family) {
+		makeFace(f.requestedSource(fontKey{family, bold, italic}))
+	}
+	if len(faces) == 0 {
+		if mono {
+			index := 0
+			if bold {
+				index++
+			}
+			if italic {
+				index += 2
+			}
+			makeFace(f.mono[index])
+		} else {
+			makeFace(f.ui)
+		}
+	}
+	makeFace(f.fallback)
+	makeFace(f.emoji)
+	if len(faces) == 1 {
+		return faces[0]
+	}
+	combined, err := text.NewMultiFace(faces...)
+	if err != nil {
+		return faces[0]
+	}
+	return combined
+}
+
+func (f *nativeFonts) requestedSource(k fontKey) *text.GoTextFaceSource {
 	f.mu.RLock()
 	source, exists := f.loaded[k]
 	f.mu.RUnlock()
-	if !exists && family != "" {
+	if !exists && k.family != "" {
 		f.mu.Lock()
 		if !f.pending[k] {
 			select {
@@ -290,31 +378,5 @@ func (f *nativeFonts) face(family string, size float64, mono, bold, italic bool,
 		}
 		f.mu.Unlock()
 	}
-	if source == nil {
-		if mono {
-			index := 0
-			if bold {
-				index++
-			}
-			if italic {
-				index += 2
-			}
-			source = f.mono[index]
-		} else {
-			source = f.ui
-		}
-	}
-	primary := &text.GoTextFace{Source: source, Size: size}
-	if len(ligatures) > 0 && !ligatures[0] {
-		primary.SetFeature(text.MustParseTag("liga"), 0)
-		primary.SetFeature(text.MustParseTag("calt"), 0)
-	}
-	if f.fallback == nil || f.fallback == source {
-		return primary
-	}
-	combined, err := text.NewMultiFace(primary, &text.GoTextFace{Source: f.fallback, Size: size})
-	if err != nil {
-		return primary
-	}
-	return combined
+	return source
 }

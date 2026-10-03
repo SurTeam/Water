@@ -48,7 +48,7 @@ type Snapshot struct {
 	Cols              int
 	Rows              int
 	CursorX           int
-	CursorY           int
+	CursorY           int // Viewport row; outside [0, Rows) when the cursor is offscreen.
 	CursorHide        bool
 	CursorStyle       string
 	CursorBlink       bool
@@ -501,7 +501,7 @@ func (e *Emulator) Snapshot() Snapshot {
 		Cols:       term.Cols(),
 		Rows:       term.Rows(),
 		CursorX:    term.CursorX(),
-		CursorY:    term.CursorY(),
+		CursorY:    buf.YBase + term.CursorY() - buf.YDisp,
 		CursorHide: term.IsCursorHidden(),
 		YBase:      buf.YBase,
 		YDisp:      buf.YDisp,
