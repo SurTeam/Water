@@ -149,6 +149,16 @@ type graphicsParser struct {
 }
 
 func (p *graphicsParser) feed(input []byte) []graphicsEvent {
+	if len(input)==0{return nil}
+	// Ordinary terminal text is overwhelmingly ASCII/UTF-8 without graphics
+	// control introducers. When no parser carry exists, avoid the full graphics
+	// scanner unless the chunk contains ESC or any high byte that could encode
+	// a C1 control. This keeps the graphics feature effectively free for plain
+	// terminal output while preserving Unicode/C1 correctness.
+	if len(p.buffer)==0 && !hasPotentialGraphicsByte(input) {
+		return nil
+	}
+
 	previousLen := len(p.buffer)
 	p.buffer = append(p.buffer, input...)
 	consumed := 0
@@ -156,13 +166,11 @@ func (p *graphicsParser) feed(input []byte) []graphicsEvent {
 	for {
 		start, kind, ok := findGraphicsStart(p.buffer)
 		if !ok {
-			retain := len(p.buffer)
-			if retain > 4 {
-				retain = 4
-			}
-			splitAt := len(p.buffer) - retain
-			if splitAt > 0 {
-				p.buffer = append(p.buffer[:0], p.buffer[splitAt:]...)
+			retain := graphicsCarryLen(p.buffer)
+			if retain==0 {
+				p.buffer=p.buffer[:0]
+			} else if splitAt:=len(p.buffer)-retain;splitAt>0 {
+				p.buffer=append(p.buffer[:0],p.buffer[splitAt:]...)
 			}
 			break
 		}
@@ -220,6 +228,44 @@ func (p *graphicsParser) feed(input []byte) []graphicsEvent {
 		})
 	}
 	return events
+}
+
+func hasPotentialGraphicsByte(data []byte)bool{
+	for _,b:=range data {
+		if b==0x1b || b>=0x80{return true}
+	}
+	return false
+}
+
+// graphicsCarryLen retains only bytes that can change how the next chunk is
+// interpreted: a split ESC graphics introducer, a split raw C1 Kitty APC
+// introducer, or an incomplete UTF-8 sequence whose continuation bytes may
+// otherwise look like raw C1 controls. Plain text therefore leaves no carry.
+func graphicsCarryLen(data []byte)int{
+	n:=len(data)
+	if n==0{return 0}
+	retain:=0
+	if data[n-1]==0x1b{retain=1}
+	if n>=2 && data[n-2]==0x1b && data[n-1]=='_'{retain=2}
+	if data[n-1]==0x9f && !isUTF8Continuation(data,n-1) && retain<1{retain=1}
+
+	limit:=4
+	if n<limit{limit=n}
+	for back:=1;back<=limit;back++{
+		index:=n-back
+		b:=data[index]
+		if b<0x80{break}
+		if b&0xc0==0x80{continue}
+		required:=0
+		switch{
+		case b>=0xc2 && b<=0xdf:required=2
+		case b>=0xe0 && b<=0xef:required=3
+		case b>=0xf0 && b<=0xf4:required=4
+		}
+		if required>back && back>retain{retain=back}
+		break
+	}
+	return retain
 }
 
 func findGraphicsStart(data []byte) (int, graphicsKind, bool) {
