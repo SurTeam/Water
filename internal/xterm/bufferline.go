@@ -221,6 +221,27 @@ func (bl *BufferLine) SetCellFromCodepoint(index int, codePoint uint32, width in
 	bl.data[si+cellBg] = attrs.Bg
 }
 
+// setASCIIBytes writes printable 7-bit characters with width 1 into a
+// contiguous cell range. The caller guarantees that attrs has no extended
+// payload. Sparse cell metadata is cleared only when it exists.
+func (bl *BufferLine) setASCIIBytes(index int,data []byte,attrs *AttributeData){
+	if len(data)==0 || index<0 || index>=bl.Len{return}
+	if max:=bl.Len-index;len(data)>max{data=data[:max]}
+	if bl.combined!=nil {
+		for offset:=range data{delete(bl.combined,index+offset)}
+	}
+	if bl.extendedAttrs!=nil {
+		for offset:=range data{delete(bl.extendedAttrs,index+offset)}
+	}
+	fg,bg:=attrs.Fg,attrs.Bg
+	for offset,b:=range data{
+		si:=(index+offset)*cellSize
+		bl.data[si+cellContent]=uint32(b)|(1<<ContentWidthShift)
+		bl.data[si+cellFg]=fg
+		bl.data[si+cellBg]=bg
+	}
+}
+
 // AddCodepointToCell adds a combining codepoint to the cell at index.
 func (bl *BufferLine) AddCodepointToCell(index int, codePoint uint32, width int) {
 	content := bl.data[index*cellSize+cellContent]
