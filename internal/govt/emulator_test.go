@@ -149,3 +149,45 @@ func TestAbsoluteSelectionTextSurvivesViewportScroll(t *testing.T) {
 		t.Fatalf("selection changed after viewport move: before=%q after=%q",got,again)
 	}
 }
+
+
+func TestOrdinaryTerminalFastPathKeepsActiveOSC8Link(t *testing.T){
+	e:=New(20,2,100)
+	defer e.Close()
+
+	e.Write([]byte("]8;;https://example.com/fast\"))
+	if !e.canFastWriteOrdinary([]byte("linked\r\n")){
+		t.Fatal("ordinary ASCII/control chunk did not qualify for fast path")
+	}
+	e.Write([]byte("linked"))
+	e.Write([]byte("]8;;\"))
+
+	snap:=e.Snapshot()
+	for col:=0;col<len("linked");col++{
+		if got:=snap.RowsData[0].Cells[col].LinkURI;got!="https://example.com/fast"{
+			t.Fatalf("fast-path cell %d URI = %q",col,got)
+		}
+	}
+}
+
+func TestOrdinaryTerminalFastPathRejectsPendingControlState(t *testing.T){
+	e:=New(20,2,100)
+	defer e.Close()
+
+	e.pendingCellSizeQuery=append(e.pendingCellSizeQuery,[]byte("[1")...)
+	if e.canFastWriteOrdinary([]byte("6t")){
+		t.Fatal("pending cell-size query incorrectly took ordinary fast path")
+	}
+	e.pendingCellSizeQuery=e.pendingCellSizeQuery[:0]
+
+	e.graphics.parser.buffer=append(e.graphics.parser.buffer,0x1b)
+	if e.canFastWriteOrdinary([]byte("_Ga=T;")){
+		t.Fatal("pending graphics prefix incorrectly took ordinary fast path")
+	}
+	e.graphics.parser.buffer=e.graphics.parser.buffer[:0]
+
+	e.links.parser.state=osc8Body
+	if e.canFastWriteOrdinary([]byte("8;;https://example.com")){
+		t.Fatal("pending OSC8 body incorrectly took ordinary fast path")
+	}
+}
