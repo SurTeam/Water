@@ -405,6 +405,8 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 	cols := h.bufferService.Cols
 	wraparoundMode := h.coreService.DecPrivateModes.Wraparound
 	insertMode := h.coreService.Modes.InsertMode
+	screenReaderMode := h.optionsService.Options.ScreenReaderMode
+	linkID := h.getCurrentLinkId()
 	curAttr := &h.curAttrData
 	buf := h.activeBuffer()
 
@@ -456,11 +458,11 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 		precedingJoinState = currentInfo
 		h.parser.SetPrecedingJoinState(precedingJoinState)
 
-		if h.optionsService.Options.ScreenReaderMode {
+		if screenReaderMode {
 			h.OnA11yCharEmitter.Fire(string(rune(code)))
 		}
 
-		if linkID:=h.getCurrentLinkId();linkID!=0 {
+		if linkID!=0 {
 			h.oscLinkService.AddLineToLink(linkID,buf.YBase+buf.Y)
 		}
 
