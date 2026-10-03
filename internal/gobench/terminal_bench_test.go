@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goserver"
@@ -39,6 +40,8 @@ func BenchmarkTerminalDirect64MB(b *testing.B) {
 		events,done,cancel:=term.Subscribe()
 		emu:=govt.New(80,24,10_000)
 		if err:=term.Write([]byte("\n"));err!=nil{b.Fatal(err)}
+		readCallsStart:=gometrics.PTYReadCalls.Load()
+		readBytesStart:=gometrics.PTYBytesRead.Load()
 		var total int64
 		start:=time.Now()
 		timer:=time.NewTimer(30*time.Second)
@@ -66,6 +69,7 @@ func BenchmarkTerminalDirect64MB(b *testing.B) {
 		}
 		_ = emu.Snapshot()
 		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
+		reportPTYReadMetrics(b,readCallsStart,readBytesStart)
 		emu.Close();cancel();r.CloseAll()
 	}
 	b.SetBytes(benchBytes)
@@ -99,6 +103,8 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 			"type":"terminal.send_text","terminal_id":spawned.TerminalID,"text":"\n",
 		});err!=nil{b.Fatal(err)}
 
+		readCallsStart:=gometrics.PTYReadCalls.Load()
+		readBytesStart:=gometrics.PTYBytesRead.Load()
 		var total int64
 		start:=time.Now()
 		timer:=time.NewTimer(30*time.Second)
@@ -125,10 +131,20 @@ func BenchmarkTerminalServer64MB(b *testing.B) {
 		}
 		_ = emu.Snapshot()
 		b.ReportMetric(float64(total)/time.Since(start).Seconds()/1e6,"MB/s")
+		reportPTYReadMetrics(b,readCallsStart,readBytesStart)
 		emu.Close();_ = session.Close();_ = server.Close()
 		select{case <-serveDone:case <-time.After(time.Second):}
 	}
 	b.SetBytes(benchBytes)
+}
+
+func reportPTYReadMetrics(b *testing.B,callsStart,bytesStart uint64){
+	calls:=gometrics.PTYReadCalls.Load()-callsStart
+	bytesRead:=gometrics.PTYBytesRead.Load()-bytesStart
+	b.ReportMetric(float64(calls),"pty-reads")
+	if calls>0{
+		b.ReportMetric(float64(bytesRead)/float64(calls),"B/pty-read")
+	}
 }
 
 func multiPaneBenchmarkCommand() string {
