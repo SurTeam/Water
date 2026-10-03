@@ -16,7 +16,7 @@ socket = str(directory / "water.sock")
 config = directory / "config.json"
 shell = next(p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists())
 config.write_text(json.dumps({"server": {"detached": False}, "shell": {"program": shell, "args": ["-f"]},
-                             "startup": {"window_width": 960, "window_height": 640}}))
+                             "startup": {"window_columns": 96, "window_rows": 30}}))
 log = (directory / "gui.log").open("w")
 gui = subprocess.Popen([water, "--control-socket", socket, "--config", str(config)], stdout=log, stderr=subprocess.STDOUT)
 print(f"owned_gui_pid={gui.pid} socket={socket}", flush=True)

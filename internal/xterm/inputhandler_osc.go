@@ -8,6 +8,15 @@ import (
 	"strings"
 )
 
+func safeReportLabel(value string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 32 || (r >= 127 && r <= 159) {
+			return -1
+		}
+		return r
+	}, value)
+}
+
 // specialColors maps offset indices to special color slots.
 var specialColors = []SpecialColorIndex{
 	SpecialColorForeground,
@@ -116,7 +125,11 @@ func (h *InputHandler) SetOrReportCursorColor(data string) bool {
 // RestoreIndexedColor (OSC 104) — restore palette colors to theme defaults.
 func (h *InputHandler) RestoreIndexedColor(data string) bool {
 	if data == "" {
-		h.OnColorEmitter.Fire([]ColorEvent{{Type: ColorRequestRestore}})
+		events := make([]ColorEvent, 256)
+		for i := range events {
+			events[i] = ColorEvent{Type: ColorRequestRestore, Index: i}
+		}
+		h.OnColorEmitter.Fire(events)
 		return true
 	}
 

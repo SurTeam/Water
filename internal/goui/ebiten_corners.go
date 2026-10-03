@@ -1,13 +1,22 @@
 package goui
 
 import (
+	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/hajimehoshi/ebiten/v2"
 	"image/color"
 )
 
 func (w *EbitengineWindow) titleHeight(c *WorkspaceClient) int {
+	return w.dp(float64(titlebarHeight(w.chromeUI(c))))
+}
+
+func (w *EbitengineWindow) chromeUI(c *WorkspaceClient) goconfig.UIConfig {
 	u := c.currentConfig().UI
-	return w.dp(float64(max(u.TitlebarHeight, u.TabHeight+4)))
+	u.SidebarVisible = !c.sidebarHidden
+	if v := w.views[c]; v != nil && v.sidebarWidth > 0 {
+		u.SidebarWidth = v.sidebarWidth
+	}
+	return u
 }
 
 func (w *EbitengineWindow) maskWindow(screen *ebiten.Image) {

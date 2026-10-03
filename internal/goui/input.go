@@ -702,6 +702,9 @@ func hyperlinkURIAt(snap govt.Snapshot, col, row int) string {
 	if col >= len(cells) {
 		return ""
 	}
+	if col > 0 && govt.CellDrawingColumns(cells, col-1) == 2 {
+		col--
+	}
 	return cells[col].LinkURI
 }
 

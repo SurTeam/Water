@@ -4,10 +4,10 @@
     "control_socket": null,
     "initial_workspace": true,
     "initial_terminal": true,
-    "window_width": 1100.0,
-    "window_height": 760.0,
-    "window_min_width": 400.0,
-    "window_min_height": 260.0
+    "window_columns": 80,
+    "window_rows": 24,
+    "window_min_columns": 40,
+    "window_min_rows": 10
   },
   "shell": {
     "program": "/opt/homebrew/bin/zsh",
@@ -64,8 +64,6 @@
     }
   },
   "terminal": {
-    "default_columns": 80,
-    "default_lines": 24,
     "scrollback_lines": 2000,
     "inactive_scrollback_lines": 500,
     "max_total_scrollback_bytes": 67108864,
@@ -85,6 +83,9 @@
     "socket_path": null
   },
   "ui": {
+    "language": "en",
+    "tab_font_size": 12.0,
+    "tab_max_title_length": 32,
     "font_size": 14.0,
     "sidebar_visible": true,
     "sidebar_show_agent_count": true,
@@ -100,7 +101,7 @@
     "pane_margin": 5.0,
     "window_padding": 10.0,
     "sidebar_surface_margin": 0.0,
-    "pane_padding": 10.0,
+    "pane_padding": 2.0,
     "pane_corner_radius": 14.0,
     "pane_divider_width": 2.0,
     "sidebar_margin": 6.0,

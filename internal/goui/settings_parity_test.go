@@ -23,6 +23,12 @@ func TestEveryConfigFieldHasSettingsControlAndRoundTrips(t *testing.T) {
 		value := config.Field(i)
 		for j := 0; j < value.NumField(); j++ {
 			field := value.Type().Field(j).Name
+			if group == "Startup" && legacyPixelField(field) {
+				continue
+			}
+			if group == "Terminal" && (field == "DefaultColumns" || field == "DefaultLines") {
+				continue
+			}
 			if field == "AgentColors" {
 				for kind := range cfg.Theme.AgentColors {
 					if !controls["Theme.AgentColors."+kind] {

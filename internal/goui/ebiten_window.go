@@ -46,6 +46,8 @@ type nativePane struct {
 	cw, lh int
 }
 type nativeView struct {
+	tabTitles                                map[uuid.UUID]string
+	tabTitleRevision                         uint64
 	panes                                    map[uuid.UUID]nativePane
 	splits                                   map[string]nativeSplit
 	settingsScroll, sidebarScroll, tabScroll int
@@ -134,10 +136,7 @@ func (w *EbitengineWindow) view(c *WorkspaceClient) *nativeView {
 }
 func (w *EbitengineWindow) dp(n float64) int { return int(n*w.scale + .5) }
 func (w *EbitengineWindow) Layout(outsideWidth, outsideHeight int) (int, int) {
-	w.scale = ebiten.Monitor().DeviceScaleFactor()
-	if w.scale < 1 {
-		w.scale = 1
-	}
+	w.refreshDisplayScale()
 	w.size = image.Pt(max(1, w.dp(float64(outsideWidth))), max(1, w.dp(float64(outsideHeight))))
 	return w.size.X, w.size.Y
 }
@@ -185,6 +184,10 @@ func (w *EbitengineWindow) Update() error {
 		w.platform = platform
 		w.windowConfigured = true
 	}
+	c := w.active()
+	if c == nil {
+		return nil
+	}
 	if w.quitResult != nil {
 		select {
 		case err := <-w.quitResult:
@@ -192,7 +195,7 @@ func (w *EbitengineWindow) Update() error {
 			if err == nil {
 				w.closing = true
 			} else {
-				w.quitError = "Server shutdown failed: " + err.Error()
+				w.quitError = c.trf("Server shutdown failed: %s", err.Error())
 			}
 		default:
 		}
@@ -202,7 +205,7 @@ func (w *EbitengineWindow) Update() error {
 		case err := <-w.windowResult:
 			w.windowResult = nil
 			if err != nil {
-				w.quitError = "New window failed: " + err.Error()
+				w.quitError = c.trf("New window failed: %s", err.Error())
 			}
 		default:
 		}
@@ -220,15 +223,12 @@ func (w *EbitengineWindow) Update() error {
 	}
 	x, y := ebiten.CursorPosition()
 	w.mouse = image.Pt(x, y)
-	c := w.active()
-	if c == nil {
-		return nil
-	}
 	platformConfig := c.currentConfig()
 	if ebiten.IsWindowMaximized() || ebiten.IsFullscreen() {
 		platformConfig.UI.WindowCornerRadius = 0
 	}
 	w.platform.Update(platformConfig)
+	w.processTerminalReports()
 	w.multi.mu.RLock()
 	liveViews := make(map[*WorkspaceClient]bool, len(w.multi.connections))
 	for _, connection := range w.multi.connections {
@@ -397,6 +397,11 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["window_decorated"] = ebiten.IsWindowDecorated()
 		state["window_position"] = []int{wx, wy}
 		state["window_size"] = []int{ww, wh}
+		state["display_scale"] = w.scale
+		if monitor := ebiten.Monitor(); monitor != nil {
+			sw, sh := monitor.Size()
+			state["screen_size_pixels"] = []int{w.dp(float64(sw)), w.dp(float64(sh))}
+		}
 		state["window_maximized"] = ebiten.IsWindowMaximized()
 		state["window_minimized"] = ebiten.IsWindowMinimized()
 		state["window_focused"] = ebiten.IsFocused()
@@ -407,16 +412,43 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["quit_error"] = w.quitError
 		state["quitting_server"] = w.quitResult != nil
 		state["titlebar_height"] = w.titleHeight(c)
+		state["ui_language"] = c.language()
+		state["ui_strings"] = map[string]string{"settings": c.tr("Settings"), "save": c.tr("Save"), "connect_remote": c.tr("+  Connect remote")}
+		grids := []map[string]any{}
+		for id, pane := range w.view(c).panes {
+			pane.term.mu.RLock()
+			directory := pane.term.snapshot.WorkingDirectoryURI
+			pane.term.mu.RUnlock()
+			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory})
+		}
+		state["terminal_grids"] = grids
 		state["ui_config"] = c.currentConfig().UI
 		state["sidebar_width"] = w.dp(float64(w.view(c).sidebarWidth))
+		state["sidebar_visible"] = !c.sidebarHidden
 		state["rename_visible"] = w.view(c).rename != nil
 		if c.settings.visible {
 			fields := make([]map[string]any, 0, len(c.settings.fields))
-			for _, f := range c.settings.fields {
-				fields = append(fields, map[string]any{"name": f.group + "." + f.name, "apply": settingsApplyKind(f)})
+			for group := 0; group < 5; group++ {
+				panel := settingsPanel{fields: c.settings.fields}
+				panel.group = group
+				for _, row := range settingsRows(&panel) {
+					if row.field < 0 {
+						continue
+					}
+					f := panel.fields[row.field]
+					fields = append(fields, map[string]any{"name": f.group + "." + f.name, "label": localizedField(c.language(), f), "apply": c.tr(settingsApplyKind(f)), "section": c.tr(row.section)})
+				}
 			}
 			state["settings_fields"] = fields
+			sections := []string{}
+			for _, row := range settingsRows(&c.settings) {
+				if row.field < 0 {
+					sections = append(sections, c.tr(row.section))
+				}
+			}
+			state["settings_sections"] = sections
 		}
+		state["tab_font_size"] = c.currentConfig().UI.TabFontSize
 		state["gui_pid"] = os.Getpid()
 		cfg := c.currentConfig()
 		state["terminal_font"] = w.fonts.resolution(fontKey{family: cfg.Terminal.FontFamily})

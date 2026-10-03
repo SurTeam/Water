@@ -70,7 +70,7 @@ def main():
     config = directory / "config.json"
     shell = next(p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists())
     isolated_config = {
-        "startup": {"window_width": 960, "window_height": 640},
+        "startup": {"window_columns": 96, "window_rows": 30},
         "server": {"detached": True, "detach_on_quit": True},
         "shell": {"program": shell, "args": ["-f"]},
     }
@@ -79,7 +79,7 @@ def main():
         for key in ("terminal", "ui", "theme", "features"):
             if key in template:
                 isolated_config[key] = template[key]
-        for key in ("window_width", "window_height"):
+        for key in ("window_columns", "window_rows"):
             if key in template.get("startup", {}):
                 isolated_config["startup"][key] = template["startup"][key]
     config.write_text(json.dumps(isolated_config))

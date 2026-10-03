@@ -148,7 +148,8 @@ func NewUnicodeService() *UnicodeService {
 }
 
 // Wcwidth returns the display width of a codepoint.
-// Control chars and combining marks return 0, East Asian wide chars return 2, others return 1.
+// Control chars and combining marks return 0; East Asian wide chars return 2;
+// others, including private-use icons, return 1 to agree with shell layout.
 func (u *UnicodeService) Wcwidth(cp rune) int {
 	num := int(cp)
 	if num < 32 {

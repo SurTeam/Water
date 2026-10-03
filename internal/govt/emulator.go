@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	xterm "github.com/SurTeam/Water/internal/xterm"
 )
@@ -45,22 +46,24 @@ type Row struct {
 }
 
 type Snapshot struct {
-	Cols              int
-	Rows              int
-	CursorX           int
-	CursorY           int // Viewport row; outside [0, Rows) when the cursor is offscreen.
-	CursorHide        bool
-	CursorStyle       string
-	CursorBlink       bool
-	YBase             int
-	YDisp             int
-	AltScreen         bool
-	ApplicationCursor bool
-	BracketedPaste    bool
-	MouseTracking     string
-	MouseEncoding     string
-	RowsData          []Row
-	Images            []TerminalImage
+	Cols                int
+	Rows                int
+	CursorX             int
+	CursorY             int // Viewport row; outside [0, Rows) when the cursor is offscreen.
+	CursorHide          bool
+	CursorStyle         string
+	CursorBlink         bool
+	YBase               int
+	YDisp               int
+	AltScreen           bool
+	ApplicationCursor   bool
+	BracketedPaste      bool
+	MouseTracking       string
+	MouseEncoding       string
+	RowsData            []Row
+	Images              []TerminalImage
+	ColorOverrides      map[int]uint32
+	WorkingDirectoryURI string
 }
 
 type MouseButton uint8
@@ -97,14 +100,22 @@ type Emulator struct {
 
 	responseMu        sync.Mutex
 	responses         [][]byte
+	responseBytes     int
 	suppressResponses bool
 
 	titleMu sync.RWMutex
 	title   string
 
-	links                *osc8Tracker
+	linkParser           osc8Parser
+	defaultColors        atomic.Pointer[[259]uint32]
+	colorOverrides       map[int]uint32
 	graphics             *graphicsState
-	pendingCellSizeQuery []byte
+	windowMetrics        atomic.Pointer[WindowMetrics]
+	workingDirectoryURI  string
+	clipboardWrite       []byte
+	clipboardMu          sync.Mutex
+	colorSchemeUpdates   atomic.Bool
+	backgroundOverridden atomic.Bool
 }
 
 func New(cols, rows, scrollback int) *Emulator {
@@ -118,8 +129,8 @@ func New(cols, rows, scrollback int) *Emulator {
 		scrollback = 2000
 	}
 	e := &Emulator{
-		links:    newOSC8Tracker(),
-		graphics: newGraphicsState(),
+		colorOverrides: make(map[int]uint32),
+		graphics:       newGraphicsState(),
 		term: xterm.New(
 			xterm.WithCols(cols),
 			xterm.WithRows(rows),
@@ -129,6 +140,10 @@ func New(cols, rows, scrollback int) *Emulator {
 	e.term.OnData(func(data string) {
 		e.enqueueResponse([]byte(data))
 	})
+	e.term.OnColor(e.handleColors)
+	e.term.OnRequestWindowsOptionsReport(e.reportWindow)
+	e.term.OnRequestColorSchemeQuery(func() { e.reportColorScheme() })
+	e.registerOSCMetadata()
 	e.term.OnBinary(func(data string) {
 		e.enqueueResponse([]byte(data))
 	})
@@ -163,15 +178,14 @@ func (e *Emulator) write(p []byte, replay bool) {
 	e.suppressResponses = replay
 	if e.canFastWriteOrdinary(p) {
 		_, _ = e.term.Write(p)
-		e.pruneLinksLocked()
 		e.suppressResponses = previous
+		e.colorSchemeUpdates.Store(e.term.DecPrivateModes().ColorSchemeUpdates)
 		e.mu.Unlock()
 		return
 	}
 
-	p = e.filterCellSizeQueryLocked(p)
 	e.applyGraphicsEraseLocked(p)
-	e.links.feed(p)
+	e.linkParser.feed(p)
 
 	events := e.graphics.parser.feed(p)
 	consumed := 0
@@ -203,19 +217,19 @@ func (e *Emulator) write(p []byte, replay bool) {
 	if consumed < len(p) {
 		_, _ = e.term.Write(p[consumed:])
 	}
-	e.pruneLinksLocked()
 	e.suppressResponses = previous
+	e.colorSchemeUpdates.Store(e.term.DecPrivateModes().ColorSchemeUpdates)
 	e.mu.Unlock()
 }
 
 func (e *Emulator) canFastWriteOrdinary(p []byte) bool {
-	if len(p) == 0 || len(e.pendingCellSizeQuery) != 0 {
+	if len(p) == 0 {
 		return false
 	}
 	if e.graphics != nil && len(e.graphics.parser.buffer) != 0 {
 		return false
 	}
-	if e.links != nil && e.links.parser.state != osc8Normal {
+	if e.linkParser.state != osc8Normal {
 		return false
 	}
 	for _, b := range p {
@@ -224,44 +238,6 @@ func (e *Emulator) canFastWriteOrdinary(p []byte) bool {
 		}
 	}
 	return true
-}
-
-func (e *Emulator) filterCellSizeQueryLocked(p []byte) []byte {
-	const query = "\x1b[16t"
-	input := p
-	if len(e.pendingCellSizeQuery) != 0 {
-		input = make([]byte, 0, len(e.pendingCellSizeQuery)+len(p))
-		input = append(input, e.pendingCellSizeQuery...)
-		input = append(input, p...)
-	}
-	// Retain only a suffix that can complete the query in a later chunk.
-	// All other ANSI data can pass through without copying or per-byte work.
-	carry := 0
-	for n := min(len(input), len(query)-1); n > 0; n-- {
-		if bytes.Equal(input[len(input)-n:], []byte(query[:n])) {
-			carry = n
-			break
-		}
-	}
-	e.pendingCellSizeQuery = append(e.pendingCellSizeQuery[:0], input[len(input)-carry:]...)
-	input = input[:len(input)-carry]
-	index := bytes.Index(input, []byte(query))
-	if index < 0 {
-		return input
-	}
-	filtered := make([]byte, 0, len(input)-len(query))
-	for index >= 0 {
-		filtered = append(filtered, input[:index]...)
-		width, height := 8, 16
-		if e.graphics != nil {
-			width = maxInt(e.graphics.cellWidth, 1)
-			height = maxInt(e.graphics.cellHeight, 1)
-		}
-		e.enqueueResponse([]byte("\x1b[6;" + itoaPositive(height) + ";" + itoaPositive(width) + "t"))
-		input = input[index+len(query):]
-		index = bytes.Index(input, []byte(query))
-	}
-	return append(filtered, input...)
 }
 
 func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
@@ -276,52 +252,21 @@ func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
 	}
 }
 
-func itoaPositive(v int) string {
-	if v <= 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for v > 0 {
-		i--
-		buf[i] = byte('0' + v%10)
-		v /= 10
-	}
-	return string(buf[i:])
-}
-
 func (e *Emulator) enqueueResponse(data []byte) {
 	if len(data) == 0 || e.suppressResponses {
 		return
 	}
-	e.responseMu.Lock()
-	e.responses = append(e.responses, append([]byte(nil), data...))
-	e.responseMu.Unlock()
+	e.enqueueLiveResponse(data)
 }
 
-func (e *Emulator) pruneLinksLocked() {
-	if e.links == nil || (len(e.links.uriByID) == 0 && e.links.activeID == 0) {
+func (e *Emulator) enqueueLiveResponse(data []byte) {
+	e.responseMu.Lock()
+	defer e.responseMu.Unlock()
+	if len(e.responses) >= 1024 || e.responseBytes+len(data) > 256*1024 {
 		return
 	}
-	buf := e.term.Buffer()
-	live := make(map[int]struct{})
-	var raw xterm.CellData
-	for row := 0; row < buf.Lines.Length(); row++ {
-		line := buf.Lines.Get(row)
-		if line == nil {
-			continue
-		}
-		for col := 0; col < line.Len; col++ {
-			line.LoadCell(col, &raw)
-			if raw.Extended == nil {
-				continue
-			}
-			if id := raw.Extended.URLID(); id != 0 {
-				live[id] = struct{}{}
-			}
-		}
-	}
-	e.links.prune(live)
+	e.responses = append(e.responses, append([]byte(nil), data...))
+	e.responseBytes += len(data)
 }
 
 func (e *Emulator) SetCellSize(width, height int) {
@@ -408,6 +353,11 @@ func (e *Emulator) SelectionText(startRow, startCol, endRow, endCol int) string 
 		if left > right {
 			continue
 		}
+		var ok bool
+		left, right, ok = ExpandSelectionColumns(left, right, min(cols, line.Len), func(column int) int { return bufferDrawingColumns(line, column) })
+		if !ok {
+			continue
+		}
 
 		var rowText strings.Builder
 		for col := left; col <= right && col < line.Len; col++ {
@@ -487,6 +437,7 @@ func (e *Emulator) TakeResponses() [][]byte {
 	e.responseMu.Lock()
 	out := e.responses
 	e.responses = nil
+	e.responseBytes = 0
 	e.responseMu.Unlock()
 	return out
 }
@@ -498,15 +449,22 @@ func (e *Emulator) Snapshot() Snapshot {
 	term := e.term
 	buf := term.Buffer()
 	s := Snapshot{
-		Cols:       term.Cols(),
-		Rows:       term.Rows(),
-		CursorX:    term.CursorX(),
-		CursorY:    buf.YBase + term.CursorY() - buf.YDisp,
-		CursorHide: term.IsCursorHidden(),
-		YBase:      buf.YBase,
-		YDisp:      buf.YDisp,
-		AltScreen:  term.IsAltBufferActive(),
-		RowsData:   make([]Row, term.Rows()),
+		WorkingDirectoryURI: e.workingDirectoryURI,
+		Cols:                term.Cols(),
+		Rows:                term.Rows(),
+		CursorX:             term.CursorX(),
+		CursorY:             buf.YBase + term.CursorY() - buf.YDisp,
+		CursorHide:          term.IsCursorHidden(),
+		YBase:               buf.YBase,
+		YDisp:               buf.YDisp,
+		AltScreen:           term.IsAltBufferActive(),
+		RowsData:            make([]Row, term.Rows()),
+	}
+	if len(e.colorOverrides) > 0 {
+		s.ColorOverrides = make(map[int]uint32, len(e.colorOverrides))
+		for index, rgb := range e.colorOverrides {
+			s.ColorOverrides[index] = rgb
+		}
 	}
 	modes := term.DecPrivateModes()
 	s.CursorStyle = "block"
@@ -548,7 +506,7 @@ func (e *Emulator) Snapshot() Snapshot {
 			}
 			if raw.Extended != nil {
 				cell.URLID = raw.Extended.URLID()
-				cell.LinkURI = e.links.uri(cell.URLID)
+				cell.LinkURI = e.term.HyperlinkURI(cell.URLID)
 			}
 			if cell.Width == 0 && cell.Text == "" {
 				// xterm uses width zero for the trailing half of wide glyphs.

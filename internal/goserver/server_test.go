@@ -48,6 +48,10 @@ func TestServerClientTerminalRoundTrip(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	if err := client.Dispatch(map[string]any{"type": "internal.terminal.foreground", "terminal_id": uuid.New(), "name": "injected"}, nil); err == nil {
+		t.Fatal("client dispatched a server-only metadata command")
+	}
+
 	var spawned struct {
 		Type       string    `json:"type"`
 		TerminalID uuid.UUID `json:"terminal_id"`

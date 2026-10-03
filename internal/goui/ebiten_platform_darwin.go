@@ -24,6 +24,7 @@ type macNativePlatform struct {
 	// AppKit objects and the item map are owned exclusively by the main queue.
 	items        map[string]macMenuItem
 	configured   goconfig.AppConfig
+	menuTitles   map[objc.ID]string
 	window       objc.ID
 	layer        objc.ID
 	radius       float64
@@ -130,6 +131,18 @@ func (p *macNativePlatform) install() {
 		p.add("show-window", "Show Water", windowMenu)
 	}
 	p.installed = true
+	p.menuTitles = map[objc.ID]string{}
+	var collect func(objc.ID)
+	collect = func(menu objc.ID) {
+		for i := 0; i < int(macSend(menu, "numberOfItems")); i++ {
+			item := macSend(menu, "itemAtIndex:", i)
+			p.menuTitles[item] = macString(macSend(item, "title"))
+			if submenu := macSend(item, "submenu"); submenu != 0 {
+				collect(submenu)
+			}
+		}
+	}
+	collect(main)
 }
 func (p *macNativePlatform) bind(name string, menu, item objc.ID, index int) {
 	macSend(item, "setTarget:", p.controller)
@@ -183,6 +196,16 @@ func (p *macNativePlatform) Update(cfg goconfig.AppConfig) {
 			}
 		}
 		p.updateCorners(float64(cfg.UI.WindowCornerRadius))
+		if p.configured.UI.Language != cfg.UI.Language {
+			for item, title := range p.menuTitles {
+				macSend(item, "setTitle:", macText(ctext(cfg.UI.Language, title)))
+			}
+			for action, title := range map[string]string{"hide-window": "Hide Water", "minimize-window": "Minimize", "quit-gui": "Quit GUI", "quit-and-server": "Quit GUI and Local Server", "show-window": "Show Water"} {
+				if ref, ok := p.items[action]; ok {
+					macSend(ref.item, "setTitle:", macText(ctext(cfg.UI.Language, title)))
+				}
+			}
+		}
 		p.configured = cfg
 		p.publish()
 	}) {

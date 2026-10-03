@@ -122,18 +122,19 @@ type ConnectionEntry struct {
 }
 
 type terminalClient struct {
-	id           uuid.UUID
-	mu           sync.RWMutex
-	emu          *govt.Emulator
-	snapshot     govt.Snapshot
-	lastSeq      uint64
-	cols         int
-	rows         int
-	view         *TerminalView
-	input        *TerminalInput
-	selection    Selection
-	imePreedit   string
-	imeComposing bool
+	id            uuid.UUID
+	mu            sync.RWMutex
+	emu           *govt.Emulator
+	snapshot      govt.Snapshot
+	lastSeq       uint64
+	cols          int
+	rows          int
+	view          *TerminalView
+	input         *TerminalInput
+	selection     Selection
+	imePreedit    string
+	imeComposing  bool
+	defaultColors [259]uint32
 }
 
 func (t *terminalClient) close() {
@@ -146,6 +147,8 @@ func (t *terminalClient) close() {
 }
 
 type WorkspaceClient struct {
+	oscClipboardMu       sync.Mutex
+	oscClipboardWrite    []byte
 	native               atomic.Pointer[EbitengineWindow]
 	session              *goclient.Session
 	invalidate           func()
@@ -903,6 +906,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		return
 	}
 	emu := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	emu.SetDefaultColors(terminalDefaultColors(c.config))
 	emu.SetCellSize(
 		max(1, int(c.config.Terminal.FontSize*0.6)),
 		max(1, int(c.config.Terminal.LineHeight)),
@@ -1265,6 +1269,7 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 		return
 	}
 	next := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	next.SetDefaultColors(terminalDefaultColors(c.config))
 	next.SetCellSize(
 		max(1, int(c.config.Terminal.FontSize*0.6)),
 		max(1, int(c.config.Terminal.LineHeight)),
@@ -1305,6 +1310,11 @@ func (c *WorkspaceClient) flushVTResponses(term *terminalClient) {
 		return
 	}
 	responses := term.emu.TakeResponses()
+	if data, ok := term.emu.TakeClipboardWrite(); ok {
+		c.oscClipboardMu.Lock()
+		c.oscClipboardWrite = data
+		c.oscClipboardMu.Unlock()
+	}
 	term.mu.RUnlock()
 	for _, data := range responses {
 		_ = c.session.DispatchAsync(map[string]any{
@@ -1852,7 +1862,9 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 		}
 		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 			left := x
-			button := chromeButton(th, click, t.Title)
+			u := c.currentConfig().UI
+			button := chromeButton(th, click, boundedTabTitle(tabCommandTitle(t), u.TabMaxTitleLength))
+			button.TextSize = unit.Sp(u.TabFontSize)
 			button.Background = configColor(c.currentConfig().Theme.TabInactiveBackground, 0x191c1e)
 			if workspace.ActiveTab != nil && t.ID == *workspace.ActiveTab {
 				button.Background = configColor(c.currentConfig().Theme.TabActiveBackground, 0x252b2a)
@@ -1964,6 +1976,9 @@ func (c *WorkspaceClient) layoutLeaf(gtx layout.Context, th *material.Theme, nod
 		return layout.Center.Layout(gtx, label.Layout)
 	}
 	applyViewConfig(term.view, c.currentConfig())
+	if syncTerminalColors(term) {
+		go c.flushVTResponses(term)
+	}
 	term.view.Focused = tab.ActivePane == node.PaneID
 	bindings := c.currentConfig().Shortcuts
 	term.input.Shortcuts = &bindings
@@ -2055,7 +2070,7 @@ func (c *WorkspaceClient) automationClick(x, y float32, count int) bool {
 
 	size := c.frameSize
 	if size.X <= 0 || size.Y <= 0 {
-		size = image.Pt(int(c.config.Startup.WindowWidth), int(c.config.Startup.WindowHeight))
+		size = fallbackWindowSize(c.config)
 	}
 	if size.X < 1 {
 		size.X = 1

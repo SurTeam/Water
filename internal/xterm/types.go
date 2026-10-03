@@ -184,7 +184,13 @@ const (
 	// GetWinSizePixels requests the window size in pixels (CSI 14 t).
 	GetWinSizePixels WindowsOptionsReportType = 0
 	// GetCellSizePixels requests the cell size in pixels (CSI 16 t).
-	GetCellSizePixels WindowsOptionsReportType = 1
+	GetCellSizePixels   WindowsOptionsReportType = 1
+	GetWindowSizePixels WindowsOptionsReportType = 2
+	GetScreenSizePixels WindowsOptionsReportType = 3
+	GetScreenSizeChars  WindowsOptionsReportType = 4
+	GetWindowPosition   WindowsOptionsReportType = 5
+	GetTextAreaPosition WindowsOptionsReportType = 6
+	GetWindowState      WindowsOptionsReportType = 7
 )
 
 // KittyKeyboardState tracks the kitty keyboard protocol state.

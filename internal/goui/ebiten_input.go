@@ -153,7 +153,8 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 		if d.edges&8 != 0 {
 			height += dy
 		}
-		minW, minH := int(w.cfg.Startup.WindowMinWidth), int(w.cfg.Startup.WindowMinHeight)
+		minimum := w.MinimumWindowSize()
+		minW, minH := minimum.X, minimum.Y
 		if width < minW {
 			if d.edges&1 != 0 {
 				x -= minW - width
@@ -533,6 +534,18 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 	case "save":
 		w.saveSettings(c)
 	default:
+		if strings.HasPrefix(label, "language:") {
+			language := strings.TrimPrefix(label, "language:")
+			if language == "en" || language == "zh-Hans" {
+				s.draft.UI.Language = language
+				for i := range s.fields {
+					if s.fields[i].group == "UI" && s.fields[i].name == "Language" {
+						s.fields[i].editor.SetText(language)
+						s.focus = i
+					}
+				}
+			}
+		}
 		if strings.HasPrefix(label, "category:") {
 			for i, name := range []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"} {
 				if label == "category:"+name {
@@ -574,7 +587,7 @@ func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 		}
 		if s.base != c.settingsStore.value.Load() {
 			c.settingsStore.saving.Store(false)
-			s.message = "Settings changed in another connection. Reopen to reload them."
+			s.message = "Settings changed in another connection. Cancel and reopen to reload them."
 			return
 		}
 	}
@@ -607,7 +620,7 @@ func (w *EbitengineWindow) connectRemote(c *WorkspaceClient) {
 		return
 	}
 	if destination == "" {
-		c.remoteError = "Enter an SSH destination"
+		c.remoteError = c.tr("Enter an SSH destination")
 		c.connectionMu.Unlock()
 		return
 	}
@@ -733,11 +746,10 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 			return true
 		}
 		if strings.EqualFold(spec, "Tab") || strings.EqualFold(spec, "shift-Tab") {
-			groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
 			indices := []int{}
-			for i, f := range c.settings.fields {
-				if f.group == groups[c.settings.group] || c.settings.group == 4 && (f.group == "Shell" || f.group == "Server" || f.group == "Features") {
-					indices = append(indices, i)
+			for _, row := range settingsRows(&c.settings) {
+				if row.field >= 0 {
+					indices = append(indices, row.field)
 				}
 			}
 			if len(indices) > 0 {
@@ -754,7 +766,12 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 				}
 				at = (at + delta + len(indices)) % len(indices)
 				c.settings.focus = indices[at]
-				v.settingsScroll = at
+				for row, item := range settingsRows(&c.settings) {
+					if item.field == indices[at] {
+						v.settingsScroll = row
+						break
+					}
+				}
 			}
 			return true
 		}
@@ -762,6 +779,18 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 			return false
 		}
 		f := &c.settings.fields[c.settings.focus]
+		if f.group == "UI" && f.name == "Language" {
+			if spec == "Space" || spec == "text: " || spec == "Left" || spec == "Right" {
+				language := "zh-Hans"
+				if f.editor.Text() == language {
+					language = "en"
+				}
+				f.editor.SetText(language)
+				c.settings.draft.UI.Language = language
+				return true
+			}
+			return false
+		}
 		if f.kind == reflect.Bool {
 			if spec == "Space" || spec == "text: " {
 				f.toggle.Value = !f.toggle.Value

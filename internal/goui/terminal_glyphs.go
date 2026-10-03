@@ -3,6 +3,7 @@ package goui
 import (
 	"image"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -61,7 +62,12 @@ func terminalEmoji(value string) bool {
 
 func terminalCellGlyph(value string) bool {
 	r, n := utf8.DecodeRuneInString(value)
-	return n == len(value) && (r >= 0x2500 && r <= 0x259f || r >= 0x2800 && r <= 0x28ff || r >= 0x1fb00 && r <= 0x1fb3b) || terminalEmoji(value)
+	return n == len(value) && (r >= 0x2500 && r <= 0x259f || r >= 0x2800 && r <= 0x28ff || r >= 0x1fb00 && r <= 0x1fb3b) || terminalEmoji(value) || terminalPrivateIcon(value)
+}
+
+func terminalPrivateIcon(value string) bool {
+	r, _ := utf8.DecodeRuneInString(value)
+	return unicode.Is(unicode.Co, r)
 }
 
 func terminalDrawingRects(value string, width, height int) ([]image.Rectangle, bool) {

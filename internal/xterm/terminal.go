@@ -187,6 +187,14 @@ func (t *Terminal) CursorY() int { return t.bufferService.Buffer().Y }
 // Buffer returns the active buffer (for advanced access).
 func (t *Terminal) Buffer() *Buffer { return t.bufferService.Buffer() }
 
+// HyperlinkURI resolves the same link registry that assigns URLIDs to cells.
+func (t *Terminal) HyperlinkURI(id int) string {
+	if data := t.oscLinkService.GetLinkData(id); data != nil {
+		return data.URI
+	}
+	return ""
+}
+
 // GetLine returns the content of a viewport line as a string.
 // Returns "" if y is out of range.
 func (t *Terminal) GetLine(y int) string {
@@ -320,6 +328,11 @@ func (t *Terminal) OnRequestWindowsOptionsReport(fn func(WindowsOptionsReportTyp
 // OnColor subscribes to color palette query/set/restore events (OSC 4/10/11/12).
 func (t *Terminal) OnColor(fn func([]ColorEvent)) Disposable {
 	return t.inputHandler.OnColorEmitter.Event(fn)
+}
+
+// RegisterOSCHandler extends OSC handling without reparsing the output stream.
+func (t *Terminal) RegisterOSCHandler(code int, fn func(string) bool) Disposable {
+	return t.inputHandler.Parser().RegisterOscHandler(code, NewOscStringHandler(fn))
 }
 
 // OnA11yChar subscribes to accessibility character announcements.

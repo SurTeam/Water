@@ -106,6 +106,12 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 		value := reflect.ValueOf(c.settings.draft).FieldByName(group)
 		for i := 0; i < value.NumField(); i++ {
 			field := value.Type().Field(i)
+			if group == "Startup" && legacyPixelField(field.Name) {
+				continue
+			}
+			if group == "Terminal" && (field.Name == "DefaultColumns" || field.Name == "DefaultLines") {
+				continue
+			}
 			v := value.Field(i)
 			// The ANSI palette is presented as 16 individual colors below.
 			if (v.Kind() == reflect.Slice && group != "Shell") || v.Kind() == reflect.Map {
@@ -161,12 +167,11 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 }
 
 func (c *WorkspaceClient) focusSettingsGroup() {
-	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
 	s := &c.settings
 	s.focus = -1
-	for i, f := range s.fields {
-		if f.group == groups[s.group] || s.group == 4 && f.group == "Shell" {
-			s.focus = i
+	for _, row := range settingsRows(s) {
+		if row.field >= 0 {
+			s.focus = row.field
 			s.requestFocus = true
 			return
 		}
@@ -175,6 +180,14 @@ func (c *WorkspaceClient) focusSettingsGroup() {
 
 func settingsLabel(name string) string {
 	switch name {
+	case "TabMaxTitleLength":
+		return "Maximum tab title characters"
+	case "SidebarHeaderHeight":
+		return "Workspace row height"
+	case "SidebarRowPadding":
+		return "Host row padding"
+	case "SidebarAgentPadding":
+		return "Agent list padding"
 	case "MaxTotalScrollbackBytes":
 		return "Scrollback memory limit (bytes)"
 	case "ReplayHistoryBytes":
@@ -220,13 +233,14 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 	cfg.Theme.ANSIColors = make([]string, 16)
 	for i := range s.fields {
 		f := &s.fields[i]
+		label := localizedField(s.draft.UI.Language, *f)
 		text := strings.TrimSpace(f.editor.Text())
 		if f.group == "Theme" {
 			if len(text) != 7 || text[0] != '#' {
-				return cfg, fmt.Errorf("%s: use #RRGGBB", f.label)
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: use #RRGGBB"), label)
 			}
 			if _, err := strconv.ParseUint(text[1:], 16, 24); err != nil {
-				return cfg, fmt.Errorf("%s: invalid color", f.label)
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: invalid color"), label)
 			}
 			if index, err := strconv.Atoi(f.name); err == nil {
 				cfg.Theme.ANSIColors[index] = text
@@ -240,31 +254,34 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 		value := reflect.ValueOf(&cfg).Elem().FieldByName(f.group).FieldByName(f.name)
 		switch value.Kind() {
 		case reflect.String:
+			if f.group == "UI" && f.name == "Language" && text != "en" && text != "zh-Hans" {
+				return cfg, fmt.Errorf("%s", ctext(cfg.UI.Language, "Choose English or Simplified Chinese"))
+			}
 			if f.group == "Shortcuts" && text != "" {
 				binding := text
 				if f.name == "SwitchTab" {
 					expanded := numberedTabBindings(text)
 					if len(expanded) == 0 {
-						return cfg, fmt.Errorf("Switch Tab: use a modifier followed by #, such as cmd-#")
+						return cfg, fmt.Errorf("%s", ctext(s.draft.UI.Language, "Switch Tab: use a modifier followed by #, such as cmd-#"))
 					}
 					binding = expanded[0]
 				}
 				ev, ok := automationInputEvent(binding)
 				if _, isKey := ev.(key.Event); !ok || !isKey {
-					return cfg, fmt.Errorf("%s: invalid shortcut", f.label)
+					return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: invalid shortcut"), label)
 				}
 			}
 			value.SetString(text)
 		case reflect.Int:
 			n, err := strconv.ParseInt(text, 10, 64)
 			if err != nil {
-				return cfg, fmt.Errorf("%s: enter a whole number", f.label)
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: enter a whole number"), label)
 			}
 			value.SetInt(n)
 		case reflect.Float32:
 			n, err := strconv.ParseFloat(text, 32)
 			if err != nil || n != n || n > 1e9 || n < 0 {
-				return cfg, fmt.Errorf("%s: enter a positive number", f.label)
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: enter a positive number"), label)
 			}
 			value.SetFloat(n)
 		case reflect.Bool:
@@ -298,9 +315,9 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 			ev, _ := automationInputEvent(binding)
 			id := fmt.Sprint(ev)
 			if prior, ok := seen[id]; ok {
-				return cfg, fmt.Errorf("Shortcut conflict: %s and %s", prior, settingsLabel(shortcuts.Type().Field(i).Name))
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "Shortcut conflict: %s and %s"), prior, localizedField(s.draft.UI.Language, settingsField{name: shortcuts.Type().Field(i).Name, label: settingsLabel(shortcuts.Type().Field(i).Name)}))
 			}
-			seen[id] = settingsLabel(shortcuts.Type().Field(i).Name)
+			seen[id] = localizedField(s.draft.UI.Language, settingsField{name: shortcuts.Type().Field(i).Name, label: settingsLabel(shortcuts.Type().Field(i).Name)})
 		}
 	}
 	return cfg.Normalized(), nil
@@ -507,7 +524,7 @@ func applyViewConfig(view *TerminalView, cfg goconfig.AppConfig) {
 	view.Theme.InverseForeground = configColor(cfg.Theme.InverseForeground, 0x2c2c2c)
 	view.Theme.InverseBackground = configColor(cfg.Theme.InverseBackground, 0xe4e4e4)
 	view.Theme.Selection = configColor(cfg.Theme.SelectionBackground, 0x555555)
-	for i := 0; i < 16; i++ {
+	for i := range view.Theme.Palette {
 		view.Theme.Palette[i] = defaultSettingsTheme.Palette[i]
 	}
 	for i, value := range cfg.Theme.ANSIColors {
@@ -517,6 +534,8 @@ func applyViewConfig(view *TerminalView, cfg goconfig.AppConfig) {
 		old := view.Theme.Palette[i]
 		view.Theme.Palette[i] = configColor(value, uint32(old.R)<<16|uint32(old.G)<<8|uint32(old.B))
 	}
+	view.baseTheme = view.Theme
+	view.Theme = themeWithOverrides(view.baseTheme, view.colorOverrides)
 	if oldTheme != view.Theme || oldHyperlinks != view.Hyperlinks || oldLigatures != view.Ligatures {
 		view.mu.Lock()
 		clear(view.cache)

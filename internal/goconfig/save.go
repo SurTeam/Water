@@ -41,6 +41,15 @@ func Save(path string, cfg AppConfig) error {
 		return err
 	}
 	mergeConfig(target, known)
+	if terminal, ok := target["terminal"].(map[string]any); ok {
+		delete(terminal, "default_columns")
+		delete(terminal, "default_lines")
+	}
+	if startup, ok := target["startup"].(map[string]any); ok {
+		for _, key := range []string{"window_width", "window_height", "window_min_width", "window_min_height"} {
+			delete(startup, key)
+		}
+	}
 	if ui, ok := target["ui"].(map[string]any); ok {
 		if _, legacy := ui["ui_font_size"]; legacy {
 			ui["ui_font_size"] = cfg.UI.UIFontSize

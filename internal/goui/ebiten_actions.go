@@ -1,7 +1,6 @@
 package goui
 
 import (
-	"fmt"
 	"gioui.org/widget"
 	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -53,7 +52,7 @@ func (w *EbitengineWindow) submitRename(c *WorkspaceClient) {
 	}
 	title := strings.TrimSpace(r.editor.Text())
 	if title == "" {
-		r.message = "Enter a name"
+		r.message = c.tr("Enter a name")
 		return
 	}
 	if err := c.session.DispatchAsync(map[string]any{"type": r.kind + ".rename", r.kind + "_id": r.id, "title": title}); err != nil {
@@ -67,7 +66,7 @@ func (w *EbitengineWindow) drawRename(c *WorkspaceClient, dst *ebiten.Image) {
 	r := w.overlay(c, dst, w.dp(400), w.dp(190))
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
-	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(20), r.Max.X-w.dp(24), r.Min.Y+w.dp(44)), fmt.Sprintf("Rename %s", rename.kind), 16, fg, true)
+	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(20), r.Max.X-w.dp(24), r.Min.Y+w.dp(44)), c.tr("Rename "+rename.kind), 16, fg, true)
 	field := image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(60), r.Max.X-w.dp(24), r.Min.Y+w.dp(94))
 	w.field(c, dst, field, rename.editor.Text(), true, &rename.editor)
 	w.hit(c, field, hitRenameField, rename.id, "rename-field")

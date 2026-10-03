@@ -157,11 +157,19 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 		if offline {
 			clr = configColor(t.SidebarConnectionOfflineColor, 0xef7d83)
 		}
-		w.label(content, c, image.Rect(header.Min.X+d(u.SidebarRowPadding), header.Min.Y+max(0, (header.Dy()-d(u.UIFontSize))/2), header.Max.X-w.dp(24), header.Max.Y), host.entry.Name, float64(u.UIFontSize), clr, true)
+		hostName := host.entry.Name
+		if host.entry.Kind == "local" {
+			hostName = c.tr("Local")
+		}
+		headerText := image.Rect(header.Min.X+d(u.SidebarRowPadding), header.Min.Y, header.Max.X-d(u.SidebarRowPadding), header.Max.Y)
+		if host.entry.Kind == "remote" {
+			headerText.Max.X -= w.dp(20)
+		}
+		w.centeredLabel(content, c, headerText, hostName, float64(u.UIFontSize), clr, true)
 		w.hit(c, header, hitConnection, host.entry.ID, "")
 		if host.entry.Kind == "remote" {
 			dr := image.Rect(header.Max.X-w.dp(20), header.Min.Y, header.Max.X, header.Max.Y)
-			w.label(content, c, dr, "×", float64(u.UIFontSize), fg, false)
+			w.centeredLabel(content, c, dr, "×", float64(u.UIFontSize), fg, false)
 			w.hit(c, dr, hitDisconnectConnection, host.entry.ID, "")
 		}
 		y = header.Max.Y + d(u.SidebarHostWorkspaceGap)
@@ -183,7 +191,8 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 			if u.SidebarShowAgentCount && count > 0 {
 				title = fmt.Sprintf("%s  · %d", title, count)
 			}
-			w.label(content, c, image.Rect(row.Min.X+d(u.SidebarWorkspaceRowPadding), row.Min.Y+max(0, (row.Dy()-d(u.UIFontSize))/2), row.Max.X-d(u.SidebarRowPadding), row.Max.Y), title, float64(u.UIFontSize), fg, selected)
+			rowPadding := d(u.SidebarWorkspaceRowPadding)
+			w.centeredLabel(content, c, image.Rect(row.Min.X+rowPadding, row.Min.Y, row.Max.X-rowPadding, row.Max.Y), title, float64(u.UIFontSize), fg, selected)
 			w.hit(c, row, hitWorkspace, ws.ID, host.entry.ID.String())
 			y = row.Max.Y
 			var rows []nativeAgent
@@ -216,7 +225,7 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 						vector.StrokeCircle(content, float32(cx), float32(cy), float32(w.dp(4)), 1, ac, true)
 					}
 				}
-				w.label(content, c, image.Rect(cx+w.dp(9), ar.Min.Y+max(0, (ar.Dy()-d(u.UIFontSize))/2), ar.Max.X-d(u.SidebarRowPadding), ar.Max.Y), a.label, float64(u.UIFontSize), fg, focused)
+				w.centeredLabel(content, c, image.Rect(cx+w.dp(9), ar.Min.Y, ar.Max.X-d(u.SidebarAgentRowPadding), ar.Max.Y), a.label, float64(u.UIFontSize), fg, focused)
 				w.hit(c, ar, hitAgent, a.pane, host.entry.ID.String()+":"+a.tab.String())
 				y = ar.Max.Y + d(u.SidebarAgentRowGap)
 			}

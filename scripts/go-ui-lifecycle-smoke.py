@@ -15,7 +15,7 @@ directory = Path(tempfile.mkdtemp(prefix="water-lifetime.", dir="/tmp"))
 socket = str(directory / "water.sock")
 config = directory / "config.json"
 shell = next(p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists())
-config.write_text(json.dumps({"startup": {"window_width": 960, "window_height": 640},
+config.write_text(json.dumps({"startup": {"window_columns": 96, "window_rows": 30},
     "server": {"detached": True, "detach_on_quit": True}, "shell": {"program": shell, "args": ["-f"]},
     "shortcuts": {"focus_left": "cmd-h", "hide_window": "cmd-w", "minimize_window": "cmd-m", "ignore_quit": "cmd-q"}}))
 gui = None

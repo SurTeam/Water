@@ -71,6 +71,7 @@ func DefaultTerminalTheme() TerminalTheme {
 }
 
 type terminalStyle struct {
+	linkURI       string
 	fg            color.NRGBA
 	bold          bool
 	italic        bool
@@ -82,6 +83,8 @@ type terminalStyle struct {
 type textRun struct {
 	startColumn int
 	spanColumns int
+	wide        bool
+	drawColumns int
 	text        string
 	style       terminalStyle
 }
@@ -121,7 +124,7 @@ func SelectedText(snap govt.Snapshot, selection Selection) string {
 	if !selection.Active || snap.Rows <= 0 || snap.Cols <= 0 {
 		return ""
 	}
-	startCol, startRow, endCol, endRow := selection.normalized()
+	_, startRow, _, endRow := selection.normalized()
 	if selection.Absolute {
 		startRow -= snap.YDisp
 		endRow -= snap.YDisp
@@ -142,20 +145,8 @@ func SelectedText(snap govt.Snapshot, selection Selection) string {
 			continue
 		}
 		line := snap.RowsData[row]
-		left, right := 0, snap.Cols-1
-		if row == startRow {
-			left = startCol
-		}
-		if row == endRow {
-			right = endCol
-		}
-		if left < 0 {
-			left = 0
-		}
-		if right >= snap.Cols {
-			right = snap.Cols - 1
-		}
-		if left > right {
+		left, right, ok := selectionColumnsForSnapshot(snap, selection, row)
+		if !ok {
 			continue
 		}
 
@@ -432,14 +423,16 @@ func utf8FirstRune(value string) (rune, int) {
 }
 
 type TerminalView struct {
-	Theme      TerminalTheme
-	FontSize   unit.Sp
-	CellWidth  unit.Dp
-	LineHeight unit.Dp
-	FontFamily string
-	Hyperlinks bool
-	Ligatures  bool
-	Focused    bool
+	Theme          TerminalTheme
+	baseTheme      TerminalTheme
+	colorOverrides map[int]uint32
+	FontSize       unit.Sp
+	CellWidth      unit.Dp
+	LineHeight     unit.Dp
+	FontFamily     string
+	Hyperlinks     bool
+	Ligatures      bool
+	Focused        bool
 
 	mu         sync.Mutex
 	cache      map[int]preparedRow
@@ -476,6 +469,7 @@ func (v *TerminalView) CacheStats() TerminalViewCacheStats {
 }
 
 func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.Snapshot, selection Selection, composition string) layout.Dimensions {
+	applyTerminalColors(v, snap)
 	cellWidth := gtx.Dp(v.CellWidth)
 	lineHeight := gtx.Dp(v.LineHeight)
 	width := snap.Cols * cellWidth
@@ -678,14 +672,17 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 			bold:          cell.Bold,
 			italic:        cell.Italic,
 			dim:           cell.Dim,
-			underline:     cell.Underline || (v.Hyperlinks && cell.URLID != 0),
+			underline:     cell.Underline || (v.Hyperlinks && cell.LinkURI != ""),
 			strikethrough: cell.Strikethrough,
+		}
+		if v.Hyperlinks {
+			style.linkURI = cell.LinkURI
 		}
 		width := int(cell.Width)
 		if width < 1 {
 			width = 1
 		}
-		if v.Ligatures && currentText != nil && currentText.style == style &&
+		if v.Ligatures && width == 1 && currentText != nil && !currentText.wide && currentText.style == style &&
 			!terminalCellGlyph(text) && !terminalCellGlyph(currentText.text) &&
 			currentText.startColumn+currentText.spanColumns == column {
 			currentText.text += text
@@ -694,6 +691,8 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 			prepared.text = append(prepared.text, textRun{
 				startColumn: column,
 				spanColumns: width,
+				wide:        width == 2,
+				drawColumns: v.glyphDrawColumns(row.Cells, column),
 				text:        text,
 				style:       style,
 			})
@@ -701,6 +700,13 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 		}
 	}
 	return prepared
+}
+
+// A private-use icon is one logical column, as in zsh/libc. It may draw into
+// the following blank cell without changing cursor positions or line wrapping.
+// With text beside it, fit it into its own cell instead of covering that text.
+func (v *TerminalView) glyphDrawColumns(cells []govt.Cell, column int) int {
+	return govt.CellDrawingColumns(cells, column)
 }
 
 func (v *TerminalView) resolveColors(cell govt.Cell) (color.NRGBA, color.NRGBA) {
@@ -763,9 +769,17 @@ func selectionColumns(selection Selection, row, cols int) (int, int, bool) {
 }
 
 func selectionColumnsForSnapshot(snap govt.Snapshot, selection Selection, viewportRow int) (int, int, bool) {
+	if viewportRow < 0 || viewportRow >= len(snap.RowsData) {
+		return 0, 0, false
+	}
 	row := viewportRow
 	if selection.Absolute {
 		row = snap.YDisp + viewportRow
 	}
-	return selectionColumns(selection, row, snap.Cols)
+	left, right, ok := selectionColumns(selection, row, snap.Cols)
+	if !ok {
+		return 0, 0, false
+	}
+	cells := snap.RowsData[viewportRow].Cells
+	return govt.ExpandSelectionColumns(left, right, min(snap.Cols, len(cells)), func(column int) int { return govt.CellDrawingColumns(cells, column) })
 }

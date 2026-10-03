@@ -38,10 +38,15 @@ type StartupConfig struct {
 	ControlSocket    *string `json:"control_socket"`
 	InitialWorkspace bool    `json:"initial_workspace"`
 	InitialTerminal  bool    `json:"initial_terminal"`
-	WindowWidth      float32 `json:"window_width"`
-	WindowHeight     float32 `json:"window_height"`
-	WindowMinWidth   float32 `json:"window_min_width"`
-	WindowMinHeight  float32 `json:"window_min_height"`
+	WindowColumns    int     `json:"window_columns"`
+	WindowRows       int     `json:"window_rows"`
+	WindowMinColumns int     `json:"window_min_columns"`
+	WindowMinRows    int     `json:"window_min_rows"`
+	// Deprecated pixel fields are accepted from older configs and cleared on save.
+	WindowWidth     float32 `json:"window_width,omitempty"`
+	WindowHeight    float32 `json:"window_height,omitempty"`
+	WindowMinWidth  float32 `json:"window_min_width,omitempty"`
+	WindowMinHeight float32 `json:"window_min_height,omitempty"`
 }
 
 type ServerConfig struct {
@@ -63,8 +68,9 @@ type FeatureConfig struct {
 }
 
 type TerminalConfig struct {
-	DefaultColumns              int     `json:"default_columns"`
-	DefaultLines                int     `json:"default_lines"`
+	// Legacy terminal size aliases mirror the canonical startup grid.
+	DefaultColumns              int     `json:"default_columns,omitempty"`
+	DefaultLines                int     `json:"default_lines,omitempty"`
 	ScrollbackLines             int     `json:"scrollback_lines"`
 	InactiveScrollbackLines     int     `json:"inactive_scrollback_lines"`
 	MaxTotalScrollbackBytes     int     `json:"max_total_scrollback_bytes"`
@@ -80,6 +86,7 @@ type TerminalConfig struct {
 }
 
 type UIConfig struct {
+	Language                       string  `json:"language"`
 	SidebarVisible                 bool    `json:"sidebar_visible"`
 	SidebarShowAgentCount          bool    `json:"sidebar_show_agent_count"`
 	DimInactivePanes               bool    `json:"dim_inactive_panes"`
@@ -110,6 +117,8 @@ type UIConfig struct {
 	TitlebarGap                    float32 `json:"titlebar_gap"`
 	TabGap                         float32 `json:"tab_gap"`
 	TabPadding                     float32 `json:"tab_padding"`
+	TabFontSize                    float32 `json:"tab_font_size"`
+	TabMaxTitleLength              int     `json:"tab_max_title_length"`
 	WindowCornerRadius             float32 `json:"window_corner_radius"`
 	SidebarCardRadius              float32 `json:"sidebar_card_radius"`
 	SidebarWorkspaceRadius         float32 `json:"sidebar_workspace_radius"`
@@ -216,10 +225,10 @@ func Default() AppConfig {
 			DefaultCWD:       &cwd,
 			InitialWorkspace: true,
 			InitialTerminal:  true,
-			WindowWidth:      1100,
-			WindowHeight:     760,
-			WindowMinWidth:   400,
-			WindowMinHeight:  260,
+			WindowColumns:    80,
+			WindowRows:       24,
+			WindowMinColumns: 40,
+			WindowMinRows:    10,
 		},
 		Server:   ServerConfig{Detached: true, AutoStart: true, DetachOnQuit: true},
 		Shell:    ShellConfig{Program: DefaultShellProgram()},
@@ -239,6 +248,7 @@ func Default() AppConfig {
 			HyperlinkDownloadDirectory: "~/Downloads/Water",
 		},
 		UI: UIConfig{
+			Language:       "en",
 			SidebarVisible: true, SidebarShowAgentCount: true, DimInactivePanes: true,
 			SidebarMinWidth: 170, SidebarMaxWidth: 420, SidebarResizeHandleWidth: 6,
 			TitlebarHeight: 36, TabHeight: 24, SidebarHeaderHeight: 24,
@@ -250,11 +260,13 @@ func Default() AppConfig {
 			SidebarWorkspaceRowPadding: 10, SidebarAgentRowPadding: 10, SidebarAgentRowHeight: 28,
 			SidebarWorkspaceGap: 4,
 			SidebarWidth:        200,
-			PanePadding:         10,
+			PanePadding:         2,
 			PaneMargin:          5,
 			PaneCornerRadius:    6,
 			PaneDividerWidth:    2,
 			UIFontSize:          12,
+			TabFontSize:         12,
+			TabMaxTitleLength:   32,
 		},
 		Shortcuts: ShortcutConfig{
 			NewWindow: "cmd-n", ConnectRemote: "cmd-shift-k", RenameWorkspace: "cmd-shift-e", RenameTab: "cmd-shift-t",
@@ -350,15 +362,19 @@ func (c AppConfig) Normalized() AppConfig {
 	c.UI.PaneDividerWidth = clampFloat(c.UI.PaneDividerWidth, 1, 16)
 	c.UI.UIFontSize = clampFloat(c.UI.UIFontSize, 8, 32)
 	c.Terminal.LineHeight = clampFloat(c.Terminal.LineHeight, 8, 64)
-	c.Startup.WindowMinWidth = clampFloat(c.Startup.WindowMinWidth, 200, 4096)
-	c.Startup.WindowMinHeight = clampFloat(c.Startup.WindowMinHeight, 120, 4096)
-	c.Startup.WindowWidth = clampFloat(c.Startup.WindowWidth, 480, 4096)
-	if c.Startup.WindowWidth < c.Startup.WindowMinWidth {
-		c.Startup.WindowWidth = c.Startup.WindowMinWidth
-	}
-	c.Startup.WindowHeight = clampFloat(c.Startup.WindowHeight, 320, 4096)
-	if c.Startup.WindowHeight < c.Startup.WindowMinHeight {
-		c.Startup.WindowHeight = c.Startup.WindowMinHeight
+	c.Startup.WindowMinColumns = min(512, max(2, c.Startup.WindowMinColumns))
+	c.Startup.WindowMinRows = min(256, max(1, c.Startup.WindowMinRows))
+	c.Startup.WindowColumns = min(512, max(c.Startup.WindowMinColumns, c.Startup.WindowColumns))
+	c.Startup.WindowRows = min(256, max(c.Startup.WindowMinRows, c.Startup.WindowRows))
+	c.Terminal.DefaultColumns = c.Startup.WindowColumns
+	c.Terminal.DefaultLines = c.Startup.WindowRows
+	c.Startup.WindowWidth, c.Startup.WindowHeight = 0, 0
+	c.Startup.WindowMinWidth, c.Startup.WindowMinHeight = 0, 0
+	switch strings.ToLower(strings.TrimSpace(c.UI.Language)) {
+	case "zh", "zh-cn", "zh-hans":
+		c.UI.Language = "zh-Hans"
+	default:
+		c.UI.Language = "en"
 	}
 	return c
 }
@@ -394,6 +410,25 @@ func Load(path string) (AppConfig, error) {
 	}
 	if err := json.Unmarshal(target, &cfg); err != nil {
 		return AppConfig{}, err
+	}
+	var sizes struct {
+		Startup struct {
+			Columns *int `json:"window_columns"`
+			Rows    *int `json:"window_rows"`
+		} `json:"startup"`
+		Terminal struct {
+			Columns *int `json:"default_columns"`
+			Rows    *int `json:"default_lines"`
+		} `json:"terminal"`
+	}
+	if err := json.Unmarshal(target, &sizes); err != nil {
+		return AppConfig{}, err
+	}
+	if sizes.Startup.Columns == nil && sizes.Terminal.Columns != nil {
+		cfg.Startup.WindowColumns = *sizes.Terminal.Columns
+	}
+	if sizes.Startup.Rows == nil && sizes.Terminal.Rows != nil {
+		cfg.Startup.WindowRows = *sizes.Terminal.Rows
 	}
 	if shellOverride.Shell != nil && shellOverride.Shell.Program != nil &&
 		(len(shellOverride.Shell.Args) == 0 || string(shellOverride.Shell.Args) == "null") {

@@ -26,6 +26,9 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 	if err := json.Unmarshal(p.Command, &head); err != nil {
 		return err
 	}
+	if strings.HasPrefix(head.Type, "internal.") {
+		return errors.New("internal commands cannot be dispatched by a client")
+	}
 
 	id := uuid.New()
 	op := OperationSnapshot{
@@ -65,6 +68,15 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 	}
 
 	switch kind {
+	case "internal.terminal.foreground":
+		var command struct {
+			TerminalID uuid.UUID `json:"terminal_id"`
+			Name       string    `json:"name"`
+		}
+		if err := json.Unmarshal(raw, &command); err != nil {
+			return fail("INVALID_COMMAND", err)
+		}
+		return s.model.SetTerminalForeground(command.TerminalID, command.Name), nil
 	case "workspace.create":
 		id := s.model.CreateWorkspace("")
 		return map[string]any{"type": "workspace_created", "workspace_id": id}, nil

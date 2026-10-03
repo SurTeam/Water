@@ -11,7 +11,6 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 	"image"
-	"image/color"
 	"reflect"
 )
 
@@ -43,7 +42,6 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
 		layout.Expanded(func(gtx layout.Context) layout.Dimensions {
 			return s.scrim.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-				paint.FillShape(gtx.Ops, color.NRGBA{A: 190}, clip.Rect{Max: gtx.Constraints.Max}.Op())
 				return layout.Dimensions{Size: gtx.Constraints.Max}
 			})
 		}),
@@ -63,7 +61,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 				return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						gtx.Constraints = layout.Exact(image.Pt(contentWidth, headerHeight))
-						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(material.H6(th, "Settings").Layout), layout.Rigid(material.Caption(th, "Appearance and shortcuts apply now. Other settings require restart.").Layout))
+						return layout.Flex{Axis: layout.Vertical}.Layout(gtx, layout.Rigid(material.H6(th, c.tr("Settings")).Layout), layout.Rigid(material.Caption(th, c.tr("Appearance and shortcuts apply now. Other settings require restart.")).Layout))
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						gtx.Constraints = layout.Exact(image.Pt(contentWidth, tabsHeight))
@@ -72,7 +70,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 						for i, name := range groups {
 							i, name := i, name
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								button := chromeButton(th, &s.tabs[i], name)
+								button := chromeButton(th, &s.tabs[i], c.tr(name))
 								button.Background = configColor(c.currentConfig().Theme.SidebarWorkspaceActiveBackground, 0x29332f)
 								button.Selected = s.group == i
 								if s.group != i {
@@ -89,16 +87,15 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 					}),
 					layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 						listBounds := image.Rect(origin.X, listTop, origin.X+contentWidth, listTop+gtx.Constraints.Max.Y)
-						fields := []int{}
-						for i, f := range s.fields {
-							if f.group == groups[s.group] || s.group == 4 && (f.group == "Shell" || f.group == "Server" || f.group == "Features") {
-								fields = append(fields, i)
-							}
-						}
-						return material.List(th, &s.list).Layout(gtx, len(fields), func(gtx layout.Context, index int) layout.Dimensions {
-							f := &s.fields[fields[index]]
+						rows := settingsRows(s)
+						return material.List(th, &s.list).Layout(gtx, len(rows), func(gtx layout.Context, index int) layout.Dimensions {
 							gtx.Constraints.Min.Y = rowHeight
 							gtx.Constraints.Max.Y = rowHeight
+							if rows[index].field < 0 {
+								return layout.Center.Layout(gtx, material.Subtitle2(th, c.tr(rows[index].section)).Layout)
+							}
+							fieldIndex := rows[index].field
+							f := &s.fields[fieldIndex]
 							labelWidth := min(gtx.Dp(260), contentWidth/2)
 							y := listTop + (index-s.list.Position.First)*rowHeight - s.list.Position.Offset
 							if rect := image.Rect(origin.X+labelWidth, y, origin.X+contentWidth, y+rowHeight).Intersect(listBounds); !rect.Empty() {
@@ -108,7 +105,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 								layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 									gtx.Constraints.Max.X = labelWidth
 									gtx.Constraints.Min.X = labelWidth
-									return material.Body2(th, f.label).Layout(gtx)
+									return material.Body2(th, localizedField(c.language(), *f)).Layout(gtx)
 								}),
 								layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 									var dims layout.Dimensions
@@ -123,12 +120,12 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 									} else {
 										dims = chromeEditor(th, &f.editor, "")(gtx)
 									}
-									if s.requestFocus && s.focus == fields[index] {
+									if s.requestFocus && s.focus == fieldIndex {
 										gtx.Execute(key.FocusCmd{Tag: &f.editor})
 										s.requestFocus = false
 									}
 									if !focusRequested && gtx.Focused(&f.editor) {
-										s.focus = fields[index]
+										s.focus = fieldIndex
 									}
 									pass := pointer.PassOp{}.Push(gtx.Ops)
 									area := clip.Rect{Max: gtx.Constraints.Max}.Push(gtx.Ops)
@@ -142,7 +139,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						gtx.Constraints = layout.Exact(image.Pt(contentWidth, messageHeight))
-						return material.Caption(th, s.message).Layout(gtx)
+						return material.Caption(th, c.tr(s.message)).Layout(gtx)
 					}),
 					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
 						gtx.Constraints = layout.Exact(image.Pt(contentWidth, footerHeight))
@@ -158,7 +155,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 						}{{&s.save, label, "save"}, {&s.cancel, "Cancel", "cancel"}, {&s.defaults, "Defaults", "defaults"}} {
 							control := control
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-								button := chromeButton(th, control.button, control.label)
+								button := chromeButton(th, control.button, c.tr(control.label))
 								if control.name == "save" {
 									button.Background = th.Palette.ContrastBg
 									button.Color = th.Palette.ContrastFg

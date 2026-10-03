@@ -89,20 +89,20 @@ type InputHandler struct {
 	iconNameStack    []string
 
 	// Events
-	OnCursorMoveEmitter           EventEmitter[struct{}]
-	OnTitleChangeEmitter          EventEmitter[string]
-	OnIconNameChangeEmitter       EventEmitter[string]
-	OnLineFeedEmitter             EventEmitter[struct{}]
-	OnA11yCharEmitter             EventEmitter[string]
-	OnA11yTabEmitter              EventEmitter[int]
-	OnRequestBellEmitter          EventEmitter[struct{}]
-	OnRequestResetEmitter         EventEmitter[struct{}]
-	OnRequestRefreshRowsEmitter   EventEmitter[RowRange]
-	OnColorEmitter                          EventEmitter[[]ColorEvent]
-	OnRequestSendFocusEmitter               EventEmitter[struct{}]
-	OnRequestSyncScrollBarEmitter           EventEmitter[struct{}]
-	OnRequestColorSchemeQueryEmitter        EventEmitter[struct{}]
-	OnRequestWindowsOptionsReportEmitter    EventEmitter[WindowsOptionsReportType]
+	OnCursorMoveEmitter                  EventEmitter[struct{}]
+	OnTitleChangeEmitter                 EventEmitter[string]
+	OnIconNameChangeEmitter              EventEmitter[string]
+	OnLineFeedEmitter                    EventEmitter[struct{}]
+	OnA11yCharEmitter                    EventEmitter[string]
+	OnA11yTabEmitter                     EventEmitter[int]
+	OnRequestBellEmitter                 EventEmitter[struct{}]
+	OnRequestResetEmitter                EventEmitter[struct{}]
+	OnRequestRefreshRowsEmitter          EventEmitter[RowRange]
+	OnColorEmitter                       EventEmitter[[]ColorEvent]
+	OnRequestSendFocusEmitter            EventEmitter[struct{}]
+	OnRequestSyncScrollBarEmitter        EventEmitter[struct{}]
+	OnRequestColorSchemeQueryEmitter     EventEmitter[struct{}]
+	OnRequestWindowsOptionsReportEmitter EventEmitter[WindowsOptionsReportType]
 }
 
 // NewInputHandler creates an InputHandler and registers all parser handlers.
@@ -258,11 +258,12 @@ func NewInputHandler(
 
 	// DCS handlers
 	p.RegisterDcsHandler(FunctionIdentifier{Intermediates: "$", Final: 'q'}, NewDcsStringHandler(h.requestStatusString))
+	p.RegisterDcsHandler(FunctionIdentifier{Intermediates: "+", Final: 'q'}, NewDcsStringHandler(h.requestTermcap))
 
 	// OSC handlers
 	p.RegisterOscHandler(0, NewOscStringHandler(h.setTitleAndIconName)) // OSC 0 — set title + icon name
-	p.RegisterOscHandler(1, NewOscStringHandler(h.setIconName))        // OSC 1 — set icon name
-	p.RegisterOscHandler(2, NewOscStringHandler(h.SetTitle))           // OSC 2 — set title
+	p.RegisterOscHandler(1, NewOscStringHandler(h.setIconName))         // OSC 1 — set icon name
+	p.RegisterOscHandler(2, NewOscStringHandler(h.SetTitle))            // OSC 2 — set title
 	p.RegisterOscHandler(4, NewOscStringHandler(h.SetOrReportIndexedColor))
 	p.RegisterOscHandler(8, NewOscStringHandler(h.SetHyperlink))
 	p.RegisterOscHandler(10, NewOscStringHandler(h.SetOrReportFgColor))
@@ -394,86 +395,104 @@ func (h *InputHandler) Parse(data []byte) {
 	}
 }
 
-func (h *InputHandler) tryParsePlainASCII(data []byte)bool{
-	if h.parser.CurrentState()!=ParserStateGround ||
-		h.charsetService.Charset!=nil ||
+func (h *InputHandler) tryParsePlainASCII(data []byte) bool {
+	if h.parser.CurrentState() != ParserStateGround ||
+		h.charsetService.Charset != nil ||
 		h.coreService.Modes.InsertMode ||
 		!h.coreService.DecPrivateModes.Wraparound ||
 		h.optionsService.Options.ScreenReaderMode ||
-		h.curAttrData.Extended!=nil {
+		h.curAttrData.Extended != nil {
 		return false
 	}
-	for _,b:=range data {
-		if b=='\r' || b=='\n' || (b>=0x20 && b<=0x7e) {
+	for _, b := range data {
+		if b == '\r' || b == '\n' || (b >= 0x20 && b <= 0x7e) {
 			continue
 		}
 		return false
 	}
 
-	start:=0
-	for i,b:=range data {
-		if b!='\r' && b!='\n' {continue}
-		if i>start {h.printASCIIBytes(data[start:i])}
-		if b=='\r' {
+	start := 0
+	for i, b := range data {
+		if b != '\r' && b != '\n' {
+			continue
+		}
+		if i > start {
+			h.printASCIIBytes(data[start:i])
+		}
+		if b == '\r' {
 			h.CarriageReturn()
 		} else {
 			h.LineFeed()
 		}
-		h.parser.precedingJoinState=0
-		start=i+1
+		h.parser.precedingJoinState = 0
+		start = i + 1
 	}
-	if start<len(data){h.printASCIIBytes(data[start:])}
+	if start < len(data) {
+		h.printASCIIBytes(data[start:])
+	}
 	return true
 }
 
-func (h *InputHandler) printASCIIBytes(data []byte){
-	if len(data)==0{return}
-	buf:=h.activeBuffer()
-	cols:=h.bufferService.Cols
-	curAttr:=&h.curAttrData
-	bufferRow:=buf.Lines.Get(buf.YBase+buf.Y)
-	if bufferRow==nil{return}
-
-	h.dirtyRowTracker.MarkDirty(buf.Y)
-	if buf.X>0 && bufferRow.GetWidth(buf.X-1)==2 {
-		bufferRow.SetCellFromCodepoint(buf.X-1,0,1,curAttr)
+func (h *InputHandler) printASCIIBytes(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	buf := h.activeBuffer()
+	cols := h.bufferService.Cols
+	curAttr := &h.curAttrData
+	bufferRow := buf.Lines.Get(buf.YBase + buf.Y)
+	if bufferRow == nil {
+		return
 	}
 
-	wrote:=false
-	for len(data)>0 {
-		if buf.X>=cols {
-			buf.X=0
+	h.dirtyRowTracker.MarkDirty(buf.Y)
+	if buf.X > 0 && bufferRow.GetWidth(buf.X-1) == 2 {
+		bufferRow.SetCellFromCodepoint(buf.X-1, 0, 1, curAttr)
+	}
+
+	wrote := false
+	for len(data) > 0 {
+		if buf.X >= cols {
+			buf.X = 0
 			buf.Y++
-			if buf.Y==buf.ScrollBottom+1 {
+			if buf.Y == buf.ScrollBottom+1 {
 				buf.Y--
-				h.bufferService.Scroll(h.eraseAttrData(),true)
+				h.bufferService.Scroll(h.eraseAttrData(), true)
 			} else {
-				if buf.Y>=h.bufferService.Rows {
-					buf.Y=h.bufferService.Rows-1
+				if buf.Y >= h.bufferService.Rows {
+					buf.Y = h.bufferService.Rows - 1
 				}
-				line:=buf.Lines.Get(buf.YBase+buf.Y)
-				if line!=nil{line.IsWrapped=true}
+				line := buf.Lines.Get(buf.YBase + buf.Y)
+				if line != nil {
+					line.IsWrapped = true
+				}
 			}
-			bufferRow=buf.Lines.Get(buf.YBase+buf.Y)
-			if bufferRow==nil{break}
+			bufferRow = buf.Lines.Get(buf.YBase + buf.Y)
+			if bufferRow == nil {
+				break
+			}
 		}
 
-		room:=cols-buf.X
-		if room<=0{continue}
-		count:=len(data)
-		if count>room{count=room}
-		bufferRow.setASCIIBytes(buf.X,data[:count],curAttr)
-		buf.X+=count
-		data=data[count:]
-		wrote=true
+		room := cols - buf.X
+		if room <= 0 {
+			continue
+		}
+		count := len(data)
+		if count > room {
+			count = room
+		}
+		bufferRow.setASCIIBytes(buf.X, data[:count], curAttr)
+		buf.X += count
+		data = data[count:]
+		wrote = true
 	}
 
 	if wrote {
-		h.parser.precedingJoinState=CreatePropertyValue(0,1,false)
+		h.parser.precedingJoinState = CreatePropertyValue(0, 1, false)
 	}
-	if bufferRow!=nil && buf.X<cols &&
-		bufferRow.GetWidth(buf.X)==0 && bufferRow.HasContent(buf.X)==0 {
-		bufferRow.SetCellFromCodepoint(buf.X,0,1,curAttr)
+	if bufferRow != nil && buf.X < cols &&
+		bufferRow.GetWidth(buf.X) == 0 && bufferRow.HasContent(buf.X) == 0 {
+		bufferRow.SetCellFromCodepoint(buf.X, 0, 1, curAttr)
 	}
 	h.dirtyRowTracker.MarkDirty(buf.Y)
 }
@@ -527,17 +546,17 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 		var currentInfo int
 		var shouldJoin bool
 		oldWidth := 0
-		if code>=0x20 && code<=0x7e && charset==nil {
+		if code >= 0x20 && code <= 0x7e && charset == nil {
 			// Printable ASCII cannot be wide or combining. Avoid the Unicode
 			// property path for the overwhelmingly common shell/log fast path.
-			chWidth=1
-			currentInfo=CreatePropertyValue(0,1,false)
+			chWidth = 1
+			currentInfo = CreatePropertyValue(0, 1, false)
 		} else {
-			currentInfo=h.unicodeService.CharProperties(rune(code),precedingJoinState)
-			chWidth=ExtractCharPropsWidth(currentInfo)
-			shouldJoin=ExtractShouldJoin(currentInfo)
+			currentInfo = h.unicodeService.CharProperties(rune(code), precedingJoinState)
+			chWidth = ExtractCharPropsWidth(currentInfo)
+			shouldJoin = ExtractShouldJoin(currentInfo)
 			if shouldJoin {
-				oldWidth=ExtractCharPropsWidth(precedingJoinState)
+				oldWidth = ExtractCharPropsWidth(precedingJoinState)
 			}
 		}
 
@@ -548,8 +567,8 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 			h.OnA11yCharEmitter.Fire(string(rune(code)))
 		}
 
-		if linkID!=0 {
-			h.oscLinkService.AddLineToLink(linkID,buf.YBase+buf.Y)
+		if linkID != 0 {
+			h.oscLinkService.AddLineToLink(linkID, buf.YBase+buf.Y)
 		}
 
 		// goto next line if ch would overflow

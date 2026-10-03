@@ -21,10 +21,92 @@ bash scripts/run-go-ui-smoke.sh
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-settings-smoke.py
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-lifecycle-smoke.py
 WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-parity-smoke.py
+WATER_BIN="$PWD/target/go-ui-smoke/water" ~/.venv/bin/python scripts/go-ui-language-grid-smoke.py
 
 # Continuous output with real application switching and increasing background intervals.
 ~/.venv/bin/python scripts/go-ui-background-smoke.py
 ```
+
+The Go frontend supports English and Simplified Chinese. Choose **UI → Language**
+in Settings, then Save; the preference also updates Water's native macOS menu.
+UI labels, setting names, validation hints and dialogs are localized. Terminal
+output, user-provided workspace/tab names and remote error details remain content
+from their source. `ui.language` is `en` or `zh-Hans` (the loader also accepts
+`zh` and `zh-CN`). Language selection previews the UI and Cancel restores the
+saved preference.
+
+Startup window dimensions are terminal cells: `startup.window_columns` and
+`window_rows`, with `window_min_columns` and `window_min_rows` for the minimum.
+The client calculates pixels from the resolved font, line height, display scale,
+titlebar, sidebar and padding. Startup dimensions also supply the default new terminal
+size; legacy `terminal.default_columns`/`default_lines` migrate only when the
+startup values are absent and are removed on save. Tab captions follow the active
+pane's foreground command unless renamed. `ui.tab_font_size` controls their font
+independently; `ui.tab_max_title_length` limits captions (default 32 characters).
+Tabs remain in the titlebar when the sidebar is hidden and start after the
+window controls. Each tab measures its caption with one space on each side,
+plus the configured tab padding; overflow scrolls horizontally.
+Settings categories have section headings and leave the background undimmed.
+These settings affect new windows. Older pixel
+fields are accepted but ignored by the Go frontend and removed when its Settings
+page saves. They are not converted to cells, since the old dimensions did not
+identify the font or display scale. Manually resized panes center the fraction
+of a cell left over at each edge; the default terminal inset is 2 dp (existing
+explicit `ui.pane_padding` settings are respected). Buttons center their measured
+text in both axes.
+Logical Unicode widths match shell layout: private-use Nerd Font symbols such
+as `` count as one column; CJK and wide emoji count as two. An icon can draw
+into a following blank cell of the same background without consuming an extra
+logical column. Beside text or at the right edge it fits its own cell.
+Glyphs use their actual ink bounds, scale down proportionally when necessary,
+and center in their available drawing space.
+Combining marks remain part of their base cell; selection, wrapping and the
+block cursor follow the same logical columns and drawing policy.
+Selection highlights complete two-cell glyphs even when a drag endpoint touches
+only one half. Copying uses the same boundaries, including icon drawing space
+borrowed from a following blank, without changing shell column calculations.
+The language/grid smoke checks actual shell dimensions, both languages and native
+menu titles, persisted settings and restart, different font sizes and sidebar
+visibility, and captures real rendered screenshots using the control API.
+
+Hyperlink targets resolve from the terminal's own OSC8 registry, which also
+assigns each cell's link ID. Drawing and clicking use the same glyph footprint.
+`scripts/go-ui-hyperlink-smoke.py` checks erased/reused links, adjacent rows,
+both halves of wide glyphs, and the final two visible linked rows of the actual
+`ls ~/Documents` output. Its isolated GUI captures opener arguments with a
+temporary test executable instead of launching files or a browser.
+
+OSC 4/10/11/12 query, set and restore colors use the configured palette and
+foreground/background/cursor colors. Application overrides affect rendering
+and subsequent queries; OSC 104/110/111/112 restore the theme defaults.
+`scripts/go-ui-tabs-colors-smoke.py` verifies title-sized tabs, sidebar hiding
+and actual Codex composer background pixels without submitting a prompt.
+
+Additional client-side terminal reports are available through the real PTY:
+
+| Sequence | Behavior |
+| --- | --- |
+| CSI 18 t | Current terminal rows and columns, including after a split/resize |
+| CSI 14 t / 14;2 t | Text grid / complete native window size in physical pixels |
+| CSI 15 t / 16 t / 19 t | Monitor pixels / character-cell pixels / monitor capacity in cells |
+| CSI 11 t / 13 t / 13;2 t | Window state / window position / text grid position |
+| CSI 5 n / 6 n / ?6 n | Terminal status and current cursor position; honors origin mode |
+| CSI 20 t / 21 t | OSC icon label / window title replies; title stacks use CSI 22/23 t |
+| CSI ?996 n / ?2031 h/l | Light/dark query and configured-theme change notifications |
+| DCS $q ... ST | Current SGR attributes, cursor style, protection and scroll margins |
+| DCS +q ... ST | Hex-encoded terminal-name, 256-color and direct-RGB capability queries |
+| OSC 7 ; file URI ST | Current directory metadata, exposed per grid by `water ctl ui snapshot` |
+| OSC 52 ; c ; base64 ST | Copy UTF-8 text to the system clipboard; empty data clears it |
+
+OSC52 writes are bounded to 1 MiB and coalesced; replay does not touch the
+clipboard. Clipboard read queries receive an empty reply. Window/screen reports
+use the GUI owning the pane, not guessed server-side dimensions. Unsupported
+terminal capabilities return a negative report. Responses are bounded and replay
+suppresses them. BEL and ST terminators and output split across chunks are tested.
+Run `~/.venv/bin/python scripts/go-ui-query-smoke.py` on macOS for native checks:
+it compares 18 actual PTY replies with GUI metrics before and after a split,
+checks OSC7 and OSC52, and restores the previous clipboard text. Only its own
+temporary GUI/server are closed.
 
 The macOS background smoke runs a continuous ANSI output command in an isolated
 dev GUI and switches to Google Chrome for 2, 5, 10, 20 and 40 seconds. It confirms

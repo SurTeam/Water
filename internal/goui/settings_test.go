@@ -20,6 +20,8 @@ import (
 func TestSettingsSaveIncludesEditsFromSameInputBatch(t *testing.T) {
 	c := &WorkspaceClient{config: goconfig.Default(), configPath: filepath.Join(t.TempDir(), "config.json")}
 	c.openSettings()
+	c.settings.group = 4
+	c.focusSettingsGroup()
 	var router input.Router
 	frame := func() {
 		var ops op.Ops

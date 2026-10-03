@@ -18,7 +18,7 @@ socket = str(directory / "water.sock")
 config = directory / "config.json"
 shell = next((p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists()), "/bin/sh")
 config.write_text(json.dumps({
-    "startup": {"window_width": 960, "window_height": 640},
+    "startup": {"window_columns": 96, "window_rows": 30},
     "terminal": {"font_family": "Sarasa Term SC Nerd Font"} if platform.system() == "Darwin" and (Path.home()/"Library/Fonts/sarasa-term-sc-regular-nerd-font.ttf").exists() else {},
     "server": {"detached": False, "detach_on_quit": False},
     "shell": {"program": shell, "args": ["-f"] if shell.endswith("zsh") else []},
@@ -189,10 +189,11 @@ except KeyboardInterrupt:
     ui = split["effective_config"]["ui"]
     panes = [h for h in split["automation_hits"] if h["kind"] == "pane"]
     expected_top = split["titlebar_height"] + round((ui["window_padding"] + ui["pane_padding"]) * scale)
-    assert all(abs(h["rect"][1] - expected_top) <= 1 for h in panes), "split panes must not reserve a process header"
+    cells = {str(g["pane_id"]): g for g in split["terminal_grids"]}
+    assert all(0 <= h["rect"][1] - expected_top <= cells[str(h["id"])]["cell_height"]/2 + 1 for h in panes), "split panes must only center the sub-cell remainder, not reserve a process header"
     left_pane = min(panes, key=lambda h: h["rect"][0])
     resize = next(h for h in split["automation_hits"] if h["kind"] == "sidebar_resize")
-    assert abs(left_pane["rect"][0] - round(ui["pane_padding"] * scale) - resize["rect"][2]) <= 1, "sidebar gap must only reserve the resize handle"
+    assert 0 <= left_pane["rect"][0] - round(ui["pane_padding"] * scale) - resize["rect"][2] <= cells[str(left_pane["id"])]["cell_width"]/2 + 1, "sidebar gap must only reserve the resize handle and centered sub-cell remainder"
     divider = next(h for h in split["automation_hits"] if h["kind"] == "divider")
     before = [h["rect"][2]-h["rect"][0] for h in split["automation_hits"] if h["kind"] == "pane"]
     x0, y0, x1, y1 = divider["rect"]

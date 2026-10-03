@@ -86,6 +86,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 	cell := measureNativeCell(faces, lh)
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	applyTerminalColors(v, snap)
 	cache := w.textures[term.id]
 	if cache == nil {
 		cache = &nativeTerminalTexture{rows: map[int]nativeRowTexture{}, images: map[uint64]*ebiten.Image{}}
@@ -137,25 +138,23 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 					styleIndex += 2
 				}
 				face := faces[styleIndex]
+				glyphBounds := bounds
+				if run.drawColumns > run.spanColumns {
+					glyphBounds.Max.X = min(target.Bounds().Max.X, bounds.Min.X+run.drawColumns*cw)
+				}
 				if rects, block := terminalDrawingRects(run.text, bounds.Dx(), lh); block {
 					for _, rect := range rects {
 						nativeRect(target, rect.Add(bounds.Min), fg)
 					}
 				} else {
-					op := &text.DrawOptions{}
-					if terminalEmoji(run.text) {
-						width, height := text.Measure(run.text, face, 0)
-						scale := min(1., float64(bounds.Dx())/max(1., width), float64(lh)/max(1., height))
-						op.GeoM.Scale(scale, scale)
-						op.GeoM.Translate(float64(bounds.Min.X)+(float64(bounds.Dx())-width*scale)/2, (float64(lh)-height*scale)/2)
-					} else {
-						op.GeoM.Translate(float64(bounds.Min.X), cell.baseline-face.Metrics().HAscent)
-					}
-					op.ColorScale.ScaleWithColor(fg)
-					text.Draw(target.SubImage(bounds).(*ebiten.Image), run.text, face, op)
+					drawTerminalGlyph(target, run.text, face, glyphBounds, cell, run.wide, fg)
 				}
 				if run.style.underline {
-					nativeRect(target, image.Rect(bounds.Min.X, lh-2, bounds.Max.X, lh-1), fg)
+					underline := bounds
+					if run.style.linkURI != "" {
+						underline = glyphBounds
+					}
+					nativeRect(target, image.Rect(underline.Min.X, lh-2, underline.Max.X, lh-1), fg)
 				}
 				if run.style.strikethrough {
 					nativeRect(target, image.Rect(bounds.Min.X, lh/2, bounds.Max.X, lh/2+1), fg)
@@ -210,33 +209,45 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 	}
 	if !snap.CursorHide && snap.CursorX >= 0 && snap.CursorX < snap.Cols && snap.CursorY >= 0 && snap.CursorY < snap.Rows {
 		x, y := r.Min.X+snap.CursorX*cw, r.Min.Y+snap.CursorY*lh
+		glyph, columns, face := "", 1, faces[0]
+		if snap.CursorY < len(snap.RowsData) && snap.CursorX < len(snap.RowsData[snap.CursorY].Cells) {
+			cells, column := snap.RowsData[snap.CursorY].Cells, snap.CursorX
+			if cells[column].Width == 0 && column > 0 && cells[column-1].Width == 2 {
+				column--
+				x -= cw
+			}
+			cursorCell := cells[column]
+			glyph, columns = cursorCell.Text, v.glyphDrawColumns(cells, column)
+			styleIndex := 0
+			if cursorCell.Bold {
+				styleIndex++
+			}
+			if cursorCell.Italic {
+				styleIndex += 2
+			}
+			face = faces[styleIndex]
+		}
 		clr := v.Theme.InactiveCursor
 		if focused {
 			clr = v.Theme.Cursor
 		}
 		if !focused || !snap.CursorBlink || time.Now().UnixMilli()%1000 < 600 {
-			cursorRect := image.Rect(x, y, x+cw, y+lh)
+			cursorRect := image.Rect(x, y, x+columns*cw, y+lh)
 			if !focused {
-				vector.StrokeRect(dst, float32(x)+.5, float32(y)+.5, float32(cw-1), float32(lh-1), 1, clr, false)
+				vector.StrokeRect(dst, float32(x)+.5, float32(y)+.5, float32(columns*cw-1), float32(lh-1), 1, clr, false)
 			} else if snap.CursorStyle == "underline" {
-				nativeRect(dst, image.Rect(x, y+lh-w.dp(2), x+cw, y+lh), clr)
+				nativeRect(dst, image.Rect(x, y+lh-w.dp(2), x+columns*cw, y+lh), clr)
 			} else if snap.CursorStyle == "bar" {
 				nativeRect(dst, image.Rect(x, y, x+w.dp(2), y+lh), clr)
 			} else {
 				nativeRect(dst, cursorRect, clr)
-				if snap.CursorY < len(snap.RowsData) && snap.CursorX < len(snap.RowsData[snap.CursorY].Cells) {
-					glyph := snap.RowsData[snap.CursorY].Cells[snap.CursorX].Text
-					if glyph != "" {
-						if rects, drawing := terminalDrawingRects(glyph, cw, lh); drawing {
-							for _, rect := range rects {
-								nativeRect(dst, rect.Add(image.Pt(x, y)).Intersect(cursorRect).Intersect(dst.Bounds()), v.Theme.CursorForeground)
-							}
-						} else {
-							op := &text.DrawOptions{}
-							op.GeoM.Translate(float64(x), float64(y)+cell.baseline-faces[0].Metrics().HAscent)
-							op.ColorScale.ScaleWithColor(v.Theme.CursorForeground)
-							text.Draw(dst.SubImage(cursorRect.Intersect(dst.Bounds())).(*ebiten.Image), glyph, faces[0], op)
+				if glyph != "" {
+					if rects, drawing := terminalDrawingRects(glyph, columns*cw, lh); drawing {
+						for _, rect := range rects {
+							nativeRect(dst, rect.Add(image.Pt(x, y)).Intersect(cursorRect).Intersect(dst.Bounds()), v.Theme.CursorForeground)
 						}
+					} else {
+						drawTerminalGlyph(dst, glyph, face, cursorRect, cell, columns == 2, v.Theme.CursorForeground)
 					}
 				}
 			}

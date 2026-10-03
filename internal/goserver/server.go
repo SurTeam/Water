@@ -121,6 +121,7 @@ func (s *Server) ListenAndServe() error {
 	}
 	s.listener = ln
 	defer os.Remove(s.SocketPath)
+	go s.monitorForegroundProcesses()
 
 	for {
 		conn, err := ln.Accept()

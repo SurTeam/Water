@@ -192,8 +192,9 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 
 	ebiten.SetWindowTitle("Water")
 	ebiten.SetWindowDecorated(false)
-	ebiten.SetWindowSize(int(cfg.Startup.WindowWidth), int(cfg.Startup.WindowHeight))
-	ebiten.SetWindowSizeLimits(int(cfg.Startup.WindowMinWidth), int(cfg.Startup.WindowMinHeight), -1, -1)
+	initialSize, minimumSize := w.InitialWindowSize(), w.MinimumWindowSize()
+	ebiten.SetWindowSize(initialSize.X, initialSize.Y)
+	ebiten.SetWindowSizeLimits(minimumSize.X, minimumSize.Y, -1, -1)
 	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
 	ebiten.SetWindowClosingHandled(true)
 	ebiten.SetRunnableOnUnfocused(true)

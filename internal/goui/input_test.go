@@ -75,6 +75,28 @@ func TestHyperlinkURIAt(t *testing.T) {
 	}
 }
 
+func TestHyperlinkClickUsesWholeVisualGlyph(t *testing.T) {
+	for _, label := range []string{"界", "🍺", " "} {
+		e := govt.New(12, 3, 0)
+		e.Write([]byte("\x1b]8;;https://example.com/a\x1b\\" + label + "\x1b]8;;\x1b\\B"))
+		for _, col := range []int{0, 1} {
+			if got := hyperlinkURIAt(e.Snapshot(), col, 0); got != "https://example.com/a" {
+				t.Fatalf("%q half %d opens %q", label, col, got)
+			}
+		}
+		if got := hyperlinkURIAt(e.Snapshot(), 2, 0); got != "" {
+			t.Fatalf("neighbor opens %q", got)
+		}
+		e.Close()
+	}
+	e := govt.New(12, 3, 0)
+	defer e.Close()
+	e.Write([]byte("\x1b]8;;https://example.com/a\x1b\\\x1b]8;;https://example.com/b\x1b\\ \x1b]8;;\x1b\\"))
+	if got := hyperlinkURIAt(e.Snapshot(), 1, 0); got != "https://example.com/b" {
+		t.Fatalf("distinct neighbor link borrowed: %q", got)
+	}
+}
+
 func TestTerminalClickCountTracksSameCellWithinWindow(t *testing.T) {
 	var input TerminalInput
 	if got := input.nextClickCount(100*time.Millisecond, 2, 3); got != 1 {

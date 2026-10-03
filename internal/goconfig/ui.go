@@ -23,6 +23,8 @@ func (u UIConfig) normalized() UIConfig {
 	u.TitlebarGap = clampFloat(u.TitlebarGap, 0, 32)
 	u.TabGap = clampFloat(u.TabGap, 0, 24)
 	u.TabPadding = clampFloat(u.TabPadding, 0, 48)
+	u.TabFontSize = clampFloat(u.TabFontSize, 8, 32)
+	u.TabMaxTitleLength = clamp(u.TabMaxTitleLength, 8, 128)
 	u.WindowCornerRadius = clampFloat(u.WindowCornerRadius, 0, 48)
 	u.SidebarCardRadius = clampFloat(u.SidebarCardRadius, 0, 32)
 	u.SidebarWorkspaceRadius = clampFloat(u.SidebarWorkspaceRadius, 0, 24)

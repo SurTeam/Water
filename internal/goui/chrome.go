@@ -14,7 +14,7 @@ import (
 )
 
 // Chrome controls keep the existing Clickable event path, but use compact,
-// left-aligned navigation instead of Material's raised action buttons.
+// centered labels instead of Material's raised action buttons.
 type chromeButtonStyle struct {
 	theme             *material.Theme
 	click             *widget.Clickable
@@ -23,6 +23,7 @@ type chromeButtonStyle struct {
 	Selected          bool
 	Compact           bool
 	FillWidth         bool
+	TextSize          unit.Sp
 }
 
 func chromeButton(th *material.Theme, click *widget.Clickable, label string) chromeButtonStyle {
@@ -55,10 +56,14 @@ func (b chromeButtonStyle) Layout(gtx layout.Context) layout.Dimensions {
 					padding = 10
 				}
 				return layout.Inset{Left: padding, Right: padding, Top: 8, Bottom: 8}.Layout(gtx, func(gtx layout.Context) layout.Dimensions {
-					label := material.Label(b.theme, b.theme.TextSize, b.label)
+					size := b.TextSize
+					if size == 0 {
+						size = b.theme.TextSize
+					}
+					label := material.Label(b.theme, size, b.label)
 					label.Color = b.Color
 					label.MaxLines = 1
-					return label.Layout(gtx)
+					return layout.Center.Layout(gtx, label.Layout)
 				})
 			}),
 		)

@@ -521,6 +521,10 @@ func (h *InputHandler) deviceStatus(params *Params) bool {
 	case 6:
 		y := buf.Y + 1
 		x := buf.X + 1
+		if h.coreService.DecPrivateModes.Origin {
+			y -= buf.ScrollTop
+		}
+		x = min(x, h.bufferService.Cols)
 		h.coreService.TriggerDataEvent(fmt.Sprintf("\x1b[%d;%dR", y, x), false, false)
 	}
 	return true
@@ -532,11 +536,13 @@ func (h *InputHandler) deviceStatusPrivate(params *Params) bool {
 	case 6:
 		y := buf.Y + 1
 		x := buf.X + 1
-		h.coreService.TriggerDataEvent(fmt.Sprintf("\x1b[?%d;%dR", y, x), false, false)
-	case 996:
-		if h.coreService.DecPrivateModes.ColorSchemeUpdates {
-			h.OnRequestColorSchemeQueryEmitter.Fire(struct{}{})
+		if h.coreService.DecPrivateModes.Origin {
+			y -= buf.ScrollTop
 		}
+		x = min(x, h.bufferService.Cols)
+		h.coreService.TriggerDataEvent(fmt.Sprintf("\x1b[?%d;%d;1R", y, x), false, false)
+	case 996:
+		h.OnRequestColorSchemeQueryEmitter.Fire(struct{}{})
 	}
 	return true
 }
@@ -1042,16 +1048,32 @@ func (h *InputHandler) windowOptions(params *Params) bool {
 				h.OnIconNameChangeEmitter.Fire(name)
 			}
 		}
+	case 11:
+		h.OnRequestWindowsOptionsReportEmitter.Fire(GetWindowState)
+	case 13:
+		if params.Length >= 2 && params.Params[1] == 2 {
+			h.OnRequestWindowsOptionsReportEmitter.Fire(GetTextAreaPosition)
+		} else {
+			h.OnRequestWindowsOptionsReportEmitter.Fire(GetWindowPosition)
+		}
 	case 14:
-		// Report window size in pixels. Ps2 == 2 means cell size (handled by case 16 upstream),
-		// otherwise report window size.
 		ps2 := int32(0)
 		if params.Length >= 2 {
 			ps2 = params.Params[1]
 		}
-		if ps2 != 2 {
+		if ps2 == 2 {
+			h.OnRequestWindowsOptionsReportEmitter.Fire(GetWindowSizePixels)
+		} else {
 			h.OnRequestWindowsOptionsReportEmitter.Fire(GetWinSizePixels)
 		}
+	case 15:
+		h.OnRequestWindowsOptionsReportEmitter.Fire(GetScreenSizePixels)
+	case 19:
+		h.OnRequestWindowsOptionsReportEmitter.Fire(GetScreenSizeChars)
+	case 20:
+		h.coreService.TriggerDataEvent("\x1b]L"+safeReportLabel(h.iconName)+"\x1b\\", false, false)
+	case 21:
+		h.coreService.TriggerDataEvent("\x1b]l"+safeReportLabel(h.windowTitle)+"\x1b\\", false, false)
 	case 16:
 		// Report cell size in pixels.
 		h.OnRequestWindowsOptionsReportEmitter.Fire(GetCellSizePixels)
