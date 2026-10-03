@@ -436,12 +436,21 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 			}
 		}
 
-		currentInfo := h.unicodeService.CharProperties(rune(code), precedingJoinState)
-		chWidth = ExtractCharPropsWidth(currentInfo)
-		shouldJoin := ExtractShouldJoin(currentInfo)
+		var currentInfo int
+		var shouldJoin bool
 		oldWidth := 0
-		if shouldJoin {
-			oldWidth = ExtractCharPropsWidth(precedingJoinState)
+		if code>=0x20 && code<=0x7e && charset==nil {
+			// Printable ASCII cannot be wide or combining. Avoid the Unicode
+			// property path for the overwhelmingly common shell/log fast path.
+			chWidth=1
+			currentInfo=CreatePropertyValue(0,1,false)
+		} else {
+			currentInfo=h.unicodeService.CharProperties(rune(code),precedingJoinState)
+			chWidth=ExtractCharPropsWidth(currentInfo)
+			shouldJoin=ExtractShouldJoin(currentInfo)
+			if shouldJoin {
+				oldWidth=ExtractCharPropsWidth(precedingJoinState)
+			}
 		}
 
 		precedingJoinState = currentInfo
@@ -451,8 +460,8 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 			h.OnA11yCharEmitter.Fire(string(rune(code)))
 		}
 
-		if h.getCurrentLinkId() != 0 {
-			h.oscLinkService.AddLineToLink(h.getCurrentLinkId(), buf.YBase+buf.Y)
+		if linkID:=h.getCurrentLinkId();linkID!=0 {
+			h.oscLinkService.AddLineToLink(linkID,buf.YBase+buf.Y)
 		}
 
 		// goto next line if ch would overflow
