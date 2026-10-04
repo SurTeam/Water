@@ -22,16 +22,17 @@ type macNativePlatform struct {
 	dispatch      func(uintptr, objc.Block)
 	controller    objc.ID
 	// AppKit objects and the item map are owned exclusively by the main queue.
-	items        map[string]macMenuItem
-	configured   goconfig.AppConfig
-	menuTitles   map[objc.ID]string
-	window       objc.ID
-	layer        objc.ID
-	radius       float64
-	installed    bool
-	pending      atomic.Bool
-	pendingCalls atomic.Int32
-	state        atomic.Pointer[map[string]any]
+	items              map[string]macMenuItem
+	configured         goconfig.AppConfig
+	menuTitles         map[objc.ID]string
+	window             objc.ID
+	layer              objc.ID
+	radius             float64
+	installed          bool
+	pending            atomic.Bool
+	pendingCalls       atomic.Int32
+	state              atomic.Pointer[map[string]any]
+	notificationStatus atomic.Pointer[string]
 }
 
 func macSend(id objc.ID, selector string, args ...any) objc.ID {
@@ -254,7 +255,14 @@ func (p *macNativePlatform) publish() {
 }
 func (p *macNativePlatform) Snapshot() map[string]any {
 	if snapshot := p.state.Load(); snapshot != nil {
-		return *snapshot
+		copy := make(map[string]any, len(*snapshot)+1)
+		for key, value := range *snapshot {
+			copy[key] = value
+		}
+		if status := p.notificationStatus.Load(); status != nil {
+			copy["notification_status"] = *status
+		}
+		return copy
 	}
 	return map[string]any{"ready": false, "hidden": false}
 }

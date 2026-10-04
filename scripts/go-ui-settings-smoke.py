@@ -59,8 +59,13 @@ def hit(label=None, kind=None):
                 found.update(candidate)
                 return True
         if label and label.startswith("field:") and snapshot.get("settings_visible"):
+            group = label.split(":")[1].split(".")[0]
+            names = [f["name"] for f in snapshot["settings_fields"] if f["name"].startswith(group+".")]
+            target = names.index(label.removeprefix("field:"))
+            visible = [h["label"].removeprefix("field:") for h in snapshot["automation_hits"] if h.get("label", "").startswith("field:"+group+".")]
+            direction = -1 if visible and target < names.index(visible[0]) else 1
             width, height = snapshot["frame_size"]
-            ctl("ui", "wheel", "--x", str(width*.65), "--y", str(height*.5), "--dy", "120")
+            ctl("ui", "wheel", "--x", str(width*.65), "--y", str(height*.5), "--dy", str(direction*88))
         return False
     wait(ready, f"hit {label or kind}")
     x0, y0, x1, y1 = found["rect"]
@@ -86,6 +91,37 @@ try:
         print("font_verified=" + font["path"], flush=True)
     terminal = initial["frame_active_terminal"]
     pane = initial["frame_focused_pane"]
+    # Preserve actual current directories, with and without OSC 7, before model
+    # creation changes the active pane. Use paths requiring URI/shell escaping.
+    from urllib.parse import quote
+    inherited = directory / "项目 with spaces"
+    inherited.mkdir()
+    ctl("pane", "input", "--pane", pane, "--text", "cd "+shlex.quote(str(inherited))+"; printf '\\033]7;%s\\007' "+shlex.quote("file://localhost"+quote(str(inherited)))+"\n")
+    wait(lambda s: any(g["pane_id"]==pane and g["working_directory_uri"].endswith(quote(str(inherited))) for g in s["terminal_grids"]), "OSC 7 current directory")
+    ctl("ui", "key", "cmd-t")
+    child = wait(lambda s: s["frame_focused_pane"] != pane, "new tab inherits source context")
+    ctl("pane", "input", "--pane", child["frame_focused_pane"], "--text", "printf 'WATER_TAB_CWD_%s\\n' \"$PWD\"\n")
+    ctl("terminal", "contains", "--terminal", child["frame_active_terminal"], "WATER_TAB_CWD_"+str(inherited.resolve()), "--timeout-ms", "4000")
+    child_tab = next(w["active_tab"] for w in ctl("state")["workspaces"] if w["id"] == child["frame_active_workspace"])
+    ctl("tab", "close", "--tab", child_tab)
+    wait(lambda s: s["frame_focused_pane"] == pane, "source pane restored")
+    process_dir = directory / "process cwd"
+    process_dir.mkdir()
+    ctl("pane", "input", "--pane", pane, "--text", "cd "+shlex.quote(str(process_dir))+"; printf 'WATER_CWD_CHANGED\\n'\n")
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_CWD_CHANGED", "--timeout-ms", "5000")
+    ctl("ui", "key", "cmd-t")
+    child = wait(lambda s: s["frame_focused_pane"] != pane, "tab uses current process cwd despite stale OSC 7")
+    ctl("pane", "input", "--pane", child["frame_focused_pane"], "--text", "printf 'WATER_FRESH_CWD_%s\\n' \"$PWD\"\n")
+    ctl("terminal", "contains", "--terminal", child["frame_active_terminal"], "WATER_FRESH_CWD_"+str(process_dir.resolve()), "--timeout-ms", "4000")
+    child_tab = next(w["active_tab"] for w in ctl("state")["workspaces"] if w["id"] == child["frame_active_workspace"])
+    ctl("tab", "close", "--tab", child_tab)
+    wait(lambda s: s["frame_focused_pane"] == pane, "source pane restored after fresh cwd tab")
+    ctl("pane", "split", "--pane", pane, "--right")
+    child = wait(lambda s: s["frame_focused_pane"] != pane, "split inherits live process cwd")
+    ctl("pane", "input", "--pane", child["frame_focused_pane"], "--text", "printf 'WATER_SPLIT_CWD_%s\\n' \"$PWD\"\n")
+    ctl("terminal", "contains", "--terminal", child["frame_active_terminal"], "WATER_SPLIT_CWD_"+str(process_dir.resolve()), "--timeout-ms", "4000")
+    ctl("pane", "close", "--pane", child["frame_focused_pane"])
+    wait(lambda s: s["frame_focused_pane"] == pane, "source pane restored after split")
     # Capture bytes in a real raw PTY so shell editing cannot mask bad encoding.
     python = str(Path.home() / ".venv/bin/python")
     key_probes = [("Up", b"\x1b[A"), ("Down", b"\x1b[B"), ("Left", b"\x1b[D"), ("Right", b"\x1b[C"),
@@ -112,9 +148,37 @@ print('WATER_KEYS_' + data.hex(), flush=True)
 """.replace("COUNT", str(len(expected_bytes)))
     ctl("pane", "input", "--pane", pane, "--text", python+" -c "+shlex.quote(raw_probe)+"\n")
     ctl("terminal", "contains", "--terminal", terminal, "WATER_RAW_READY", "--timeout-ms", "5000")
+    # No selected text: Command+C must copy only and contribute no PTY bytes.
+    assert ctl("ui", "key", "cmd-c")["handled"]
+    ctl("ui", "key", "cmd-d")
     for key, _ in key_probes:
         assert ctl("ui", "key", key)["handled"], key
     ctl("terminal", "contains", "--terminal", terminal, "WATER_KEYS_"+expected_bytes.hex(), "--timeout-ms", "5000")
+    mouse_probe = """import os, select, termios, time, tty
+old = termios.tcgetattr(0)
+try:
+    tty.setraw(0)
+    print('\\x1b[?1000h\\x1b[?1006hWATER_' + 'MOUSE_READY', flush=True)
+    data = b''
+    deadline = time.monotonic()+4
+    while time.monotonic() < deadline:
+        readable, _, _ = select.select([0], [], [], .25 if data else max(0,deadline-time.monotonic()))
+        if not readable:
+            break
+        data += os.read(0, 4096)
+finally:
+    print('\\x1b[?1000l\\x1b[?1006l', end='', flush=True)
+    termios.tcsetattr(0, termios.TCSANOW, old)
+print('WATER_MOUSE_COUNT_' + str(data.count(b'M')) + '_' + data.hex(), flush=True)
+"""
+    for delta, reports in ((40,1),(120,3),(10000,64)):
+        probe = mouse_probe.replace("MOUSE_READY", "MOUSE_READY_"+str(delta)).replace("MOUSE_COUNT_", "MOUSE_COUNT_"+str(delta)+"_")
+        ctl("pane", "input", "--pane", pane, "--text", python+" -c "+shlex.quote(probe)+"\n")
+        ctl("terminal", "contains", "--terminal", terminal, "WATER_MOUSE_READY_"+str(delta), "--timeout-ms", "4000")
+        mouse_state = ctl("ui", "snapshot")
+        rect = next(h["rect"] for h in mouse_state["automation_hits"] if h["kind"] == "pane")
+        ctl("ui", "wheel", "--x", str((rect[0]+rect[2])/2), "--y", str((rect[1]+rect[3])/2), "--dy", str(delta))
+        ctl("terminal", "contains", "--terminal", terminal, f"WATER_MOUSE_COUNT_{delta}_{reports}_", "--timeout-ms", "4000")
     interrupt_probe = """import time
 print('WATER_' + 'INTERRUPT_READY', flush=True)
 try:
@@ -126,10 +190,32 @@ except KeyboardInterrupt:
     ctl("terminal", "contains", "--terminal", terminal, "WATER_INTERRUPT_READY", "--timeout-ms", "5000")
     assert ctl("ui", "key", "ctrl-c")["handled"]
     ctl("terminal", "contains", "--terminal", terminal, "WATER_INTERRUPTED", "--timeout-ms", "5000")
+    ctl("pane", "input", "--pane", pane, "--text", "for i in {1..400}; do printf 'ROW_%04d\\n' $i; done; printf 'WATER_SCROLL_END\\n'\n")
+    ctl("terminal", "contains", "--terminal", terminal, "WATER_SCROLL_END", "--timeout-ms", "4000")
+    def grid(s):
+        return next(g for g in s["terminal_grids"] if g["pane_id"] == pane)
+    scrolling = wait(lambda s: grid(s)["y_base"] > 300 and grid(s)["y_disp"] == grid(s)["y_base"], "scrollback filled and at bottom")
+    rect = grid(scrolling)["rect"]
+    def wheel(delta):
+        ctl("ui", "wheel", "--x", str((rect[0]+rect[2])/2), "--y", str((rect[1]+rect[3])/2), "--dy", str(delta))
+    before = grid(scrolling)["y_disp"]
+    wheel(-40)
+    fine = wait(lambda s: grid(s)["y_disp"] == before-1, "fine scrollback moves one line")
+    wheel(-4000)
+    wait(lambda s: grid(s)["y_disp"] == before-101, "bulk scrollback moves 100 lines")
+    wheel(-1e9)
+    wait(lambda s: grid(s)["y_disp"] == 0, "very large scroll safely clamps to history start")
+    wheel(1e9)
+    wait(lambda s: grid(s)["y_disp"] == grid(s)["y_base"], "large scroll safely returns to live bottom")
     font_demo = "printf '\\033[2J\\033[HRegular  gypqj  0123456789  Il1 O0  => !=\\n\\033[1mBold     gypqj  0123456789  Il1 O0\\033[0m\\n\\033[3mItalic   gypqj  0123456789  Il1 O0\\033[0m\\n中文：更纱黑体  水\\nNerd:        \\n'\n"
     ctl("pane", "input", "--pane", pane, "--text", font_demo)
     ctl("terminal", "contains", "--terminal", terminal, "Nerd:", "--timeout-ms", "5000")
     ctl("ui", "screenshot", "--output", str(directory / "font.png"))
+    unicode_demo = "printf '\\033[2J\\033[H中文标点：你好，世界。你好、世界；你好：世界！\\n中文括号：（你好）「世界」『文字』【布局】\\n全角文本：ＡＢＣ１２３￥＋－＝\\n组合字符：é ä 漢󠄀\\n绘图符号：┌──┬──┐ ▀▄█ ░▒▓ ⡇⣀⣿\\n文字符号：← → ↑ ↓ ∑ ∫ √ ≤ ≥ ▶︎ ♥︎\\nemoji: 🍺 👩‍💻  Nerd:  \\n'\n"
+    unicode_demo = unicode_demo.replace("emoji:", "补充文字符号：🂡 🀀 🠖 🞀 🄰 🩀\\nemoji:")
+    ctl("pane", "input", "--pane", pane, "--text", unicode_demo)
+    ctl("terminal", "contains", "--terminal", terminal, "中文标点：", "--timeout-ms", "4000")
+    ctl("ui", "screenshot", "--output", str(directory / "unicode-layout.png"))
     ctl("ui", "key", "ctrl-l")
     tabs = [h for h in initial["automation_hits"] if h["kind"] == "tab"]
     assert tabs and all(h["rect"][3] <= initial["titlebar_height"] for h in tabs), "tabs must share the titlebar"
@@ -154,7 +240,7 @@ except KeyboardInterrupt:
     assert ctl("ui", "drag", "--x", str(width-2), "--y", str(height*.8), "--to-x", str(width-62), "--to-y", str(height*.8))["handled"]
     wait(lambda s: s["window_size"] == initial["window_size"], "custom border restored size")
     ctl("ui", "screenshot", "--output", str(directory / "workspace.png"))
-    hit(kind="settings")
+    ctl("ui", "key", "cmd-,")
     wait(lambda s: s.get("settings_visible"), "settings open")
     ctl("ui", "screenshot", "--output", str(directory / "settings.png"))
     edit("Terminal.FontSize", "18")
@@ -163,6 +249,13 @@ except KeyboardInterrupt:
     edit("Terminal.FontFamily", font_chain)
     hit(label="category:UI")
     edit("UI.SidebarWidth", "240")
+    edit("UI.TitlebarHeight", "20")
+    edit("UI.TabHeight", "12")
+    edit("UI.TabFontSize", "8")
+    edit("UI.SidebarRemoteButtonHeight", "40")
+    edit("UI.SidebarRemoteButtonFontSize", "16")
+    edit("UI.SidebarWorkspaceButtonHeight", "24")
+    edit("UI.SidebarWorkspaceButtonFontSize", "9")
     hit(label="category:Theme")
     edit("Theme.TerminalBackground", "#182838")
     edit("Theme.1", "#ee5566")
@@ -172,7 +265,25 @@ except KeyboardInterrupt:
     edit("Shortcuts.IgnoreQuit", "cmd-alt-q")
     edit("Shortcuts.SplitDown", "ctrl-alt-s")
     hit(label="save")
-    saved = wait(lambda s: not s.get("settings_visible") and s.get("effective_config", {}).get("ui", {}).get("sidebar_width") == 240, "saved settings projected")
+    saved = wait(lambda s: s.get("settings_visible") and s.get("settings_message") == "Settings saved" and s.get("effective_config", {}).get("ui", {}).get("sidebar_width") == 240, "saved settings projected and panel remains open")
+    hit(label="cancel")
+    saved = wait(lambda s: not s.get("settings_visible"), "cancel saved settings without discard prompt")
+    scale = saved["frame_size"][0] / saved["window_size"][0]
+    assert saved["titlebar_height"] == round(20 * scale)
+    tab = next(h for h in saved["automation_hits"] if h["kind"] == "tab")
+    assert tab["rect"][3] - tab["rect"][1] == round(12 * scale)
+    assert abs((tab["rect"][1] + tab["rect"][3]) / 2 - saved["titlebar_height"] / 2) <= 1
+    resize = next(h for h in saved["automation_hits"] if h["kind"] == "sidebar_resize")
+    assert tab["rect"][0] == resize["rect"][2], "tab must align with terminal container"
+    assert not any(h["kind"] in ("settings", "split_right", "split_down") for h in saved["automation_hits"])
+    remote_button = next(h for h in saved["automation_hits"] if h["kind"] == "new_remote")
+    workspace_button = next(h for h in saved["automation_hits"] if h["kind"] == "new_workspace")
+    assert remote_button["rect"][3]-remote_button["rect"][1] == round(40*scale)
+    assert workspace_button["rect"][3]-workspace_button["rect"][1] == round(24*scale)
+    assert workspace_button["rect"][1]-remote_button["rect"][3] == round(8*scale)
+    assert saved["effective_config"]["ui"]["sidebar_remote_button_font_size"] == 16
+    assert saved["effective_config"]["ui"]["sidebar_workspace_button_font_size"] == 9
+    ctl("ui", "screenshot", "--output", str(directory / "compact-titlebar.png"))
     persisted = json.loads(config.read_text())
     assert persisted["future_setting"]["keep"]
     assert persisted["theme"]["terminal_background"] == "#182838"
@@ -183,7 +294,7 @@ except KeyboardInterrupt:
     assert persisted["terminal"]["font_size"] == 18
     assert persisted["terminal"]["font_family"] == font_chain
     assert persisted["theme"]["ansi_colors"][1] == "#ee5566"
-    hit(kind="split_right")
+    ctl("ui", "key", "cmd-\\")
     split = wait(lambda s: len([h for h in s.get("automation_hits", []) if h["kind"] == "pane"]) == 2, "horizontal split")
     scale = split["frame_size"][0] / split["window_size"][0]
     ui = split["effective_config"]["ui"]
@@ -218,8 +329,27 @@ except KeyboardInterrupt:
     ctl("ui", "screenshot", "--output", str(directory / "split.png"))
     ctl("ui", "key", "cmd-,")
     wait(lambda s: s.get("settings_visible"), "reopen settings")
+    hit(label="category:UI")
+    edit("UI.TitlebarHeight", "12")
+    edit("UI.TabHeight", "8")
+    edit("UI.TabFontSize", "6")
+    hit(label="save")
+    wait(lambda s: s.get("settings_message") == "Settings saved" and s["effective_config"]["ui"]["titlebar_height"] == 12, "smallest chrome saved")
+    hit(label="save")
+    wait(lambda s: s.get("settings_message") == "Settings saved" and not s.get("settings_saving"), "repeat save without leaving settings")
+    hit(label="category:UI")
+    ctl("ui", "screenshot", "--output", str(directory / "accent-settings.png"))
+    ctl("ui", "key", "cmd-,")
+    tiny = wait(lambda s: not s.get("settings_visible"), "settings shortcut closes saved panel")
+    assert tiny["titlebar_height"] == round(12 * scale)
+    tab = next(h for h in tiny["automation_hits"] if h["kind"] == "tab")
+    assert tab["rect"][3] - tab["rect"][1] == round(8 * scale)
+    assert abs((tab["rect"][1]+tab["rect"][3])/2-tiny["titlebar_height"]/2) <= 1
+    assert all(0 <= h["rect"][1] < h["rect"][3] <= tiny["titlebar_height"] for h in tiny["automation_hits"] if h["kind"].startswith("window_"))
+    ctl("ui", "screenshot", "--output", str(directory / "minimum-titlebar.png"))
+    ctl("ui", "key", "cmd-,")
     ctl("ui", "key", "Escape")
-    wait(lambda s: not s.get("settings_visible"), "cancel settings")
+    wait(lambda s: not s.get("settings_visible"), "Escape closes clean settings")
     hit(kind="window_minimize")
     wait(lambda s: s["window_minimized"], "custom minimize")
     hit(kind="window_maximize")

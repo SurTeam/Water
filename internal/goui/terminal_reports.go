@@ -15,7 +15,15 @@ func (w *EbitengineWindow) updateTerminalMetrics(term *terminalClient, rect imag
 		sw, sh := monitor.Size()
 		m.ScreenWidth, m.ScreenHeight = w.dp(float64(sw)), w.dp(float64(sh))
 	}
-	term.emu.SetWindowMetrics(m)
+	setTerminalWindowMetrics(term, m)
+}
+
+func setTerminalWindowMetrics(term *terminalClient, m govt.WindowMetrics) {
+	term.mu.RLock()
+	defer term.mu.RUnlock()
+	if term.emu != nil {
+		term.emu.SetWindowMetrics(m)
+	}
 }
 
 func (w *EbitengineWindow) processTerminalReports() {

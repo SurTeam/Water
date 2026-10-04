@@ -32,11 +32,28 @@ type settingsField struct {
 
 var defaultSettingsTheme = DefaultTerminalTheme()
 
+type sidebarChoice struct{ value, label string }
+
+func sidebarSettingChoices(f settingsField) []sidebarChoice {
+	if f.group != "UI" {
+		return nil
+	}
+	if f.name == "SidebarAgentMode" {
+		return []sidebarChoice{{"workspace", "Under workspace"}, {"split", "Separate agents"}}
+	}
+	if strings.HasPrefix(f.name, "Sidebar") && strings.HasSuffix(f.name, "Alignment") {
+		return []sidebarChoice{{"left", "Left"}, {"center", "Center"}, {"right", "Right"}}
+	}
+	return nil
+}
+
 type settingsSave struct {
 	cfg goconfig.AppConfig
 	err error
 }
 type settingsPanel struct {
+	initial                       []string
+	confirmDiscard                bool
 	visible, saving               bool
 	group, focus                  int
 	requestFocus                  bool
@@ -92,6 +109,7 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 		return
 	}
 	c.settings.visible = true
+	c.settings.confirmDiscard = false
 	c.settings.message = ""
 	c.settings.draft = cfg
 	if c.settingsStore != nil {
@@ -160,10 +178,33 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 		f.editor.SetText(text)
 		c.settings.fields = append(c.settings.fields, f)
 	}
+	c.settings.initial = c.settings.values()
 	c.focusSettingsGroup()
 	if c.invalidate != nil {
 		c.invalidate()
 	}
+}
+
+func (s *settingsPanel) values() []string {
+	values := make([]string, len(s.fields))
+	for i, f := range s.fields {
+		if f.kind == reflect.Bool {
+			values[i] = strconv.FormatBool(f.toggle.Value)
+		} else {
+			values[i] = f.editor.Text()
+		}
+	}
+	return values
+}
+
+func (s *settingsPanel) cancelChanges() {
+	if !s.confirmDiscard && !reflect.DeepEqual(s.initial, s.values()) {
+		s.confirmDiscard = true
+		s.message = "Unsaved changes. Click Discard changes to cancel, or continue editing."
+		return
+	}
+	s.visible = false
+	s.focus = -1
 }
 
 func (c *WorkspaceClient) focusSettingsGroup() {
@@ -180,6 +221,8 @@ func (c *WorkspaceClient) focusSettingsGroup() {
 
 func settingsLabel(name string) string {
 	switch name {
+	case "CopyOrInterrupt":
+		return "Copy"
 	case "TabMaxTitleLength":
 		return "Maximum tab title characters"
 	case "SidebarHeaderHeight":
@@ -254,6 +297,15 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 		value := reflect.ValueOf(&cfg).Elem().FieldByName(f.group).FieldByName(f.name)
 		switch value.Kind() {
 		case reflect.String:
+			if choices := sidebarSettingChoices(*f); len(choices) > 0 {
+				valid := false
+				for _, choice := range choices {
+					valid = valid || text == choice.value
+				}
+				if !valid {
+					return cfg, fmt.Errorf("%s: choose one of the displayed options", label)
+				}
+			}
 			if f.group == "UI" && f.name == "Language" && text != "en" && text != "zh-Hans" {
 				return cfg, fmt.Errorf("%s", ctext(cfg.UI.Language, "Choose English or Simplified Chinese"))
 			}
@@ -336,8 +388,10 @@ func (c *WorkspaceClient) pollSettingsSave() {
 			return
 		}
 		c.runtimeConfig = &result.cfg
-		c.settings.visible = false
-		c.restoreTerminalFocus = true
+		group, focus := c.settings.group, c.settings.focus
+		c.openSettingsConfig(result.cfg)
+		c.settings.group, c.settings.focus = group, focus
+		c.settings.message = "Settings saved"
 	default:
 	}
 }
@@ -379,7 +433,7 @@ func (c *WorkspaceClient) layoutSettings(gtx layout.Context, th *material.Theme)
 	c.hitRegions = append(c.hitRegions, automationHit{Rect: image.Rectangle{Max: gtx.Constraints.Max}, Kind: hitSettingsControl})
 	for s.cancel.Clicked(gtx) {
 		if !s.saving {
-			s.visible = false
+			s.cancelChanges()
 			c.restoreTerminalFocus = true
 			if c.invalidate != nil {
 				c.invalidate()
@@ -389,7 +443,9 @@ func (c *WorkspaceClient) layoutSettings(gtx layout.Context, th *material.Theme)
 	}
 	for s.defaults.Clicked(gtx) {
 		if !s.saving {
+			initial := s.initial
 			c.openSettingsConfig(goconfig.Default())
+			s.initial = initial
 		}
 	}
 	for s.save.Clicked(gtx) {
@@ -451,11 +507,7 @@ func (c *WorkspaceClient) routeSettingsInput(spec string) bool {
 	}
 	if e, ok := ev.(key.Event); ok && e.Name == key.NameEscape {
 		if !c.settings.saving {
-			c.settings.visible = false
-			c.restoreTerminalFocus = true
-			if c.invalidate != nil {
-				c.invalidate()
-			}
+			c.settings.cancelChanges()
 		}
 		return true
 	}
@@ -486,7 +538,9 @@ func (c *WorkspaceClient) routeSettingsInput(spec string) bool {
 }
 
 func (c *WorkspaceClient) splitPane(direction string) {
-	_ = c.session.DispatchAsync(map[string]any{"type": "pane.split", "direction": direction})
+	command := c.creationCommand("pane.split")
+	command["direction"] = direction
+	_ = c.session.DispatchAsync(command)
 }
 func (c *WorkspaceClient) cycleTab(delta int) bool {
 	c.mu.RLock()

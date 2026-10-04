@@ -74,6 +74,8 @@ def edit(name, value):
 
 def save():
     hit(label="save")
+    wait(lambda s: s["settings_visible"] and s.get("settings_message") == "Settings saved", "saved settings remain open")
+    hit(label="cancel")
     return wait(lambda s: not s["settings_visible"], "saved settings")
 
 def screenshot(name, rounded):
@@ -105,7 +107,7 @@ try:
     wait(lambda s: s["remote_form_visible"], "remote shortcut")
     ctl("ui", "key", "escape")
     wait(lambda s: not s["remote_form_visible"], "remote cancelled")
-    hit(kind="settings")
+    ctl("ui", "key", "cmd-,")
     state = wait(lambda s: s["settings_visible"], "settings")
     fields = {f["name"] for f in state["settings_fields"]}
     assert {"Startup.ControlSocket", "UI.WindowCornerRadius", "UI.SidebarAgentRowWidth",
@@ -129,13 +131,13 @@ try:
     ctl("ui", "drag", "--x", str((x0+x1)/2), "--y", str((y0+y1)/2),
         "--to-x", str((x0+x1)/2+40), "--to-y", str((y0+y1)/2))
     wait(lambda s: s["sidebar_width"] > state["sidebar_width"], "sidebar resize")
-    hit(kind="settings")
+    ctl("ui", "key", "cmd-,")
     hit(label="category:UI")
     edit("UI.WindowCornerRadius", 0)
     save()
     wait(lambda s: s["native_menu"].get("window_corner_radius") == 0, "square native layer")
     screenshot("square", False)
-    hit(kind="settings")
+    ctl("ui", "key", "cmd-,")
     hit(label="category:UI")
     edit("UI.WindowCornerRadius", 16)
     hit(label="field:UI.SidebarVisible")

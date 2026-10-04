@@ -101,7 +101,8 @@ def check_tabs_and_settings():
     def tabs(state):
         return [hit for hit in state["automation_hits"] if hit["kind"] == "tab"]
     def aligned(state):
-        return tabs(state) and tabs(state)[0]["rect"][0] == min(g["rect"][0] for g in state["terminal_grids"])
+        resize = next((h for h in state["automation_hits"] if h["kind"] == "sidebar_resize"), None)
+        return tabs(state) and resize and tabs(state)[0]["rect"][0] == resize["rect"][2]
     state = wait(aligned, "tab and terminal left alignment")
     pane = str(state["frame_focused_pane"])
     ctl("pane", "input", "--pane", pane, "--text", "sleep 30\n")
@@ -118,7 +119,7 @@ def check_tabs_and_settings():
     before = directory / "before-settings.png"
     after = directory / "settings-sections.png"
     ctl("ui", "screenshot", "--output", str(before))
-    click(kind="settings")
+    ctl("ui", "key", "cmd-,")
     state = wait(lambda s: s["settings_visible"] and s.get("settings_sections"), "settings section headings")
     names = [f["name"] for f in state["settings_fields"]]
     assert "Terminal.DefaultColumns" not in names and "Terminal.DefaultLines" not in names
@@ -136,7 +137,9 @@ def check_tabs_and_settings():
     edit("field:UI.TabFontSize", 20)
     edit("field:UI.TabMaxTitleLength", 16)
     click(label="save")
-    state = wait(lambda s: not s["settings_visible"] and s["tab_font_size"] == 20, "independent tab font")
+    wait(lambda s: s.get("settings_message") == "Settings saved" and s["tab_font_size"] == 20, "independent tab font")
+    click(label="cancel")
+    state = wait(lambda s: not s["settings_visible"], "close saved font settings")
     assert state["ui_config"]["font_size"] == 12
     expected = custom[:15] + "…"
     wait(lambda s: tabs(s)[0].get("label") == expected, "bounded custom caption")
@@ -190,7 +193,7 @@ try:
     check_grid(103, 37)
     check_tabs_and_settings()
     ctl("ui", "screenshot", "--output", str(directory / "english-window.png"))
-    click(kind="settings")
+    ctl("ui", "key", "cmd-,")
     click(label="category:UI")
     click(label="language:zh-Hans")
     preview = wait(lambda s: s["ui_language"] == "zh-Hans", "Chinese preview")
@@ -202,7 +205,8 @@ try:
     edit("field:Startup.WindowColumns", 104)
     edit("field:Startup.WindowRows", 38)
     click(label="save")
-    wait(lambda s: not s["settings_visible"] and s["ui_language"] == "zh-Hans" and s["native_menu"]["items"]["quit-gui"]["title"] == "退出界面", "saved Chinese menu")
+    wait(lambda s: s.get("settings_message") == "Settings saved" and s["ui_language"] == "zh-Hans" and s["native_menu"]["items"]["quit-gui"]["title"] == "退出界面", "saved Chinese menu")
+    click(label="cancel")
     saved = json.loads(config.read_text())
     assert saved["ui"]["language"] == "zh-Hans" and saved["startup"]["window_columns"] == 104
     assert "window_width" not in saved["startup"]
@@ -211,19 +215,22 @@ try:
     start()
     check_grid(104, 38)
     ctl("ui", "screenshot", "--output", str(directory / "chinese-window.png"))
-    click(kind="settings")
+    ctl("ui", "key", "cmd-,")
     click(label="category:UI")
     click(label="language:en")
     ctl("ui", "screenshot", "--output", str(directory / "english-settings.png"))
     click(label="save")
-    wait(lambda s: not s["settings_visible"] and s["ui_language"] == "en" and s["native_menu"]["items"]["quit-gui"]["title"] == "Quit GUI", "English menu restored")
-    click(kind="settings")
+    wait(lambda s: s.get("settings_message") == "Settings saved" and s["ui_language"] == "en" and s["native_menu"]["items"]["quit-gui"]["title"] == "Quit GUI", "English menu restored")
+    click(label="cancel")
+    ctl("ui", "key", "cmd-,")
     click(label="category:UI")
     click(label="language:zh-Hans")
     wait(lambda s: s["ui_language"] == "zh-Hans", "unsaved Chinese preview")
     ctl("ui", "key", "Space")
     wait(lambda s: s["ui_language"] == "en", "keyboard language selection")
     click(label="language:zh-Hans")
+    click(label="cancel")
+    wait(lambda s: s["settings_visible"] and "Unsaved changes" in s.get("settings_message", ""), "dirty language discard prompt")
     click(label="cancel")
     wait(lambda s: not s["settings_visible"] and s["ui_language"] == "en", "cancel restores language")
     assert json.loads(config.read_text())["ui"]["language"] == "en"

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
 )
@@ -65,6 +66,18 @@ func (r *Registry) ForegroundNames(ctx context.Context) map[uuid.UUID]string {
 			continue
 		}
 		name := strings.TrimLeft(filepath.Base(fields[1]), "-")
+		if agent := goagent.Detect(name, fields[1:]); agent != nil {
+			switch agent.Kind {
+			case goagent.ClaudeCode:
+				name = "claude"
+			case goagent.Codex:
+				name = "codex"
+			case goagent.OpenCode:
+				name = "opencode"
+			case goagent.Pi:
+				name = "pi"
+			}
+		}
 		// Homebrew runs a Ruby script; expose the command users launched.
 		for _, arg := range fields[2:] {
 			if filepath.Base(arg) == "brew.rb" {

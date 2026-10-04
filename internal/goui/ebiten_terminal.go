@@ -147,7 +147,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 						nativeRect(target, rect.Add(bounds.Min), fg)
 					}
 				} else {
-					drawTerminalGlyph(target, run.text, face, glyphBounds, cell, run.wide, fg)
+					drawTerminalGlyph(target, run.text, face, glyphBounds, cell, fg)
 				}
 				if run.style.underline {
 					underline := bounds
@@ -247,7 +247,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 							nativeRect(dst, rect.Add(image.Pt(x, y)).Intersect(cursorRect).Intersect(dst.Bounds()), v.Theme.CursorForeground)
 						}
 					} else {
-						drawTerminalGlyph(dst, glyph, face, cursorRect, cell, columns == 2, v.Theme.CursorForeground)
+						drawTerminalGlyph(dst, glyph, face, cursorRect, cell, v.Theme.CursorForeground)
 					}
 				}
 			}

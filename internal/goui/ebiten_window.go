@@ -51,6 +51,8 @@ type nativeView struct {
 	panes                                    map[uuid.UUID]nativePane
 	splits                                   map[string]nativeSplit
 	settingsScroll, sidebarScroll, tabScroll int
+	agentShelfScroll                         int
+	agentShelfRect                           image.Rectangle
 	remoteFocused                            bool
 	lastActiveTab                            uuid.UUID
 	sidebarWidth                             float32
@@ -74,44 +76,49 @@ type nativeDrag struct {
 // EbitengineWindow owns rendering, input and window chrome. Transport requests
 // enter the bounded queue; GPU and window APIs run only in Update/Draw.
 type EbitengineWindow struct {
-	multi            *MultiWorkspaceClient
-	cfg              goconfig.AppConfig
-	queue            chan nativeRequest
-	done             chan struct{}
-	once             sync.Once
-	views            map[*WorkspaceClient]*nativeView
-	fonts            *nativeFonts
-	textures         map[uuid.UUID]*nativeTerminalTexture
-	cornerMask       *ebiten.Image
-	cornerRadius     int
-	scale            float64
-	size             image.Point
-	mouse            image.Point
-	lastMouse        image.Point
-	drag             *nativeDrag
-	pressed          *automationHit
-	lastClick        time.Time
-	lastClickPoint   image.Point
-	clickCount       int
-	closing          bool
-	windowConfigured bool
-	shots            []nativeRequest
-	composer         textinput.Composer
-	composition      string
-	inputTarget      string
-	clipboardReady   bool
-	platform         nativePlatform
-	menuEvents       chan string
-	quitServer       func() error
-	newWindow        func() error
-	windowResult     chan error
-	quitResult       chan error
-	quitError        string
+	multi                   *MultiWorkspaceClient
+	cfg                     goconfig.AppConfig
+	queue                   chan nativeRequest
+	done                    chan struct{}
+	once                    sync.Once
+	views                   map[*WorkspaceClient]*nativeView
+	fonts                   *nativeFonts
+	textures                map[uuid.UUID]*nativeTerminalTexture
+	cornerMask              *ebiten.Image
+	cornerRadius            int
+	scale                   float64
+	size                    image.Point
+	mouse                   image.Point
+	lastMouse               image.Point
+	drag                    *nativeDrag
+	pressed                 *automationHit
+	lastClick               time.Time
+	lastClickPoint          image.Point
+	clickCount              int
+	closing                 bool
+	windowConfigured        bool
+	shots                   []nativeRequest
+	composer                textinput.Composer
+	composition             string
+	inputTarget             string
+	clipboardReady          bool
+	platform                nativePlatform
+	notificationAgents      map[string]nativeAgent
+	notificationConnections map[uuid.UUID]string
+	bellNotifications       chan uuid.UUID
+	lastBellNotification    map[uuid.UUID]time.Time
+	menuEvents              chan string
+	quitServer              func() error
+	newWindow               func() error
+	windowResult            chan error
+	quitResult              chan error
+	quitError               string
 }
 
 func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *EbitengineWindow {
 	w := &EbitengineWindow{multi: multi, cfg: cfg, queue: make(chan nativeRequest, 128), done: make(chan struct{}), menuEvents: make(chan string, 16), views: map[*WorkspaceClient]*nativeView{}, textures: map[uuid.UUID]*nativeTerminalTexture{}, scale: 1}
 	w.fonts = newNativeFonts(cfg)
+	w.bellNotifications = make(chan uuid.UUID, 32)
 	w.clipboardReady = clipboard.Init() == nil
 	w.initComposer()
 	return w
@@ -228,6 +235,7 @@ func (w *EbitengineWindow) Update() error {
 		platformConfig.UI.WindowCornerRadius = 0
 	}
 	w.platform.Update(platformConfig)
+	w.processNotifications(c)
 	w.processTerminalReports()
 	w.multi.mu.RLock()
 	liveViews := make(map[*WorkspaceClient]bool, len(w.multi.connections))
@@ -418,11 +426,23 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		for id, pane := range w.view(c).panes {
 			pane.term.mu.RLock()
 			directory := pane.term.snapshot.WorkingDirectoryURI
+			yBase, yDisp := pane.term.snapshot.YBase, pane.term.snapshot.YDisp
 			pane.term.mu.RUnlock()
-			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory})
+			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp})
 		}
 		state["terminal_grids"] = grids
 		state["ui_config"] = c.currentConfig().UI
+		sidebarAgents := []map[string]any{}
+		for _, host := range w.hosts() {
+			for _, a := range host.view.sidebarAgents(host.state) {
+				status := a.status
+				if host.entry.Status != "" && host.entry.Status != "connected" && host.entry.Status != "online" {
+					status = "Offline"
+				}
+				sidebarAgents = append(sidebarAgents, map[string]any{"pane_id": a.pane, "connection_id": host.entry.ID, "workspace_id": a.workspace, "workspace_name": a.workspaceName, "title": a.label, "title_source": a.titleSource, "status": status, "status_label": c.tr(status)})
+			}
+		}
+		state["sidebar_agents"] = sidebarAgents
 		state["sidebar_width"] = w.dp(float64(w.view(c).sidebarWidth))
 		state["sidebar_visible"] = !c.sidebarHidden
 		state["rename_visible"] = w.view(c).rename != nil

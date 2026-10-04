@@ -91,6 +91,10 @@ func (w *EbitengineWindow) hit(c *WorkspaceClient, r image.Rectangle, kind autom
 	}
 }
 func (w *EbitengineWindow) button(dst *ebiten.Image, c *WorkspaceClient, r image.Rectangle, title string, kind automationHitKind, id uuid.UUID, selected bool) {
+	w.buttonWithFontSize(dst, c, r, title, kind, id, selected, c.currentConfig().UI.UIFontSize)
+}
+
+func (w *EbitengineWindow) buttonWithFontSize(dst *ebiten.Image, c *WorkspaceClient, r image.Rectangle, title string, kind automationHitKind, id uuid.UUID, selected bool, fontSize float32) {
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	if selected {
@@ -98,7 +102,8 @@ func (w *EbitengineWindow) button(dst *ebiten.Image, c *WorkspaceClient, r image
 	} else if w.mouse.In(r) && !c.settings.visible {
 		w.round(dst, r, w.dp(6), mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .06))
 	}
-	w.centeredLabel(dst, c, r.Inset(w.dp(4)), c.tr(title), float64(cfg.UI.UIFontSize), fg, selected)
+	textRect := image.Rect(r.Min.X+w.dp(4), r.Min.Y, r.Max.X-w.dp(4), r.Max.Y)
+	w.centeredLabel(dst, c, textRect, c.tr(title), float64(fontSize), fg, selected)
 	w.hit(c, r, kind, id, "")
 }
 
@@ -167,9 +172,9 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	}{{hitWindowClose, configColor("#ef766f", 0), "×"}, {hitWindowMinimize, configColor("#e3bb63", 0), "−"}, {hitWindowMaximize, configColor("#79bf93", 0), "+"}} {
 		cx := w.dp(float64(cfg.UI.TitlebarPadding) + 5.5 + float64(i)*(11+float64(cfg.UI.TitlebarGap)))
 		cy := baseHeight / 2
-		r := image.Rect(cx-w.dp(10), cy-w.dp(12), cx+w.dp(10), cy+w.dp(12))
+		r := image.Rect(cx-w.dp(10), 0, cx+w.dp(10), baseHeight)
 		if dst != nil {
-			vector.FillCircle(dst, float32(cx), float32(cy), float32(w.dp(5.5)), item.clr, true)
+			vector.FillCircle(dst, float32(cx), float32(cy), float32(min(w.dp(5.5), max(1, cy-1))), item.clr, true)
 		}
 		if w.mouse.In(r) {
 			w.centeredLabel(dst, c, r, item.glyph, 11, configColor("#272b2d", 0), false)
@@ -178,7 +183,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	workspace := activeWorkspace(state)
 	if sideWidth > 0 {
-		w.label(dst, c, image.Rect(controlsEnd, w.dp(10), sideWidth-w.dp(14), baseHeight), "Water", 11, muted, true)
+		w.centeredLabel(dst, c, image.Rect(controlsEnd, 0, sideWidth-w.dp(14), baseHeight), "Water", float64(min(11, cfg.UI.TitlebarHeight-2)), muted, true)
 		w.drawSidebar(c, dst, image.Rect(0, titleHeight, sideWidth, w.size.Y), sidebar)
 		handle := w.dp(float64(cfg.UI.SidebarResizeHandleWidth))
 		edge := sideWidth - w.dp(float64(cfg.UI.WindowPadding))
@@ -198,18 +203,12 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 				w.layoutNativePane(c, dst, &root, *tab, image.Rect(left, titleHeight+pad, w.size.X-pad, w.size.Y-pad), nil)
 			}
 		}
-		x := w.size.X
-		for _, pane := range v.panes {
-			x = min(x, pane.rect.Min.X)
-		}
-		if x == w.size.X {
-			x = w.dp(float64(cfg.UI.WindowPadding + cfg.UI.PanePadding))
-			if sideWidth > 0 {
-				x = sideWidth - w.dp(float64(cfg.UI.WindowPadding)) + w.dp(float64(cfg.UI.SidebarResizeHandleWidth+cfg.UI.PanePadding))
-			}
+		x := w.dp(float64(cfg.UI.WindowPadding))
+		if sideWidth > 0 {
+			x = sideWidth - w.dp(float64(cfg.UI.WindowPadding)) + w.dp(float64(cfg.UI.SidebarResizeHandleWidth))
 		}
 		x = max(x, controlsEnd)
-		available := max(0, w.size.X-x-w.dp(132))
+		available := max(0, w.size.X-x-w.dp(float64(26+cfg.UI.WindowPadding+cfg.UI.TabGap)))
 		if v.tabTitleRevision != state.StateRevision || v.tabTitles == nil {
 			v.tabTitles = map[uuid.UUID]string{}
 			for _, ws := range state.Workspaces {
@@ -235,7 +234,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 			tabWidths[i] = min(max(1, available), int(math.Ceil(width+2*space))+2*w.dp(float64(cfg.UI.TabPadding)))
 			tabOffsets[i+1] = tabOffsets[i] + tabWidths[i] + w.dp(float64(cfg.UI.TabGap))
 		}
-		tabHeight := min(baseHeight-w.dp(4), w.dp(float64(max(cfg.UI.TabHeight, cfg.UI.TabFontSize+8))))
+		tabHeight := min(baseHeight, w.dp(float64(cfg.UI.TabHeight)))
 		tabTop := (baseHeight - tabHeight) / 2
 		v.tabRect = image.Rect(x, 0, x+available, titleHeight)
 		maxScroll := max(0, tabOffsets[len(workspace.Tabs)]-available)
@@ -289,14 +288,6 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 		}
 		w.centeredLabel(dst, c, add, "+", 12, muted, false)
 		w.hit(c, add, hitNewTab, uuid.Nil, "")
-		for i, kind := range []automationHitKind{hitSplitRight, hitSplitDown, hitSettings} {
-			r := image.Rect(w.size.X-w.dp(98)+i*w.dp(30), tabTop, w.size.X-w.dp(72)+i*w.dp(30), tabTop+tabHeight)
-			if w.mouse.In(r) {
-				w.round(dst, r, w.dp(6), mixColor(chrome, fg, .07))
-			}
-			w.drawIcon(dst, r, kind, muted)
-			w.hit(c, r, kind, uuid.Nil, "")
-		}
 	} else {
 		w.label(dst, c, image.Rect(sideWidth+w.dp(30), titleHeight+w.dp(30), w.size.X, w.size.Y), c.tr("Creating workspace…"), 13, muted, false)
 	}
@@ -542,7 +533,7 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	tabWidth := (r.Dx() - w.dp(48)) / 5
 	w.round(dst, image.Rect(r.Min.X+w.dp(24), top-w.dp(3), r.Max.X-w.dp(24), top+w.dp(33)), w.dp(8), mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .045))
 	for i, name := range groups {
-		tr := image.Rect(r.Min.X+w.dp(24)+i*tabWidth, top, r.Min.X+w.dp(24)+(i+1)*tabWidth-w.dp(4), top+w.dp(32))
+		tr := image.Rect(r.Min.X+w.dp(24)+i*tabWidth, top, r.Min.X+w.dp(24)+(i+1)*tabWidth-w.dp(8), top+w.dp(32))
 		w.button(dst, c, tr, name, hitSettingsControl, uuid.Nil, s.group == i)
 		c.hitRegions[len(c.hitRegions)-1].Label = "category:" + name
 	}
@@ -557,7 +548,7 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 		row := rows[j]
 		if row.field < 0 {
 			heading := image.Rect(r.Min.X+w.dp(24), y+w.dp(8), r.Max.X-w.dp(36), y+w.dp(32))
-			w.label(dst, c, heading, c.tr(row.section), 12, fg, true)
+			w.label(dst, c, heading, c.tr(row.section), 12, configColor(cfg.Theme.Accent, 0x72d6ab), true)
 			nativeRect(dst, image.Rect(heading.Min.X, heading.Max.Y+w.dp(6), heading.Max.X, heading.Max.Y+w.dp(6)+1), mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .08))
 			continue
 		}
@@ -567,9 +558,15 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 		fr := image.Rect(r.Min.X+r.Dx()*42/100, y, r.Max.X-w.dp(36), y+w.dp(34))
 		w.label(dst, c, labelR, localizedField(c.language(), *f), 11, fg, false)
 		w.label(dst, c, image.Rect(labelR.Min.X, y+w.dp(23), labelR.Max.X, y+rowHeight), c.tr(settingsApplyKind(*f)), 9, muted, false)
-		if f.group == "UI" && f.name == "Language" {
+		if choices := sidebarSettingChoices(*f); len(choices) > 0 {
+			for j, choice := range choices {
+				br := image.Rect(fr.Min.X+j*fr.Dx()/len(choices), fr.Min.Y, fr.Min.X+(j+1)*fr.Dx()/len(choices)-w.dp(8), fr.Max.Y)
+				w.button(dst, c, br, choice.label, hitSettingsControl, uuid.Nil, f.editor.Text() == choice.value)
+				c.hitRegions[len(c.hitRegions)-1].Label = "choice:" + f.name + ":" + choice.value
+			}
+		} else if f.group == "UI" && f.name == "Language" {
 			for n, choice := range []struct{ code, title string }{{"en", "English"}, {"zh-Hans", "简体中文"}} {
-				br := image.Rect(fr.Min.X+n*fr.Dx()/2, fr.Min.Y, fr.Min.X+(n+1)*fr.Dx()/2-w.dp(4), fr.Max.Y)
+				br := image.Rect(fr.Min.X+n*fr.Dx()/2, fr.Min.Y, fr.Min.X+(n+1)*fr.Dx()/2-w.dp(8), fr.Max.Y)
 				w.button(dst, c, br, choice.title, hitSettingsControl, uuid.Nil, f.editor.Text() == choice.code)
 				c.hitRegions[len(c.hitRegions)-1].Label = "language:" + choice.code
 			}
@@ -593,7 +590,7 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 				w.round(dst, image.Rect(fr.Max.X-w.dp(27), fr.Min.Y+w.dp(7), fr.Max.X-w.dp(9), fr.Min.Y+w.dp(25)), w.dp(3), configColor(f.editor.Text(), 0x555555))
 			}
 		}
-		if f.name != "Language" {
+		if f.name != "Language" && len(sidebarSettingChoices(*f)) == 0 {
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:"+f.group+"."+f.name)
 		}
 	}
@@ -606,6 +603,9 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	message := s.message
 	messageColor := configColor("#ef766f", 0)
+	if message == "Settings saved" {
+		messageColor = configColor(cfg.Theme.Accent, 0x72d6ab)
+	}
 	if font := w.fonts.resolution(fontKey{family: cfg.Terminal.FontFamily}); message == "" && font["status"] == "fallback" {
 		message = c.trf("Font unavailable: %s. Using Go Mono.", cfg.Terminal.FontFamily)
 		messageColor = muted
@@ -613,10 +613,13 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), footer-w.dp(16), r.Max.X-w.dp(24), footer+w.dp(12)), c.tr(message), 10, messageColor, false)
 	nativeRect(dst, image.Rect(r.Min.X+w.dp(24), footer+w.dp(7), r.Max.X-w.dp(24), footer+w.dp(7)+1), mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .08))
 	for i, item := range []struct{ label, name string }{{"Save", "save"}, {"Cancel", "cancel"}, {"Reset defaults", "defaults"}} {
+		if item.name == "cancel" && s.confirmDiscard {
+			item.label = "Discard changes"
+		}
 		x := r.Max.X - w.dp(112)
 		width := w.dp(88)
 		if i == 1 {
-			x -= w.dp(100)
+			x -= w.dp(104)
 		}
 		if i == 2 {
 			x = r.Min.X + w.dp(24)

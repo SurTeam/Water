@@ -198,6 +198,12 @@ func (c *Client) OpenSession() (*Session, error) {
 }
 
 func (s *Session) Call(method string, params any, out any) error {
+	return s.CallTimeout(method, params, out, 10*time.Second)
+}
+
+func (s *Session) CallTimeout(method string, params any, out any, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	requestID := s.nextID.Add(1)
 	raw, err := marshalParams(params)
 	if err != nil {
@@ -221,7 +227,7 @@ func (s *Session) Call(method string, params any, out any) error {
 		s.replyMu.Unlock()
 	}()
 
-	err = s.enqueue(req, true)
+	err = s.enqueue(req, false)
 	if err != nil {
 		return err
 	}
@@ -243,6 +249,10 @@ func (s *Session) Call(method string, params any, out any) error {
 		return nil
 	case <-s.done:
 		return errors.New("session closed")
+	case <-timer.C:
+		err := fmt.Errorf("session RPC %s timed out after %s", method, timeout)
+		_ = s.closeWithError(err)
+		return err
 	}
 }
 

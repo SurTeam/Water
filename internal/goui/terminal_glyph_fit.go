@@ -31,15 +31,21 @@ func fitTerminalGlyph(ink, cell image.Rectangle) (scale, x, y float64) {
 	return
 }
 
-func drawTerminalGlyph(dst *ebiten.Image, value string, face text.Face, bounds image.Rectangle, cell nativeCellMetrics, wide bool, fg color.NRGBA) {
-	op := &text.DrawOptions{}
-	if wide || terminalEmoji(value) || terminalPrivateIcon(value) {
-		scale, x, y := fitTerminalGlyph(terminalGlyphInk(value, face), bounds)
-		op.GeoM.Scale(scale, scale)
-		op.GeoM.Translate(x, y)
-	} else {
-		op.GeoM.Translate(float64(bounds.Min.X), float64(bounds.Min.Y)+cell.baseline-face.Metrics().HAscent)
+func terminalGlyphPlacement(value string, face text.Face, bounds image.Rectangle, cell nativeCellMetrics) (scale, x, y float64) {
+	// Cell width is a grid allocation, not an instruction to center glyph ink.
+	// Text (especially CJK punctuation and combining marks) keeps font bearings
+	// and the common baseline. Only pictorial emoji and private icons are fitted.
+	if terminalEmoji(value) || terminalPrivateIcon(value) {
+		return fitTerminalGlyph(terminalGlyphInk(value, face), bounds)
 	}
+	return 1, float64(bounds.Min.X), float64(bounds.Min.Y) + cell.baseline - face.Metrics().HAscent
+}
+
+func drawTerminalGlyph(dst *ebiten.Image, value string, face text.Face, bounds image.Rectangle, cell nativeCellMetrics, fg color.NRGBA) {
+	op := &text.DrawOptions{}
+	scale, x, y := terminalGlyphPlacement(value, face, bounds, cell)
+	op.GeoM.Scale(scale, scale)
+	op.GeoM.Translate(x, y)
 	op.ColorScale.ScaleWithColor(fg)
 	text.Draw(dst.SubImage(bounds.Intersect(dst.Bounds())).(*ebiten.Image), value, face, op)
 }

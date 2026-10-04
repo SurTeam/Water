@@ -3,6 +3,7 @@ package goui
 import (
 	"fmt"
 	"image"
+	"math"
 	"reflect"
 	"strings"
 
@@ -310,7 +311,7 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 	case hitNewWorkspace:
 		_ = c.session.DispatchAsync(map[string]any{"type": "workspace.new"})
 	case hitNewTab:
-		_ = c.session.DispatchAsync(map[string]any{"type": "tab.new"})
+		_ = c.session.DispatchAsync(c.creationCommand("tab.new"))
 	case hitSplitRight:
 		c.splitPane("right")
 	case hitSplitDown:
@@ -464,20 +465,17 @@ func (w *EbitengineWindow) wheel(c *WorkspaceClient, p image.Point, dx, dy float
 		v.tabScroll = max(0, v.tabScroll+int(delta))
 		return true
 	}
+	if !c.sidebarHidden && c.currentConfig().UI.SidebarAgentMode == "split" && p.In(v.agentShelfRect) {
+		v.agentShelfScroll = max(0, v.agentShelfScroll+int(dy))
+		return true
+	}
 	if !c.sidebarHidden && p.In(v.sidebarRect) {
 		v.sidebarScroll = max(0, v.sidebarScroll+int(dy))
 		return true
 	}
 	for _, pane := range v.panes {
 		if p.In(pane.rect) {
-			steps := int(dy / float64(pane.lh))
-			if steps == 0 {
-				if dy > 0 {
-					steps = 1
-				} else if dy < 0 {
-					steps = -1
-				}
-			}
+			steps := terminalWheelStep(dy)
 			action := govt.MouseDown
 			if steps < 0 {
 				action = govt.MouseUp
@@ -493,20 +491,31 @@ func (w *EbitengineWindow) wheel(c *WorkspaceClient, p image.Point, dx, dy float
 				return true
 			}
 			if pane.term.input.OnScroll != nil {
-				lines := int(dy / float64(pane.lh))
-				if lines == 0 {
-					if dy > 0 {
-						lines = 1
-					} else if dy < 0 {
-						lines = -1
-					}
-				}
+				lines := terminalWheelStep(dy)
 				pane.term.input.OnScroll(lines)
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// One ordinary wheel unit is 40 logical pixels in the native input path.
+// Small gestures move one line; aggregated fast gestures retain their magnitude.
+// Local history jumps are bounded; application report emission is capped at 64.
+func terminalWheelStep(delta float64) int {
+	return terminalWheelSteps(delta, 40)
+}
+
+func terminalWheelSteps(delta, unit float64) int {
+	if delta == 0 || math.IsNaN(delta) || unit <= 0 {
+		return 0
+	}
+	steps := max(1, int(math.Min(65536, math.Abs(delta)/unit)))
+	if delta < 0 {
+		return -steps
+	}
+	return steps
 }
 
 func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
@@ -517,10 +526,10 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 		return
 	}
 	switch label {
-	case "cancel", "scrim":
-		s.visible = false
-		s.focus = -1
-		if label == "scrim" {
+	case "cancel":
+		s.cancelChanges()
+	case "scrim":
+		if !s.visible {
 			c.connectionMu.Lock()
 			if !c.remoteConnecting {
 				c.remoteFormVisible = false
@@ -529,11 +538,24 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 			w.view(c).remoteFocused = false
 		}
 	case "defaults":
+		initial := s.initial
 		c.openSettingsConfig(goconfig.Default())
+		s.initial = initial
 		w.view(c).settingsScroll = 0
 	case "save":
 		w.saveSettings(c)
 	default:
+		if strings.HasPrefix(label, "choice:") {
+			parts := strings.SplitN(strings.TrimPrefix(label, "choice:"), ":", 2)
+			if len(parts) == 2 {
+				for i := range s.fields {
+					if s.fields[i].group == "UI" && s.fields[i].name == parts[0] {
+						s.fields[i].editor.SetText(parts[1])
+						s.focus = i
+					}
+				}
+			}
+		}
 		if strings.HasPrefix(label, "language:") {
 			language := strings.TrimPrefix(label, "language:")
 			if language == "en" || language == "zh-Hans" {
@@ -592,6 +614,7 @@ func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 		}
 	}
 	s.saving = true
+	s.message = "Saving…"
 	result := make(chan settingsSave, 1)
 	s.result = result
 	path := c.configPath
@@ -738,7 +761,7 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	if c.settings.visible {
 		if strings.EqualFold(spec, "escape") {
 			if !c.settings.saving {
-				c.settings.visible = false
+				c.settings.cancelChanges()
 			}
 			return true
 		}
@@ -845,11 +868,15 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 				return true
 			}
 		}
-		term.input.emit([]byte{3})
+		if !pressed.Modifiers.Contain(key.ModCommand) && !pressed.Modifiers.Contain(key.ModSuper) {
+			term.input.emit([]byte{3})
+		}
 		return true
 	}
 	if shortcutMatches(pressed, bindings.EOF) {
-		term.input.emit([]byte{4})
+		if !pressed.Modifiers.Contain(key.ModCommand) && !pressed.Modifiers.Contain(key.ModSuper) {
+			term.input.emit([]byte{4})
+		}
 		return true
 	}
 	if shortcutMatches(pressed, bindings.ScrollPageUp) || shortcutMatches(pressed, bindings.ScrollPageDown) {

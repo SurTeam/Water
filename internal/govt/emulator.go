@@ -95,8 +95,9 @@ type MouseEvent struct {
 }
 
 type Emulator struct {
-	mu   sync.RWMutex
-	term *xterm.Terminal
+	bells atomic.Uint64
+	mu    sync.RWMutex
+	term  *xterm.Terminal
 
 	responseMu        sync.Mutex
 	responses         [][]byte
@@ -141,6 +142,7 @@ func New(cols, rows, scrollback int) *Emulator {
 		e.enqueueResponse([]byte(data))
 	})
 	e.term.OnColor(e.handleColors)
+	e.term.OnBell(func() { e.bells.Add(1) })
 	e.term.OnRequestWindowsOptionsReport(e.reportWindow)
 	e.term.OnRequestColorSchemeQuery(func() { e.reportColorScheme() })
 	e.registerOSCMetadata()
@@ -154,6 +156,8 @@ func New(cols, rows, scrollback int) *Emulator {
 	})
 	return e
 }
+
+func (e *Emulator) BellCount() uint64 { return e.bells.Load() }
 
 func (e *Emulator) Close() {
 	e.mu.Lock()

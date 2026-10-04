@@ -1,6 +1,7 @@
 package goremote
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -58,7 +59,7 @@ func Connect(destination string) (*Tunnel, error) {
 	remote := remoteControlSocket(destination)
 	control := controlMasterSocket(destination)
 	local := filepath.Join(
-		os.TempDir(),
+		sshSocketDirectory(),
 		fmt.Sprintf("water-go-ssh-%d-%s.sock", os.Geteuid(), strings.ReplaceAll(uuid.New().String(), "-", "")),
 	)
 	_ = os.Remove(local)
@@ -83,7 +84,7 @@ func Connect(destination string) (*Tunnel, error) {
 	}
 
 	var info serverInfo
-	infoErr := goclient.New(local).Call("server.info", map[string]any{}, &info)
+	infoErr := goclient.New(local).CallTimeout("server.info", map[string]any{}, &info, time.Second)
 	if infoErr == nil {
 		_ = t.Close()
 		return nil, fmt.Errorf(
@@ -118,7 +119,7 @@ func (t *Tunnel) Client() *goclient.Client {
 
 func (t *Tunnel) compatible() bool {
 	var info serverInfo
-	if err := t.Client().Call("server.info", map[string]any{}, &info); err != nil {
+	if err := t.Client().CallTimeout("server.info", map[string]any{}, &info, time.Second); err != nil {
 		return false
 	}
 	return info.ProtocolVersion == goprotocol.ProtocolVersion &&
@@ -137,8 +138,8 @@ func (t *Tunnel) Close() error {
 
 func controlMasterSocket(destination string) string {
 	return filepath.Join(
-		os.TempDir(),
-		fmt.Sprintf("water-go-ssh-%d-%016x.ctl", os.Geteuid(), stableID(destination)),
+		sshSocketDirectory(),
+		fmt.Sprintf("water-go-ssh-%s-%d-%016x.ctl", gobuild.Variant, os.Geteuid(), stableID(destination+"|"+os.Getenv("WATER_SSH_CONFIG"))),
 	)
 }
 
@@ -147,7 +148,7 @@ func remoteControlSocket(destination string) string {
 		return p
 	}
 	return filepath.Join(
-		os.TempDir(),
+		"/tmp",
 		fmt.Sprintf(
 			"water-go-%s-p%d-%016x-%016x.sock",
 			buildIdentityToken(),
@@ -158,16 +159,28 @@ func remoteControlSocket(destination string) string {
 	)
 }
 
+// OpenSSH adds a random suffix to ControlPath; Darwin permits only 104 bytes.
+func sshSocketDirectory() string {
+	if directory := os.TempDir(); len(directory) <= 24 {
+		return directory
+	}
+	return "/tmp"
+}
+
 func buildIdentityToken() string {
-	value:=strings.ToLower(strings.TrimSpace(gobuild.Variant))
-	if value==""{value="dev"}
+	value := strings.ToLower(strings.TrimSpace(gobuild.Variant))
+	if value == "" {
+		value = "dev"
+	}
 	var b strings.Builder
-	for _,r:=range value{
-		if (r>='a'&&r<='z')||(r>='0'&&r<='9')||r=='-'||r=='_'{
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 			b.WriteRune(r)
 		}
 	}
-	if b.Len()==0{return "dev"}
+	if b.Len() == 0 {
+		return "dev"
+	}
 	return b.String()
 }
 
@@ -178,7 +191,7 @@ func stableID(value string) uint64 {
 }
 
 func ensureControlMaster(destination, control string) error {
-	if command("ssh", "-S", control, "-O", "check", destination).Run() == nil {
+	if runSSH("-S", control, "-O", "check", destination) == nil {
 		return nil
 	}
 	_ = os.Remove(control)
@@ -247,7 +260,7 @@ func startRemoteServer(destination, control, remoteSocket string) error {
 
 func runSSH(args ...string) error {
 	cmd := command("ssh", args...)
-	out, err := cmd.CombinedOutput()
+	out, err := boundedSSHOutput(cmd)
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
@@ -256,6 +269,14 @@ func runSSH(args ...string) error {
 		return errors.New(msg)
 	}
 	return nil
+}
+
+func boundedSSHOutput(cmd *exec.Cmd) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	defer cancel()
+	bounded := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	bounded.Stdin, bounded.Env, bounded.Dir = cmd.Stdin, cmd.Env, cmd.Dir
+	return bounded.CombinedOutput()
 }
 
 func command(name string, args ...string) *exec.Cmd {

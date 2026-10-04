@@ -86,6 +86,20 @@ type TerminalConfig struct {
 }
 
 type UIConfig struct {
+	SystemNotifications            bool    `json:"system_notifications"`
+	SidebarAgentMode               string  `json:"sidebar_agent_mode"`
+	SidebarHostFontSize            float32 `json:"sidebar_host_font_size"`
+	SidebarWorkspaceFontSize       float32 `json:"sidebar_workspace_font_size"`
+	SidebarAgentFontSize           float32 `json:"sidebar_agent_font_size"`
+	SidebarRemoteButtonHeight      float32 `json:"sidebar_remote_button_height"`
+	SidebarRemoteButtonFontSize    float32 `json:"sidebar_remote_button_font_size"`
+	SidebarWorkspaceButtonHeight   float32 `json:"sidebar_workspace_button_height"`
+	SidebarWorkspaceButtonFontSize float32 `json:"sidebar_workspace_button_font_size"`
+	SidebarHostAlignment           string  `json:"sidebar_host_alignment"`
+	SidebarWorkspaceAlignment      string  `json:"sidebar_workspace_alignment"`
+	SidebarAgentAlignment          string  `json:"sidebar_agent_alignment"`
+	SidebarHostRowWidth            float32 `json:"sidebar_host_row_width"`
+	SidebarWorkspaceRowWidth       float32 `json:"sidebar_workspace_row_width"`
 	Language                       string  `json:"language"`
 	SidebarVisible                 bool    `json:"sidebar_visible"`
 	SidebarShowAgentCount          bool    `json:"sidebar_show_agent_count"`
@@ -248,6 +262,10 @@ func Default() AppConfig {
 			HyperlinkDownloadDirectory: "~/Downloads/Water",
 		},
 		UI: UIConfig{
+			SidebarAgentMode: "workspace", SidebarHostFontSize: 12, SidebarWorkspaceFontSize: 12, SidebarAgentFontSize: 12,
+			SidebarRemoteButtonHeight: 30, SidebarRemoteButtonFontSize: 12, SidebarWorkspaceButtonHeight: 30, SidebarWorkspaceButtonFontSize: 12,
+			SidebarHostAlignment: "center", SidebarWorkspaceAlignment: "center", SidebarAgentAlignment: "center",
+			SidebarHostRowWidth: 1, SidebarWorkspaceRowWidth: 1,
 			Language:       "en",
 			SidebarVisible: true, SidebarShowAgentCount: true, DimInactivePanes: true,
 			SidebarMinWidth: 170, SidebarMaxWidth: 420, SidebarResizeHandleWidth: 6,
@@ -284,7 +302,7 @@ func Default() AppConfig {
 			FocusDown:        "cmd-j",
 			Paste:            "cmd-v",
 			CopyOrInterrupt:  "cmd-c",
-			EOF:              "cmd-d",
+			EOF:              "ctrl-d",
 			ScrollPageUp:     "shift-pageup",
 			ScrollPageDown:   "shift-pagedown",
 		},
@@ -360,7 +378,7 @@ func (c AppConfig) Normalized() AppConfig {
 	c.UI.PaneMargin = clampFloat(c.UI.PaneMargin, 0, 32)
 	c.UI.PaneCornerRadius = clampFloat(c.UI.PaneCornerRadius, 0, 48)
 	c.UI.PaneDividerWidth = clampFloat(c.UI.PaneDividerWidth, 1, 16)
-	c.UI.UIFontSize = clampFloat(c.UI.UIFontSize, 8, 32)
+	c.UI.UIFontSize = clampFloat(c.UI.UIFontSize, 6, 32)
 	c.Terminal.LineHeight = clampFloat(c.Terminal.LineHeight, 8, 64)
 	c.Startup.WindowMinColumns = min(512, max(2, c.Startup.WindowMinColumns))
 	c.Startup.WindowMinRows = min(256, max(1, c.Startup.WindowMinRows))

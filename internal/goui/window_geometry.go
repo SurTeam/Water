@@ -22,7 +22,7 @@ func windowGridSize(cfg goconfig.AppConfig, scale float64, cell nativeCellMetric
 }
 
 func titlebarBaseHeight(u goconfig.UIConfig) float32 {
-	return max(u.TitlebarHeight, u.TabHeight+4, u.TabFontSize+12)
+	return u.TitlebarHeight
 }
 func titlebarHeight(u goconfig.UIConfig) float32 {
 	return titlebarBaseHeight(u)

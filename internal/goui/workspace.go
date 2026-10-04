@@ -663,7 +663,13 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 	}
 	shortcuts := c.currentConfig().Shortcuts
 	if shortcutMatches(pressed, shortcuts.OpenSettings) {
-		c.openSettings()
+		if c.settings.visible {
+			if !c.settings.saving {
+				c.settings.cancelChanges()
+			}
+		} else {
+			c.openSettings()
+		}
 		return true
 	}
 	if c.settings.visible {
@@ -682,7 +688,7 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 		if action.command == "pane.focus" {
 			return c.focusDirection(action.direction)
 		}
-		command := map[string]any{"type": action.command}
+		command := c.creationCommand(action.command)
 		if action.direction != "" {
 			command["direction"] = action.direction
 		}
@@ -1229,6 +1235,10 @@ func (c *WorkspaceClient) applyTerminalEvent(push goclient.TerminalPush) {
 	}
 
 	term.mu.Lock()
+	if term.emu == nil {
+		term.mu.Unlock()
+		return
+	}
 	if push.Event.Seq <= term.lastSeq {
 		term.mu.Unlock()
 		return
@@ -1241,7 +1251,16 @@ func (c *WorkspaceClient) applyTerminalEvent(push goclient.TerminalPush) {
 	term.lastSeq = push.Event.Seq
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
+		bells := term.emu.BellCount()
 		term.emu.Write(push.Event.Data)
+		if term.emu.BellCount() > bells {
+			if window := c.native.Load(); window != nil {
+				select {
+				case window.bellNotifications <- term.id:
+				default:
+				}
+			}
+		}
 		term.selection = Selection{}
 	case goprotocol.ResizeEvent:
 		term.emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)
@@ -1392,7 +1411,7 @@ func (c *WorkspaceClient) layoutUnlocked(gtx layout.Context, th *material.Theme)
 		_ = c.session.DispatchAsync(map[string]any{"type": "workspace.new"})
 	}
 	for c.newTab.Clicked(gtx) {
-		_ = c.session.DispatchAsync(map[string]any{"type": "tab.new"})
+		_ = c.session.DispatchAsync(c.creationCommand("tab.new"))
 	}
 
 	return layout.Stack{Alignment: layout.Center}.Layout(gtx,
@@ -1891,38 +1910,10 @@ func (c *WorkspaceClient) layoutTabs(gtx layout.Context, th *material.Theme, wor
 		x += dims.Size.X
 		return dims
 	}))
-	spacerWidth := 0
 	children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
-		spacerWidth = gtx.Constraints.Min.X
 		return layout.Dimensions{Size: gtx.Constraints.Min}
 	}))
-	toolbarStart := len(c.hitRegions)
-	for _, control := range []struct {
-		button *widget.Clickable
-		label  string
-		kind   automationHitKind
-	}{
-		{&c.splitRightButton, "Split →", hitSplitRight}, {&c.splitDownButton, "Split ↓", hitSplitDown}, {&c.settingsButton, "Settings", hitSettings},
-	} {
-		control := control
-		children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
-			left := x
-			button := chromeButton(th, control.button, control.label)
-			button.Compact = true
-			dims := layout.Inset{Top: 4, Bottom: 4, Right: 4}.Layout(gtx, button.Layout)
-			c.hitRegions = append(c.hitRegions, automationHit{Rect: image.Rect(origin.X+left, origin.Y, origin.X+left+dims.Size.X, origin.Y+dims.Size.Y), Kind: control.kind})
-			x += dims.Size.X
-			return dims
-		}))
-	}
 	dims := layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx, children...)
-	// Rigid children are measured before the flexible spacer. Only translate
-	// toolbar hits created in this layout, after its actual width is known.
-	for i := toolbarStart; i < len(c.hitRegions); i++ {
-		if c.hitRegions[i].Kind == hitSplitRight || c.hitRegions[i].Kind == hitSplitDown || c.hitRegions[i].Kind == hitSettings {
-			c.hitRegions[i].Rect = c.hitRegions[i].Rect.Add(image.Pt(spacerWidth, 0))
-		}
-	}
 	chromeOffset(gtx, image.Pt(0, dims.Size.Y-1), func() { chromeRule(gtx, th) })
 	return dims
 }

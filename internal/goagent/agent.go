@@ -63,11 +63,13 @@ func Label(kind Kind) string {
 func Detect(processName string, cmdline []string) *DetectedAgent {
 	tokens := make([]string, 0, len(cmdline)+2)
 	tokens = append(tokens, normalizeToken(processName))
-	if argv0:=shellExecArgv0(cmdline);argv0!="" {
-		tokens=append(tokens,normalizeToken(argv0))
+	if argv0 := shellExecArgv0(cmdline); argv0 != "" {
+		tokens = append(tokens, normalizeToken(argv0))
 	}
-	for _, token := range cmdline {
-		tokens = append(tokens, normalizeToken(token))
+	for i, token := range cmdline {
+		if i == 0 || strings.Contains(token, "/") {
+			tokens = append(tokens, normalizeToken(token))
+		}
 	}
 	for _, def := range definitions {
 		for _, token := range tokens {
@@ -103,13 +105,14 @@ func normalizeToken(token string) string {
 	return strings.ToLower(strings.TrimLeft(base, "-"))
 }
 
-
 func shellExecArgv0(cmdline []string) string {
-	for _,raw:=range cmdline {
-		fields:=strings.Fields(raw)
-		for i:=0;i+2<len(fields);i++ {
-			if fields[i]!="exec" || fields[i+1]!="-a" { continue }
-			return strings.Trim(fields[i+2],"\"'")
+	for _, raw := range cmdline {
+		fields := strings.Fields(raw)
+		for i := 0; i+2 < len(fields); i++ {
+			if fields[i] != "exec" || fields[i+1] != "-a" {
+				continue
+			}
+			return strings.Trim(fields[i+2], "\"'")
 		}
 	}
 	return ""

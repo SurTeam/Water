@@ -131,11 +131,6 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 		if err != nil {
 			return goui.ConnectionEntry{}, nil, nil, err
 		}
-		for _, entry := range multi.ConnectionEntries() {
-			if entry.Kind == "remote" && entry.Destination == destination {
-				return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("remote connection %s is already open", destination)
-			}
-		}
 		tunnel, err := goremote.Connect(destination)
 		if err != nil {
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("connect remote Water server %s: %w", destination, err)

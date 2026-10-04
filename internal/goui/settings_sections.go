@@ -13,6 +13,9 @@ func settingsSection(f settingsField) string {
 		}
 		return "Font and text"
 	case "UI":
+		if strings.HasPrefix(f.name, "Sidebar") && strings.Contains(f.name, "Button") {
+			return "Sidebar buttons"
+		}
 		if strings.HasPrefix(f.name, "Tab") {
 			return "Tabs"
 		}
@@ -105,7 +108,7 @@ func settingsRows(s *settingsPanel) []settingsRow {
 	var rows []settingsRow
 	order := [][]string{
 		{"Font and text", "History and memory", "Links and downloads"},
-		{"Language and interface", "Tabs", "Window appearance", "Terminal panes", "Sidebar layout", "Workspaces", "Agents"},
+		{"Language and interface", "Tabs", "Window appearance", "Terminal panes", "Sidebar layout", "Sidebar buttons", "Workspaces", "Agents"},
 		{"Windows and settings", "Connections and workspaces", "Tabs", "Panes", "Terminal input"},
 		{"Terminal colors", "ANSI palette", "Interface colors", "Tab colors", "Pane colors", "Connection colors", "Workspace colors", "Agent colors"},
 		{"Initial terminal size", "Minimum terminal size", "Startup behavior", "Shell", "Local server", "Terminal behavior"},

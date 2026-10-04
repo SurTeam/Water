@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/SurTeam/Water/internal/govt"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
+	"golang.org/x/image/font/gofont/gomono"
 )
 
 func TestWideGlyphFitPreservesInkAndCentersBothAxes(t *testing.T) {
@@ -22,6 +24,23 @@ func TestWideGlyphFitPreservesInkAndCentersBothAxes(t *testing.T) {
 		}
 		if ink.Dx() < cell.Dx()-2 && ink.Dy() < cell.Dy()-2 && scale != 1 {
 			t.Fatal("small glyph resized")
+		}
+	}
+}
+
+func TestTextUnicodePreservesFontOriginAndBaseline(t *testing.T) {
+	face := &text.GoTextFace{Source: fontSource(gomono.TTF), Size: 24}
+	cell := nativeCellMetrics{width: 16, height: 44, baseline: 32}
+	bounds := image.Rect(40, 80, 72, 124)
+	for _, value := range []string{"中", "，", "。", "、", "（", "）", "「", "」", "！", "？", "Ａ", "￥", "한", "あ", "e\u0301", "क", "ا", "∫", "→", "🂡", "🀀", "🠖", "🞀", "🄰", "🩀", "♥\ufe0e", "▶\ufe0e", "\U0001f321\ufe0e"} {
+		scale, x, y := terminalGlyphPlacement(value, face, bounds, cell)
+		if scale != 1 || x != 40 || y != 80+cell.baseline-face.Metrics().HAscent {
+			t.Fatalf("text repositioned by its ink: %q => %g %g %g", value, scale, x, y)
+		}
+	}
+	for _, value := range []string{"🍺", "👩‍💻", "⌚", "🇨🇳", "♥\ufe0f", ""} {
+		if !terminalEmoji(value) && !terminalPrivateIcon(value) {
+			t.Fatalf("pictorial glyph lost fitting: %q", value)
 		}
 	}
 }

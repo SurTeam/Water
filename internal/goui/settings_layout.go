@@ -23,8 +23,7 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 			break
 		}
 		if e, ok := ev.(key.Event); ok && e.State == key.Press && !s.saving {
-			s.visible = false
-			c.restoreTerminalFocus = true
+			s.cancelChanges()
 			if c.invalidate != nil {
 				c.invalidate()
 			}
@@ -69,6 +68,12 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 						children := []layout.FlexChild{}
 						for i, name := range groups {
 							i, name := i, name
+							if i > 0 {
+								children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									x += gtx.Dp(8)
+									return layout.Dimensions{Size: image.Pt(gtx.Dp(8), 0)}
+								}))
+							}
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								button := chromeButton(th, &s.tabs[i], c.tr(name))
 								button.Background = configColor(c.currentConfig().Theme.SidebarWorkspaceActiveBackground, 0x29332f)
@@ -92,7 +97,9 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 							gtx.Constraints.Min.Y = rowHeight
 							gtx.Constraints.Max.Y = rowHeight
 							if rows[index].field < 0 {
-								return layout.Center.Layout(gtx, material.Subtitle2(th, c.tr(rows[index].section)).Layout)
+								title := material.Subtitle2(th, c.tr(rows[index].section))
+								title.Color = configColor(c.currentConfig().Theme.Accent, 0x72d6ab)
+								return layout.Center.Layout(gtx, title.Layout)
 							}
 							fieldIndex := rows[index].field
 							f := &s.fields[fieldIndex]
@@ -154,6 +161,15 @@ func (c *WorkspaceClient) renderSettings(gtx layout.Context, th *material.Theme,
 							label, name string
 						}{{&s.save, label, "save"}, {&s.cancel, "Cancel", "cancel"}, {&s.defaults, "Defaults", "defaults"}} {
 							control := control
+							if len(children) > 0 {
+								children = append(children, layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+									x += gtx.Dp(12)
+									return layout.Dimensions{Size: image.Pt(gtx.Dp(12), 0)}
+								}))
+							}
+							if control.name == "cancel" && s.confirmDiscard {
+								control.label = "Discard changes"
+							}
 							children = append(children, layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 								button := chromeButton(th, control.button, c.tr(control.label))
 								if control.name == "save" {

@@ -2,7 +2,9 @@ package goui
 
 import (
 	"errors"
+	"github.com/SurTeam/Water/internal/goclient"
 	"sync"
+	"time"
 
 	"gioui.org/layout"
 	"gioui.org/widget/material"
@@ -23,6 +25,7 @@ type MultiWorkspaceClient struct {
 	connections     map[uuid.UUID]*managedWorkspaceClient
 	active          uuid.UUID
 	closed          bool
+	stop            chan struct{}
 	bootstrapped    bool
 	running         bool
 	remoteConnector func(string) (ConnectionEntry, *WorkspaceClient, func(), error)
@@ -32,6 +35,7 @@ func NewMultiWorkspaceClient(invalidate func()) *MultiWorkspaceClient {
 	return &MultiWorkspaceClient{
 		invalidate:  invalidate,
 		connections: make(map[uuid.UUID]*managedWorkspaceClient),
+		stop:        make(chan struct{}),
 	}
 }
 
@@ -98,7 +102,7 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 	}
 	m.connections[entry.ID] = &managedWorkspaceClient{entry: entry, view: view, close: closeFn}
 	view.connectionMu.Lock()
-	view.onDisconnected = func(error) { m.markDisconnected(entry.ID) }
+	view.onDisconnected = func(error) { m.markViewDisconnected(entry.ID, view) }
 	view.connectionMu.Unlock()
 	m.order = append(m.order, entry.ID)
 	if m.active == uuid.Nil || activate {
@@ -108,6 +112,9 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 	m.mu.Unlock()
 	if running {
 		go view.Run()
+		if entry.Kind == "remote" {
+			go m.monitorRemote(entry.ID)
+		}
 	}
 	if m.invalidate != nil {
 		m.invalidate()
@@ -118,6 +125,18 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 func (m *MultiWorkspaceClient) markDisconnected(id uuid.UUID) {
 	m.mu.Lock()
 	if connection := m.connections[id]; connection != nil {
+		connection.entry.Status = "disconnected"
+		m.syncSwitchersLocked()
+	}
+	m.mu.Unlock()
+	if m.invalidate != nil {
+		m.invalidate()
+	}
+}
+
+func (m *MultiWorkspaceClient) markViewDisconnected(id uuid.UUID, view *WorkspaceClient) {
+	m.mu.Lock()
+	if connection := m.connections[id]; connection != nil && connection.view == view {
 		connection.entry.Status = "disconnected"
 		m.syncSwitchersLocked()
 	}
@@ -263,6 +282,11 @@ func (m *MultiWorkspaceClient) Run() {
 	for _, view := range views {
 		go view.Run()
 	}
+	for _, entry := range m.ConnectionEntries() {
+		if entry.Kind == "remote" {
+			go m.monitorRemote(entry.ID)
+		}
+	}
 }
 
 func (m *MultiWorkspaceClient) Layout(gtx layout.Context, th *material.Theme) layout.Dimensions {
@@ -282,6 +306,7 @@ func (m *MultiWorkspaceClient) Close() {
 		return
 	}
 	m.closed = true
+	close(m.stop)
 	connections := make([]*managedWorkspaceClient, 0, len(m.order))
 	for index := len(m.order) - 1; index >= 0; index-- {
 		if connection := m.connections[m.order[index]]; connection != nil {
@@ -297,6 +322,114 @@ func (m *MultiWorkspaceClient) Close() {
 		connection.view.Close()
 		if connection.close != nil {
 			connection.close()
+		}
+	}
+}
+
+// Each remote connection has one bounded background health/reconnect worker.
+// It never changes the active selection or replaces the remote server.
+func (m *MultiWorkspaceClient) monitorRemote(id uuid.UUID) {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	failures := 0
+	retryDelay := 2 * time.Second
+	var nextAttempt time.Time
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+		}
+		m.mu.RLock()
+		old := m.connections[id]
+		connector := m.remoteConnector
+		if old == nil || m.closed {
+			m.mu.RUnlock()
+			return
+		}
+		entry := old.entry
+		m.mu.RUnlock()
+		err := goclient.New(entry.SocketPath).CallTimeout("server.info", nil, nil, time.Second)
+		if err == nil && entry.Status == "connected" {
+			failures = 0
+			continue
+		}
+		if err != nil {
+			failures++
+			if failures < 3 && entry.Status == "connected" {
+				continue
+			}
+		}
+		m.markDisconnected(id)
+		if connector == nil {
+			continue
+		}
+		if time.Now().Before(nextAttempt) {
+			continue
+		}
+		m.mu.Lock()
+		if m.connections[id] != old || m.closed {
+			m.mu.Unlock()
+			return
+		}
+		old.entry.Status = "reconnecting"
+		m.syncSwitchersLocked()
+		m.mu.Unlock()
+		if m.invalidate != nil {
+			m.invalidate()
+		}
+		replacement, view, closeFn, err := connector(entry.Destination)
+		if err == nil {
+			err = view.Bootstrap()
+		}
+		if err != nil {
+			if view != nil {
+				view.Close()
+			}
+			if closeFn != nil {
+				closeFn()
+			}
+			m.markDisconnected(id)
+			nextAttempt = time.Now().Add(retryDelay)
+			retryDelay = min(30*time.Second, retryDelay*2)
+			continue
+		}
+		replacement.ID = id
+		replacement.Status = "connected"
+		view.connectionMu.Lock()
+		view.onDisconnected = func(error) { m.markViewDisconnected(id, view) }
+		view.connectionMu.Unlock()
+		m.mu.Lock()
+		if m.closed || m.connections[id] != old {
+			m.mu.Unlock()
+			view.Close()
+			if closeFn != nil {
+				closeFn()
+			}
+			return
+		}
+		m.connections[id] = &managedWorkspaceClient{entry: replacement, view: view, close: closeFn}
+		m.syncSwitchersLocked()
+		m.mu.Unlock()
+		old.view.layoutMu.Lock()
+		view.layoutMu.Lock()
+		view.settings = old.view.settings
+		old.view.settings = settingsPanel{}
+		view.layoutMu.Unlock()
+		old.view.layoutMu.Unlock()
+		old.view.connectionMu.Lock()
+		old.view.onDisconnected = nil
+		old.view.connectionMu.Unlock()
+		old.view.Close()
+		if old.close != nil {
+			old.close()
+		}
+		failures = 0
+		retryDelay = 2 * time.Second
+		nextAttempt = time.Time{}
+		go view.Run()
+		if m.invalidate != nil {
+			m.invalidate()
 		}
 	}
 }

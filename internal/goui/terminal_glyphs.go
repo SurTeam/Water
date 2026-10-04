@@ -56,8 +56,11 @@ func terminalBlockRects(value string, width, height int) ([]image.Rectangle, boo
 }
 
 func terminalEmoji(value string) bool {
+	if strings.ContainsRune(value, '\ufe0e') {
+		return false
+	}
 	r, _ := utf8.DecodeRuneInString(value)
-	return r >= 0x1f000 && r <= 0x1faff || strings.ContainsRune(value, '\ufe0f')
+	return emojiPresentation(r) || strings.ContainsRune(value, '\ufe0f')
 }
 
 func terminalCellGlyph(value string) bool {

@@ -201,14 +201,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				_ = i.OnMouse(base)
 			}
 		case pointer.Scroll:
-			steps := int(pe.Scroll.Y / float32(lineHeight))
-			if steps == 0 {
-				if pe.Scroll.Y < 0 {
-					steps = -1
-				} else if pe.Scroll.Y > 0 {
-					steps = 1
-				}
-			}
+			steps := terminalWheelSteps(float64(pe.Scroll.Y), float64(gtx.Dp(40)))
 			if steps == 0 {
 				continue
 			}
@@ -221,7 +214,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				base.Button = govt.MouseWheel
 				base.Action = action
 				accepted := false
-				for n := 0; n < steps; n++ {
+				for n := 0; n < min(steps, 64); n++ {
 					if i.OnMouse(base) {
 						accepted = true
 					}
@@ -231,14 +224,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 				}
 			}
 			if i.OnScroll != nil {
-				lines := int(pe.Scroll.Y / float32(lineHeight))
-				if lines == 0 {
-					if pe.Scroll.Y < 0 {
-						lines = -1
-					} else {
-						lines = 1
-					}
-				}
+				lines := terminalWheelSteps(float64(pe.Scroll.Y), float64(gtx.Dp(40)))
 				i.OnScroll(lines)
 			}
 		case pointer.Cancel:
@@ -332,7 +318,7 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			if i.OnShortcut != nil && i.OnShortcut(ev) {
 				continue
 			}
-			bindings := goconfig.ShortcutConfig{Paste: "cmd-v", CopyOrInterrupt: "cmd-c", EOF: "cmd-d", ScrollPageUp: "shift-pageup", ScrollPageDown: "shift-pagedown"}
+			bindings := goconfig.ShortcutConfig{Paste: "cmd-v", CopyOrInterrupt: "cmd-c", EOF: "ctrl-d", ScrollPageUp: "shift-pageup", ScrollPageDown: "shift-pagedown"}
 			if i.Shortcuts != nil {
 				bindings = *i.Shortcuts
 			}
@@ -350,11 +336,15 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 						continue
 					}
 				}
-				i.emit([]byte{0x03})
+				if !ev.Modifiers.Contain(key.ModCommand) && !ev.Modifiers.Contain(key.ModSuper) {
+					i.emit([]byte{0x03})
+				}
 				continue
 			}
 			if shortcutMatches(ev, bindings.EOF) {
-				i.emit([]byte{0x04})
+				if !ev.Modifiers.Contain(key.ModCommand) && !ev.Modifiers.Contain(key.ModSuper) {
+					i.emit([]byte{0x04})
+				}
 				continue
 			}
 			if shortcutMatches(ev, bindings.ScrollPageUp) {
@@ -513,6 +503,9 @@ func (i *TerminalInput) emit(data []byte) {
 
 func EncodeKey(ev key.Event, applicationCursor bool) []byte {
 	mods := ev.Modifiers
+	if mods.Contain(key.ModCommand) || mods.Contain(key.ModSuper) {
+		return nil
+	}
 	modParam := modifierParameter(mods)
 	modified := mods&(key.ModShift|key.ModAlt|key.ModCtrl) != 0
 
