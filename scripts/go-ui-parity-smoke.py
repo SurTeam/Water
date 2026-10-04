@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify migrated Rust settings and native rounded geometry in an owned GUI."""
+"""Verify settings and native rounded geometry in an owned GUI."""
 import json
 import os
 import platform

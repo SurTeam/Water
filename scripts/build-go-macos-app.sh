@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Environment:
 #   WATER_APP_VARIANT   dev (default) or release
-#   WATER_APP_VERSION   product version (default: Cargo.toml package version)
+#   WATER_APP_VERSION   product version (default: VERSION)
 #   CODESIGN_IDENTITY   codesign identity (default: - for ad-hoc)
 #   CODESIGN_REQUIRED   require a non-ad-hoc identity (default: 0)
 #   CODESIGN_SKIP       leave the bundle unsigned (default: 0)
@@ -38,7 +38,7 @@ case "$variant" in
     ;;
 esac
 
-version="${WATER_APP_VERSION:-$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)}"
+version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
 
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"

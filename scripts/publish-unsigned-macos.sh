@@ -47,8 +47,8 @@ case "$publication" in
     ;;
 esac
 
-version="$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)"
-[[ -n "$version" ]] || { echo "error: Cargo.toml version is empty" >&2; exit 1; }
+version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
+[[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
 asset="${app_name}-${version}-macOS-arm64.zip"
 # GitHub normalizes spaces in release asset names to periods. Keep the local
 # archive path unchanged, but pass the server-side name to the signing action.

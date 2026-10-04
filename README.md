@@ -1,6 +1,6 @@
 # Water
 
-Water is a native Rust workbench for people who run local shells, remote build environments, and coding agents side by side. It keeps workspaces, terminal panes, server sessions, and agent status in one controllable desktop surface instead of treating each terminal as a disposable window.
+Water is a native Go workbench for people who run local shells, remote build environments, and coding agents side by side. It keeps workspaces, terminal panes, server sessions, and agent status in one controllable desktop surface instead of treating each terminal as a disposable window.
 
 ![Water terminal workspace](assets/screenshots/water-terminal-content.png)
 
@@ -20,7 +20,7 @@ The UI is deliberately quiet: a connection sidebar on the left, tabs above the a
 The packaged product targets macOS first. The repository also supports Linux development builds; the screenshots above show the default workspace appearance.
 
 ```sh
-cargo run --bin water
+go run ./cmd/water
 ```
 
 For setup, configuration, remote connections, control commands, tests, cross-builds, and signing, see [docs/Documents.md](docs/Documents.md). The current module boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md), and the complete configuration schema is in [config.example.json](config.example.json).

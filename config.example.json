@@ -19,6 +19,8 @@
     "selection": true
   },
   "theme": {
+    "accent": "#8eaeed",
+    "accent_foreground": "#ffffff",
     "terminal_background": "#2c2c2c",
     "terminal_foreground": "#e4e4e4",
     "selection_background": "#555555",
@@ -64,6 +66,7 @@
     }
   },
   "terminal": {
+    "replay_history_bytes": 8388608,
     "scrollback_lines": 2000,
     "inactive_scrollback_lines": 500,
     "max_total_scrollback_bytes": 67108864,
@@ -83,6 +86,31 @@
     "socket_path": null
   },
   "ui": {
+    "system_notifications": false,
+    "sidebar_agent_mode": "workspace",
+    "sidebar_host_font_size": 12.0,
+    "sidebar_workspace_font_size": 12.0,
+    "sidebar_agent_font_size": 12.0,
+    "sidebar_remote_button_height": 30.0,
+    "sidebar_remote_button_font_size": 12.0,
+    "sidebar_workspace_button_height": 30.0,
+    "sidebar_workspace_button_font_size": 12.0,
+    "sidebar_host_alignment": "center",
+    "sidebar_workspace_alignment": "center",
+    "sidebar_agent_alignment": "center",
+    "sidebar_host_row_width": 1.0,
+    "sidebar_workspace_row_width": 1.0,
+    "workspace_navigation_across_hosts": false,
+    "sidebar_agent_row_gap": 3.0,
+    "sidebar_agent_padding": 6.0,
+    "sidebar_host_header_height": 28.0,
+    "sidebar_host_workspace_gap": 8.0,
+    "sidebar_agent_row_width": 0.8,
+    "sidebar_workspace_row_padding": 10.0,
+    "sidebar_agent_row_padding": 10.0,
+    "sidebar_agent_row_height": 28.0,
+    "sidebar_workspace_gap": 4.0,
+    "font_family": "",
     "language": "en",
     "tab_font_size": 12.0,
     "tab_max_title_length": 32,
@@ -117,6 +145,7 @@
     "sidebar_workspace_radius": 10.0
   },
   "shortcuts": {
+    "promote_pane_to_tab": "cmd-shift-enter",
     "open_settings": "cmd-,",
     "new_window": "cmd-n",
     "hide_window": "cmd-w",

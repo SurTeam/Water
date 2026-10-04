@@ -206,8 +206,8 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 	case 2: // erase all
 		if buf.HasScrollback() && !respectProtect {
 			// Shell clear-screen (Ctrl+L) clears the live viewport while
-			// retaining its contents in bounded history, as in Water's
-			// Rust terminal. CSI 3 J remains the explicit history erase.
+			// retaining its contents in bounded history.
+			// CSI 3 J remains the explicit history erase.
 			last := h.bufferService.Rows - 1
 			for last >= 0 && buf.Lines.Get(buf.YBase+last).GetTrimmedLength() == 0 {
 				last--

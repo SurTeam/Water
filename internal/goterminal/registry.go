@@ -39,12 +39,12 @@ type Terminal struct {
 	subs        map[uint64]*subscriber
 	nextSub     uint64
 
-	seq    atomic.Uint64
-	closed     chan struct{}
-	readerDone    chan struct{}
-	resizeRequests chan resizeRequest
+	seq              atomic.Uint64
+	closed           chan struct{}
+	readerDone       chan struct{}
+	resizeRequests   chan resizeRequest
 	rawFlushRequests chan rawFlushRequest
-	once          sync.Once
+	once             sync.Once
 }
 
 type Registry struct {
@@ -186,21 +186,21 @@ type resizeRequest struct {
 }
 
 type rawFlushRequest struct {
-	ready chan struct{}
+	ready  chan struct{}
 	resume chan struct{}
 }
 
 func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
-	req:=resizeRequest{size:size.Normalized(),done:make(chan error,1)}
+	req := resizeRequest{size: size.Normalized(), done: make(chan error, 1)}
 	select {
-	case t.resizeRequests<-req:
+	case t.resizeRequests <- req:
 	case <-t.readerDone:
 		return io.ErrClosedPipe
 	case <-t.closed:
 		return io.ErrClosedPipe
 	}
 	select {
-	case err:=<-req.done:
+	case err := <-req.done:
 		return err
 	case <-t.readerDone:
 		return io.ErrClosedPipe
@@ -388,7 +388,7 @@ func (t *Terminal) readLoop() {
 		if pendingBytes >= readBlockBytes {
 			flush()
 		} else {
-			// Match the Rust worker's micro-burst semantics: each useful read
+			// Each useful read in a micro-burst
 			// extends the idle window, while max age still bounds a continuous
 			// stream to five milliseconds.
 			resetIdle()
@@ -452,7 +452,7 @@ func (t *Terminal) readLoop() {
 				}
 			}
 			// Serialize resize with every PTY block already observed by the
-			// reader. This matches the Rust worker's authoritative stream
+			// reader. Preserve authoritative stream
 			// ordering: Output(old geometry) -> Resize -> Output(new geometry).
 			drainObserved()
 			flush()
@@ -549,7 +549,7 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 					if n == 0 {
 						return false
 					}
-					// Match the existing Rust reader's bounded successful-data
+					// Use a bounded successful-data
 					// micro-burst. Never spin on empty/spurious readiness.
 					wouldBlocks++
 					now := time.Now()
@@ -588,7 +588,7 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 
 func (t *Terminal) waitLoop() {
 	err := t.cmd.Wait()
-	// Preserve the same stream-order invariant as the Rust worker: all bytes
+	// Preserve stream ordering: all bytes
 	// readable from the PTY must be sequenced before the authoritative Exit.
 	<-t.readerDone
 	var code *int32
@@ -620,7 +620,7 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 	}
 	t.mu.Unlock()
 
-	// Match the Rust worker semantics: the 64-event subscriber queue is a
+	// The 64-event subscriber queue is a
 	// bounded backpressure boundary. Never silently drop a terminal event.
 	for _, sub := range subs {
 		select {
@@ -629,7 +629,6 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 		}
 	}
 }
-
 
 func retainedEventBytes(ev goprotocol.TerminalEvent) int {
 	n := replayEventOverhead

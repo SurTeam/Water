@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Environment:
 #   WATER_APP_VARIANT   dev (default) or release
-#   WATER_APP_VERSION   product version (default: Cargo.toml package version)
+#   WATER_APP_VERSION   product version (default: VERSION)
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
@@ -33,7 +33,7 @@ case "$variant" in
     ;;
 esac
 
-version="${WATER_APP_VERSION:-$(awk -F ' *= *' '/^version = / { gsub(/"/, "", $2); print $2; exit }' Cargo.toml)}"
+version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
 
 arch="$(uname -m)"

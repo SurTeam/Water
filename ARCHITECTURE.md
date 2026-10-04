@@ -1,83 +1,70 @@
 # Water 架构
 
-本文描述当前实现的边界和入口；工作约定见 [AGENTS.md](AGENTS.md)，运行、测试和打包命令见 [docs/Documents.md](docs/Documents.md)。不要用旧的 Phase 叙述推断模块职责。
+当前产品由 Go 实现，桌面运行时使用 Ebitengine。工作约定见 [AGENTS.md](AGENTS.md)，命令和发布流程见 [docs/Documents.md](docs/Documents.md)。
 
 ## 入口地图
 
 | 关注点 | 入口 |
 | --- | --- |
-| 应用模型、命令、operation、revision/event | [`src/app/`](src/app/)、[`src/command/`](src/command/)、[`src/event/mod.rs`](src/event/mod.rs) |
-| workspace/tab/pane 拓扑和 typed ID | [`src/workspace/`](src/workspace/)、[`src/pane/model.rs`](src/pane/model.rs)、[`src/ids.rs`](src/ids.rs) |
-| PTY、元数据、回放和终端流 | [`src/server.rs`](src/server.rs)、[`src/terminal/model.rs`](src/terminal/model.rs)、[`src/terminal/worker.rs`](src/terminal/worker.rs)、[`src/terminal/replay.rs`](src/terminal/replay.rs)、[`src/terminal/stream.rs`](src/terminal/stream.rs) |
-| 客户端模拟、滚动、选择和绘制 | [`src/terminal/emulator.rs`](src/terminal/emulator.rs)、[`src/ui/application.rs`](src/ui/application.rs)、[`src/ui/workspace.rs`](src/ui/workspace.rs) |
-| 控制协议、CLI 和 UI automation | [`src/control/`](src/control/)、[`src/ctl/mod.rs`](src/ctl/mod.rs)、[`src/ui/control.rs`](src/ui/control.rs)、[`src/automation/`](src/automation/) |
-| 配置、启动和构建身份 | [`src/config.rs`](src/config.rs)、[`src/main.rs`](src/main.rs)、[`build.rs`](build.rs)、[`src/lib.rs`](src/lib.rs) |
-| SSH 连接、远端 server 和 agent 检测 | [`src/remote.rs`](src/remote.rs)、[`src/agent/model.rs`](src/agent/model.rs)、[`src/control/protocol.rs`](src/control/protocol.rs) |
+| GUI/CLI 启动、control 和 scenario | [`cmd/water/`](cmd/water/)、[`internal/gouiapp/`](internal/gouiapp/) |
+| 独立 server | [`cmd/water-server/`](cmd/water-server/)、[`internal/goserver/`](internal/goserver/) |
+| 应用模型、workspace/tab/pane、命令和事件 | [`internal/gomodel/`](internal/gomodel/)、[`internal/goserver/commands.go`](internal/goserver/commands.go) |
+| 协议、UUID、operation 和 revision | [`internal/goprotocol/`](internal/goprotocol/) |
+| PTY、前台进程、回放和有序终端流 | [`internal/goterminal/`](internal/goterminal/) |
+| RPC、GUI session 和有界传输队列 | [`internal/goclient/`](internal/goclient/) |
+| 客户端模拟、终端查询和图形解析 | [`internal/govt/`](internal/govt/)、[`internal/xterm/`](internal/xterm/) |
+| 窗口、布局、终端绘制、输入和 Settings | [`internal/goui/`](internal/goui/) 中的 `ebiten_*` 和共享客户端模块 |
+| SSH 与 embedded server payload | [`internal/goremote/`](internal/goremote/) |
+| Agent 检测与绑定 | [`internal/goagent/`](internal/goagent/) |
+| 配置与构建身份 | [`internal/goconfig/`](internal/goconfig/)、[`internal/gobuild/`](internal/gobuild/)、[`VERSION`](VERSION) |
 
 ## 运行时分层
 
-Go GUI 的入口为 [`internal/gouiapp/app.go`](internal/gouiapp/app.go)，窗口、标题栏、控件、终端纹理和原生输入由 [`internal/goui/ebiten_window.go`](internal/goui/ebiten_window.go)、[`ebiten_layout.go`](internal/goui/ebiten_layout.go)、[`ebiten_terminal.go`](internal/goui/ebiten_terminal.go)、[`ebiten_input.go`](internal/goui/ebiten_input.go) 实现。运行时使用 Ebitengine，不创建 Gio 窗口，也不把 Gio 帧转成纹理。既有 `WorkspaceClient` 继续持有 connection、终端模拟、Settings 和选择状态；共享 VT 编码器和旧 Gio 布局保留用于兼容性测试。
-
-窗口使用无系统装饰模式。关闭、最小化、最大化/恢复、标题栏拖动和边缘缩放由客户端处理。原生输入与 `water ctl ui` 进入同一套事件处理器，控制请求经过有界队列进入 `Update`，截图读取真实 `Draw` 帧；PNG 编码、配置保存、SSH 和字体文件加载在帧循环外进行。模型变更仍只通过 connection 所属 session 的 dispatcher/channel。
-
-Go 设置字段与 Rust 配置 schema 有自动对照检查。圆角通过透明窗口、缓存 alpha mask 和 macOS content layer 裁剪实现，原生菜单和 layer 操作经过有界 main-queue bridge。标题栏/标签/侧栏几何、Agent 配色和行为设置投影到客户端；侧栏工作区重排、重命名和 Agent 聚焦仍向对象所属 connection 发送命令。Ebitengine 单进程窗口限制下，新窗口使用同变体 GUI 子进程连接已有 server；UI control 转发始终作用于该窗口当前活动的 connection。
-
 ```text
 GUI / water ctl / scenario / remote client
-        │  对象所属 connection 的 CommandTransport
+        │ 对象所属 connection 的 session / control transport
         ▼
-CommandDispatcher → ApplicationModel
-        │
-        ├─ operation / state revision / bounded event history
-        └─ PTY 元数据、标题、agent 绑定和退出事件
+server command dispatcher → application model
+        ├─ operation / revision / bounded event history
+        └─ PTY metadata / title / agent / exit
 
-PTY worker → ordered Output / Resize / Exit
-          → bounded replay ring + live stream
-          → client emulator worker → immutable TerminalSnapshot → GPUI
+PTY reader → ordered Output / Resize / Exit
+           → bounded replay + live stream
+           → client emulator → visible snapshot → Ebitengine Draw
 ```
 
-`ApplicationModel` 只在线程内由 dispatcher 修改。control server/client、GUI 和 scenario 是 transport 适配层；它们不能通过共享全局模型绕过命令路径。持续终端输出不逐屏写入模型 snapshot，模型 snapshot 也不能替代终端流。
+外部模型变更必须通过服务端命令路径。客户端拥有窗口选择、viewport、scrollback、selection 和拖拽预览；提交拓扑变化时才发送命令。服务端拥有模型、PTY 和有界原始 replay，不维持长期屏幕模拟器，不逐屏推送终端快照。
 
-## 状态归属
+GUI 命令写入在 session worker 上执行，帧循环不做 socket I/O。session 写队列为 64 frame / 16 MiB，terminal decoded 队列为 64 event。队列饱和时明确断开 session，关闭会唤醒等待者；输出不能静默丢弃。PTY 的 Output、Resize、Exit 保持同一有序 sequence，attach replay 与 live 流按 sequence 去重、完整衔接。
 
-| 状态 | 所有者 | 备注 |
-| --- | --- | --- |
-| workspace、tab、pane tree、surface/session/terminal 元数据 | server 的 model thread | 通过 command、operation、revision/event 对外提供 |
-| PTY 子进程、原始字节、进程名、resize/exit | server PTY worker/registry | 不在 GPUI 主线程执行阻塞 I/O |
-| replay 边界、attach、live 订阅 | server `TerminalRegistry`/`ReplayRing` | 有界、按 sequence 衔接 |
-| Alacritty emulator、屏幕、scrollback、selection、viewport | 每个 connection 的 client worker/UI | 不等于应用模型变更 |
-| active window、焦点、拖拽预览、tab-strip 滚动 | GPUI client | 提交拓扑变化时才发送应用命令 |
-| host/workspace/agent 的显示排序与侧栏颜色 | workspace UI/config | 不能改变对象的 connection 归属 |
+## UI 与输入
 
-## 终端生命周期与内存边界
+[`internal/gouiapp/app.go`](internal/gouiapp/app.go) 启动桌面窗口。`ebiten_window.go`、`ebiten_layout.go`、`ebiten_terminal.go` 和 `ebiten_input.go` 实现无系统装饰窗口、标题栏、控件、终端绘制和输入。原生输入与 `water ctl ui` 使用同一套事件处理器；控制请求经过有界队列进入 Update，截图捕获真实 Draw 帧。PNG 编码、配置保存、SSH 和字体文件加载在帧循环外进行。
 
-- PTY 的 `Output`、`Resize`、`Exit` 共用有序事件序列。attach 返回有限 replay 和 live tail；客户端按 sequence 去重，不能在 replay/live 交接处丢事件或重复应用。
-- 服务端不维持长期运行的屏幕模拟器。需要 cells 的查询可以从有限 replay 临时重放；GUI 的长期 emulator、服务端 metadata snapshot 和查询投影是三个不同概念。
-- replay 原始字节、GUI scrollback grid 和 recent-output 查询各有边界。焦点终端可使用配置的滚动历史预算，失焦终端压缩到 inactive 上限，多个终端共享总字节上限；不能把服务端 replay 上限误当成客户端 scrollback 上限。
-- PTY reader 在背压、空唤醒、关闭和 detach 时必须可停止且有界；关闭 tab/pane 后应断开终端订阅，退出 terminal 的 snapshot/query 仍要能被有界 observer 读取。
+共享 `WorkspaceClient` 持有 connection、客户端终端、Settings 和 selection；旧 Gio 布局与输入模块保留用于 Go 内部兼容性测试，运行时不创建 Gio 窗口。Ebitengine 的单进程窗口限制通过同变体 GUI 子进程连接已有 server 处理。UI control 总是路由到目标窗口的活动 connection。
 
-## Connection、远端和身份
+终端客户端处理宽字符、字体 fallback、selection/copy、OSC 8 hyperlink、图形、终端查询回复与本地/远端文件打开。重放不触发剪贴板或终端报告等副作用。macOS 原生菜单与圆角 layer 操作经过有界 main-queue bridge。
 
-每个 Local/Remote connection 有自己的 control transport、model projection 和 client terminal state。SSH 使用 OpenSSH ControlMaster 与 Unix socket forward；首次连接按远端 OS/CPU 选择匹配的 embedded server payload，缓存和 socket 按版本、协议、namespace、destination 隔离。兼容 server 可复用，不兼容 server 不能被静默替换；transport 断开时侧栏保留 offline/dimmed host，重新连接不应丢失其服务端 workspace。
+## Connection、远端与身份
 
-`src/ids.rs` 的 `WorkspaceId`、`TabId`、`PaneId`、`SurfaceId`、`TerminalId`、`SessionId`、`ConnectionId` 和 `OperationId` 是 typed newtype，新的身份使用完整 UUIDv4。JSON/CLI 使用标准 UUID 字符串，二进制 terminal frame 保留 16 字节；旧数值 fixture 只为兼容反序列化，不能成为新实现的身份策略。
+每个 Local/Remote connection 有独立 transport、model projection 和 client terminal state。实体与 operation 使用完整 UUIDv4；JSON/CLI 传递 UUID 字符串，二进制终端事件保留完整 16 字节。命令必须发到对象所属 connection。
 
-## UI、控制和 coding agent
+控制协议版本为 4，API signature 为 `water-control/v5`。JSON control frame 使用 32-bit big-endian 长度前缀，live terminal frame 使用 `\0WT4` 和 UUID/sequence/geometry 布局。`water ctl server info` 与 `connections list` 用于检查变体、版本与协议兼容性。
 
-`water ctl` 已并入 `water` binary；协议当前为 v4，control message/attach replay 使用 JSON，live terminal event 使用带完整 ID 的二进制 frame，API signature 为 `water-control/v4`。`water ctl info`、`server info` 和 `connections list` 用于检查 client/server/build compatibility。UI automation 目前覆盖真实 keystroke、click、wheel、snapshot 和（启用且平台支持时的）window screenshot；它不提供通用 drag/pointer stream，测试不能绕过 control API 使用系统注入。
+SSH 使用系统 OpenSSH ControlMaster 和 Unix socket forwarding。首次连接按远端 Darwin/Linux、amd64/arm64 选择 embedded Go server payload；远端缓存和 socket 按版本、协议、namespace、destination 隔离。兼容 server 可复用，不兼容 server 不能被静默替换。断线保留 offline host 与服务端 workspace。
 
-agent 检测依据 terminal 的前台进程和 argv，归一化为 `AgentKind`/session label，再沿同一 workspace/tab/pane/terminal 路径进入 model projection、事件和侧栏。当前范围是检测、绑定、状态、排序和侧栏交互，不把它扩展成新的结构化 Agent Surface。近期输出活跃只表示有未提交本地输入回显之外的输出，不等价于语义上的“等待输入”或“工具运行”。
+Agent 检测来自终端前台进程及 argv，绑定、状态和侧栏交互沿既有 model/connection 路径进行。
 
-终端 UI 还负责 selection/copy、双击边界、OSC 8 hyperlink、本地/远端下载确认、scrollback viewport、tab/workspace 导航和非焦点 pane dimming；这些局部行为不能绕过命令/connection 边界改变服务端模型。
+## 配置与构建
 
-## 配置与构建身份
+配置类型、默认值、override 合并、校验与保存位于 `internal/goconfig`；完整示例为 [`config.example.json`](config.example.json)。Settings 保存保留未知字段，配置必须贯通读写和运行时投影。启动、shell、server 与历史预算变更的生效范围不能与当前 PTY 生命周期混淆。
 
-`AppConfig` 由内置 defaults 与可选 override 合并而成；startup、server、shell、terminal、theme、UI、shortcut、feature 和容量限制必须同时在解析、Settings 读写、校验和运行时投影中保持一致。窗口退出、restart-required 配置和已有 PTY 的生命周期不能被静默混淆。
+Go 版本和依赖由 `go.mod`/`go.sum` 管理。产品版本由 `VERSION` 管理，打包和发布使用同一 `WATER_APP_VERSION` override。普通 Go 构建默认 dev；打包通过 `WATER_APP_VARIANT` 和 linker flags 设置 dev/release。GUI、server、embedded payload、socket、配置目录与 Bundle ID 必须保持同一身份。GUI 原生构建，headless server payload 通过 Go 交叉编译。
 
-项目只有 dev/release 两种运行身份。`build.rs`、GUI、dedicated server、embedded payload、远端缓存、socket、配置目录和 macOS bundle 必须使用同一变体；普通 `cargo build` 是优化后的 dev，不能从 opt-level 推断 release。GPUI revision、Linux cross linker、macOS framework stubs 和预编译 Metal shader 的具体命令见 [docs/Documents.md](docs/Documents.md)。
+## 验证与发布
 
-## 验证入口
+各模块的 `*_test.go` 覆盖协议、模型、PTY、客户端、VT、配置和 UI。[`internal/gobench/`](internal/gobench/) 提供终端性能与交互延迟检查；[`tests/scenarios/`](tests/scenarios/) 和 `scripts/run-go-scenario-suite.sh` 验证真实服务端命令路径；`scripts/run-go-ui-smoke.sh` 与各 `go-ui-*-smoke.py` 验证原生 GUI。
 
-模型和协议：[`tests/phase1.rs`](tests/phase1.rs)、[`tests/phase2.rs`](tests/phase2.rs)、[`tests/protocol.rs`](tests/protocol.rs)。终端可靠性：[`tests/phase3.rs`](tests/phase3.rs)、[`tests/terminal_reader.rs`](tests/terminal_reader.rs)、[`tests/terminal_detach.rs`](tests/terminal_detach.rs)、[`tests/resize_stream.rs`](tests/resize_stream.rs)、[`tests/hotpath.rs`](tests/hotpath.rs)。真实 control/GUI 路径：[`tests/ctl_smoke.rs`](tests/ctl_smoke.rs)、[`tests/scenarios/`](tests/scenarios/)。变体打包：[`tests/build_variants.rs`](tests/build_variants.rs)。
+测试使用唯一 socket、临时 config、有界 operation/output/exit 条件，只清理本次创建的 PID。headless 或交叉编译不能替代真实 GUI 检查。
 
-验证必须使用有界 operation/output/exit 条件、独立 socket/config 和 Water control API；历史“通过”或“预存失败”不自动豁免当前基线。
+CI 只保留 [macos-signed.yml](.github/workflows/macos-signed.yml)。本地构建 unsigned archive 并验证后，上传目标 tag 的 draft release，再手动触发 signing workflow。Action 只下载、签名、验证、可选 notarization 和发布，不编译源码。

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	performanceGateBytes = 32_000_000
+	performanceGateBytes              = 32_000_000
 	minimumSharedRunnerThroughputMBps = 5.0
 )
 
@@ -56,8 +56,8 @@ func TestTerminalPerformanceGate(t *testing.T) {
 
 	// The absolute floor only catches order-of-magnitude regressions. Shared
 	// GitHub runners can vary enough that direct and server measurements may
-	// even invert, so the same-runner Rust-vs-Go workflow is the comparison
-	// oracle. This gate keeps the architectural invariants hard: sequence
+	// even invert; compare performance on the same machine. This gate keeps
+	// the architectural invariants hard: sequence
 	// continuity, bounded queues/replay, server/direct retention, and latency.
 	if direct.mbps() < minimumSharedRunnerThroughputMBps {
 		t.Fatalf(
@@ -169,11 +169,11 @@ func measureServerPerformance(t *testing.T) performanceSample {
 		TerminalID uuid.UUID `json:"terminal_id"`
 	}
 	if err := client.Dispatch(map[string]any{
-		"type": "terminal.spawn",
+		"type":    "terminal.spawn",
 		"program": "/bin/sh",
-		"args": []string{"-c", "read _; " + bufferedTerminalCommand("WATER_GO_PERF", performanceGateBytes)},
+		"args":    []string{"-c", "read _; " + bufferedTerminalCommand("WATER_GO_PERF", performanceGateBytes)},
 		"columns": 80,
-		"lines": 24,
+		"lines":   24,
 	}, &spawned); err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func measureServerPerformance(t *testing.T) performanceSample {
 	var attached struct {
 		Size    goprotocol.TerminalSize        `json:"size"`
 		Replay  []goprotocol.WireTerminalEvent `json:"replay"`
-		LastSeq uint64                          `json:"last_seq"`
+		LastSeq uint64                         `json:"last_seq"`
 	}
 	if err := session.Attach(spawned.TerminalID, &attached); err != nil {
 		t.Fatal(err)
@@ -200,9 +200,9 @@ func measureServerPerformance(t *testing.T) performanceSample {
 
 	lastSeq := attached.LastSeq
 	if err := session.DispatchAsync(map[string]any{
-		"type": "terminal.send_text",
+		"type":        "terminal.send_text",
 		"terminal_id": spawned.TerminalID,
-		"text": "\n",
+		"text":        "\n",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,6 @@ func numberMetric(metrics map[string]any, key string) float64 {
 	}
 }
 
-
 func TestTerminalInteractionPerformanceGate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("performance gate is disabled in short mode")
@@ -311,11 +310,11 @@ func TestTerminalInteractionPerformanceGate(t *testing.T) {
 		TerminalID uuid.UUID `json:"terminal_id"`
 	}
 	if err := client.Dispatch(map[string]any{
-		"type": "terminal.spawn",
+		"type":    "terminal.spawn",
 		"program": "/bin/sh",
-		"args": []string{"-c", "read _; exec yes WATER_INTERACTION_FLOOD"},
+		"args":    []string{"-c", "read _; exec yes WATER_INTERACTION_FLOOD"},
 		"columns": 80,
-		"lines": 24,
+		"lines":   24,
 	}, &spawned); err != nil {
 		t.Fatal(err)
 	}
@@ -332,9 +331,9 @@ func TestTerminalInteractionPerformanceGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := session.DispatchAsync(map[string]any{
-		"type": "terminal.send_text",
+		"type":        "terminal.send_text",
 		"terminal_id": spawned.TerminalID,
-		"text": "\n",
+		"text":        "\n",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -363,10 +362,10 @@ func TestTerminalInteractionPerformanceGate(t *testing.T) {
 floodReady:
 	resizeStart := time.Now()
 	if err := client.Dispatch(map[string]any{
-		"type": "terminal.resize",
+		"type":        "terminal.resize",
 		"terminal_id": spawned.TerminalID,
-		"columns": 100,
-		"lines": 31,
+		"columns":     100,
+		"lines":       31,
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -376,9 +375,9 @@ floodReady:
 
 	inputStart := time.Now()
 	if err := client.Dispatch(map[string]any{
-		"type": "terminal.send_bytes",
+		"type":        "terminal.send_bytes",
 		"terminal_id": spawned.TerminalID,
-		"bytes": []int{3},
+		"bytes":       []int{3},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}

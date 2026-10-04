@@ -53,7 +53,7 @@ func automationInputEvent(spec string) (event.Event, bool) {
 	}
 	spec = strings.ReplaceAll(strings.ToLower(spec), "page-up", "pageup")
 	spec = strings.ReplaceAll(spec, "page-down", "pagedown")
-	// A trailing hyphen is the key itself (Rust's default split-down: cmd--).
+	// A trailing hyphen is the key itself (default split-down: cmd--).
 	if strings.HasSuffix(spec, "--") {
 		spec = strings.TrimSuffix(spec, "-") + "minus"
 	}

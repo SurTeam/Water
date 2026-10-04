@@ -6,7 +6,7 @@ out_dir="${repo_root}/internal/goremote/payloads"
 mkdir -p "${out_dir}"
 
 variant="${WATER_APP_VARIANT:-dev}"
-version="${WATER_APP_VERSION:-go-rewrite}"
+version="${WATER_APP_VERSION:-$(cat "${repo_root}/VERSION")}"
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"
 ldflags="-s -w -X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version}"
 

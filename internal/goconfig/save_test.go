@@ -63,7 +63,7 @@ func TestSaveRefusesMalformedExistingConfig(t *testing.T) {
 	}
 }
 
-func TestUIFontNamesSupportRustAndLegacyGoConfigs(t *testing.T) {
+func TestUIFontNamesSupportCurrentAndLegacyConfigs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	for _, input := range []string{`{"ui":{"ui_font_size":17}}`, `{"ui":{"font_size":17,"font_family":"monospace"}}`} {
 		if err := os.WriteFile(path, []byte(input), 0600); err != nil {
@@ -85,7 +85,7 @@ func TestUIFontNamesSupportRustAndLegacyGoConfigs(t *testing.T) {
 		var root map[string]any
 		_ = json.Unmarshal(data, &root)
 		if root["ui"].(map[string]any)["font_size"] != float64(20) {
-			t.Fatal("Rust-compatible font key absent")
+			t.Fatal("canonical font key absent")
 		}
 	}
 }

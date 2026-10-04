@@ -1,5 +1,8 @@
 # testTermCat performance investigation — 2026-10-03
 
+This is a historical Go/Gio measurement report. The current desktop runtime
+uses Ebitengine; the recorded GUI timings do not validate the current renderer.
+
 The core optimization is implemented while retaining Gio. In the native macOS
 GUI, the unchanged `testTermCat` script now reports `real` values of
 **0.753 / 0.685 / 0.653 seconds** (median **0.685 seconds**). The user's prior
@@ -35,7 +38,7 @@ individual server-local samples can still exceed 0.8 seconds.
   perform three stores per cell and remove sparse metadata once per range.
 - Darwin's blocking PTY file is rewrapped as a nonblocking, pollable file with
   a separate owned descriptor. The reader accumulates available data before
-  channel handoff and uses the Rust reader's bounded successful-data micro-burst:
+  channel handoff and uses a bounded successful-data micro-burst:
   at most 64 consecutive EAGAIN attempts, a 1 ms idle window, a 5 ms maximum
   batch age, and a 128 KiB block. Empty readiness returns to the runtime poller;
   it does not enter the successful-data spin loop. These bounds permit brief
@@ -91,8 +94,7 @@ The shell's `real` measures producer completion under PTY backpressure. It
 does not by itself prove that the client parsed and displayed the last byte.
 The headless benchmarks below instead consume through the ordered Exit event
 and take a final terminal snapshot. They are useful for isolating bottlenecks,
-but are not interchangeable with the shell's timer. The user's Rust number
-was not independently reproduced during this investigation.
+but are not interchangeable with the shell's timer.
 
 ## Initial native Darwin arm64 measurements
 
