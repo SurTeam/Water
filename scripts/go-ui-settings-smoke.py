@@ -245,10 +245,47 @@ except KeyboardInterrupt:
     width, height = enlarged["frame_size"]
     assert ctl("ui", "drag", "--x", str(width-2), "--y", str(height*.8), "--to-x", str(width-62), "--to-y", str(height*.8))["handled"]
     wait(lambda s: s["window_size"] == initial["window_size"], "custom border restored size")
+    sidebar = ctl("ui", "snapshot")
+    background = next(h for h in sidebar["automation_hits"] if h.get("label") == "sidebar-background")
+    sx0, sy0, sx1, sy1 = background["rect"]
+    blank = None
+    for sy in range(int(sy0+20*scale), int(sy1-20*scale), max(1, int(12*scale))):
+        sx = int((sx0+sx1)/2)
+        top = next((h for h in reversed(sidebar["automation_hits"]) if h["rect"][0] <= sx < h["rect"][2] and h["rect"][1] <= sy < h["rect"][3]), None)
+        if top and top.get("label") == "sidebar-background":
+            blank = (sx, sy)
+            break
+    assert blank, "sidebar must have a blank drag surface"
+    sx, sy = blank
+    assert ctl("ui", "drag", "--x", str(sx), "--y", str(sy), "--to-x", str(sx+30), "--to-y", str(sy+20))["handled"]
+    wait(lambda s: s["window_position"] != sidebar["window_position"], "sidebar blank area moves window")
     ctl("ui", "screenshot", "--output", str(directory / "workspace.png"))
     ctl("ui", "key", "cmd-,")
     wait(lambda s: s.get("settings_visible"), "settings open")
     ctl("ui", "screenshot", "--output", str(directory / "settings.png"))
+    edit("Terminal.FontSize", "1234")
+    ctl("ui", "key", "shift-left")
+    ctl("ui", "key", "shift-left")
+    selected = wait(lambda s: s.get("settings_editor", {}).get("caret") == 2, "shift-arrow moves caret")
+    assert selected["settings_editor"]["anchor"] == 4
+    ctl("ui", "key", "shift-right")
+    selected = wait(lambda s: s.get("settings_editor", {}).get("caret") == 3, "selection shrinks")
+    assert selected["settings_editor"]["anchor"] == 4
+    ctl("ui", "key", "text:8")
+    wait(lambda s: s.get("settings_editor", {}).get("text") == "1238", "replace keyboard selection")
+    field = next(h for h in selected["automation_hits"] if h.get("label") == "field:Terminal.FontSize")
+    x0, y0, x1, y1 = field["rect"]
+    y = (y0+y1)/2
+    ctl("ui", "click", "--x", str(x0+2), "--y", str(y))
+    wait(lambda s: s.get("settings_editor", {}).get("caret") == 0, "mouse places insertion point")
+    ctl("ui", "key", "Right")
+    ctl("ui", "key", "text:9")
+    wait(lambda s: s.get("settings_editor", {}).get("text") == "19238", "arrow places insertion point")
+    ctl("ui", "drag", "--x", str(x1-2), "--y", str(y), "--to-x", str(x0+2), "--to-y", str(y))
+    selected = wait(lambda s: s.get("settings_editor", {}).get("caret") == 0, "mouse drag selection")
+    assert selected["settings_editor"]["anchor"] == 5
+    ctl("ui", "key", "text:18")
+    wait(lambda s: s.get("settings_editor", {}).get("text") == "18", "replace mouse selection")
     edit("Terminal.FontSize", "18")
     edit("Terminal.LineHeight", "22")
     font_chain = "Sarasa Term SC Nerd Font, Apple Color Emoji" if platform.system() == "Darwin" else "Go Mono, Noto Color Emoji"

@@ -22,6 +22,75 @@ import (
 	"time"
 )
 
+func TestCertificateRequirement(t *testing.T) {
+	for _, tc := range []struct {
+		requirement string
+		want        bool
+	}{
+		{`identifier "dev.water.terminal" and certificate leaf = H"85b37ea8d5b9719cb5f443613573ad1f4986b17b"`, true},
+		{`identifier "dev.water.terminal" and anchor apple generic and certificate leaf[subject.OU] = "TEAM"`, true},
+		{`identifier "dev.water.terminal" and cdhash H"123456"`, false},
+		{`identifier "dev.water.terminal"`, false},
+		{"", false},
+	} {
+		if got := certificateRequirement(tc.requirement); got != tc.want {
+			t.Errorf("requirement %q: got %v, want %v", tc.requirement, got, tc.want)
+		}
+	}
+}
+
+func TestInstalledSignedBundleVerification(t *testing.T) {
+	app := os.Getenv("WATER_TEST_SIGNED_APP")
+	if app == "" {
+		t.Skip("set WATER_TEST_SIGNED_APP to verify a locally installed signed bundle")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	info := filepath.Join(app, "Contents", "Info.plist")
+	out, err := exec.CommandContext(ctx, "/usr/bin/plutil", "-extract", "CFBundleShortVersionString", "raw", "-o", "-", info).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := strings.TrimSpace(string(out))
+	variant := "release"
+	if filepath.Base(app) == "Water Dev.app" {
+		variant = "dev"
+	}
+	if err := verifyBundle(ctx, app, app, variant, version); err != nil {
+		t.Fatalf("valid signed bundle rejected: %v", err)
+	}
+	_, _, name := names(variant)
+	adhoc := filepath.Join(t.TempDir(), name)
+	macos := filepath.Join(adhoc, "Contents", "MacOS")
+	if err := os.MkdirAll(macos, 0700); err != nil {
+		t.Fatal(err)
+	}
+	plist, err := os.ReadFile(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(adhoc, "Contents", "Info.plist"), plist, 0600); err != nil {
+		t.Fatal(err)
+	}
+	gui, _, _ := names(variant)
+	binary, err := os.ReadFile("/bin/echo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(macos, gui), binary, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.CommandContext(ctx, "/usr/bin/codesign", "--force", "--sign", "-", adhoc).CombinedOutput(); err != nil {
+		t.Fatalf("create ad-hoc fixture: %s: %v", out, err)
+	}
+	if err := verifyBundle(ctx, app, adhoc, variant, version); err == nil {
+		t.Fatal("signed installation accepted ad-hoc update")
+	}
+	if err := verifyBundle(ctx, adhoc, adhoc, variant, version); err == nil || !strings.Contains(err.Error(), "ad-hoc") {
+		t.Fatalf("ad-hoc installation must be rejected: %v", err)
+	}
+}
+
 // The native subprocess tests run the same headless installer binary logic;
 // fake GUI programs provide a controlled startup acknowledgement.
 func TestMain(m *testing.M) {

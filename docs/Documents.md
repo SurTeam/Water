@@ -364,7 +364,7 @@ The existing macOS signing-only workflow remains the signing/publishing path.
 
 Both platforms require the SHA256 digest provided by GitHub's release-assets
 API and verify the complete download before extracting it. macOS additionally
-requires the new bundle to satisfy the current app's Apple designated signing
+requires the new bundle to satisfy the current app's certificate designated signing
 requirement, and verifies bundle identity, version and nested signatures.
 Unsigned/ad-hoc macOS development bundles cannot install updates. Linux trusts
 the official HTTPS release metadata and its digest; it does not claim an

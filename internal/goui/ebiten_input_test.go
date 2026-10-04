@@ -3,8 +3,11 @@ package goui
 import (
 	"gioui.org/io/key"
 	"gioui.org/widget"
+	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/text/v2"
+	"golang.org/x/image/font/gofont/goregular"
 	"image"
 	"reflect"
 	"testing"
@@ -187,12 +190,51 @@ func TestNativeEditorKeyboardSelection(t *testing.T) {
 	if !editNativeEditor(&editor, "shift-left") || !editNativeEditor(&editor, "shift-left") {
 		t.Fatal("shift-arrow selection was not handled")
 	}
+	if caret, anchor := editor.Selection(); caret != 1 || anchor != 3 {
+		t.Fatalf("moving caret and fixed anchor: %d,%d", caret, anchor)
+	}
+	editNativeEditor(&editor, "shift-right")
+	if caret, anchor := editor.Selection(); caret != 2 || anchor != 3 {
+		t.Fatalf("selection must shrink when reversing direction: %d,%d", caret, anchor)
+	}
+	editNativeEditor(&editor, "shift-left")
 	if !editNativeEditor(&editor, "text:水") || editor.Text() != "a水" {
 		t.Fatalf("keyboard selection replacement: %q", editor.Text())
 	}
 	editor.SetCaret(0, 0)
 	if !editNativeEditor(&editor, "Delete") || editor.Text() != "水" {
 		t.Fatalf("forward deletion: %q", editor.Text())
+	}
+}
+
+func TestNativeFieldMouseCaretAndHorizontalScroll(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.UIFontFamily = ""
+	c := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	w := &EbitengineWindow{scale: 2, fonts: &nativeFonts{ui: fontSource(goregular.TTF)}}
+	var editor widget.Editor
+	editor.SetText("Wi水🌊abc")
+	r := image.Rect(100, 100, 500, 164)
+	face := w.fonts.face("", float64(w.dp(float64(cfg.UI.UIFontSize))), false, false, false)
+	for _, pos := range []int{0, 1, 2, 4, 7} {
+		prefix, _ := text.Measure(string([]rune(editor.Text())[:pos]), face, 0)
+		x := r.Min.X + w.dp(10) + int(prefix+.5)
+		if got := w.fieldCaretAt(c, r, &editor, x); got != pos {
+			t.Fatalf("mouse position for rune %d: got %d", pos, got)
+		}
+	}
+	editor.SetText("a long input path with many characters")
+	n := len([]rune(editor.Text()))
+	editor.SetCaret(n, n)
+	r.Max.X = 220
+	w.field(c, nil, r, editor.Text(), true, &editor)
+	if w.fieldScroll <= 0 || w.fieldCaretAt(c, r, &editor, r.Max.X-w.dp(10)) != n {
+		t.Fatal("long input must reveal its caret and map mouse positions through scrolling")
+	}
+	editor.SetCaret(0, 0)
+	w.field(c, nil, r, editor.Text(), true, &editor)
+	if w.fieldScroll != 0 {
+		t.Fatal("moving to the beginning must reveal the first character")
 	}
 }
 

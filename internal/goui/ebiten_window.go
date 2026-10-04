@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gioui.org/widget"
 	"image"
 	"image/png"
 	"os"
@@ -64,6 +65,7 @@ type nativeView struct {
 	rename                                   *nativeRename
 }
 type nativeDrag struct {
+	editor                          *widget.Editor
 	sidebarWidth                    float32
 	kind                            automationHitKind
 	hit                             automationHit
@@ -103,6 +105,8 @@ type EbitengineWindow struct {
 	composition             string
 	inputTarget             string
 	clipboardReady          bool
+	fieldEditor             *widget.Editor
+	fieldScroll             float64
 	platform                nativePlatform
 	notificationAgents      map[string]nativeAgent
 	notificationConnections map[uuid.UUID]string
@@ -616,6 +620,11 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 				}
 			}
 			state["settings_fields"] = fields
+			if i := c.settings.focus; i >= 0 && i < len(c.settings.fields) {
+				f := &c.settings.fields[i]
+				caret, anchor := f.editor.Selection()
+				state["settings_editor"] = map[string]any{"name": f.group + "." + f.name, "text": f.editor.Text(), "caret": caret, "anchor": anchor}
+			}
 			sections := []string{}
 			for _, row := range settingsRows(&c.settings) {
 				if row.field < 0 {

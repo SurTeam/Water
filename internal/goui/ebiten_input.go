@@ -111,6 +111,9 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 		case hitRemoteField:
 			w.view(c).remoteFocused = true
 		case hitSettingsControl:
+			if c.settings.saving {
+				return true
+			}
 			if strings.HasPrefix(h.Label, "field:") {
 				for i := range c.settings.fields {
 					f := &c.settings.fields[i]
@@ -118,8 +121,13 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 						c.settings.focus = i
 						c.settings.requestFocus = false
 						if f.kind != reflect.Bool {
-							n := len([]rune(f.editor.Text()))
-							f.editor.SetCaret(n, n)
+							pos := w.fieldCaretAt(c, h.Rect, &f.editor, p.X)
+							_, anchor := f.editor.Selection()
+							if !ebiten.IsKeyPressed(ebiten.KeyShift) {
+								anchor = pos
+							}
+							f.editor.SetCaret(pos, anchor)
+							w.drag = &nativeDrag{kind: hitSettingsControl, hit: h, editor: &f.editor}
 						}
 						break
 					}
@@ -129,6 +137,26 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 		return true
 	}
 	return false
+}
+
+// Match mouse insertion positions to the same proportional font used to draw fields.
+func (w *EbitengineWindow) fieldCaretAt(c *WorkspaceClient, r image.Rectangle, editor *widget.Editor, x int) int {
+	cfg := c.currentConfig()
+	face := w.fonts.face(cfg.UI.UIFontFamily, float64(w.dp(float64(cfg.UI.UIFontSize))), false, false, false)
+	value := []rune(editor.Text())
+	x -= r.Min.X + w.dp(10)
+	if w.fieldEditor == editor {
+		x += int(w.fieldScroll)
+	}
+	previous := 0.0
+	for i := 1; i <= len(value); i++ {
+		width, _ := text.Measure(string(value[:i]), face, 0)
+		if float64(x) < (previous+width)/2 {
+			return i - 1
+		}
+		previous = width
+	}
+	return len(value)
 }
 
 func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
@@ -173,6 +201,11 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 		return
 	}
 	switch d.kind {
+	case hitSettingsControl:
+		if d.editor != nil {
+			_, anchor := d.editor.Selection()
+			d.editor.SetCaret(w.fieldCaretAt(c, d.hit.Rect, d.editor, p.X), anchor)
+		}
 	case hitSidebarResize:
 		cfg := c.currentConfig()
 		width := d.sidebarWidth + float32(float64(p.X-d.start.X)/w.scale)
@@ -979,7 +1012,7 @@ func editNativeEditor(editor *widget.Editor, spec string) bool {
 		editor.SetCaret(start, start)
 		return true
 	}
-	anchor, caret := editor.Selection()
+	caret, anchor := editor.Selection()
 	pos := caret
 	switch e.Name {
 	case key.NameLeftArrow:
@@ -1002,7 +1035,7 @@ func editNativeEditor(editor *widget.Editor, spec string) bool {
 		return false
 	}
 	if e.Modifiers.Contain(key.ModShift) {
-		editor.SetCaret(anchor, pos)
+		editor.SetCaret(pos, anchor)
 	} else {
 		editor.SetCaret(pos, pos)
 	}
@@ -1150,10 +1183,13 @@ func (w *EbitengineWindow) initComposer() {
 		}
 		if editor != nil {
 			value := []rune(editor.Text())
-			_, caret := editor.Selection()
+			caret, _ := editor.Selection()
 			caret = min(max(0, caret), len(value))
 			face := w.fonts.face(c.currentConfig().UI.UIFontFamily, float64(w.dp(float64(c.currentConfig().UI.UIFontSize))), false, false, false)
 			width, _ := text.Measure(string(value[:caret]), face, 0)
+			if w.fieldEditor == editor {
+				width -= w.fieldScroll
+			}
 			x := min(r.Max.X-w.dp(10), r.Min.X+w.dp(10)+int(width))
 			return &textinput.SessionOptions{CaretBounds: image.Rect(x, r.Min.Y+w.dp(6), x+1, r.Max.Y-w.dp(6))}
 		}

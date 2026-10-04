@@ -468,6 +468,9 @@ func (w *EbitengineWindow) overlay(c *WorkspaceClient, dst *ebiten.Image, width,
 	w.round(dst, r.Inset(1), w.dp(10), configColor(c.currentConfig().Theme.ChromeBackground, 0x171b20))
 	kept := c.hitRegions[:0]
 	for _, h := range c.hitRegions {
+		if h.Label == "sidebar-background" {
+			continue
+		}
 		if h.Kind == hitWindowClose || h.Kind == hitWindowMinimize || h.Kind == hitWindowMaximize || h.Kind == hitTitlebar {
 			kept = append(kept, h)
 		}
@@ -486,23 +489,40 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 	}
 	w.round(dst, r, w.dp(5), border)
 	w.round(dst, r.Inset(1), w.dp(4), mixColor(bg, fg, .025))
+	content := r.Inset(w.dp(10))
+	if dst != nil && !content.Intersect(dst.Bounds()).Empty() {
+		dst = dst.SubImage(image.Rect(content.Min.X, r.Min.Y, content.Max.X, r.Max.Y).Intersect(dst.Bounds())).(*ebiten.Image)
+	}
+	offset := 0.0
 	if focused && len(editors) > 0 {
 		editor := editors[0]
 		runes := []rune(editor.Text())
-		anchor, caret := editor.Selection()
+		caret, anchor := editor.Selection()
 		anchor = min(max(0, anchor), len(runes))
 		caret = min(max(0, caret), len(runes))
 		start, end := min(anchor, caret), max(anchor, caret)
 		face := w.fonts.face(cfg.UI.UIFontFamily, float64(w.dp(float64(cfg.UI.UIFontSize))), false, false, false)
 		before, _ := text.Measure(string(runes[:start]), face, 0)
 		after, _ := text.Measure(string(runes[:end]), face, 0)
-		x := r.Min.X + w.dp(10)
+		prefix, _ := text.Measure(string(runes[:caret]), face, 0)
+		if w.fieldEditor != editor {
+			w.fieldEditor, w.fieldScroll = editor, 0
+		}
+		full, _ := text.Measure(value, face, 0)
+		available := float64(max(1, content.Dx()-1))
+		w.fieldScroll = min(max(0, full-available), max(0, w.fieldScroll))
+		if prefix < w.fieldScroll {
+			w.fieldScroll = prefix
+		} else if prefix > w.fieldScroll+available {
+			w.fieldScroll = prefix - available
+		}
+		offset = w.fieldScroll
+		x := content.Min.X - int(offset)
 		if w.composition == "" && start != end {
 			clr := configColor(cfg.Theme.Accent, 0x72d6ab)
 			clr.A = 65
 			nativeRect(dst, image.Rect(x+int(before), r.Min.Y+w.dp(5), min(r.Max.X-w.dp(8), x+int(after)), r.Max.Y-w.dp(5)), clr)
 		}
-		prefix, _ := text.Measure(string(runes[:caret]), face, 0)
 		if w.composition != "" {
 			value = string(runes[:start]) + w.composition + string(runes[end:])
 			preeditWidth, _ := text.Measure(w.composition, face, 0)
@@ -514,7 +534,13 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 			nativeRect(dst, image.Rect(cx, r.Min.Y+w.dp(6), cx+1, r.Max.Y-w.dp(6)), fg)
 		}
 	}
-	w.label(dst, c, image.Rect(r.Min.X+w.dp(10), r.Min.Y+w.dp(8), r.Max.X-w.dp(10), r.Max.Y), value, float64(cfg.UI.UIFontSize), fg, false)
+	if dst != nil && value != "" {
+		face := w.fonts.face(cfg.UI.UIFontFamily, float64(w.dp(float64(cfg.UI.UIFontSize))), false, false, false)
+		op := &text.DrawOptions{}
+		op.GeoM.Translate(float64(content.Min.X)-offset, float64(r.Min.Y+w.dp(8)))
+		op.ColorScale.ScaleWithColor(fg)
+		text.Draw(dst, value, face, op)
+	}
 }
 func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	s := &c.settings

@@ -130,6 +130,8 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 	u := cfg.UI
 	t := cfg.Theme
 	v := w.view(c)
+	// Controls added below take precedence over the blank draggable surface.
+	w.hit(c, r, hitTitlebar, uuid.Nil, "sidebar-background")
 	d := func(n float32) int { return w.dp(float64(n)) }
 	fg := configColor(t.UIForeground, 0xe6eaea)
 	pad := d(u.WindowPadding)

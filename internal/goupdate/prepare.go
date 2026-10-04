@@ -213,7 +213,7 @@ func installation(executable, variant, platform string) (string, error) {
 }
 
 func verifyBundle(ctx context.Context, current, candidate, variant, version string) error {
-	// Require the same Apple certificate identity and bundle identifier, rather
+	// Require the same signing certificate identity and bundle identifier, rather
 	// than accepting any valid (or ad-hoc) signature.
 	display, err := exec.CommandContext(ctx, "/usr/bin/codesign", "-d", "-r-", current).CombinedOutput()
 	if err != nil {
@@ -225,8 +225,11 @@ func verifyBundle(ctx context.Context, current, candidate, variant, version stri
 			requirement = strings.TrimPrefix(line, "designated => ")
 		}
 	}
-	if !strings.Contains(requirement, "anchor apple") || !strings.Contains(requirement, "certificate") {
+	if !certificateRequirement(requirement) {
 		return fmt.Errorf("unsigned and ad-hoc apps cannot install updates")
+	}
+	if err = exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", current).Run(); err != nil {
+		return fmt.Errorf("current app signature is invalid")
 	}
 	if err = exec.CommandContext(ctx, "/usr/bin/codesign", "--verify", "--deep", "--strict", "-R", "="+requirement, candidate).Run(); err != nil {
 		return fmt.Errorf("update app signature does not match this installation")
@@ -243,6 +246,13 @@ func verifyBundle(ctx context.Context, current, candidate, variant, version stri
 		}
 	}
 	return nil
+}
+
+// CI also signs with the SurTeamCode certificate, whose designated requirement
+// pins the leaf certificate directly rather than requiring an Apple anchor.
+// Ad-hoc requirements contain only an identifier or cdhash, with no certificate.
+func certificateRequirement(requirement string) bool {
+	return strings.Contains(requirement, "certificate ")
 }
 
 func verifyBinary(ctx context.Context, path, variant, version string) error {
