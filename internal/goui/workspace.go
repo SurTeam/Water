@@ -139,6 +139,8 @@ type terminalClient struct {
 	imePreedit       string
 	imeComposing     bool
 	defaultColors    [259]uint32
+	cursorStyle      string
+	cursorBlink      bool
 	inputPending     atomic.Bool
 }
 
@@ -975,6 +977,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		return
 	}
 	emu := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	emu.SetCursorDefaults(c.currentConfig().Terminal.CursorStyle, c.currentConfig().Terminal.CursorBlink)
 	emu.SetDefaultColors(terminalDefaultColors(c.config))
 	emu.SetCellSize(
 		max(1, int(c.config.Terminal.FontSize*0.6)),
@@ -1419,6 +1422,7 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 		return
 	}
 	next := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	next.SetCursorDefaults(c.currentConfig().Terminal.CursorStyle, c.currentConfig().Terminal.CursorBlink)
 	next.SetDefaultColors(terminalDefaultColors(c.config))
 	next.SetCellSize(
 		max(1, int(c.config.Terminal.FontSize*0.6)),
@@ -2098,6 +2102,7 @@ func (c *WorkspaceClient) layoutLeaf(gtx layout.Context, th *material.Theme, nod
 		return layout.Center.Layout(gtx, label.Layout)
 	}
 	applyViewConfig(term.view, c.currentConfig())
+	syncTerminalCursor(term, c.currentConfig())
 	if syncTerminalColors(term) {
 		go c.flushVTResponses(term)
 	}

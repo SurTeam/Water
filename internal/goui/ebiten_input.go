@@ -5,6 +5,7 @@ import (
 	"image"
 	"math"
 	"reflect"
+	"runtime"
 	"strings"
 	"time"
 
@@ -589,7 +590,7 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 			parts := strings.SplitN(strings.TrimPrefix(label, "choice:"), ":", 2)
 			if len(parts) == 2 {
 				for i := range s.fields {
-					if s.fields[i].group == "UI" && s.fields[i].name == parts[0] {
+					if len(sidebarSettingChoices(s.fields[i])) > 0 && s.fields[i].name == parts[0] {
 						s.fields[i].editor.SetText(parts[1])
 						s.focus = i
 					}
@@ -1191,16 +1192,19 @@ func (w *EbitengineWindow) initComposer() {
 				width -= w.fieldScroll
 			}
 			x := min(r.Max.X-w.dp(10), r.Min.X+w.dp(10)+int(width))
-			return &textinput.SessionOptions{CaretBounds: image.Rect(x, r.Min.Y+w.dp(6), x+1, r.Max.Y-w.dp(6))}
+			return w.caretSessionOptions(image.Rect(x, r.Min.Y+w.dp(6), x+1, r.Max.Y-w.dp(6)))
 		}
 		if pane, ok := w.view(c).panes[c.frameFocusedPane]; ok {
 			pane.term.mu.RLock()
 			snap := pane.term.snapshot
 			pane.term.mu.RUnlock()
+			if snap.CursorY < 0 || snap.CursorY >= snap.Rows || snap.CursorX < 0 || snap.CursorX >= snap.Cols {
+				return nil
+			}
 			x, y := pane.rect.Min.X+snap.CursorX*pane.cw, pane.rect.Min.Y+snap.CursorY*pane.lh
 			r = image.Rect(x, y, x+pane.cw, y+pane.lh)
 		}
-		return &textinput.SessionOptions{CaretBounds: r}
+		return w.caretSessionOptions(r)
 	}
 	w.composer.OnComposition = func(comp *textinput.Composition) {
 		w.composition = comp.Text()
@@ -1228,6 +1232,26 @@ func (w *EbitengineWindow) initComposer() {
 		}
 	}
 }
+
+func (w *EbitengineWindow) caretSessionOptions(bounds image.Rectangle) *textinput.SessionOptions {
+	// Water's logical framebuffer uses backing pixels. Ebitengine's macOS
+	// text-input view interprets caret bounds as AppKit points, so compensate
+	// for the monitor's backing scale (independent of Water's UI scale).
+	if runtime.GOOS == "darwin" {
+		bounds = caretBoundsInPoints(bounds, ebiten.Monitor().DeviceScaleFactor())
+	}
+	w.inputCaret = bounds
+	return &textinput.SessionOptions{CaretBounds: bounds}
+}
+
+func caretBoundsInPoints(bounds image.Rectangle, scale float64) image.Rectangle {
+	if scale <= 0 {
+		scale = 1
+	}
+	return image.Rect(int(math.Floor(float64(bounds.Min.X)/scale)), int(math.Floor(float64(bounds.Min.Y)/scale)),
+		int(math.Ceil(float64(bounds.Max.X)/scale)), int(math.Ceil(float64(bounds.Max.Y)/scale)))
+}
+
 func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
 	if w.updateVisible {
 		w.composer.Cancel()
@@ -1249,6 +1273,15 @@ func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
 	}
 	if !ebiten.IsFocused() {
 		return false, nil
+	}
+	// Composer captures bounds at session start. Refresh an idle session when
+	// the terminal cursor or layout moves; never cancel live marked text.
+	if w.composition == "" {
+		previous := w.inputCaret
+		opts := w.composer.OnNewSession()
+		if opts == nil || opts.CaretBounds != previous {
+			w.composer.Cancel()
+		}
 	}
 	handled, err := w.composer.Update()
 	if err != nil {

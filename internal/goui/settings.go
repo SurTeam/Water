@@ -35,6 +35,9 @@ var defaultSettingsTheme = DefaultTerminalTheme()
 type sidebarChoice struct{ value, label string }
 
 func sidebarSettingChoices(f settingsField) []sidebarChoice {
+	if f.group == "Terminal" && f.name == "CursorStyle" {
+		return []sidebarChoice{{"block", "Block"}, {"bar", "Bar"}, {"underline", "Underline"}}
+	}
 	if f.group != "UI" {
 		return nil
 	}

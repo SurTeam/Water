@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.4](releases/v0.3.4.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md) and [the memory and input report](memory-input-profile-2026-10-04.md).
+Current release: [0.3.7](releases/v0.3.7.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md) and [the memory and input report](memory-input-profile-2026-10-04.md).
 
 ## Requirements
 
@@ -144,6 +144,11 @@ On macOS, the application menu follows the configured `hide_window` and `minimiz
 
 The Go settings panel covers the configuration schema, including sidebar, host/workspace/agent geometry, agent colors, dimming, tab-wheel behavior, cross-host workspace navigation and window shortcuts. Each control indicates whether it applies immediately, to new windows or after restarting. Existing override documents and unknown keys survive saving. Cmd+N starts a separate native GUI process attached to the current server, loading the saved window preferences. Workspace and tab rename dialogs use the normal command dispatcher; sidebar Agent rows activate their owning connection, tab and pane.
 
+Terminal settings include `cursor_style` (`block`, `bar`, `underline`) and
+`cursor_blink` (`true` or `false`). Both apply immediately; the defaults remain
+a blinking block. Applications can override these preferences with DECSCUSR;
+CSI 0 SP q restores the configured defaults.
+
 Agent rows use foreground-process detection and, when the program emits it, client-side OSC `9;4;<state>[;<percentage>]` progress metadata. States `1`/`3` show Running, `0` shows Idle, `2` shows Error, and `4` shows Paused. Paused can also mean a warning; it does not prove that approval is required. Programs without progress reports retain the process-based Running/Exited status. No Agent hooks are installed. With `ui.system_notifications` enabled, agent starts, stops and observed status changes send notifications; initial snapshots and reconnect recovery are baselined. Progress reports must reach Water directly; programs that gate reporting on terminal identity, or multiplexers that filter OSC, may not emit them to Water.
 
 Rounded windows use Ebitengine screen transparency, a cached corner shader and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
@@ -185,6 +190,17 @@ counters, CPU and allocation profiles, throughput limits, and the presentation
 cadence tradeoff.
 See [the memory and input profiling report](memory-input-profile-2026-10-04.md)
 for the measured results and remaining limits.
+
+The [server memory and cursor report](server-memory-cursor-ime-2026-10-05.md)
+records the idle PTY allocation fix and native Retina cursor/IME checks.
+`water ctl debug memory` reports Go heap allocated, in-use, idle and released
+bytes separately from retained PTY replay. Queue capacity does not reserve an
+8 MiB read pool per idle PTY: reader blocks are allocated on demand, with at
+most two spare 128 KiB blocks cached after bursts.
+Run `WATER_BIN=/path/to/dev/water ~/.venv/bin/python scripts/go-ui-cursor-smoke.py`
+to verify all six cursor preferences, persistence and IME caret geometry in an
+isolated native GUI. Physical input-method candidate-window acceptance remains
+a separate check.
 
 On macOS, `~/.venv/bin/python scripts/go-ui-detached-startup-smoke.py`
 verifies the packaged dev app's cold start through `open`, with no existing

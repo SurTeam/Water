@@ -141,6 +141,7 @@ func New(cols, rows, scrollback int) *Emulator {
 			xterm.WithScrollback(scrollback),
 		),
 	}
+	e.term.SetCursorDefaults(xterm.CursorStyleBlock, true)
 	e.term.OnData(func(data string) {
 		e.enqueueResponse([]byte(data))
 	})
@@ -493,8 +494,9 @@ func (e *Emulator) snapshot(reuseRows bool) Snapshot {
 		}
 	}
 	modes := term.DecPrivateModes()
-	s.CursorStyle = "block"
-	s.CursorBlink = true
+	style, blink := term.CursorDefaults()
+	s.CursorStyle = string(style)
+	s.CursorBlink = blink
 	if modes.CursorStyle != nil {
 		s.CursorStyle = string(*modes.CursorStyle)
 	}

@@ -104,6 +104,7 @@ type EbitengineWindow struct {
 	composer                textinput.Composer
 	composition             string
 	inputTarget             string
+	inputCaret              image.Rectangle
 	clipboardReady          bool
 	fieldEditor             *widget.Editor
 	fieldScroll             float64
@@ -580,6 +581,7 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["window_position"] = []int{wx, wy}
 		state["window_size"] = []int{ww, wh}
 		state["display_scale"] = w.scale
+		state["ime_caret_bounds"] = []int{w.inputCaret.Min.X, w.inputCaret.Min.Y, w.inputCaret.Max.X, w.inputCaret.Max.Y}
 		if monitor := ebiten.Monitor(); monitor != nil {
 			sw, sh := monitor.Size()
 			state["screen_size_pixels"] = []int{w.dp(float64(sw)), w.dp(float64(sh))}
@@ -601,11 +603,13 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 			pane.term.mu.RLock()
 			directory := pane.term.snapshot.WorkingDirectoryURI
 			yBase, yDisp := pane.term.snapshot.YBase, pane.term.snapshot.YDisp
+			cursorX, cursorY := pane.term.snapshot.CursorX, pane.term.snapshot.CursorY
+			cursorStyle, cursorBlink := pane.term.snapshot.CursorStyle, pane.term.snapshot.CursorBlink
 			pane.term.mu.RUnlock()
 			pane.term.mu.RLock()
 			columns, rows := pane.term.cols, pane.term.rows
 			pane.term.mu.RUnlock()
-			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "terminal_columns": columns, "terminal_rows": rows, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp})
+			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "terminal_columns": columns, "terminal_rows": rows, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp, "cursor_x": cursorX, "cursor_y": cursorY, "cursor_style": cursorStyle, "cursor_blink": cursorBlink})
 		}
 		state["terminal_grids"] = grids
 		state["ui_config"] = c.currentConfig().UI

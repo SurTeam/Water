@@ -474,6 +474,16 @@ func (t *Terminal) AddMarker(cursorYOffset int) *Marker {
 // Scrollback returns the scrollback buffer size.
 func (t *Terminal) Scrollback() int { return t.optionsService.Options.Scrollback }
 
+// SetCursorDefaults changes user preferences without clearing application overrides.
+func (t *Terminal) SetCursorDefaults(style CursorStyle, blink bool) {
+	t.optionsService.SetOption("cursorStyle", style)
+	t.optionsService.SetOption("cursorBlink", blink)
+}
+
+func (t *Terminal) CursorDefaults() (CursorStyle, bool) {
+	return t.optionsService.Options.CursorStyle, t.optionsService.Options.CursorBlink
+}
+
 // Dispose cleans up all resources.
 func (t *Terminal) Dispose() {
 	if t.isDisposed {

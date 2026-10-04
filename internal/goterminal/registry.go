@@ -20,6 +20,7 @@ const (
 	defaultReplayBytes   = 8 * 1024 * 1024
 	readBlockBytes       = 128 * 1024
 	rawReadQueueCapacity = 64
+	idleReadCacheBlocks  = 2
 	outputBatchIdle      = time.Millisecond
 	outputBatchMaxAge    = 5 * time.Millisecond
 	replayEventOverhead  = 64
@@ -267,9 +268,17 @@ func (t *Terminal) readLoop() {
 	defer close(t.readerDone)
 
 	raw := make(chan []byte, rawReadQueueCapacity)
-	free := make(chan []byte, rawReadQueueCapacity)
-	for i := 0; i < rawReadQueueCapacity; i++ {
-		free <- make([]byte, readBlockBytes)
+	// Queue capacity bounds backpressure, not an idle memory reservation.
+	// Allocate blocks only when the reader needs them and discard burst excess.
+	free := make(chan []byte, idleReadCacheBlocks)
+	recycle := func(chunk []byte) {
+		if cap(chunk) < readBlockBytes {
+			return
+		}
+		select {
+		case free <- chunk[:readBlockBytes]:
+		default:
+		}
 	}
 	rawReaderDone := make(chan struct{})
 	go func() { defer close(rawReaderDone); t.rawReadLoop(raw, free) }()
@@ -343,10 +352,9 @@ func (t *Terminal) readLoop() {
 	}
 	returnPending := func() {
 		for _, chunk := range pending {
-			if cap(chunk) >= readBlockBytes {
-				free <- chunk[:readBlockBytes]
-			}
+			recycle(chunk)
 		}
+		clear(pending)
 		pending = pending[:0]
 		pendingBytes = 0
 	}
@@ -372,9 +380,7 @@ func (t *Terminal) readLoop() {
 	}
 	appendChunk := func(chunk []byte) {
 		if len(chunk) == 0 {
-			if cap(chunk) >= readBlockBytes {
-				free <- chunk[:readBlockBytes]
-			}
+			recycle(chunk)
 			return
 		}
 		if pendingBytes > 0 && pendingBytes+len(chunk) > readBlockBytes {
@@ -518,6 +524,8 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 				continue
 			case <-t.closed:
 				return
+			default:
+				buf = make([]byte, readBlockBytes)
 			}
 		}
 		buf = buf[:readBlockBytes]

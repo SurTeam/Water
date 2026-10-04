@@ -32,6 +32,18 @@ func syncTerminalColors(term *terminalClient) bool {
 	return false
 }
 
+func syncTerminalCursor(term *terminalClient, cfg goconfig.AppConfig) {
+	style, blink := cfg.Terminal.CursorStyle, cfg.Terminal.CursorBlink
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	if term.emu == nil || (term.cursorStyle == style && term.cursorBlink == blink) {
+		return
+	}
+	term.cursorStyle, term.cursorBlink = style, blink
+	term.emu.SetCursorDefaults(style, blink)
+	term.snapshot = term.emu.FrameSnapshot()
+}
+
 func applyTerminalColors(v *TerminalView, snap govt.Snapshot) {
 	if len(v.colorOverrides) == 0 && len(snap.ColorOverrides) == 0 {
 		return

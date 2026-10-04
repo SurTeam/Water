@@ -66,6 +66,8 @@
     }
   },
   "terminal": {
+    "cursor_style": "block",
+    "cursor_blink": true,
     "replay_history_bytes": 8388608,
     "scrollback_lines": 2000,
     "inactive_scrollback_lines": 500,

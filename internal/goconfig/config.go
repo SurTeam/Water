@@ -68,6 +68,8 @@ type FeatureConfig struct {
 }
 
 type TerminalConfig struct {
+	CursorStyle string `json:"cursor_style"`
+	CursorBlink bool   `json:"cursor_blink"`
 	// Legacy terminal size aliases mirror the canonical startup grid.
 	DefaultColumns              int     `json:"default_columns,omitempty"`
 	DefaultLines                int     `json:"default_lines,omitempty"`
@@ -248,6 +250,8 @@ func Default() AppConfig {
 		Shell:    ShellConfig{Program: DefaultShellProgram()},
 		Features: FeatureConfig{MouseReporting: true, BracketedPaste: true, Selection: true},
 		Terminal: TerminalConfig{
+			CursorStyle:                "block",
+			CursorBlink:                true,
 			DefaultColumns:             DefaultColumns,
 			DefaultLines:               DefaultLines,
 			ScrollbackLines:            DefaultScrollbackLines,
@@ -369,6 +373,12 @@ func (c AppConfig) Normalized() AppConfig {
 		c.Terminal.InactiveScrollbackLines = c.Terminal.ScrollbackLines
 	}
 	c.Terminal.ReplayHistoryBytes = clamp(c.Terminal.ReplayHistoryBytes, MinReplayHistoryBytes, MaxReplayHistoryBytes)
+	c.Terminal.CursorStyle = strings.ToLower(strings.TrimSpace(c.Terminal.CursorStyle))
+	switch c.Terminal.CursorStyle {
+	case "block", "bar", "underline":
+	default:
+		c.Terminal.CursorStyle = "block"
+	}
 	if strings.TrimSpace(c.Terminal.FontFamily) == "" {
 		c.Terminal.FontFamily = "Sarasa Term SC"
 	}

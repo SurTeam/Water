@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -335,7 +336,13 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		return ss.write(goprotocol.Success(msg.RequestID, s.metricsSnapshot()))
 	case "debug.memory":
 		modelMemory := s.model.MemoryProjection()
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
+			"heap_alloc_bytes":          memory.HeapAlloc,
+			"heap_inuse_bytes":          memory.HeapInuse,
+			"heap_idle_bytes":           memory.HeapIdle,
+			"heap_released_bytes":       memory.HeapReleased,
 			"terminal_count":            s.registry.Count(),
 			"scrollback_lines":          s.Config.Terminal.ScrollbackLines,
 			"inactive_scrollback_lines": s.Config.Terminal.InactiveScrollbackLines,

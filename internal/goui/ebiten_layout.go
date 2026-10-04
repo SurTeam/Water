@@ -436,6 +436,7 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 		return
 	}
 	applyViewConfig(term.view, cfg)
+	syncTerminalCursor(term, cfg)
 	if syncTerminalColors(term) {
 		go c.flushVTResponses(term)
 	}
