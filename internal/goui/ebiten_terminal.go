@@ -36,9 +36,9 @@ func (w *EbitengineWindow) terminalFaces(c *WorkspaceClient) []text.Face {
 	size := float64(w.dp(float64(cfg.Terminal.FontSize)))
 	return []text.Face{
 		w.fonts.face(cfg.Terminal.FontFamily, size, true, false, false, cfg.Terminal.Ligatures),
-		w.fonts.face(cfg.Terminal.FontFamily, size, true, true, false, cfg.Terminal.Ligatures),
-		w.fonts.face(cfg.Terminal.FontFamily, size, true, false, true, cfg.Terminal.Ligatures),
-		w.fonts.face(cfg.Terminal.FontFamily, size, true, true, true, cfg.Terminal.Ligatures),
+		w.fonts.cachedFace(cfg.Terminal.FontFamily, size, true, true, false, cfg.Terminal.Ligatures),
+		w.fonts.cachedFace(cfg.Terminal.FontFamily, size, true, false, true, cfg.Terminal.Ligatures),
+		w.fonts.cachedFace(cfg.Terminal.FontFamily, size, true, true, true, cfg.Terminal.Ligatures),
 	}
 }
 
@@ -130,6 +130,14 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 	v := term.view
 	cfg := c.currentConfig()
 	faces := w.terminalFaces(c)
+	requested := [4]bool{true}
+	faceForStyle := func(index int) text.Face {
+		if !requested[index] {
+			faces[index] = w.fonts.face(cfg.Terminal.FontFamily, float64(w.dp(float64(cfg.Terminal.FontSize))), true, index&1 != 0, index&2 != 0, cfg.Terminal.Ligatures)
+			requested[index] = true
+		}
+		return faces[index]
+	}
 	if !cfg.Features.Selection {
 		selection = Selection{}
 	}
@@ -192,7 +200,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 				if run.style.italic {
 					styleIndex += 2
 				}
-				face := faces[styleIndex]
+				face := faceForStyle(styleIndex)
 				glyphBounds := bounds
 				if run.drawColumns > run.spanColumns {
 					glyphBounds.Max.X = min(target.Bounds().Max.X, bounds.Min.X+run.drawColumns*cw)
@@ -277,7 +285,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 			if cursorCell.Italic {
 				styleIndex += 2
 			}
-			face = faces[styleIndex]
+			face = faceForStyle(styleIndex)
 		}
 		clr := v.Theme.InactiveCursor
 		if focused {

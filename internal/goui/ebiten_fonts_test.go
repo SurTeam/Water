@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/SurTeam/Water/internal/goconfig"
+
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/gomono"
@@ -131,6 +133,70 @@ func TestNativeFontCollectionSelectsMatchingFace(t *testing.T) {
 	k := fontKey{family: "Go Mono"}
 	if f.load(k) == nil || f.resolved[k].index != 1 {
 		t.Fatalf("selected first face instead of requested family: %v", f.resolved[k])
+	}
+	// An unrelated malformed face must not be parsed when requesting face 1.
+	// The previous collection constructor parsed every face and rejected it.
+	first := int(binary.BigEndian.Uint32(data[12:]))
+	copy(data[first:first+4], "BAD!")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := loadNativeFontSource(path, 1)
+	if err != nil {
+		t.Fatalf("unselected face affected loading: %v", err)
+	}
+	width, _ := text.Measure("iiiMMM", &text.GoTextFace{Source: selected, Size: 24}, 0)
+	wantWidth, _ := text.Measure("iiiMMM", &text.GoTextFace{Source: fontSource(gomono.TTF), Size: 24}, 0)
+	if width != wantWidth {
+		t.Fatalf("collection selected wrong face: width %g, want %g", width, wantWidth)
+	}
+	if _, err := loadNativeFontSource(path, 2); err == nil {
+		t.Fatal("out-of-range collection index accepted")
+	}
+}
+
+func TestNativeFontsSkipUnusedFallbackFamiliesAndStyles(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.Terminal.FontFamily, cfg.UI.UIFontFamily = "Go Mono", "Go"
+	f := newNativeFonts(cfg)
+	defer f.close()
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	fallbacks := 0
+	for k, record := range f.resolved {
+		t.Logf("loaded %s bold=%t italic=%t: %s face=%d", k.family, k.bold, k.italic, record.path, record.index)
+		if k.family == "Sarasa UI SC" || k.family == "PingFang" || k.family == "Noto Sans CJK" {
+			fallbacks++
+			if k.bold || k.italic {
+				t.Fatalf("unused fallback style loaded: %+v", k)
+			}
+		}
+		if k.family == "Go" && k.italic {
+			t.Fatalf("unused UI italic loaded: %+v", k)
+		}
+	}
+	if fallbacks > 1 {
+		t.Fatalf("loaded %d backup families, want at most the first available one", fallbacks)
+	}
+}
+
+func TestNativeFontMetricsDoNotRequestUnusedStyles(t *testing.T) {
+	f := testNativeFonts(nil)
+	f.pending = map[fontKey]bool{}
+	f.requests = make(chan fontKey, 8)
+	source := fontSource(gomono.TTF)
+	f.mono = [4]*text.GoTextFaceSource{source, source, source, source}
+	f.cachedFace("Unloaded", 24, true, true, true)
+	if len(f.requests) != 0 {
+		t.Fatal("measuring an unused style requested its font")
+	}
+	f.face("Unloaded", 24, true, true, true)
+	f.face("Unloaded", 24, true, true, true)
+	if len(f.requests) != 1 {
+		t.Fatalf("rendered style queued %d loads, want one", len(f.requests))
+	}
+	if got := <-f.requests; got != (fontKey{family: "Unloaded", bold: true, italic: true}) {
+		t.Fatalf("requested wrong style: %+v", got)
 	}
 }
 

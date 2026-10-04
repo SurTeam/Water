@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shlex
 import socket as network_socket
@@ -18,9 +19,10 @@ def main():
     parser.add_argument("--seconds", type=float, default=5)
     parser.add_argument("--rate-mib", type=float, default=0.25)
     parser.add_argument("--profile", action="store_true", help="requires a water_cpu_diagnostic build")
+    parser.add_argument("--cycles", type=int, default=1, help="bounded output cycles for retained-memory comparison (1..3)")
     args = parser.parse_args()
-    if not 1 <= args.seconds <= 15 or not 0 < args.rate_mib <= 4:
-        parser.error("seconds must be 1..15 and rate-mib must be 0..4")
+    if not 1 <= args.seconds <= 15 or not 0 < args.rate_mib <= 4 or not 1 <= args.cycles <= 3:
+        parser.error("seconds must be 1..15, rate-mib 0..4, and cycles 1..3")
     water = str(args.water.resolve())
     root = Path(__file__).resolve().parent.parent
     directory = Path(tempfile.mkdtemp(prefix="water-cpu.", dir="/tmp"))
@@ -72,7 +74,17 @@ def main():
         cpu_percent = round((cpu_time() - cpu) / elapsed * 100, 2)
         if args.profile:
             allocations("after")
-        return {"mode": label, "cpu_percent": cpu_percent}
+        rss = int(subprocess.check_output(["ps", "-p", str(gui.pid), "-o", "rss="], text=True)) * 1024
+        record = {"mode": label, "cpu_percent": cpu_percent, "rss_bytes": rss}
+        summary = subprocess.check_output(["vmmap", "-summary", str(gui.pid)], text=True, stderr=subprocess.STDOUT)
+        (directory / f"{label}-vmmap.txt").write_text(summary)
+        footprint = re.search(r"Physical footprint:\s+([\d.]+)([KMG])", summary)
+        if footprint:
+            record["physical_footprint_bytes"] = int(float(footprint[1]) * 1024 ** ("KMG".index(footprint[2]) + 1))
+        if args.profile:
+            with urllib.request.urlopen(f"http://127.0.0.1:{profile_port}/debug/memory", timeout=5) as response:
+                record.update(json.load(response))
+        return record
 
     try:
         deadline = time.monotonic() + 10
@@ -89,12 +101,15 @@ def main():
         ctl("terminal", "contains", "--terminal", terminal, "%", "--timeout-ms", "5000")
         records = [measure("idle")]
         emitter = root / "scripts/go-ui-background-smoke.py"
-        command = (f"{shlex.quote(str(Path.home() / '.venv/bin/python'))} {shlex.quote(str(emitter))} "
-                   f"--emit-output ansi --emit-seconds {args.seconds + 2} --rate-mib {args.rate_mib}; printf 'WATER_CPU_%s\\n' DONE\n")
-        ctl("terminal", "send", "--terminal", terminal, command)
-        ctl("terminal", "contains", "--terminal", terminal, "WATER_OUTPUT_LOAD_START", "--timeout-ms", "5000")
-        records.append(measure("ansi-output"))
-        ctl("terminal", "contains", "--terminal", terminal, "WATER_CPU_DONE", "--timeout-ms", "5000")
+        for cycle in range(args.cycles):
+            command = (f"printf 'WATER_CPU_%s_%s\\n' START {cycle}; "
+                       f"{shlex.quote(str(Path.home() / '.venv/bin/python'))} {shlex.quote(str(emitter))} "
+                       f"--emit-output ansi --emit-seconds {args.seconds + 2} --rate-mib {args.rate_mib}; printf 'WATER_CPU_%s_%s\\n' DONE {cycle}\n")
+            ctl("terminal", "send", "--terminal", terminal, command)
+            ctl("terminal", "contains", "--terminal", terminal, f"WATER_CPU_START_{cycle}", "--timeout-ms", "5000")
+            label = "ansi-output" if args.cycles == 1 else f"ansi-output-{cycle + 1}"
+            records.append(measure(label))
+            ctl("terminal", "contains", "--terminal", terminal, f"WATER_CPU_DONE_{cycle}", "--timeout-ms", "5000")
         ctl("ui", "screenshot", "--output", str(directory / "screen.png"))
         report = {"gui_pid": gui.pid, "water": water, "rate_mib": args.rate_mib, "seconds": args.seconds, "records": records}
         (directory / "report.json").write_text(json.dumps(report, indent=2))

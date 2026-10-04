@@ -3,11 +3,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"os"
 	"runtime"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 // Local-only instrumentation for profiling an isolated native GUI. This file
@@ -30,6 +33,18 @@ func init() {
 		runtime.GC()
 		runtime.GC()
 		pprof.Handler("allocs").ServeHTTP(w, r)
+	})
+	mux.HandleFunc("/debug/memory", func(w http.ResponseWriter, r *http.Request) {
+		var memory runtime.MemStats
+		runtime.ReadMemStats(&memory)
+		var graphics ebiten.DebugInfo
+		ebiten.ReadDebugInfo(&graphics)
+		json.NewEncoder(w).Encode(map[string]any{
+			"heap_alloc": memory.HeapAlloc, "heap_inuse": memory.HeapInuse,
+			"heap_sys": memory.HeapSys, "heap_released": memory.HeapReleased,
+			"num_gc": memory.NumGC, "total_alloc": memory.TotalAlloc,
+			"gpu_image_bytes": graphics.TotalGPUImageMemoryUsageInBytes,
+		})
 	})
 	go http.Serve(listener, mux)
 }

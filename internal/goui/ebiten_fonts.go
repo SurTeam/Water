@@ -96,17 +96,29 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 	if source := f.load(fontKey{family: "SFNS"}); source != nil {
 		f.ui = source
 	}
-	families := append(nativeFontFamilies(cfg.Terminal.FontFamily), nativeFontFamilies(cfg.UI.UIFontFamily)...)
-	families = append(families, "Sarasa UI SC", "PingFang", "Noto Sans CJK")
-	for _, family := range families {
-		for _, style := range []fontKey{{family: family}, {family: family, bold: true}, {family: family, italic: true}, {family: family, bold: true, italic: true}} {
-			if family != "" {
+	for _, family := range nativeFontFamilies(cfg.Terminal.FontFamily) {
+		k := fontKey{family: family}
+		f.loaded[k] = f.load(k)
+	}
+	// UI labels use regular and bold. Other styles are requested on demand.
+	for _, family := range nativeFontFamilies(cfg.UI.UIFontFamily) {
+		for _, style := range []fontKey{{family: family}, {family: family, bold: true}} {
+			if _, loaded := f.loaded[style]; !loaded {
 				f.loaded[style] = f.load(style)
 			}
 		}
 	}
+	// Only the first available regular CJK fallback participates in face().
+	// Loading every backup family in four styles retained hundreds of MB of
+	// parsed glyph tables that could never be used by the rendering chain.
 	for _, family := range []string{"Sarasa UI SC", "PingFang", "Noto Sans CJK"} {
-		if s := f.loaded[fontKey{family: family}]; s != nil {
+		k := fontKey{family: family}
+		s, loaded := f.loaded[k]
+		if !loaded {
+			s = f.load(k)
+			f.loaded[k] = s
+		}
+		if s != nil {
 			f.fallback = s
 			break
 		}
@@ -258,20 +270,16 @@ func (f *nativeFonts) load(k fontKey) *text.GoTextFaceSource {
 		if cached := f.fileSources[cacheKey]; cached != nil {
 			return remember(cached)
 		}
-		data, err := os.ReadFile(record.path)
-		if err != nil {
-			continue
-		}
-		sources, err := text.NewGoTextFaceSourcesFromCollection(bytes.NewReader(data))
-		if err == nil && record.index < len(sources) {
+		source, err := loadNativeFontSource(record.path, record.index)
+		if err == nil {
 			if len(f.fileSources) >= 64 {
 				for old := range f.fileSources {
 					delete(f.fileSources, old)
 					break
 				}
 			}
-			f.fileSources[cacheKey] = sources[record.index]
-			return remember(sources[record.index])
+			f.fileSources[cacheKey] = source
+			return remember(source)
 		}
 	}
 	return nil
@@ -320,6 +328,16 @@ func (f *nativeFonts) resolution(k fontKey) map[string]any {
 		"style": record.style, "path": record.path, "face_index": record.index, "status": status}
 }
 func (f *nativeFonts) face(family string, size float64, mono, bold, italic bool, ligatures ...bool) text.Face {
+	return f.faceWithRequest(family, size, mono, bold, italic, true, ligatures...)
+}
+
+// Measuring styles must not load an entire font for a style never displayed.
+// Cached faces use the bundled styled fallback until the renderer requests it.
+func (f *nativeFonts) cachedFace(family string, size float64, mono, bold, italic bool, ligatures ...bool) text.Face {
+	return f.faceWithRequest(family, size, mono, bold, italic, false, ligatures...)
+}
+
+func (f *nativeFonts) faceWithRequest(family string, size float64, mono, bold, italic, request bool, ligatures ...bool) text.Face {
 	var faces []text.Face
 	seen := map[*text.GoTextFaceSource]bool{}
 	makeFace := func(source *text.GoTextFaceSource) {
@@ -335,7 +353,7 @@ func (f *nativeFonts) face(family string, size float64, mono, bold, italic bool,
 		faces = append(faces, face)
 	}
 	for _, family := range nativeFontFamilies(family) {
-		makeFace(f.requestedSource(fontKey{family, bold, italic}))
+		makeFace(f.source(fontKey{family, bold, italic}, request))
 	}
 	if len(faces) == 0 {
 		if mono {
@@ -364,10 +382,14 @@ func (f *nativeFonts) face(family string, size float64, mono, bold, italic bool,
 }
 
 func (f *nativeFonts) requestedSource(k fontKey) *text.GoTextFaceSource {
+	return f.source(k, true)
+}
+
+func (f *nativeFonts) source(k fontKey, request bool) *text.GoTextFaceSource {
 	f.mu.RLock()
 	source, exists := f.loaded[k]
 	f.mu.RUnlock()
-	if !exists && k.family != "" {
+	if request && !exists && k.family != "" {
 		f.mu.Lock()
 		if !f.pending[k] {
 			select {
