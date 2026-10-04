@@ -176,6 +176,25 @@ func (pr *Loader) RawTable(tag Tag) ([]byte, error) {
 	return pr.RawTableTo(tag, nil)
 }
 
+// ViewTable optionally borrows immutable file-backed bytes. The caller owns
+// release and must keep the view alive until its final access. Compressed
+// tables and ordinary Resources retain the existing owned-buffer behavior.
+func (pr *Loader) ViewTable(tag Tag) ([]byte, func(), error) {
+	s, found := pr.tables[tag]
+	if !found {
+		return nil, nil, fmt.Errorf("missing table %s", tag)
+	}
+	if source, ok := pr.file.(interface {
+		View(int64, int) ([]byte, func(), error)
+	}); ok && (s.zLength == 0 || s.zLength == s.length) && s.length > 0 {
+		if data, release, err := source.View(int64(s.offset), int(s.length)); err == nil {
+			return data, release, nil
+		}
+	}
+	data, err := pr.findTableBuffer(s, nil)
+	return data, nil, err
+}
+
 // RawTable writes the binary content of the given table to [dst], returning it,
 // or an error if not found.
 func (pr *Loader) RawTableTo(tag Tag, dst []byte) ([]byte, error) {

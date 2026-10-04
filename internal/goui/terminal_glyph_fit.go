@@ -4,6 +4,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -41,11 +42,50 @@ func terminalGlyphPlacement(value string, face text.Face, bounds image.Rectangle
 	return 1, float64(bounds.Min.X), float64(bounds.Min.Y) + cell.baseline - face.Metrics().HAscent
 }
 
+var terminalGlyphPool = sync.Pool{New: func() any { return new([]text.Glyph) }}
+
 func drawTerminalGlyph(dst *ebiten.Image, value string, face text.Face, bounds image.Rectangle, cell nativeCellMetrics, fg color.NRGBA) {
-	op := &text.DrawOptions{}
 	scale, x, y := terminalGlyphPlacement(value, face, bounds, cell)
-	op.GeoM.Scale(scale, scale)
-	op.GeoM.Translate(x, y)
-	op.ColorScale.ScaleWithColor(fg)
-	text.Draw(dst.SubImage(bounds.Intersect(dst.Bounds())).(*ebiten.Image), value, face, op)
+	bounds = bounds.Intersect(dst.Bounds())
+	if bounds.Empty() {
+		return
+	}
+	glyphs := terminalGlyphPool.Get().(*[]text.Glyph)
+	*glyphs = text.AppendGlyphs((*glyphs)[:0], value, face, nil)
+	defer func() {
+		clear(*glyphs) // Do not keep glyph textures alive through the pool.
+		*glyphs = (*glyphs)[:0]
+		terminalGlyphPool.Put(glyphs)
+	}()
+	var clipped *ebiten.Image
+	for _, glyph := range *glyphs {
+		if glyph.Image == nil {
+			continue
+		}
+		left, top := x+glyph.X*scale, y+glyph.Y*scale
+		right := left + float64(glyph.Image.Bounds().Dx())*scale
+		bottom := top + float64(glyph.Image.Bounds().Dy())*scale
+		if right <= float64(bounds.Min.X) || bottom <= float64(bounds.Min.Y) || left >= float64(bounds.Max.X) || top >= float64(bounds.Max.Y) {
+			continue
+		}
+		target := dst
+		// Most glyphs fit their cells. Giving every cell its own scissor
+		// rectangle breaks GPU batching and creates thousands of native calls.
+		// Keep exact clipping only for ink that actually crosses a cell edge.
+		if left < float64(bounds.Min.X) || top < float64(bounds.Min.Y) || right > float64(bounds.Max.X) || bottom > float64(bounds.Max.Y) {
+			if clipped == nil {
+				clipped = dst.SubImage(bounds).(*ebiten.Image)
+			}
+			target = clipped
+		}
+		var op ebiten.DrawImageOptions
+		op.GeoM.Scale(scale, scale)
+		op.GeoM.Translate(left, top)
+		if glyph.Colored {
+			op.ColorScale.ScaleAlpha(float32(fg.A) / 255)
+		} else {
+			op.ColorScale.ScaleWithColor(fg)
+		}
+		target.DrawImage(glyph.Image, &op)
+	}
 }

@@ -5,6 +5,7 @@ package font
 import (
 	"bytes"
 	"reflect"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -87,5 +88,52 @@ func TestLazyGlyphOffsetsRejectInvalidBounds(t *testing.T) {
 		if headers, lazy := newLazyGlyphTable(make([]byte, 10), offsets); headers != nil || lazy != nil {
 			t.Fatalf("accepted invalid offsets %v", offsets)
 		}
+	}
+}
+
+func TestBorrowedGlyphOwnsInstructionsAfterViewRelease(t *testing.T) {
+	loader, err := ot.NewLoader(bytes.NewReader(gomono.TTF))
+	if err != nil {
+		t.Fatal(err)
+	}
+	font, err := NewFont(loader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := append([]byte(nil), font.lazyGlyf.raw...)
+	eager, err := tables.ParseGlyf(raw, font.lazyGlyf.offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	headers, lazy := newLazyGlyphView(raw, font.lazyGlyf.offsets, func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+		released = true
+	})
+	mapped := &Font{glyf: headers, lazyGlyf: lazy}
+	glyphs := make(tables.Glyf, len(eager))
+	for i := range glyphs {
+		glyphs[i] = mapped.glyphOutline(tables.GlyphID(i))
+	}
+	// Save a fully independent expected result before poisoning mapped bytes.
+	ownedRaw := append([]byte(nil), raw...)
+	want, err := tables.ParseGlyf(ownedRaw, lazy.offsets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.SetFinalizer(lazy, nil)
+	lazy.release()
+	if !released || !reflect.DeepEqual(glyphs, want) {
+		t.Fatal("returned glyph retained borrowed input")
+	}
+}
+
+func TestInvalidBorrowedGlyphViewIsReleased(t *testing.T) {
+	released := false
+	_, lazy := newLazyGlyphView(make([]byte, 10), []uint32{0, 11}, func() { released = true })
+	if lazy != nil || !released {
+		t.Fatal("invalid glyph view leaked")
 	}
 }

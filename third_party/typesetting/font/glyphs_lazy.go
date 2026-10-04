@@ -4,6 +4,7 @@ package font
 
 import (
 	"encoding/binary"
+	"runtime"
 	"sync"
 
 	"github.com/go-text/typesetting/font/opentype/tables"
@@ -22,6 +23,20 @@ type lazyGlyphTable struct {
 	cache   map[tables.GlyphID]tables.Glyph
 	ring    [lazyGlyphCacheLimit]tables.GlyphID
 	next    int
+	release func()
+}
+
+func newLazyGlyphView(raw []byte, offsets []uint32, release func()) (tables.Glyf, *lazyGlyphTable) {
+	headers, lazy := newLazyGlyphTable(raw, offsets)
+	if release != nil {
+		if lazy == nil {
+			release()
+		} else {
+			lazy.release = release
+			runtime.SetFinalizer(lazy, func(table *lazyGlyphTable) { table.release() })
+		}
+	}
+	return headers, lazy
 }
 
 func newLazyGlyphTable(raw []byte, offsets []uint32) (tables.Glyf, *lazyGlyphTable) {
@@ -54,6 +69,7 @@ func (f *Font) glyphOutline(gid tables.GlyphID) tables.Glyph {
 		return f.glyf[gid]
 	}
 	l := f.lazyGlyf
+	defer runtime.KeepAlive(l)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if glyph, ok := l.cache[gid]; ok {
@@ -63,7 +79,13 @@ func (f *Font) glyphOutline(gid tables.GlyphID) tables.Glyph {
 	var glyph tables.Glyph
 	if start != end {
 		var err error
-		glyph, _, err = tables.ParseGlyph(l.raw[start:end])
+		data := l.raw[start:end]
+		if l.release != nil {
+			// Parsed instructions may reference their input. A returned glyph
+			// must remain valid after the font and its mapping are collected.
+			data = append([]byte(nil), data...)
+		}
+		glyph, _, err = tables.ParseGlyph(data)
 		if err != nil {
 			glyph = tables.Glyph{}
 		}

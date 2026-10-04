@@ -103,7 +103,24 @@ func loadNativeFontSource(path string, index int, bitmapPixels ...int) (*text.Go
 		}
 	}
 	view.bitmapStart = int64(len(header)) + info.Size()
-	return text.NewGoTextFaceSource(io.NewSectionReader(&view, 0, view.bitmapStart+12+view.bitmap.length))
+	return text.NewGoTextFaceSource(&nativeFontResource{
+		SectionReader: io.NewSectionReader(&view, 0, view.bitmapStart+12+view.bitmap.length),
+		file:          file, headerSize: int64(len(header)), fileSize: info.Size(),
+	})
+}
+
+type nativeFontResource struct {
+	*io.SectionReader
+	file                 *os.File
+	headerSize, fileSize int64
+}
+
+func (r *nativeFontResource) View(offset int64, length int) ([]byte, func(), error) {
+	offset -= r.headerSize
+	if offset < 0 || length < 0 || offset > r.fileSize || int64(length) > r.fileSize-offset {
+		return nil, nil, fmt.Errorf("font view outside original file")
+	}
+	return mapNativeFontTable(r.file, offset, length)
 }
 
 // sbix contains a complete set of bitmap glyphs at every strike size. Keep the

@@ -66,13 +66,20 @@ for size in (8, 16, 32):
         gx, gy = grid["rect"][:2]
         cw, lh = grid["cell_width"], grid["cell_height"]
         crops = []
-        for row, column in ((1,1),(2,1),(3,1),(6,1),(6,3),(8,0)):
+        for row, column in ((1,1),(2,1),(3,1),(6,1),(6,3)):
             crop = image.crop((gx+column*cw, gy+row*lh, gx+(column+2)*cw, gy+(row+1)*lh))
             mask = crop.convert("L").point(lambda p: 255 if p > 10 else 0)
             ink = mask.getbbox()
             assert ink and ink[0] >= 1 and ink[2] <= 2*cw-1 and ink[1] >= 1 and ink[3] <= lh-1, (size,row,column,ink)
             assert abs(ink[0]-(2*cw-ink[2])) <= 2 and abs(ink[1]-(lh-ink[3])) <= 2, ("uncentered",size,row,column,ink)
             crops.append(crop)
+        # CJK text preserves its font bearings and baseline; unlike private
+        # icons it need not be centered or inset. Wrapping must reproduce the
+        # same complete glyph, including ink touching its cell boundary.
+        cjk = image.crop((gx+cw, gy+4*lh, gx+3*cw, gy+5*lh))
+        wrapped_cjk = image.crop((gx, gy+8*lh, gx+2*cw, gy+9*lh))
+        assert cjk.convert("L").getbbox(), ("missing CJK glyph", size)
+        assert cjk.tobytes() == wrapped_cjk.tobytes(), ("wrapped CJK clipped or displaced", size)
         # Each following B must begin in the cell after the two-column icon.
         for row, column in ((1,3),(6,5),(8,2)):
             crop = image.crop((gx+column*cw, gy+row*lh, gx+(column+1)*cw, gy+(row+1)*lh))

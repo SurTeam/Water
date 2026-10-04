@@ -637,7 +637,15 @@ func (v *TerminalView) Layout(gtx layout.Context, th *material.Theme, snap govt.
 }
 
 func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
-	prepared := preparedRow{hash: row.Hash}
+	return v.prepareRowInto(row, preparedRow{})
+}
+
+func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) preparedRow {
+	clear(prepared.text)
+	clear(prepared.backgrounds)
+	prepared.hash = row.Hash
+	prepared.text = prepared.text[:0]
+	prepared.backgrounds = prepared.backgrounds[:0]
 	var currentText *textRun
 	var currentBG *backgroundRun
 	var joined strings.Builder

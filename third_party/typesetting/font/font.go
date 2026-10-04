@@ -254,7 +254,6 @@ func NewFont(ld *ot.Loader) (*Font, error) {
 
 	out.upem = out.head.Upem()
 
-	raw, _ = ld.RawTable(ot.MustNewTag("glyf"))
 	locaRaw, _ := ld.RawTable(ot.MustNewTag("loca"))
 	loca, err := tables.ParseLoca(locaRaw, out.nGlyphs, out.head.IndexToLocFormat == 1)
 	gvarRaw, _ := ld.RawTable(ot.MustNewTag("gvar"))
@@ -262,9 +261,11 @@ func NewFont(ld *ot.Loader) (*Font, error) {
 		// Variable outlines need all point counts while decoding gvar. Keep
 		// the upstream eager path for those fonts; static outlines are lazy.
 		if len(out.fvar) > 0 && len(gvarRaw) > 0 {
+			raw, _ = ld.RawTable(ot.MustNewTag("glyf"))
 			out.glyf, _ = tables.ParseGlyf(raw, loca)
 		} else {
-			out.glyf, out.lazyGlyf = newLazyGlyphTable(raw, loca)
+			data, release, _ := ld.ViewTable(ot.MustNewTag("glyf"))
+			out.glyf, out.lazyGlyf = newLazyGlyphView(data, loca, release)
 		}
 	}
 

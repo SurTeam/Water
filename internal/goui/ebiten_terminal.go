@@ -94,6 +94,10 @@ func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []gov
 			index, unused = unused[len(unused)-1], unused[:len(unused)-1]
 			// The image can be overwritten, but its old content cannot be used.
 			next[y] = cache.rows[index]
+			if row, ok := v.cache[index]; ok {
+				row.hash = ^rows[y].Hash
+				prepared[y] = row
+			}
 		}
 	}
 	cache.rows, v.cache = next, prepared
@@ -202,7 +206,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		prepared, ok := v.cache[y]
 		if !ok || prepared.hash != row.Hash {
 			preparedRows++
-			prepared = v.prepareRow(row)
+			prepared = v.prepareRowInto(row, prepared)
 			v.cache[y] = prepared
 		}
 		rendered, ok := cache.rows[y]
