@@ -98,6 +98,7 @@ type Emulator struct {
 	frameMu   sync.Mutex
 	frameRows map[*xterm.BufferLine]cachedFrameRow
 	bells     atomic.Uint64
+	progress  atomic.Uint32 // zero means no OSC 9;4 report; otherwise state + 1
 	mu        sync.RWMutex
 	term      *xterm.Terminal
 

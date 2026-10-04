@@ -19,7 +19,7 @@ var chineseText = map[string]string{
 	"Settings saved":           "设置已保存",
 	"Terminal needs attention": "终端需要你的注意",
 	"Reconnecting":             "重连中",
-	"Running":                  "运行中", "Exited": "已退出", "Sidebar buttons": "侧栏底部按钮",
+	"Running":                  "运行中", "Exited": "已退出", "Idle": "空闲", "Paused": "已暂停", "Error": "错误", "Sidebar buttons": "侧栏底部按钮",
 	"Under workspace": "工作区下方", "Separate agents": "集中展示", "Left": "居左", "Center": "居中", "Right": "居右", "Discard changes": "放弃修改",
 	"Unsaved changes. Click Discard changes to cancel, or continue editing.": "有未保存的修改。点击“放弃修改”取消，或继续编辑。",
 	"Font and text": "字体与文字", "History and memory": "历史与内存", "Links and downloads": "链接与下载", "Language and interface": "语言与界面", "Tabs": "标签页", "Terminal panes": "终端窗格", "Agents": "Agent", "Workspaces": "工作区", "Sidebar layout": "侧栏布局", "Window appearance": "窗口外观",

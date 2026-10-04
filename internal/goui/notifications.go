@@ -34,7 +34,7 @@ func (w *EbitengineWindow) processNotifications(c *WorkspaceClient) {
 	connections := map[uuid.UUID]string{}
 	for _, host := range w.hosts() {
 		connections[host.entry.ID] = host.entry.Status
-		for _, a := range sidebarAgents(host.state) {
+		for _, a := range host.view.sidebarAgents(host.state) {
 			agents[host.entry.ID.String()+":"+a.pane.String()] = a
 		}
 	}
@@ -42,12 +42,22 @@ func (w *EbitengineWindow) processNotifications(c *WorkspaceClient) {
 		if platform, ok := w.platform.(interface{ Notify(string, string) }); ok {
 			for key, old := range w.notificationAgents {
 				connection, _, _ := strings.Cut(key, ":")
-				if _, exists := connections[nativeUUID(connection)]; !exists {
+				connectionID := nativeUUID(connection)
+				if status, exists := connections[connectionID]; !exists || status != "connected" || w.notificationConnections[connectionID] != "connected" {
 					continue
 				}
 				current, exists := agents[key]
 				if old.running && (!exists || !current.running || current.kind != old.kind) {
 					platform.Notify("Water", fmt.Sprintf("%s has stopped", old.label))
+				} else if exists && current.kind == old.kind && current.status != old.status {
+					platform.Notify("Water", fmt.Sprintf("%s: %s", current.label, c.tr(current.status)))
+				}
+			}
+			for key, current := range agents {
+				connection, _, _ := strings.Cut(key, ":")
+				id := nativeUUID(connection)
+				if _, existed := w.notificationAgents[key]; !existed && current.running && w.notificationAgents != nil && connections[id] == "connected" && w.notificationConnections[id] == "connected" {
+					platform.Notify("Water", fmt.Sprintf("%s: %s", current.label, c.tr(current.status)))
 				}
 			}
 			for id, status := range connections {

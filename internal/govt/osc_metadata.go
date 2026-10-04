@@ -3,13 +3,41 @@ package govt
 import (
 	"encoding/base64"
 	"net/url"
+	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/SurTeam/Water/internal/xterm"
 )
 
 const maxClipboardBytes = 1024 * 1024
 
 func (e *Emulator) registerOSCMetadata() {
+	e.term.RegisterEscHandler(xterm.FunctionIdentifier{Final: 'c'}, func() bool {
+		if e.progress.Load() != 0 {
+			e.progress.Store(1) // RIS withdraws a previously reported indicator.
+		}
+		return false // Preserve the terminal's normal hard-reset handler.
+	})
+	e.term.RegisterOSCHandler(9, func(data string) bool {
+		if len(data) > 64 {
+			return true
+		}
+		fields := strings.Split(data, ";")
+		if len(fields) < 2 || len(fields) > 3 || fields[0] != "4" || len(fields[1]) != 1 || fields[1][0] < '0' || fields[1][0] > '4' {
+			return true
+		}
+		if len(fields) == 3 {
+			if fields[2] == "" || strings.IndexFunc(fields[2], func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				return true
+			}
+			if _, err := strconv.ParseUint(fields[2], 10, 32); err != nil {
+				return true
+			}
+		}
+		e.progress.Store(uint32(fields[1][0]-'0') + 1)
+		return true
+	})
 	e.term.RegisterOSCHandler(7, func(data string) bool {
 		if len(data) > 8192 {
 			return true
@@ -50,6 +78,13 @@ func (e *Emulator) registerOSCMetadata() {
 		}
 		return true
 	})
+}
+
+// ProgressState is client-local metadata, also reconstructed by bounded replay.
+// State 4 means paused/warning, not necessarily an approval request.
+func (e *Emulator) ProgressState() (state int, reported bool) {
+	value := e.progress.Load()
+	return int(value) - 1, value != 0
 }
 
 // TakeClipboardWrite coalesces bounded OSC52 writes; replay never writes.

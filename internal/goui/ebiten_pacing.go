@@ -36,13 +36,37 @@ func (w *EbitengineWindow) updateFramePacing() {
 	}
 }
 
-type nativeKeyRepeater struct{ next map[ebiten.Key]time.Time }
+type nativeKeyRepeater struct {
+	next     map[ebiten.Key]time.Time
+	consumed map[ebiten.Key]bool
+}
+
+// Observe releases even on ticks owned by the IME. A consumed press must not
+// become a new physical press on the following tick while it is still held.
+func (r *nativeKeyRepeater) observe(pressed func(ebiten.Key) bool, consume bool) {
+	for k := ebiten.Key(0); k <= ebiten.KeyMax; k++ {
+		if !pressed(k) {
+			delete(r.next, k)
+			delete(r.consumed, k)
+		} else if consume {
+			if r.consumed == nil {
+				r.consumed = make(map[ebiten.Key]bool)
+			}
+			r.consumed[k] = true
+			delete(r.next, k)
+		}
+	}
+}
 
 // Physical navigation/control keys repeat by elapsed time, independent of a
 // 60Hz/120Hz display. Never replay missed repeats as a burst after a slow frame.
 func (r *nativeKeyRepeater) ready(k ebiten.Key, pressed bool, now time.Time) bool {
 	if !pressed {
 		delete(r.next, k)
+		delete(r.consumed, k)
+		return false
+	}
+	if r.consumed[k] {
 		return false
 	}
 	if r.next == nil {

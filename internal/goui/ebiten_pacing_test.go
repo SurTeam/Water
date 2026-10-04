@@ -50,3 +50,23 @@ func TestPhysicalKeyRepeatUsesTimeWithoutCatchUpBursts(t *testing.T) {
 		}
 	}
 }
+
+func TestIMEConsumedKeysStaySuppressedUntilRelease(t *testing.T) {
+	for _, k := range []ebiten.Key{ebiten.KeyEnter, ebiten.KeyBackspace, ebiten.KeyArrowDown} {
+		var r nativeKeyRepeater
+		now := time.Unix(1, 0)
+		pressed := func(key ebiten.Key) bool { return key == k }
+		r.observe(pressed, true)
+		for _, elapsed := range []time.Duration{time.Second / 60, time.Second} {
+			r.observe(pressed, false)
+			if r.ready(k, true, now.Add(elapsed)) {
+				t.Fatalf("IME consumed key %v was sent again", k)
+			}
+		}
+		// A release can occur while composition still owns the frame.
+		r.observe(func(ebiten.Key) bool { return false }, true)
+		if !r.ready(k, true, now.Add(2*time.Second)) {
+			t.Fatalf("fresh press %v was suppressed", k)
+		}
+	}
+}

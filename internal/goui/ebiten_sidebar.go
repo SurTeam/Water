@@ -77,11 +77,14 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 		c.mu.RLock()
 		term := c.terminals[a.terminal]
 		c.mu.RUnlock()
-		if term != nil && a.titleSource != "custom" {
+		if term != nil {
 			term.mu.RLock()
 			var title string
 			if term.emu != nil {
 				title = term.emu.Title()
+				if state, reported := term.emu.ProgressState(); reported && a.running {
+					a.status = [...]string{"Idle", "Running", "Error", "Running", "Paused"}[state]
+				}
 			}
 			term.mu.RUnlock()
 			title = strings.TrimSpace(strings.Map(func(r rune) rune {
@@ -90,7 +93,7 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 				}
 				return r
 			}, title))
-			if title != "" {
+			if title != "" && a.titleSource != "custom" {
 				a.label = string([]rune(title)[:min(256, len([]rune(title)))])
 				a.titleSource = "osc"
 			}
@@ -382,8 +385,13 @@ func (w *EbitengineWindow) drawAgentLabel(c *WorkspaceClient, dst *ebiten.Image,
 	fg := configColor(t.UIForeground, 0xe6eaea)
 	statusColor := configColor(t.AgentColors[a.kind], 0x8eaeed)
 	status := a.status
-	if !a.running {
+	if !a.running || a.status == "Idle" {
 		statusColor = mixColor(statusColor, fg, .5)
+	}
+	if a.status == "Paused" {
+		statusColor = color.NRGBA{R: 232, G: 183, B: 90, A: 255}
+	} else if a.status == "Error" {
+		statusColor = configColor(t.SidebarConnectionOfflineColor, 0xef7d83)
 	}
 	if offline {
 		status = "Offline"
@@ -392,8 +400,11 @@ func (w *EbitengineWindow) drawAgentLabel(c *WorkspaceClient, dst *ebiten.Image,
 	pad := min(w.dp(float64(u.SidebarAgentRowPadding)), max(0, row.Dx()/8))
 	if !shelf {
 		glyph := "▶"
-		if !a.running || offline {
+		if !a.running || a.status == "Idle" || a.status == "Paused" || offline {
 			glyph = "Ⅱ"
+		}
+		if a.status == "Error" && !offline {
+			glyph = "!"
 		}
 		icon := image.Rect(row.Min.X+pad, row.Min.Y, row.Min.X+pad+w.dp(16), row.Max.Y)
 		w.centeredLabel(dst, c, icon, glyph, float64(u.SidebarAgentFontSize), statusColor, false)

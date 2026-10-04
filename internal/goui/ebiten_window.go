@@ -402,6 +402,7 @@ func (w *EbitengineWindow) Update() error {
 	}
 	w.nativePointer(c)
 	w.updateCursor(c)
+	w.keyRepeat.observe(ebiten.IsKeyPressed, false)
 	if !ebiten.IsFocused() {
 		w.keyRepeat = nativeKeyRepeater{}
 		w.composer.Cancel()
@@ -421,6 +422,9 @@ func (w *EbitengineWindow) Update() error {
 	}
 	if err != nil {
 		return err
+	}
+	if handled || previousComposition != "" {
+		w.keyRepeat.observe(ebiten.IsKeyPressed, true)
 	}
 	if !handled {
 		w.nativeKeys(c)

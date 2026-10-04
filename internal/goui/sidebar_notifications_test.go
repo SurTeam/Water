@@ -92,11 +92,68 @@ func TestSidebarAgentOSCTitlesAndStatuses(t *testing.T) {
 	check("Restored session", "osc", "Running")
 	raw["custom_label"] = "Pinned name"
 	check("Pinned name", "custom", "Running")
+	emu.Write([]byte("\x1b]9;4;4\x07"))
+	check("Pinned name", "custom", "Paused")
+	emu.Write([]byte("\x1b]9;4;2;50\x07"))
+	check("Pinned name", "custom", "Error")
+	emu.Write([]byte("\x1b]9;4;0\x07"))
+	check("Pinned name", "custom", "Idle")
+	emu.Write([]byte("\x1b]9;4;3\x07"))
+	check("Pinned name", "custom", "Running")
 	delete(raw, "custom_label")
 	raw["status"] = map[string]any{"exited": map[string]any{"code": 0}}
 	check("Restored session", "osc", "Exited")
 	emu.Write([]byte("\x1b]2;\x07"))
 	check("Codex", "kind", "Exited")
+}
+
+func TestAgentProgressNotificationsOnlyOnTransitions(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.SystemNotifications = true
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	connection, pane, terminal := uuid.New(), uuid.New(), uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer func() {
+		delete(view.terminals, terminal)
+		emu.Close()
+	}()
+	view.terminals[terminal] = &terminalClient{id: terminal, emu: emu}
+	view.state.Agents = []any{map[string]any{"kind": "codex", "label": "Codex", "pane_id": pane, "terminal_id": terminal, "status": "running"}}
+	if err := manager.AddConnection(ConnectionEntry{ID: connection, Kind: "remote", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	emu.WriteReplay([]byte("\x1b]9;4;4\x07"))
+	window.processNotifications(view)
+	if len(platform.messages) != 0 {
+		t.Fatal("initial replay notified")
+	}
+	for i, transition := range []struct{ osc, status string }{{"3", "Running"}, {"0", "Idle"}, {"4", "Paused"}, {"2", "Error"}} {
+		emu.Write([]byte("\x1b]9;4;" + transition.osc + "\x07"))
+		window.processNotifications(view)
+		window.processNotifications(view)
+		if len(platform.messages) != i+1 || platform.messages[i] != "Water: Codex: "+transition.status {
+			t.Fatalf("transition %s notifications=%v", transition.status, platform.messages)
+		}
+	}
+	manager.markDisconnected(connection)
+	window.processNotifications(view)
+	before := len(platform.messages)
+	emu.WriteReplay([]byte("\x1b]9;4;0\x07"))
+	window.processNotifications(view)
+	if len(platform.messages) != before {
+		t.Fatal("offline replay emitted agent notification")
+	}
+	manager.mu.Lock()
+	manager.connections[connection].entry.Status = "connected"
+	manager.mu.Unlock()
+	window.processNotifications(view)
+	if len(platform.messages) != before+1 || platform.messages[before] != "Water: Remote connection restored." {
+		t.Fatalf("reconnect emitted false agent transition: %v", platform.messages)
+	}
 }
 
 func TestSidebarFooterIndependentHeights(t *testing.T) {
