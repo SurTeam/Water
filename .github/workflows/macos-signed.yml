@@ -76,6 +76,7 @@ jobs:
               app_name='Water'
               gui_binary='water'
               server_binary='water-server'
+              updater_binary='water-update'
               [[ "$RELEASE_TAG" == v* ]] || {
                 echo "error: release builds require a v* tag" >&2
                 exit 1
@@ -85,6 +86,7 @@ jobs:
               app_name='Water Dev'
               gui_binary='water-dev'
               server_binary='water-srv-dev'
+              updater_binary='water-update-dev'
               [[ "$RELEASE_TAG" == dev-* ]] || {
                 echo "error: dev builds require a dev-* tag" >&2
                 exit 1
@@ -131,14 +133,15 @@ jobs:
             exit 1
           }
           case "$SOURCE_ASSET" in
-            "$asset_prefix"-*-macOS-arm64.zip) ;;
+            "$asset_prefix"-*-macOS-arm64.zip) archive_arch=arm64 ;;
+            "$asset_prefix"-*-macOS-amd64.zip) archive_arch=amd64 ;;
             *)
               echo "error: source asset does not match the selected app variant" >&2
               exit 1
               ;;
           esac
           version="${SOURCE_ASSET#"$asset_prefix-"}"
-          version="${version%-macOS-arm64.zip}"
+          version="${version%-macOS-$archive_arch.zip}"
           [[ -n "$version" && "$version" != "$SOURCE_ASSET" ]] || {
             echo "error: could not determine app version from source asset" >&2
             exit 1
@@ -148,6 +151,7 @@ jobs:
             echo "app_name=$app_name"
             echo "gui_binary=$gui_binary"
             echo "server_binary=$server_binary"
+            echo "updater_binary=$updater_binary"
             echo "version=$version"
             echo "title=$app_name $version"
           } >> "$GITHUB_OUTPUT"
@@ -262,13 +266,17 @@ jobs:
           APP_NAME: ${{ steps.release.outputs.app_name }}
           GUI_BINARY: ${{ steps.release.outputs.gui_binary }}
           SERVER_BINARY: ${{ steps.release.outputs.server_binary }}
+          UPDATER_BINARY: ${{ steps.release.outputs.updater_binary }}
         run: |
           set -euo pipefail
           app_dir="$RUNNER_TEMP/water-signing/$APP_NAME.app"
           test -x "$app_dir/Contents/MacOS/$SERVER_BINARY"
           test -x "$app_dir/Contents/MacOS/$GUI_BINARY"
+          test -x "$app_dir/Contents/MacOS/$UPDATER_BINARY"
 
           # Sign nested executables before the containing app bundle.
+          codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
+            "$app_dir/Contents/MacOS/$UPDATER_BINARY"
           codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \
             "$app_dir/Contents/MacOS/$SERVER_BINARY"
           codesign --force --options runtime --timestamp --sign "$CODESIGN_IDENTITY" \

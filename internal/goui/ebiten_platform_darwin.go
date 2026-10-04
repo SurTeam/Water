@@ -126,6 +126,7 @@ func (p *macNativePlatform) install() {
 	}
 	appMenu := macSend(macSend(main, "itemAtIndex:", 0), "submenu")
 	macSend(appMenu, "setAutoenablesItems:", false)
+	p.add("check-updates", "Software update", appMenu)
 	p.add("quit-and-server", "Quit GUI and Local Server", appMenu)
 	macSend(p.items["quit-and-server"].item, "setEnabled:", p.canQuitServer)
 	if windowMenu != 0 {

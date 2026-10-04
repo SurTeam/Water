@@ -338,7 +338,11 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 	case hitRemoteSubmit:
 		w.connectRemote(c)
 	case hitSettingsControl:
-		w.settingsAction(c, h.Label)
+		if strings.HasPrefix(h.Label, "update:") {
+			w.updateAction(strings.TrimPrefix(h.Label, "update:"))
+		} else if !w.updateVisible {
+			w.settingsAction(c, h.Label)
+		}
 	case hitHyperlinkConfirm:
 		c.confirmHyperlink()
 	case hitHyperlinkCancel:
@@ -379,7 +383,7 @@ func (w *EbitengineWindow) reportPointer(c *WorkspaceClient, p image.Point, acti
 	c.connectionMu.RLock()
 	remoteVisible := c.remoteFormVisible
 	c.connectionMu.RUnlock()
-	if c.settings.visible || remoteVisible || w.view(c).rename != nil {
+	if w.updateVisible || c.settings.visible || remoteVisible || w.view(c).rename != nil {
 		return
 	}
 	for _, pane := range w.view(c).panes {
@@ -436,6 +440,9 @@ func (w *EbitengineWindow) updateCursor(c *WorkspaceClient) {
 }
 
 func (w *EbitengineWindow) wheel(c *WorkspaceClient, p image.Point, dx, dy float64) bool {
+	if w.updateVisible {
+		return true
+	}
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
 	v := w.view(c)
@@ -669,6 +676,12 @@ func (w *EbitengineWindow) connectRemote(c *WorkspaceClient) {
 func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
+	if w.updateVisible {
+		if strings.EqualFold(spec, "escape") {
+			w.updateAction("close")
+		}
+		return true
+	}
 	v := w.view(c)
 	if ev, ok := automationInputEvent(spec); ok {
 		if pressed, isKey := ev.(key.Event); isKey {
@@ -1094,7 +1107,7 @@ func nativeKeyName(k ebiten.Key, mods string) (string, bool) {
 func (w *EbitengineWindow) initComposer() {
 	w.composer.OnNewSession = func() *textinput.SessionOptions {
 		c := w.active()
-		if c == nil || !ebiten.IsFocused() {
+		if c == nil || !ebiten.IsFocused() || w.updateVisible {
 			return nil
 		}
 		c.layoutMu.Lock()
@@ -1174,6 +1187,10 @@ func (w *EbitengineWindow) initComposer() {
 	}
 }
 func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
+	if w.updateVisible {
+		w.composer.Cancel()
+		return false, nil
+	}
 	c.layoutMu.Lock()
 	target := fmt.Sprintf("%p:%s", c, c.frameActiveTerminal)
 	if w.view(c).rename != nil {

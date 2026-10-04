@@ -303,6 +303,61 @@ For a real GUI smoke run, start the current binary with a unique socket/config a
 
 Builds and checks run locally. CI only retains `.github/workflows/macos-signed.yml`, which is manually dispatched and does no compilation.
 
+## In-app updates (macOS and Linux)
+
+Open **Settings → Software update**, or the macOS application menu's
+**Software update** item. Water checks its public GitHub Releases, offers a
+download, then **Install and restart**. Checking and downloading run outside
+the rendering loop. No DMG mounting or dragging an app is required after
+installing a version that includes this updater.
+
+Only strictly newer product versions with an exact platform/architecture asset
+are eligible. Release builds accept non-draft, non-prerelease `v*` releases;
+dev builds use non-draft `dev-*` releases, including timestamp tags whose
+product version is obtained from the package name. Same-version dev rebuilds
+are not updates: increment `WATER_APP_VERSION` when publishing an update.
+macOS uses `Water[- Dev]-VERSION-macOS-{arm64,amd64}.zip` (GitHub replaces spaces
+with periods); Linux uses `water[-dev]-VERSION-{aarch64,x86_64}-linux.tar.gz`.
+Publish Linux packages to the matching release after building them natively.
+The existing macOS signing-only workflow remains the signing/publishing path.
+
+Both platforms require the SHA256 digest provided by GitHub's release-assets
+API and verify the complete download before extracting it. macOS additionally
+requires the new bundle to satisfy the current app's Apple designated signing
+requirement, and verifies bundle identity, version and nested signatures.
+Unsigned/ad-hoc macOS development bundles cannot install updates. Linux trusts
+the official HTTPS release metadata and its digest; it does not claim an
+independent publisher signature. The GUI, sibling server and private headless installer identities are
+checked before installation. Invalid packages and archive links/path traversal
+are rejected.
+
+The installation directory must be writable. macOS must run from an installed
+app bundle, outside a mounted DMG or App Translocation; Linux requires the GUI
+and sibling server from the extracted package in the same directory. A system
+package manager installation should continue using that package manager when
+its directory is not writable. Water does not request elevated privileges.
+
+An independent installer waits for the GUI to exit, retains the old app/binaries,
+and rolls back if replacement fails or the new GUI fails to render a live frame
+within 20 seconds. The control socket, config and SSH destinations are preserved.
+Detached terminal servers continue running during the GUI restart, including
+when `detach_on_quit` is false. An embedded local server blocks installation;
+enable `server.detached` and restart Water before installing updates. Remote
+connections reconnect through the existing transport. Protocol incompatibility
+with a retained server causes startup failure and rollback rather than server
+replacement or session termination.
+
+Failed installations retain `.water-update-*` (release) or `.water-dev-update-*` (dev) staging/backup files and
+`install.log` beside the installation. A crashed installer may leave
+`.water-update-lock` / `.water-dev-update-lock`; remove that lock only after confirming no installer for
+this installation is running. Normal successful installation cleans its files.
+No update is installed without clicking **Install and restart**.
+
+Run `~/.venv/bin/python scripts/go-ui-update-smoke.py` with `WATER_BIN` pointing
+to the native test binary. It uses an isolated socket/config and real Water
+control actions, checks the localized panel/menu and bounded release lookup,
+and captures screenshots without installing a release.
+
 ## macOS signing handoff
 
 The macOS app registers as an alternate handler for `.command` files. Choose

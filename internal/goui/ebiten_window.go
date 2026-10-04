@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goupdate"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -114,6 +115,13 @@ type EbitengineWindow struct {
 	windowResult            chan error
 	quitResult              chan error
 	quitError               string
+	updates                 *goupdate.Manager
+	updateVisible           bool
+	updateRestartAllowed    bool
+	updateResult            chan error
+	updating                bool
+	startupAcknowledged     bool
+	startupFrameDrawn       bool
 	frameRevision           atomic.Uint64
 	presentedRevision       atomic.Uint64
 	continuousInput         atomic.Bool
@@ -241,6 +249,10 @@ func (w *EbitengineWindow) Update() error {
 	if c == nil {
 		return nil
 	}
+	if w.startupFrameDrawn && !w.startupAcknowledged {
+		w.startupAcknowledged = true
+		go goupdate.AcknowledgeStartup()
+	}
 	if w.quitResult != nil {
 		select {
 		case err := <-w.quitResult:
@@ -270,6 +282,18 @@ func (w *EbitengineWindow) Update() error {
 			w.Invalidate()
 		default:
 			n = 16
+		}
+	}
+	if w.updateResult != nil {
+		select {
+		case err := <-w.updateResult:
+			w.updateResult = nil
+			if err == nil {
+				w.updating = true
+				w.closing = true
+			}
+			w.Invalidate()
+		default:
 		}
 	}
 	if w.closing || ebiten.IsWindowBeingClosed() {
@@ -406,6 +430,7 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 		}
 	}
 	w.maskWindow(screen)
+	w.startupFrameDrawn = true
 	if len(w.shots) > 0 {
 		img := image.NewRGBA(screen.Bounds())
 		screen.ReadPixels(img.Pix)
@@ -486,6 +511,11 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		wx, wy := ebiten.WindowPosition()
 		ww, wh := ebiten.WindowSize()
 		state["renderer"] = "ebitengine"
+		state["update_visible"] = w.updateVisible
+		state["update_restart_allowed"] = w.updateRestartAllowed
+		if w.updates != nil {
+			state["update"] = w.updates.Snapshot()
+		}
 		state["window_decorated"] = ebiten.IsWindowDecorated()
 		state["window_position"] = []int{wx, wy}
 		state["window_size"] = []int{ww, wh}

@@ -14,11 +14,13 @@ import (
 
 	"github.com/hajimehoshi/ebiten/v2"
 
+	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/goremote"
 	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/SurTeam/Water/internal/goui"
+	"github.com/SurTeam/Water/internal/goupdate"
 )
 
 type stringListFlag []string
@@ -80,6 +82,13 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	}
 	multi := goui.NewMultiWorkspaceClient(invalidate)
 	w = goui.NewEbitengineWindow(multi, cfg)
+	restartArgs := []string{"--control-socket", socket, "--config", configPath}
+	for _, destination := range sshDestinations {
+		restartArgs = append(restartArgs, "--ssh", destination)
+	}
+	updates := goupdate.NewManager(gobuild.Version, buildVariant, restartArgs, invalidate)
+	defer updates.Close()
+	w.SetUpdateManager(updates)
 	w.SetNewWindowHandler(func() error {
 		executable, err := os.Executable()
 		if err != nil {
@@ -101,6 +110,7 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	settingsStore := goui.NewSettingsStore(cfg)
 
 	localSession, embedded, ownsDetached, localErr := connectOrStart(socket, configPath, cfg, buildVariant)
+	w.SetUpdateRestartAllowed(embedded == nil)
 	if localErr == nil {
 		w.SetQuitServerHandler(func() error {
 			return goclient.New(socket).CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
@@ -109,7 +119,11 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			defer embedded.Close()
 		}
 		if embedded == nil && ownsDetached && !cfg.Server.DetachOnQuit {
-			defer func() { _ = goclient.New(socket).Call("server.shutdown", map[string]any{}, nil) }()
+			defer func() {
+				if !w.Updating() {
+					_ = goclient.New(socket).Call("server.shutdown", map[string]any{}, nil)
+				}
+			}()
 		}
 		localView := goui.NewWorkspaceClientWithConnection(localSession, invalidate, cfg, "")
 		w.Attach(localView)

@@ -21,11 +21,13 @@ case "$variant" in
     package_name="water-dev"
     gui_installed_name="water-dev"
     server_installed_name="water-srv-dev"
+    updater_installed_name="water-update-dev"
     ;;
   release)
     package_name="water"
     gui_installed_name="water"
     server_installed_name="water-server"
+    updater_installed_name="water-update"
     ;;
   *)
     echo "error: WATER_APP_VARIANT must be dev or release" >&2
@@ -60,14 +62,16 @@ WATER_APP_VARIANT="$variant" WATER_APP_VERSION="$version" \
 
 go build -trimpath -ldflags="$ldflags" -o "$build_dir/water" ./cmd/water
 go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-server" ./cmd/water-server
+go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-update" ./cmd/water-update
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 install -m 755 "$build_dir/water" "$stage_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$stage_dir/$server_installed_name"
+install -m 755 "$build_dir/water-update" "$stage_dir/$updater_installed_name"
 
 rm -f "$archive"
-tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name"
+tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$updater_installed_name"
 
 echo "Built $archive"
 echo "Run with: tar xzf $(basename "$archive") && ./$gui_installed_name"

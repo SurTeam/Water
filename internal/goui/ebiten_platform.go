@@ -17,6 +17,8 @@ func (w *EbitengineWindow) SetQuitServerHandler(handler func() error) { w.quitSe
 
 func (w *EbitengineWindow) menuAction(action string) {
 	switch action {
+	case "check-updates":
+		w.updateAction("open")
 	case "hide-window":
 		w.platform.Hide()
 	case "show-window":

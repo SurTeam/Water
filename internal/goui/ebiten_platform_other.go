@@ -25,7 +25,7 @@ func (p *otherNativePlatform) Snapshot() map[string]any {
 }
 func (p *otherNativePlatform) Invoke(action string) error {
 	switch action {
-	case "hide-window", "show-window", "minimize-window", "quit-gui":
+	case "hide-window", "show-window", "minimize-window", "quit-gui", "check-updates":
 	case "quit-and-server":
 		if !p.canQuitServer {
 			return fmt.Errorf("no local server")

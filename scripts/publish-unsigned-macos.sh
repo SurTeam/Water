@@ -49,7 +49,12 @@ esac
 
 version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
-asset="${app_name}-${version}-macOS-arm64.zip"
+case "$(uname -m)" in
+  arm64) archive_arch=arm64 ;;
+  x86_64) archive_arch=amd64 ;;
+  *) echo "error: unsupported macOS architecture" >&2; exit 1 ;;
+esac
+asset="${app_name}-${version}-macOS-${archive_arch}.zip"
 # GitHub normalizes spaces in release asset names to periods. Keep the local
 # archive path unchanged, but pass the server-side name to the signing action.
 release_asset="${asset// /.}"

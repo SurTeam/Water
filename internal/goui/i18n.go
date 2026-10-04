@@ -8,6 +8,14 @@ import (
 // UI text is localized on the client. Model names and terminal output remain
 // user content; automation keys and protocol identifiers never depend on locale.
 var chineseText = map[string]string{
+	"Software update": "软件更新", "Check for updates": "检查更新", "Checking for updates…": "正在检查更新…",
+	"Current version: %s": "当前版本：%s", "Version %s is available": "发现新版本 %s", "Version %s is ready to install": "版本 %s 已准备好安装",
+	"No compatible updates are available": "暂无适用于此平台的新版本", "Downloading and verifying…": "正在下载并校验…",
+	"Download update": "下载更新", "Install and restart": "安装并重启", "Installing update…": "正在安装更新…",
+	"Update failed. You can try again.": "更新失败，可以重试。", "Close": "关闭",
+	"Updates are downloaded from Water's GitHub Releases.":                    "更新来自 Water 的 GitHub Releases。",
+	"Restart keeps detached terminal servers running.":                        "重启后，独立运行的终端服务将继续运行。",
+	"Restart requires a detached local server. Change Server settings first.": "安装需要独立终端服务，请先调整服务设置并重新启动应用。",
 	"Settings saved":           "设置已保存",
 	"Terminal needs attention": "终端需要你的注意",
 	"Reconnecting":             "重连中",

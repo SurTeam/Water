@@ -321,6 +321,9 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 		w.drawRename(c, dst)
 	}
 	w.drawHyperlink(c, dst)
+	if w.updateVisible {
+		w.drawUpdate(c, dst)
+	}
 }
 
 func (w *EbitengineWindow) drawIcon(dst *ebiten.Image, r image.Rectangle, kind automationHitKind, clr color.NRGBA) {
@@ -528,6 +531,10 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .52)
 	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(20), r.Max.X-w.dp(24), r.Min.Y+w.dp(44)), c.tr("Settings"), 16, fg, true)
+	if w.updates != nil {
+		w.button(dst, c, image.Rect(r.Max.X-w.dp(190), r.Min.Y+w.dp(16), r.Max.X-w.dp(24), r.Min.Y+w.dp(46)), "Software update", hitSettingsControl, uuid.Nil, false)
+		c.hitRegions[len(c.hitRegions)-1].Label = "update:open"
+	}
 	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
 	top := r.Min.Y + w.dp(60)
 	tabWidth := (r.Dx() - w.dp(48)) / 5

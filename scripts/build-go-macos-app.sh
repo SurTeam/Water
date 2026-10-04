@@ -25,12 +25,14 @@ case "$variant" in
     bundle_id="dev.water.terminal.dev"
     gui_installed_name="water-dev"
     server_installed_name="water-srv-dev"
+    updater_installed_name="water-update-dev"
     ;;
   release)
     app_name="Water"
     bundle_id="dev.water.terminal"
     gui_installed_name="water"
     server_installed_name="water-server"
+    updater_installed_name="water-update"
     ;;
   *)
     echo "error: WATER_APP_VARIANT must be dev or release" >&2
@@ -58,11 +60,13 @@ WATER_APP_VARIANT="$variant" WATER_APP_VERSION="$version"   bash "$root_dir/scri
 
 go build -trimpath -ldflags="$ldflags" -o "$build_dir/water" ./cmd/water
 go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-server" ./cmd/water-server
+go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-update" ./cmd/water-update
 
 rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir"
 install -m 755 "$build_dir/water" "$macos_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$macos_dir/$server_installed_name"
+install -m 755 "$build_dir/water-update" "$macos_dir/$updater_installed_name"
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
 
 install -d -m 755 "$resources_dir/skills/water-control"
@@ -95,6 +99,7 @@ elif [[ "$codesign_required" != "0" && "$codesign_identity" == "-" ]]; then
 elif [[ "$codesign_identity" == "-" ]]; then
   codesign --force --deep --sign - "$app_dir" >/dev/null
 else
+  codesign --force --options runtime --timestamp --sign "$codesign_identity" "$macos_dir/$updater_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$macos_dir/$server_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$macos_dir/$gui_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$app_dir" >/dev/null
@@ -104,7 +109,12 @@ if [[ "$codesign_skip" != "1" ]]; then
   codesign --verify --deep --strict "$app_dir"
 fi
 
-zip_name="${app_name}-${version}-macOS-arm64.zip"
+case "$(uname -m)" in
+  arm64) archive_arch=arm64 ;;
+  x86_64) archive_arch=amd64 ;;
+  *) echo "error: unsupported macOS architecture" >&2; exit 1 ;;
+esac
+zip_name="${app_name}-${version}-macOS-${archive_arch}.zip"
 zip_path="$root_dir/dist/$zip_name"
 rm -f "$zip_path"
 ditto -c -k --sequesterRsrc --keepParent "$app_dir" "$zip_path"
