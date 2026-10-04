@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"image"
 	"math"
+	"sort"
 	"time"
+
+	"github.com/SurTeam/Water/internal/govt"
 
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
@@ -44,9 +47,56 @@ type nativeRowTexture struct {
 	image *ebiten.Image
 }
 type nativeTerminalTexture struct {
-	rows   map[int]nativeRowTexture
-	images map[uint64]*ebiten.Image
-	style  string
+	rows    map[int]nativeRowTexture
+	images  map[uint64]*ebiten.Image
+	style   string
+	surface *ebiten.Image
+}
+
+// Match content before recycling any texture: scrolling moves unchanged rows
+// to different screen indices. Each old texture is consumed at most once.
+func matchNativeRows(rows []govt.Row, old map[int]nativeRowTexture) ([]int, []int) {
+	byHash := make(map[uint64][]int, len(old))
+	for y, row := range old {
+		byHash[row.hash] = append(byHash[row.hash], y)
+	}
+	matches := make([]int, len(rows))
+	used := make(map[int]bool, len(old))
+	for y, row := range rows {
+		matches[y] = -1
+		if indices := byHash[row.Hash]; len(indices) > 0 {
+			index := indices[len(indices)-1]
+			matches[y], used[index] = index, true
+			byHash[row.Hash] = indices[:len(indices)-1]
+		}
+	}
+	var unused []int
+	for y := range old {
+		if !used[y] {
+			unused = append(unused, y)
+		}
+	}
+	sort.Ints(unused)
+	return matches, unused
+}
+
+func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []govt.Row) {
+	matches, unused := matchNativeRows(rows, cache.rows)
+	next := make(map[int]nativeRowTexture, len(rows))
+	prepared := make(map[int]preparedRow, len(rows))
+	for y, index := range matches {
+		if index >= 0 {
+			next[y] = cache.rows[index]
+			if row, ok := v.cache[index]; ok {
+				prepared[y] = row
+			}
+		} else if len(unused) > 0 {
+			index, unused = unused[len(unused)-1], unused[:len(unused)-1]
+			// The image can be overwritten, but its old content cannot be used.
+			next[y] = cache.rows[index]
+		}
+	}
+	cache.rows, v.cache = next, prepared
 }
 
 func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClient, r image.Rectangle, cw, lh int) {
@@ -93,19 +143,21 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		w.textures[term.id] = cache
 	}
 	style := fmt.Sprintf("%s:%g:%d:%d:%v:%t:%t:%d", cfg.Terminal.FontFamily, cfg.Terminal.FontSize, cw, lh, v.Theme, cfg.Terminal.Hyperlinks, cfg.Terminal.Ligatures, w.fonts.generation.Load())
-	if style != cache.style {
-		for _, row := range cache.rows {
-			row.image.Deallocate()
+	rowCount := min(snap.Rows, len(snap.RowsData), (r.Dy()+lh-1)/lh)
+	width, height := max(1, snap.Cols*cw), max(1, rowCount*lh)
+	if style != cache.style || cache.surface == nil || cache.surface.Bounds().Size() != image.Pt(width, height) {
+		if cache.surface != nil {
+			cache.surface.Deallocate()
 		}
+		cache.surface = ebiten.NewImage(width, height)
 		cache.rows = map[int]nativeRowTexture{}
 		v.cache = map[int]preparedRow{}
 		cache.style = style
 	}
-	nativeRect(dst, r, v.Theme.Background)
-	for y, row := range snap.RowsData {
-		if y >= snap.Rows || r.Min.Y+y*lh >= r.Max.Y {
-			break
-		}
+	recycleNativeRows(cache, v, snap.RowsData[:rowCount])
+	// All row slots share a render target. Finish its updates before reading
+	// any slot into the window, avoiding one Metal pass switch per row.
+	for y, row := range snap.RowsData[:rowCount] {
 		prepared, ok := v.cache[y]
 		if !ok || prepared.hash != row.Hash {
 			prepared = v.prepareRow(row)
@@ -113,16 +165,19 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		}
 		rendered, ok := cache.rows[y]
 		if !ok || rendered.hash != row.Hash {
+			var target *ebiten.Image
 			if ok {
-				rendered.image.Deallocate()
+				target = rendered.image
+			} else {
+				target = cache.surface.SubImage(image.Rect(0, y*lh, width, (y+1)*lh)).(*ebiten.Image)
 			}
-			target := ebiten.NewImage(max(1, snap.Cols*cw), lh)
+			top := target.Bounds().Min.Y
 			target.Fill(v.Theme.Background)
 			for _, bg := range prepared.backgrounds {
-				nativeRect(target, image.Rect(bg.startColumn*cw, 0, (bg.startColumn+bg.spanColumns)*cw, lh), bg.color)
+				nativeRect(target, image.Rect(bg.startColumn*cw, top, (bg.startColumn+bg.spanColumns)*cw, top+lh), bg.color)
 			}
 			for _, run := range prepared.text {
-				bounds := image.Rect(run.startColumn*cw, 0, (run.startColumn+run.spanColumns)*cw, lh).Intersect(target.Bounds())
+				bounds := image.Rect(run.startColumn*cw, top, (run.startColumn+run.spanColumns)*cw, top+lh).Intersect(target.Bounds())
 				if bounds.Empty() || run.text == "" {
 					continue
 				}
@@ -154,15 +209,19 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 					if run.style.linkURI != "" {
 						underline = glyphBounds
 					}
-					nativeRect(target, image.Rect(underline.Min.X, lh-2, underline.Max.X, lh-1), fg)
+					nativeRect(target, image.Rect(underline.Min.X, top+lh-2, underline.Max.X, top+lh-1), fg)
 				}
 				if run.style.strikethrough {
-					nativeRect(target, image.Rect(bounds.Min.X, lh/2, bounds.Max.X, lh/2+1), fg)
+					nativeRect(target, image.Rect(bounds.Min.X, top+lh/2, bounds.Max.X, top+lh/2+1), fg)
 				}
 			}
 			rendered = nativeRowTexture{row.Hash, target}
 			cache.rows[y] = rendered
 		}
+	}
+	nativeRect(dst, r, v.Theme.Background)
+	for y := 0; y < rowCount; y++ {
+		rendered := cache.rows[y]
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(float64(r.Min.X), float64(r.Min.Y+y*lh))
 		dst.DrawImage(rendered.image, op)
@@ -170,13 +229,6 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 			clr := v.Theme.Selection
 			clr.A = 100
 			nativeRect(dst, image.Rect(r.Min.X+left*cw, r.Min.Y+y*lh, r.Min.X+(right+1)*cw, r.Min.Y+(y+1)*lh), clr)
-		}
-	}
-	for y, row := range cache.rows {
-		if y >= len(snap.RowsData) {
-			row.image.Deallocate()
-			delete(cache.rows, y)
-			delete(v.cache, y)
 		}
 	}
 	visibleImages := map[uint64]bool{}

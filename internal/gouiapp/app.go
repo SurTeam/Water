@@ -72,8 +72,14 @@ func runWindowWithConnection(socket, configPath string, cfg goconfig.AppConfig, 
 }
 
 func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig, buildVariant string, sshDestinations []string) error {
-	multi := goui.NewMultiWorkspaceClient(nil)
-	w := goui.NewEbitengineWindow(multi, cfg)
+	var w *goui.EbitengineWindow
+	invalidate := func() {
+		if w != nil {
+			w.Invalidate()
+		}
+	}
+	multi := goui.NewMultiWorkspaceClient(invalidate)
+	w = goui.NewEbitengineWindow(multi, cfg)
 	w.SetNewWindowHandler(func() error {
 		executable, err := os.Executable()
 		if err != nil {
@@ -105,7 +111,7 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 		if embedded == nil && ownsDetached && !cfg.Server.DetachOnQuit {
 			defer func() { _ = goclient.New(socket).Call("server.shutdown", map[string]any{}, nil) }()
 		}
-		localView := goui.NewWorkspaceClientWithConnection(localSession, nil, cfg, "")
+		localView := goui.NewWorkspaceClientWithConnection(localSession, invalidate, cfg, "")
 		w.Attach(localView)
 		localView.SetConfigPath(configPath)
 		localView.SetSettingsStore(settingsStore)
@@ -140,7 +146,7 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			_ = tunnel.Close()
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("open remote Water session %s: %w", destination, err)
 		}
-		view := goui.NewWorkspaceClientWithConnection(session, nil, cfg, destination)
+		view := goui.NewWorkspaceClientWithConnection(session, invalidate, cfg, destination)
 		w.Attach(view)
 		view.SetConfigPath(configPath)
 		view.SetSettingsStore(settingsStore)
@@ -196,6 +202,9 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	// Hidden windows keep Update running to service control and terminal input.
 	// Draw owns clearing so an invisible frame submits no graphics commands.
 	ebiten.SetScreenClearedEveryFrame(false)
+	// Retaining the screen alone still runs Update at 60 Hz. Minimum FPS mode
+	// sleeps until native input or the window's bounded scheduler wakes it.
+	ebiten.SetFPSMode(ebiten.FPSModeVsyncOffMinimum)
 	return ebiten.RunGameWithOptions(w, &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant})
 }
 

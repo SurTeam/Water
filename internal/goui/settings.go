@@ -381,6 +381,9 @@ func (c *WorkspaceClient) pollSettingsSave() {
 	}
 	select {
 	case result := <-c.settings.result:
+		if c.invalidate != nil {
+			c.invalidate()
+		}
 		c.settings.saving = false
 		c.settings.result = nil
 		if result.err != nil {

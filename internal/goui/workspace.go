@@ -328,8 +328,15 @@ func (c *WorkspaceClient) Close() {
 func (c *WorkspaceClient) Run() {
 	pushes := c.session.Pushes
 	events := c.session.Events
+	// PTY chunks can arrive much faster than the display consumes snapshots.
+	// Parse every event on this worker, but copy visible cells at most 60 Hz.
+	ticker := time.NewTicker(time.Second / 60)
+	defer ticker.Stop()
+	pending := make(map[*terminalClient]bool)
 	for pushes != nil || events != nil {
 		select {
+		case <-ticker.C:
+			c.publishTerminalSnapshots(pending)
 		case msg, ok := <-pushes:
 			if !ok {
 				pushes = nil
@@ -349,9 +356,30 @@ func (c *WorkspaceClient) Run() {
 				events = nil
 				continue
 			}
-			c.applyTerminalEvent(push)
+			// Drain only an already queued, bounded batch. Parsing and responses
+			// retain event order; visible snapshots are copied once per terminal.
+			batch := []goclient.TerminalPush{push}
+			for len(batch) < 64 && events != nil {
+				select {
+				case next, open := <-events:
+					if !open {
+						events = nil
+						break
+					}
+					batch = append(batch, next)
+				default:
+					goto publish
+				}
+			}
+		publish:
+			for _, event := range batch {
+				if term := c.applyTerminalEventDeferred(event); term != nil {
+					pending[term] = true
+				}
+			}
 		}
 	}
+	c.publishTerminalSnapshots(pending)
 	if err := c.session.Err(); err != nil {
 		c.mu.Lock()
 		c.connectionError = err.Error()
@@ -1227,26 +1255,57 @@ func applyWireEvent(emu *govt.Emulator, ev goprotocol.WireTerminalEvent) {
 }
 
 func (c *WorkspaceClient) applyTerminalEvent(push goclient.TerminalPush) {
+	c.applyTerminalEvents([]goclient.TerminalPush{push})
+}
+
+func (c *WorkspaceClient) applyTerminalEvents(batch []goclient.TerminalPush) {
+	changed := make(map[*terminalClient]bool)
+	for _, push := range batch {
+		if term := c.applyTerminalEventDeferred(push); term != nil {
+			changed[term] = true
+		}
+	}
+	c.publishTerminalSnapshots(changed)
+}
+
+func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]bool) {
+	if len(changed) == 0 {
+		return
+	}
+	for term := range changed {
+		term.mu.Lock()
+		if term.emu != nil {
+			term.snapshot = term.emu.Snapshot()
+		}
+		term.mu.Unlock()
+		delete(changed, term)
+	}
+	if c.invalidate != nil {
+		c.invalidate()
+	}
+}
+
+func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush) *terminalClient {
 	c.mu.RLock()
 	term := c.terminals[push.TerminalID]
 	c.mu.RUnlock()
 	if term == nil {
-		return
+		return nil
 	}
 
 	term.mu.Lock()
 	if term.emu == nil {
 		term.mu.Unlock()
-		return
+		return nil
 	}
 	if push.Event.Seq <= term.lastSeq {
 		term.mu.Unlock()
-		return
+		return nil
 	}
 	if term.lastSeq != 0 && push.Event.Seq != term.lastSeq+1 {
 		term.mu.Unlock()
 		c.resyncTerminal(push.TerminalID)
-		return
+		return nil
 	}
 	term.lastSeq = push.Event.Seq
 	switch push.Event.Kind {
@@ -1268,12 +1327,9 @@ func (c *WorkspaceClient) applyTerminalEvent(push goclient.TerminalPush) {
 		term.rows = push.Event.Size.Lines
 		term.selection = Selection{}
 	}
-	term.snapshot = term.emu.Snapshot()
 	term.mu.Unlock()
 	c.flushVTResponses(term)
-	if c.invalidate != nil {
-		c.invalidate()
-	}
+	return term
 }
 
 func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {

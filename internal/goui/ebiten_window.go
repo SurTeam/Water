@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/SurTeam/Water/internal/goconfig"
@@ -113,7 +114,22 @@ type EbitengineWindow struct {
 	windowResult            chan error
 	quitResult              chan error
 	quitError               string
+	frameRevision           atomic.Uint64
+	presentedRevision       atomic.Uint64
+	continuousInput         atomic.Bool
+	layoutRevision          uint64
+	drawnRevision           uint64
+	lastLayout              time.Time
+	lastFrameSize           image.Point
+	lastFrameScale          float64
+	lastFocus               bool
+	lastBlink               bool
+	lastFontGeneration      uint64
+	wasInvisible            bool
 }
+
+// Invalidate coalesces worker updates without doing graphics work off-thread.
+func (w *EbitengineWindow) Invalidate() { w.frameRevision.Add(1) }
 
 func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *EbitengineWindow {
 	w := &EbitengineWindow{multi: multi, cfg: cfg, queue: make(chan nativeRequest, 128), done: make(chan struct{}), menuEvents: make(chan string, 16), views: map[*WorkspaceClient]*nativeView{}, textures: map[uuid.UUID]*nativeTerminalTexture{}, scale: 1}
@@ -121,7 +137,32 @@ func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *E
 	w.bellNotifications = make(chan uuid.UUID, 32)
 	w.clipboardReady = clipboard.Init() == nil
 	w.initComposer()
+	w.Invalidate()
+	go w.scheduleFrames()
 	return w
+}
+
+// Minimum FPS mode wakes for native input. Workers coalesce their invalidations
+// here at display cadence; periodic maintenance covers native menus, visibility,
+// settings completion and cursor blink without a permanent 60 Hz frame loop.
+func (w *EbitengineWindow) scheduleFrames() {
+	ticker := time.NewTicker(time.Second / 60)
+	defer ticker.Stop()
+	ticks := 0
+	blink := time.Now().UnixMilli()%1000 < 600
+	for {
+		select {
+		case <-w.done:
+			return
+		case <-ticker.C:
+			ticks++
+			phase := time.Now().UnixMilli()%1000 < 600
+			if ticks%15 == 0 || phase != blink || w.continuousInput.Load() || w.frameRevision.Load() != w.presentedRevision.Load() {
+				ebiten.ScheduleFrame()
+			}
+			blink = phase
+		}
+	}
 }
 func (w *EbitengineWindow) Attach(c *WorkspaceClient) { c.native.Store(w) }
 func (w *EbitengineWindow) Close()                    { w.once.Do(func() { close(w.done); w.fonts.close() }) }
@@ -154,6 +195,7 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 	defer timer.Stop()
 	select {
 	case w.queue <- r:
+		w.Invalidate()
 	case <-w.done:
 		return nil, errors.New("window closed")
 	case <-timer.C:
@@ -170,6 +212,9 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 }
 
 func (w *EbitengineWindow) Update() error {
+	defer func() {
+		w.continuousInput.Store(len(inpututil.AppendPressedKeys(nil)) > 0 || w.drag != nil || w.composition != "")
+	}()
 	if !w.windowConfigured {
 		// Apply decoration to the live native window too: platform startup can
 		// alter its initial style while setting up resizability and focus.
@@ -182,6 +227,7 @@ func (w *EbitengineWindow) Update() error {
 			}
 			select {
 			case w.menuEvents <- action:
+				w.Invalidate()
 			default:
 			}
 		}, w.quitServer != nil)
@@ -221,6 +267,7 @@ func (w *EbitengineWindow) Update() error {
 		select {
 		case action := <-w.menuEvents:
 			w.menuAction(action)
+			w.Invalidate()
 		default:
 			n = 16
 		}
@@ -230,6 +277,21 @@ func (w *EbitengineWindow) Update() error {
 	}
 	x, y := ebiten.CursorPosition()
 	w.mouse = image.Pt(x, y)
+	focused := ebiten.IsFocused()
+	blink := time.Now().UnixMilli()%1000 < 600
+	fontGeneration := w.fonts.generation.Load()
+	if w.mouse != w.lastMouse || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || blink != w.lastBlink || fontGeneration != w.lastFontGeneration || w.drag != nil {
+		w.Invalidate()
+	}
+	w.lastFrameSize, w.lastFrameScale, w.lastFocus, w.lastBlink, w.lastFontGeneration = w.size, w.scale, focused, blink, fontGeneration
+	// Keep the existing 60 Hz input/repeat clock, but don't rebuild or submit
+	// an unchanged frame. Keyboard and pointer edits can be purely local.
+	if len(inpututil.AppendPressedKeys(nil)) > 0 || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) || inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft) {
+		w.Invalidate()
+	}
+	if dx, dy := ebiten.Wheel(); dx != 0 || dy != 0 {
+		w.Invalidate()
+	}
 	platformConfig := c.currentConfig()
 	if ebiten.IsWindowMaximized() || ebiten.IsFullscreen() {
 		platformConfig.UI.WindowCornerRadius = 0
@@ -248,11 +310,18 @@ func (w *EbitengineWindow) Update() error {
 			delete(w.views, view)
 		}
 	}
-	w.layout(c, nil)
+	revision := w.frameRevision.Load()
+	if revision != w.layoutRevision || time.Since(w.lastLayout) >= 250*time.Millisecond {
+		// Settings save completion is polled by layout even without input.
+		w.layout(c, nil)
+		w.layoutRevision, w.lastLayout = revision, time.Now()
+	}
+	processed := false
 	for n := 0; n < 128; n++ {
 		select {
 		case r := <-w.queue:
 			w.handleRequest(r)
+			processed = true
 		default:
 			n = 128
 		}
@@ -265,7 +334,10 @@ func (w *EbitengineWindow) Update() error {
 	if c == nil {
 		return nil
 	}
-	w.layout(c, nil)
+	if processed || w.frameRevision.Load() != w.layoutRevision {
+		w.layout(c, nil)
+		w.layoutRevision = w.frameRevision.Load()
+	}
 	w.nativePointer(c)
 	w.updateCursor(c)
 	if !ebiten.IsFocused() {
@@ -279,7 +351,11 @@ func (w *EbitengineWindow) Update() error {
 		w.nativeKeys(c)
 		return nil
 	}
+	previousComposition := w.composition
 	handled, err := w.updateComposer(c)
+	if handled || previousComposition != w.composition {
+		w.Invalidate()
+	}
 	if err != nil {
 		return err
 	}
@@ -290,6 +366,8 @@ func (w *EbitengineWindow) Update() error {
 }
 
 func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
+	revision := w.frameRevision.Load()
+	w.presentedRevision.Store(revision)
 	// Ebitengine does not swap buffers for hidden or fully occluded windows.
 	// Continuing to draw accumulates graphics commands until restore, including automatic
 	// screen clears. Leave the retained frame untouched while Update and the
@@ -300,8 +378,14 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 		invisible = state["hidden"] == true || state["occluded"] == true
 	}
 	if (invisible || ebiten.IsWindowMinimized()) && len(w.shots) == 0 {
+		w.wasInvisible = true
 		return
 	}
+	if revision == w.drawnRevision && !w.wasInvisible && len(w.shots) == 0 {
+		return
+	}
+	w.wasInvisible = false
+	w.drawnRevision = revision
 	screen.Clear()
 	if c := w.active(); c != nil {
 		w.layout(c, screen)
@@ -311,8 +395,8 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 		}
 		for id, cache := range w.textures {
 			if !visible[id] {
-				for _, row := range cache.rows {
-					row.image.Deallocate()
+				if cache.surface != nil {
+					cache.surface.Deallocate()
 				}
 				for _, tex := range cache.images {
 					tex.Deallocate()
