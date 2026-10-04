@@ -144,8 +144,15 @@ type EbitengineWindow struct {
 
 // Invalidate coalesces worker updates without doing graphics work off-thread.
 func (w *EbitengineWindow) Invalidate() {
-	w.frameRevision.Add(1)
+	countNativeInvalidation()
 	w.frameActivity.Store(time.Now().UnixNano())
+	w.invalidateOutput()
+}
+
+// Output publication has its own bounded cadence. It must not turn on the
+// display-rate input loop merely because a PTY keeps producing bytes.
+func (w *EbitengineWindow) invalidateOutput() {
+	w.frameRevision.Add(1)
 	select {
 	case w.frameWake <- struct{}{}:
 	default:

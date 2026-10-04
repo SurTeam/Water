@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestTerminalViewsPublishOnDisplayConsumptionWithoutASecondClock(t *testing.T) {
+func TestTerminalViewsCoalesceUntilDisplayConsumptionAndPublicationDeadline(t *testing.T) {
 	id := uuid.New()
 	emu := govt.New(20, 4, 100)
 	defer emu.Close()
@@ -25,7 +25,7 @@ func TestTerminalViewsPublishOnDisplayConsumptionWithoutASecondClock(t *testing.
 		snapshotWake: make(chan struct{}, 1),
 		invalidate:   func() { invalidated <- struct{}{} },
 	}
-	c.native.Store(&EbitengineWindow{})
+	c.native.Store(&EbitengineWindow{frameWake: invalidated})
 	done := make(chan struct{})
 	go func() { c.Run(); close(done) }()
 	defer func() {

@@ -640,6 +640,7 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 	prepared := preparedRow{hash: row.Hash}
 	var currentText *textRun
 	var currentBG *backgroundRun
+	var joined strings.Builder
 
 	for column, cell := range row.Cells {
 		fg, bg := v.resolveColors(cell)
@@ -661,6 +662,7 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 
 		if cell.Width == 0 || cell.Invisible {
 			currentText = nil
+			joined.Reset()
 			continue
 		}
 		text := cell.Text
@@ -685,9 +687,17 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 		if v.Ligatures && width == 1 && currentText != nil && !currentText.wide && currentText.style == style &&
 			!terminalCellGlyph(text) && !terminalCellGlyph(currentText.text) &&
 			currentText.startColumn+currentText.spanColumns == column {
-			currentText.text += text
+			// A changing log line must not copy every growing prefix. Builder
+			// retains immutable strings while growing in amortized linear time.
+			if joined.Len() == 0 {
+				joined.Grow(len(row.Cells) - currentText.startColumn)
+				joined.WriteString(currentText.text)
+			}
+			joined.WriteString(text)
+			currentText.text = joined.String()
 			currentText.spanColumns += width
 		} else {
+			joined.Reset()
 			prepared.text = append(prepared.text, textRun{
 				startColumn: column,
 				spanColumns: width,

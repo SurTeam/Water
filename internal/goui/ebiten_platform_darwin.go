@@ -186,6 +186,9 @@ func (p *macNativePlatform) Update(cfg goconfig.AppConfig) {
 	}
 	if !p.onMain(func() {
 		defer p.pending.Store(false)
+		if end := traceNativeWork("platform.update"); end != nil {
+			defer end()
+		}
 		if !p.installed {
 			p.install()
 		}
@@ -237,6 +240,9 @@ func (p *macNativePlatform) updateCorners(radius float64) {
 	macSend(p.window, "invalidateShadow")
 }
 func (p *macNativePlatform) publish() {
+	if end := traceNativeWork("platform.publish"); end != nil {
+		defer end()
+	}
 	items := map[string]any{}
 	for action, ref := range p.items {
 		items[action] = map[string]any{"title": macString(macSend(ref.item, "title")), "key": macString(macSend(ref.item, "keyEquivalent")),

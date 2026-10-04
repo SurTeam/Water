@@ -3,3 +3,7 @@
 package goui
 
 func traceNativeWork(name string) func() { return nil }
+
+func countNativeWork(name string, amount int) {}
+
+func countNativeInvalidation() {}

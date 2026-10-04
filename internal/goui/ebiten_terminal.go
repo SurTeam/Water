@@ -172,17 +172,25 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		v.cache = map[int]preparedRow{}
 		cache.style = style
 	}
+	endMatch := traceNativeWork("terminal.row_match")
 	recycleNativeRows(cache, v, snap.RowsData[:rowCount])
+	if endMatch != nil {
+		endMatch()
+	}
+	endRaster := traceNativeWork("terminal.raster")
+	preparedRows, rasterRows, textRuns := 0, 0, 0
 	// All row slots share a render target. Finish its updates before reading
 	// any slot into the window, avoiding one Metal pass switch per row.
 	for y, row := range snap.RowsData[:rowCount] {
 		prepared, ok := v.cache[y]
 		if !ok || prepared.hash != row.Hash {
+			preparedRows++
 			prepared = v.prepareRow(row)
 			v.cache[y] = prepared
 		}
 		rendered, ok := cache.rows[y]
 		if !ok || rendered.hash != row.Hash {
+			rasterRows++
 			var target *ebiten.Image
 			if ok {
 				target = rendered.image
@@ -195,6 +203,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 				nativeRect(target, image.Rect(bg.startColumn*cw, top, (bg.startColumn+bg.spanColumns)*cw, top+lh), bg.color)
 			}
 			for _, run := range prepared.text {
+				textRuns++
 				bounds := image.Rect(run.startColumn*cw, top, (run.startColumn+run.spanColumns)*cw, top+lh).Intersect(target.Bounds())
 				if bounds.Empty() || run.text == "" {
 					continue
@@ -236,6 +245,17 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 			rendered = nativeRowTexture{row.Hash, target}
 			cache.rows[y] = rendered
 		}
+	}
+	if endRaster != nil {
+		endRaster()
+	}
+	countNativeWork("count.visible_rows", rowCount)
+	countNativeWork("count.prepared_rows", preparedRows)
+	countNativeWork("count.raster_rows", rasterRows)
+	countNativeWork("count.text_runs", textRuns)
+	endComposite := traceNativeWork("terminal.composite")
+	if endComposite != nil {
+		defer endComposite()
 	}
 	nativeRect(dst, r, v.Theme.Background)
 	for y := 0; y < rowCount; y++ {

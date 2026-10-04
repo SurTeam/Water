@@ -64,6 +64,8 @@ def main():
                 (directory / f"{label}-allocs-{suffix}.pprof").write_bytes(response.read())
         if args.profile:
             allocations("before")
+            with urllib.request.urlopen(f"http://127.0.0.1:{profile_port}/debug/latency?reset=1", timeout=5) as response:
+                response.read()
         started, cpu = time.monotonic(), cpu_time()
         if args.profile:
             native_sample = subprocess.Popen(["sample", str(gui.pid), str(int(args.seconds)), "5", "-file", str(directory / f"{label}.sample")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -78,10 +80,20 @@ def main():
             time.sleep(min(0.1, max(0, deadline - time.monotonic())))
         elapsed = time.monotonic() - started
         cpu_percent = round((cpu_time() - cpu) / elapsed * 100, 2)
+        stages = None
         if args.profile:
+            with urllib.request.urlopen(f"http://127.0.0.1:{profile_port}/debug/latency", timeout=5) as response:
+                stages = json.load(response)
             allocations("after")
         rss = int(subprocess.check_output(["ps", "-p", str(gui.pid), "-o", "rss="], text=True)) * 1024
-        record = {"mode": label, "cpu_percent": cpu_percent, "rss_bytes": rss}
+        record = {"mode": label, "cpu_percent": cpu_percent, "rss_bytes": rss, "elapsed_seconds": elapsed}
+        if args.profile:
+            record["stages"] = stages
+            output_bytes = stages.get("count.output_bytes", {}).get("samples", 0)
+            record["processed_mib_per_second"] = output_bytes / elapsed / (1024 * 1024)
+        state = ctl("ui", "snapshot")
+        record["application_hidden"] = state.get("application_hidden")
+        record["window_occluded"] = state.get("window_occluded")
         summary = subprocess.check_output(["vmmap", "-summary", str(gui.pid)], text=True, stderr=subprocess.STDOUT)
         (directory / f"{label}-vmmap.txt").write_text(summary)
         footprint = re.search(r"Physical footprint:\s+([\d.]+)([KMG])", summary)
@@ -112,7 +124,9 @@ def main():
                        f"{shlex.quote(str(Path.home() / '.venv/bin/python'))} {shlex.quote(str(emitter))} "
                        f"--emit-output ansi --emit-seconds {args.sustained_seconds or args.seconds + 2} --rate-mib {args.rate_mib}; printf 'WATER_CPU_%s_%s\\n' DONE {cycle}\n")
             ctl("terminal", "send", "--terminal", terminal, command)
-            ctl("terminal", "contains", "--terminal", terminal, f"WATER_CPU_START_{cycle}", "--timeout-ms", "5000")
+            # The command echo also contains WATER_CPU_START_<cycle>. Wait for
+            # the producer's own marker so shell echo cannot start the timer.
+            ctl("terminal", "contains", "--terminal", terminal, "WATER_OUTPUT_LOAD_START", "--timeout-ms", "5000")
             label = "ansi-output" if args.cycles == 1 else f"ansi-output-{cycle + 1}"
             if args.sustained_seconds:
                 deadline = time.monotonic() + args.sustained_seconds

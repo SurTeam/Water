@@ -337,15 +337,42 @@ func (c *WorkspaceClient) Run() {
 	pushes := c.session.Pushes
 	events := c.session.Events
 	// The renderer consumes immutable views and asks for the next latest view.
-	// No independent publication clock: publish a first change immediately,
-	// then coalesce until a display frame consumes it. ANSI parsing never waits
-	// for the renderer, including when its window is hidden.
+	// Publish the first change immediately, then retain only the latest parsed
+	// view at a bounded output cadence. Input wakes the GUI independently. ANSI
+	// parsing never waits for the renderer, including when its window is hidden.
 	pending := make(map[*terminalClient]bool)
 	outstanding := false
+	var published time.Time
+	publication := time.NewTimer(time.Hour)
+	publication.Stop()
+	defer publication.Stop()
+	var publicationDue <-chan time.Time
+	publish := func() {
+		if outstanding && c.native.Load() != nil {
+			return
+		}
+		if len(pending) > 0 && c.native.Load() != nil {
+			if delay := outputPublicationDelay(published, time.Now()); delay > 0 {
+				if publicationDue == nil {
+					publication.Reset(delay)
+					publicationDue = publication.C
+				}
+				return
+			}
+		}
+		outstanding = c.publishTerminalSnapshots(pending)
+		if outstanding {
+			published = time.Now()
+		}
+	}
 	for pushes != nil || events != nil {
 		select {
+		case <-publicationDue:
+			publicationDue = nil
+			publish()
 		case <-c.snapshotWake:
-			outstanding = c.publishTerminalSnapshots(pending)
+			outstanding = false
+			publish()
 		case msg, ok := <-pushes:
 			if !ok {
 				pushes = nil
@@ -376,7 +403,7 @@ func (c *WorkspaceClient) Run() {
 			default:
 			}
 			if !outstanding || c.native.Load() == nil {
-				outstanding = c.publishTerminalSnapshots(pending)
+				publish()
 			}
 		}
 	}
@@ -1303,7 +1330,9 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 		term.mu.Unlock()
 		delete(changed, term)
 	}
-	if c.invalidate != nil {
+	if window := c.native.Load(); window != nil {
+		window.invalidateOutput()
+	} else if c.invalidate != nil {
 		c.invalidate()
 	}
 	return true
@@ -1342,7 +1371,12 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
 		bells := emu.BellCount()
+		end := traceNativeWork("terminal.parse")
 		emu.Write(push.Event.Data)
+		if end != nil {
+			end()
+		}
+		countNativeWork("count.output_bytes", len(push.Event.Data))
 		if emu.BellCount() > bells {
 			if window := c.native.Load(); window != nil {
 				select {

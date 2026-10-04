@@ -6,6 +6,15 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
+// A fast byte stream does not require presenting every intermediate screen.
+// Keep this clock independent of display-rate pointer/keyboard interaction.
+func outputPublicationDelay(published, now time.Time) time.Duration {
+	if published.IsZero() {
+		return 0
+	}
+	return max(0, time.Second/30-now.Sub(published))
+}
+
 // Active input/output follows display presentation rather than two free-running
 // 60Hz clocks. Idle/occluded windows sleep and retain their last rendered frame.
 func (w *EbitengineWindow) updateFramePacing() {
@@ -15,6 +24,9 @@ func (w *EbitengineWindow) updateFramePacing() {
 		visible = visible && state["hidden"] != true && state["occluded"] != true
 	}
 	active := w.continuousInput.Load() || len(w.queue) > 0 || time.Since(time.Unix(0, w.frameActivity.Load())) < 120*time.Millisecond
+	if w.continuousInput.Load() {
+		countNativeWork("count.continuous_input", 1)
+	}
 	mode := ebiten.FPSModeVsyncOffMinimum
 	if visible && active {
 		mode = ebiten.FPSModeVsyncOn

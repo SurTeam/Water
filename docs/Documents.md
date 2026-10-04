@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.2](releases/v0.3.2.md). GUI performance measurements and their limits are recorded in [the memory and input report](memory-input-profile-2026-10-04.md).
+Current release: [0.3.4](releases/v0.3.4.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md) and [the memory and input report](memory-input-profile-2026-10-04.md).
 
 ## Requirements
 
@@ -174,9 +174,13 @@ acceptance. The diagnostic HTTP endpoints exist only in the tagged build.
 `scripts/diagnose-gui-cadence.py --water /tmp/water-profile` exercises paced
 output and 50 Hz GUI text input through the same framed control transport,
 reporting changed-frame intervals separately from work duration. Rendering uses
-immutable changed-row views published on display consumption, without a separate
-snapshot timer; active frames follow display sync and idle windows retain the
-last frame. This does not replace physical keyboard/IME verification.
+immutable changed-row views: the first output is published immediately, and
+continuous output is coalesced on display consumption at up to 30 publications
+per second. Input activity follows display sync independently; idle windows
+retain the last frame. This does not replace physical keyboard/IME verification.
+The latest [CPU pipeline report](cpu-pipeline-profile-2026-10-04.md) records stage
+counters, CPU and allocation profiles, throughput limits, and the presentation
+cadence tradeoff.
 See [the memory and input profiling report](memory-input-profile-2026-10-04.md)
 for the measured results and remaining limits.
 
