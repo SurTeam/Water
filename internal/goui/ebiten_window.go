@@ -86,8 +86,7 @@ type EbitengineWindow struct {
 	views                   map[*WorkspaceClient]*nativeView
 	fonts                   *nativeFonts
 	textures                map[uuid.UUID]*nativeTerminalTexture
-	cornerMask              *ebiten.Image
-	cornerRadius            int
+	cornerShader            *ebiten.Shader
 	scale                   float64
 	size                    image.Point
 	mouse                   image.Point
@@ -125,6 +124,9 @@ type EbitengineWindow struct {
 	frameRevision           atomic.Uint64
 	presentedRevision       atomic.Uint64
 	continuousInput         atomic.Bool
+	frameWake               chan struct{}
+	frameActivity           atomic.Int64
+	keyRepeat               nativeKeyRepeater
 	layoutRevision          uint64
 	drawnRevision           uint64
 	lastLayout              time.Time
@@ -137,11 +139,19 @@ type EbitengineWindow struct {
 }
 
 // Invalidate coalesces worker updates without doing graphics work off-thread.
-func (w *EbitengineWindow) Invalidate() { w.frameRevision.Add(1) }
+func (w *EbitengineWindow) Invalidate() {
+	w.frameRevision.Add(1)
+	w.frameActivity.Store(time.Now().UnixNano())
+	select {
+	case w.frameWake <- struct{}{}:
+	default:
+	}
+}
 
 func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *EbitengineWindow {
 	w := &EbitengineWindow{multi: multi, cfg: cfg, queue: make(chan nativeRequest, 128), done: make(chan struct{}), menuEvents: make(chan string, 16), views: map[*WorkspaceClient]*nativeView{}, textures: map[uuid.UUID]*nativeTerminalTexture{}, scale: 1}
 	w.fonts = newNativeFonts(cfg)
+	w.frameWake = make(chan struct{}, 1)
 	w.bellNotifications = make(chan uuid.UUID, 32)
 	w.clipboardReady = clipboard.Init() == nil
 	w.initComposer()
@@ -162,10 +172,15 @@ func (w *EbitengineWindow) scheduleFrames() {
 		select {
 		case <-w.done:
 			return
+		case <-w.frameWake:
+			ebiten.ScheduleFrame()
 		case <-ticker.C:
 			ticks++
 			phase := time.Now().UnixMilli()%1000 < 600
-			if ticks%15 == 0 || phase != blink || w.continuousInput.Load() || w.frameRevision.Load() != w.presentedRevision.Load() {
+			// Draw can run before the next simulation tick consumes a queued key.
+			// Its presented revision must not put still-pending input to sleep
+			// until the 250ms maintenance wakeup.
+			if ticks%15 == 0 || phase != blink || len(w.queue) > 0 || w.continuousInput.Load() || w.frameRevision.Load() != w.presentedRevision.Load() {
 				ebiten.ScheduleFrame()
 			}
 			blink = phase
@@ -204,6 +219,9 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 	select {
 	case w.queue <- r:
 		w.Invalidate()
+		// Control input is latency-sensitive; wake the native event loop now
+		// rather than waiting for the next output coalescing tick.
+		ebiten.ScheduleFrame()
 	case <-w.done:
 		return nil, errors.New("window closed")
 	case <-timer.C:
@@ -220,6 +238,10 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 }
 
 func (w *EbitengineWindow) Update() error {
+	defer w.updateFramePacing()
+	if end := traceNativeWork("native.update"); end != nil {
+		defer end()
+	}
 	defer func() {
 		w.continuousInput.Store(len(inpututil.AppendPressedKeys(nil)) > 0 || w.drag != nil || w.composition != "")
 	}()
@@ -304,8 +326,11 @@ func (w *EbitengineWindow) Update() error {
 	focused := ebiten.IsFocused()
 	blink := time.Now().UnixMilli()%1000 < 600
 	fontGeneration := w.fonts.generation.Load()
-	if w.mouse != w.lastMouse || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || blink != w.lastBlink || fontGeneration != w.lastFontGeneration || w.drag != nil {
+	if w.mouse != w.lastMouse || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || w.drag != nil {
 		w.Invalidate()
+	}
+	if blink != w.lastBlink {
+		w.frameRevision.Add(1)
 	}
 	w.lastFrameSize, w.lastFrameScale, w.lastFocus, w.lastBlink, w.lastFontGeneration = w.size, w.scale, focused, blink, fontGeneration
 	// Keep the existing 60 Hz input/repeat clock, but don't rebuild or submit
@@ -365,6 +390,7 @@ func (w *EbitengineWindow) Update() error {
 	w.nativePointer(c)
 	w.updateCursor(c)
 	if !ebiten.IsFocused() {
+		w.keyRepeat = nativeKeyRepeater{}
 		w.composer.Cancel()
 		return nil
 	}
@@ -390,6 +416,9 @@ func (w *EbitengineWindow) Update() error {
 }
 
 func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
+	if end := traceNativeWork("native.draw"); end != nil {
+		defer end()
+	}
 	revision := w.frameRevision.Load()
 	w.presentedRevision.Store(revision)
 	// Ebitengine does not swap buffers for hidden or fully occluded windows.
@@ -405,11 +434,24 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 		w.wasInvisible = true
 		return
 	}
+	// Acknowledge consumption after rendering: the worker may publish the next
+	// view immediately, without another timer or a request on the next Update.
+	defer func() {
+		if c := w.active(); c != nil {
+			select {
+			case c.snapshotWake <- struct{}{}:
+			default:
+			}
+		}
+	}()
 	if revision == w.drawnRevision && !w.wasInvisible && len(w.shots) == 0 {
 		return
 	}
 	w.wasInvisible = false
 	w.drawnRevision = revision
+	if end := traceNativeWork("native.present"); end != nil {
+		defer end()
+	}
 	screen.Clear()
 	if c := w.active(); c != nil {
 		w.layout(c, screen)

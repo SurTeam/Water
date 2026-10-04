@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/SurTeam/Water/internal/goui"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -26,6 +27,10 @@ func init() {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+	mux.HandleFunc("/debug/latency", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(goui.NativeWorkTimings(r.URL.Query().Get("reset") == "1"))
+	})
 	mux.HandleFunc("/debug/pprof/goroutine", pprof.Handler("goroutine").ServeHTTP)
 	mux.HandleFunc("/debug/pprof/allocs", func(w http.ResponseWriter, r *http.Request) {
 		// Allocation records can lag two GC cycles. Collect outside the timed

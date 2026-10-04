@@ -95,9 +95,11 @@ type MouseEvent struct {
 }
 
 type Emulator struct {
-	bells atomic.Uint64
-	mu    sync.RWMutex
-	term  *xterm.Terminal
+	frameMu   sync.Mutex
+	frameRows map[*xterm.BufferLine]cachedFrameRow
+	bells     atomic.Uint64
+	mu        sync.RWMutex
+	term      *xterm.Terminal
 
 	responseMu        sync.Mutex
 	responses         [][]byte
@@ -447,6 +449,25 @@ func (e *Emulator) TakeResponses() [][]byte {
 }
 
 func (e *Emulator) Snapshot() Snapshot {
+	return e.snapshot(false)
+}
+
+type cachedFrameRow struct {
+	revision uint64
+	row      Row
+}
+
+// FrameSnapshot returns an immutable visible view. Unchanged rows share their
+// cell storage with earlier frames; changed rows receive fresh storage. The
+// cache retains only the current viewport, never the scrollback. Callers must
+// not mutate cells. Snapshot remains the independently owned copy API.
+func (e *Emulator) FrameSnapshot() Snapshot {
+	e.frameMu.Lock()
+	defer e.frameMu.Unlock()
+	return e.snapshot(true)
+}
+
+func (e *Emulator) snapshot(reuseRows bool) Snapshot {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
@@ -484,11 +505,22 @@ func (e *Emulator) Snapshot() Snapshot {
 	s.MouseTracking = modes.MouseTrackingMode
 	s.MouseEncoding = modes.MouseEncoding
 
+	var nextRows map[*xterm.BufferLine]cachedFrameRow
+	if reuseRows {
+		nextRows = make(map[*xterm.BufferLine]cachedFrameRow, term.Rows())
+	}
 	for row := 0; row < term.Rows(); row++ {
 		line := buf.Lines.Get(buf.YDisp + row)
 		if line == nil {
 			s.RowsData[row] = Row{Cells: make([]Cell, term.Cols())}
 			continue
+		}
+		if reuseRows {
+			if cached, ok := e.frameRows[line]; ok && cached.revision == line.Revision() && cached.row.Wrapped == line.IsWrapped && len(cached.row.Cells) == term.Cols() {
+				s.RowsData[row] = cached.row
+				nextRows[line] = cached
+				continue
+			}
 		}
 		cells := make([]Cell, term.Cols())
 		h := fnv.New64a()
@@ -537,6 +569,12 @@ func (e *Emulator) Snapshot() Snapshot {
 			_, _ = h.Write(packed[:])
 		}
 		s.RowsData[row] = Row{Cells: cells, Hash: h.Sum64(), Wrapped: line.IsWrapped}
+		if reuseRows {
+			nextRows[line] = cachedFrameRow{revision: line.Revision(), row: s.RowsData[row]}
+		}
+	}
+	if reuseRows {
+		e.frameRows = nextRows
 	}
 	if e.graphics != nil {
 		s.Images = e.graphics.snapshot(term, s.RowsData)

@@ -124,20 +124,26 @@ type ConnectionEntry struct {
 type terminalClient struct {
 	id            uuid.UUID
 	mu            sync.RWMutex
+	parseMu       sync.Mutex
 	emu           *govt.Emulator
 	snapshot      govt.Snapshot
 	lastSeq       uint64
 	cols          int
 	rows          int
+	cellWidth     int
+	cellHeight    int
 	view          *TerminalView
 	input         *TerminalInput
 	selection     Selection
 	imePreedit    string
 	imeComposing  bool
 	defaultColors [259]uint32
+	inputPending  atomic.Bool
 }
 
 func (t *terminalClient) close() {
+	t.parseMu.Lock()
+	defer t.parseMu.Unlock()
 	t.mu.Lock()
 	if t.emu != nil {
 		t.emu.Close()
@@ -152,6 +158,7 @@ type WorkspaceClient struct {
 	native               atomic.Pointer[EbitengineWindow]
 	session              *goclient.Session
 	invalidate           func()
+	snapshotWake         chan struct{}
 	config               goconfig.AppConfig
 	runtimeConfig        *goconfig.AppConfig // Owned by layoutMu; server settings change on restart.
 	settingsStore        *SettingsStore
@@ -222,6 +229,7 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 	c := &WorkspaceClient{
 		session:                    session,
 		invalidate:                 invalidate,
+		snapshotWake:               make(chan struct{}, 1),
 		config:                     config.Normalized(),
 		sidebarHidden:              !config.UI.SidebarVisible,
 		remoteDestination:          strings.TrimSpace(remoteDestination),
@@ -328,15 +336,16 @@ func (c *WorkspaceClient) Close() {
 func (c *WorkspaceClient) Run() {
 	pushes := c.session.Pushes
 	events := c.session.Events
-	// PTY chunks can arrive much faster than the display consumes snapshots.
-	// Parse every event on this worker, but copy visible cells at most 60 Hz.
-	ticker := time.NewTicker(time.Second / 60)
-	defer ticker.Stop()
+	// The renderer consumes immutable views and asks for the next latest view.
+	// No independent publication clock: publish a first change immediately,
+	// then coalesce until a display frame consumes it. ANSI parsing never waits
+	// for the renderer, including when its window is hidden.
 	pending := make(map[*terminalClient]bool)
+	outstanding := false
 	for pushes != nil || events != nil {
 		select {
-		case <-ticker.C:
-			c.publishTerminalSnapshots(pending)
+		case <-c.snapshotWake:
+			outstanding = c.publishTerminalSnapshots(pending)
 		case msg, ok := <-pushes:
 			if !ok {
 				pushes = nil
@@ -356,26 +365,18 @@ func (c *WorkspaceClient) Run() {
 				events = nil
 				continue
 			}
-			// Drain only an already queued, bounded batch. Parsing and responses
-			// retain event order; visible snapshots are copied once per terminal.
-			batch := []goclient.TerminalPush{push}
-			for len(batch) < 64 && events != nil {
-				select {
-				case next, open := <-events:
-					if !open {
-						events = nil
-						break
-					}
-					batch = append(batch, next)
-				default:
-					goto publish
-				}
+			if term := c.applyTerminalEventDeferred(push); term != nil {
+				pending[term] = true
 			}
-		publish:
-			for _, event := range batch {
-				if term := c.applyTerminalEventDeferred(event); term != nil {
-					pending[term] = true
-				}
+			// Prioritize a frame request after each bounded ordered event, rather
+			// than letting a permanently full output channel starve publication.
+			select {
+			case <-c.snapshotWake:
+				outstanding = false
+			default:
+			}
+			if !outstanding || c.native.Load() == nil {
+				outstanding = c.publishTerminalSnapshots(pending)
 			}
 		}
 	}
@@ -978,13 +979,13 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 		Hyperlinks:            c.config.Terminal.Hyperlinks,
 		HyperlinkCommandClick: c.config.Terminal.HyperlinkCommandClick,
 		OnInput: func(data []byte) {
-			term.mu.Lock()
-			term.selection = Selection{}
-			if term.emu != nil {
-				term.emu.ScrollToBottom()
-				term.snapshot = term.emu.Snapshot()
+			// Input must not wait for output parsing or allocate a screen copy on
+			// the frame thread. The terminal worker applies viewport follow-up.
+			term.inputPending.Store(true)
+			select {
+			case c.snapshotWake <- struct{}{}:
+			default:
 			}
-			term.mu.Unlock()
 			if c.invalidate != nil {
 				c.invalidate()
 			}
@@ -1004,7 +1005,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 				return false
 			}
 			accepted := term.emu.Mouse(ev)
-			term.snapshot = term.emu.Snapshot()
+			term.snapshot = term.emu.FrameSnapshot()
 			if accepted {
 				term.selection = Selection{}
 			}
@@ -1268,14 +1269,36 @@ func (c *WorkspaceClient) applyTerminalEvents(batch []goclient.TerminalPush) {
 	c.publishTerminalSnapshots(changed)
 }
 
-func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]bool) {
+func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]bool) bool {
+	c.mu.RLock()
+	for _, term := range c.terminals {
+		if term.inputPending.Load() {
+			term.mu.Lock()
+			if term.snapshot.YDisp != term.snapshot.YBase || term.selection.Active {
+				changed[term] = true
+			} else {
+				// Most typing already follows the live viewport. Do not publish
+				// a duplicate pre-echo view and delay the actual PTY echo behind it.
+				term.inputPending.Store(false)
+			}
+			term.mu.Unlock()
+		}
+	}
+	c.mu.RUnlock()
 	if len(changed) == 0 {
-		return
+		return false
+	}
+	if end := traceNativeWork("terminal.snapshot"); end != nil {
+		defer end()
 	}
 	for term := range changed {
 		term.mu.Lock()
 		if term.emu != nil {
-			term.snapshot = term.emu.Snapshot()
+			if term.inputPending.Swap(false) {
+				term.selection = Selection{}
+				term.emu.ScrollToBottom()
+			}
+			term.snapshot = term.emu.FrameSnapshot()
 		}
 		term.mu.Unlock()
 		delete(changed, term)
@@ -1283,15 +1306,21 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 	if c.invalidate != nil {
 		c.invalidate()
 	}
+	return true
 }
 
 func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush) *terminalClient {
+	if end := traceNativeWork("terminal.event"); end != nil {
+		defer end()
+	}
 	c.mu.RLock()
 	term := c.terminals[push.TerminalID]
 	c.mu.RUnlock()
 	if term == nil {
 		return nil
 	}
+	term.parseMu.Lock()
+	defer term.parseMu.Unlock()
 
 	term.mu.Lock()
 	if term.emu == nil {
@@ -1308,11 +1337,13 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 		return nil
 	}
 	term.lastSeq = push.Event.Seq
+	emu := term.emu
+	term.mu.Unlock()
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
-		bells := term.emu.BellCount()
-		term.emu.Write(push.Event.Data)
-		if term.emu.BellCount() > bells {
+		bells := emu.BellCount()
+		emu.Write(push.Event.Data)
+		if emu.BellCount() > bells {
 			if window := c.native.Load(); window != nil {
 				select {
 				case window.bellNotifications <- term.id:
@@ -1320,14 +1351,17 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 				}
 			}
 		}
+		term.mu.Lock()
 		term.selection = Selection{}
+		term.mu.Unlock()
 	case goprotocol.ResizeEvent:
-		term.emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)
+		emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)
+		term.mu.Lock()
 		term.cols = push.Event.Size.Columns
 		term.rows = push.Event.Size.Lines
 		term.selection = Selection{}
+		term.mu.Unlock()
 	}
-	term.mu.Unlock()
 	c.flushVTResponses(term)
 	return term
 }

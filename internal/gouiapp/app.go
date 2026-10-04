@@ -219,6 +219,9 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	// Retaining the screen alone still runs Update at 60 Hz. Minimum FPS mode
 	// sleeps until native input or the window's bounded scheduler wakes it.
 	ebiten.SetFPSMode(ebiten.FPSModeVsyncOffMinimum)
+	// Update exactly once before each presentation, including minimum mode;
+	// text events must not accumulate while fixed-tick catch-up skips an Update.
+	ebiten.SetTPS(ebiten.SyncWithFPS)
 	return ebiten.RunGameWithOptions(w, &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant})
 }
 
@@ -321,6 +324,13 @@ func startDetachedServer(socket, configPath, buildVariant string) error {
 		"--config", configPath,
 		"--daemonize",
 	)
+	// Older Water servers leaked their private daemon marker into PTY shells.
+	// A GUI launched from one of those shells must still start a fresh launcher.
+	for _, value := range os.Environ() {
+		if !strings.HasPrefix(value, "WATER_GO_DAEMON_CHILD=") {
+			cmd.Env = append(cmd.Env, value)
+		}
+	}
 	if out, err := cmd.CombinedOutput(); err != nil {
 		message := strings.TrimSpace(string(out))
 		if message == "" {

@@ -6,6 +6,7 @@ import (
 	"math"
 	"reflect"
 	"strings"
+	"time"
 
 	"gioui.org/io/key"
 	"gioui.org/widget"
@@ -14,7 +15,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/hajimehoshi/ebiten/v2/exp/textinput"
-	"github.com/hajimehoshi/ebiten/v2/inpututil"
 	"github.com/hajimehoshi/ebiten/v2/text/v2"
 	"golang.design/x/clipboard"
 )
@@ -1023,7 +1023,13 @@ func (w *EbitengineWindow) nativeKeys(c *WorkspaceClient) {
 	if ebiten.IsKeyPressed(ebiten.KeyMeta) {
 		mods += "cmd-"
 	}
-	for _, spec := range nativeKeySpecs(mods, w.composition != "", inpututil.KeyPressDuration) {
+	now := time.Now()
+	for _, spec := range nativeKeySpecs(mods, w.composition != "", func(k ebiten.Key) int {
+		if w.keyRepeat.ready(k, ebiten.IsKeyPressed(k), now) {
+			return 1
+		}
+		return 0
+	}) {
 		w.composer.Confirm()
 		w.key(c, spec)
 	}

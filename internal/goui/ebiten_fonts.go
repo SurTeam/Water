@@ -3,6 +3,7 @@ package goui
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -24,6 +25,7 @@ import (
 type fontKey struct {
 	family       string
 	bold, italic bool
+	bitmapPixels int
 }
 type nativeFontRecord struct {
 	path          string
@@ -45,6 +47,7 @@ type nativeFonts struct {
 	mono        [4]*text.GoTextFaceSource
 	fallback    *text.GoTextFaceSource
 	emoji       *text.GoTextFaceSource
+	emojiFamily string
 }
 
 func fontName(s string) string {
@@ -93,8 +96,10 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 	}
 	// Resolve the requested family before opening the window. Future changes
 	// are loaded by the worker and use the bundled fallback until ready.
-	if source := f.load(fontKey{family: "SFNS"}); source != nil {
-		f.ui = source
+	if len(nativeFontFamilies(cfg.UI.UIFontFamily)) == 0 {
+		if source := f.load(fontKey{family: "SFNS"}); source != nil {
+			f.ui = source
+		}
 	}
 	for _, family := range nativeFontFamilies(cfg.Terminal.FontFamily) {
 		k := fontKey{family: family}
@@ -108,10 +113,24 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 			}
 		}
 	}
+	// Sarasa's SC UI/Term faces share the CJK repertoire. Reuse a configured
+	// regular SC face before loading another full copy of those glyph tables.
+	for _, family := range append(nativeFontFamilies(cfg.UI.UIFontFamily), nativeFontFamilies(cfg.Terminal.FontFamily)...) {
+		name := fontName(family)
+		if name == "sarasatermsc" || name == "sarasatermscnerdfont" || name == "sarasauisc" {
+			if source := f.loaded[fontKey{family: family}]; source != nil {
+				f.fallback = source
+				break
+			}
+		}
+	}
 	// Only the first available regular CJK fallback participates in face().
 	// Loading every backup family in four styles retained hundreds of MB of
 	// parsed glyph tables that could never be used by the rendering chain.
 	for _, family := range []string{"Sarasa UI SC", "PingFang", "Noto Sans CJK"} {
+		if f.fallback != nil {
+			break
+		}
 		k := fontKey{family: family}
 		s, loaded := f.loaded[k]
 		if !loaded {
@@ -128,6 +147,8 @@ func newNativeFonts(cfg goconfig.AppConfig) *nativeFonts {
 	for _, family := range []string{"Apple Color Emoji", "Noto Color Emoji", "Segoe UI Emoji", "Noto Emoji"} {
 		if source := f.load(fontKey{family: family}); source != nil {
 			f.emoji = source
+			f.emojiFamily = family
+			f.loaded[fontKey{family: family}] = source
 			break
 		}
 	}
@@ -260,7 +281,7 @@ func (f *nativeFonts) load(k fontKey) *text.GoTextFaceSource {
 	}
 	sort.SliceStable(matches, func(i, j int) bool { return nativeFontScore(matches[i], k) < nativeFontScore(matches[j], k) })
 	for _, record := range matches {
-		cacheKey := fmt.Sprintf("%s:%d", record.path, record.index)
+		cacheKey := fmt.Sprintf("%s:%d:%d", record.path, record.index, k.bitmapPixels)
 		remember := func(source *text.GoTextFaceSource) *text.GoTextFaceSource {
 			f.mu.Lock()
 			f.resolved[k] = record
@@ -270,7 +291,7 @@ func (f *nativeFonts) load(k fontKey) *text.GoTextFaceSource {
 		if cached := f.fileSources[cacheKey]; cached != nil {
 			return remember(cached)
 		}
-		source, err := loadNativeFontSource(record.path, record.index)
+		source, err := loadNativeFontSource(record.path, record.index, k.bitmapPixels)
 		if err == nil {
 			if len(f.fileSources) >= 64 {
 				for old := range f.fileSources {
@@ -290,7 +311,7 @@ func (f *nativeFonts) resolution(k fontKey) map[string]any {
 		chain := make([]map[string]any, 0, len(families))
 		var primary map[string]any
 		for _, family := range families {
-			r := f.resolution(fontKey{family, k.bold, k.italic})
+			r := f.resolution(fontKey{family: family, bold: k.bold, italic: k.italic, bitmapPixels: k.bitmapPixels})
 			chain = append(chain, r)
 			if primary == nil && r["status"] == "ready" {
 				primary = r
@@ -353,7 +374,11 @@ func (f *nativeFonts) faceWithRequest(family string, size float64, mono, bold, i
 		faces = append(faces, face)
 	}
 	for _, family := range nativeFontFamilies(family) {
-		makeFace(f.source(fontKey{family, bold, italic}, request))
+		k := fontKey{family: family, bold: bold, italic: italic}
+		if strings.Contains(fontName(family), "emoji") {
+			k.bitmapPixels = nativeBitmapPixels(size)
+		}
+		makeFace(f.source(k, request))
 	}
 	if len(faces) == 0 {
 		if mono {
@@ -370,7 +395,15 @@ func (f *nativeFonts) faceWithRequest(family string, size float64, mono, bold, i
 		}
 	}
 	makeFace(f.fallback)
-	makeFace(f.emoji)
+	if f.emojiFamily != "" {
+		source := f.source(fontKey{family: f.emojiFamily, bitmapPixels: nativeBitmapPixels(size)}, request)
+		if source == nil {
+			source = f.emoji
+		}
+		makeFace(source)
+	} else {
+		makeFace(f.emoji)
+	}
 	if len(faces) == 1 {
 		return faces[0]
 	}
@@ -379,6 +412,19 @@ func (f *nativeFonts) faceWithRequest(family string, size float64, mono, bold, i
 		return faces[0]
 	}
 	return combined
+}
+
+// Small UI/terminal sizes share the 32px strike; larger fonts and display-scale
+// changes request a suitable source asynchronously, without capping resolution.
+func nativeBitmapPixels(size float64) int {
+	if size <= 32 {
+		return 0
+	}
+	pixels := 64
+	for pixels < int(math.Ceil(size)) && pixels < 4096 {
+		pixels *= 2
+	}
+	return pixels
 }
 
 func (f *nativeFonts) requestedSource(k fontKey) *text.GoTextFaceSource {

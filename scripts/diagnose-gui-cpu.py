@@ -19,21 +19,27 @@ def main():
     parser.add_argument("--seconds", type=float, default=5)
     parser.add_argument("--rate-mib", type=float, default=0.25)
     parser.add_argument("--profile", action="store_true", help="requires a water_cpu_diagnostic build")
+    parser.add_argument("--memory", action="store_true", help="sample diagnostic memory without forced GC or CPU profiling")
+    parser.add_argument("--config", type=Path, help="use these preferences in the isolated test instance")
+    parser.add_argument("--sustained-seconds", type=int, default=0, help="one continuous output run, sampled repeatedly (0 or 10..45 seconds)")
     parser.add_argument("--cycles", type=int, default=1, help="bounded output cycles for retained-memory comparison (1..3)")
     args = parser.parse_args()
     if not 1 <= args.seconds <= 15 or not 0 < args.rate_mib <= 4 or not 1 <= args.cycles <= 3:
         parser.error("seconds must be 1..15, rate-mib 0..4, and cycles 1..3")
+    if args.sustained_seconds and not 10 <= args.sustained_seconds <= 45:
+        parser.error("sustained-seconds must be 0 or 10..45")
     water = str(args.water.resolve())
     root = Path(__file__).resolve().parent.parent
     directory = Path(tempfile.mkdtemp(prefix="water-cpu.", dir="/tmp"))
     socket = str(directory / "control.sock")
     config = directory / "config.json"
     shell = next(str(p) for p in (Path("/opt/homebrew/bin/zsh"), Path("/bin/zsh")) if p.exists())
-    config.write_text(json.dumps({"startup": {"window_columns": 96, "window_rows": 30},
-                                  "server": {"detached": False},
-                                  "shell": {"program": shell, "args": ["-f"]}}))
+    preferences = json.loads(args.config.read_text()) if args.config else {"startup": {"window_columns": 96, "window_rows": 30}}
+    preferences.setdefault("server", {})["detached"] = False
+    preferences["shell"] = {"program": shell, "args": ["-f"]}
+    config.write_text(json.dumps(preferences))
     env = dict(os.environ, WATER_CONTROL_SOCKET=socket, WATER_CONFIG=str(config))
-    if args.profile:
+    if args.profile or args.memory:
         with network_socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             profile_port = reservation.getsockname()[1]
@@ -81,7 +87,7 @@ def main():
         footprint = re.search(r"Physical footprint:\s+([\d.]+)([KMG])", summary)
         if footprint:
             record["physical_footprint_bytes"] = int(float(footprint[1]) * 1024 ** ("KMG".index(footprint[2]) + 1))
-        if args.profile:
+        if args.profile or args.memory:
             with urllib.request.urlopen(f"http://127.0.0.1:{profile_port}/debug/memory", timeout=5) as response:
                 record.update(json.load(response))
         return record
@@ -101,17 +107,26 @@ def main():
         ctl("terminal", "contains", "--terminal", terminal, "%", "--timeout-ms", "5000")
         records = [measure("idle")]
         emitter = root / "scripts/go-ui-background-smoke.py"
-        for cycle in range(args.cycles):
+        for cycle in range(1 if args.sustained_seconds else args.cycles):
             command = (f"printf 'WATER_CPU_%s_%s\\n' START {cycle}; "
                        f"{shlex.quote(str(Path.home() / '.venv/bin/python'))} {shlex.quote(str(emitter))} "
-                       f"--emit-output ansi --emit-seconds {args.seconds + 2} --rate-mib {args.rate_mib}; printf 'WATER_CPU_%s_%s\\n' DONE {cycle}\n")
+                       f"--emit-output ansi --emit-seconds {args.sustained_seconds or args.seconds + 2} --rate-mib {args.rate_mib}; printf 'WATER_CPU_%s_%s\\n' DONE {cycle}\n")
             ctl("terminal", "send", "--terminal", terminal, command)
             ctl("terminal", "contains", "--terminal", terminal, f"WATER_CPU_START_{cycle}", "--timeout-ms", "5000")
             label = "ansi-output" if args.cycles == 1 else f"ansi-output-{cycle + 1}"
-            records.append(measure(label))
+            if args.sustained_seconds:
+                deadline = time.monotonic() + args.sustained_seconds
+                sample = 0
+                while time.monotonic() + args.seconds + 1 < deadline:
+                    sample += 1
+                    records.append(measure(f"continuous-output-{sample}"))
+            else:
+                records.append(measure(label))
             ctl("terminal", "contains", "--terminal", terminal, f"WATER_CPU_DONE_{cycle}", "--timeout-ms", "5000")
+        if args.sustained_seconds:
+            records.append(measure("output-finished"))
         ctl("ui", "screenshot", "--output", str(directory / "screen.png"))
-        report = {"gui_pid": gui.pid, "water": water, "rate_mib": args.rate_mib, "seconds": args.seconds, "records": records}
+        report = {"gui_pid": gui.pid, "water": water, "rate_mib": args.rate_mib, "seconds": args.seconds, "sustained_seconds": args.sustained_seconds, "forced_gc": args.profile, "records": records}
         (directory / "report.json").write_text(json.dumps(report, indent=2))
         print(json.dumps(dict(report, directory=str(directory))))
     finally:

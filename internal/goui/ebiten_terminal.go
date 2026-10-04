@@ -106,14 +106,22 @@ func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClie
 		term.mu.Unlock()
 		return
 	}
-	term.emu.SetCellSize(cw, lh)
-	if cols == term.cols && rows == term.rows {
+	cellChanged := cw != term.cellWidth || lh != term.cellHeight
+	if cols == term.cols && rows == term.rows && !cellChanged {
 		term.mu.Unlock()
 		return
 	}
+	// A retained view must not wait for the parser's lock every frame merely
+	// to reapply the same graphics cell metrics.
+	if cellChanged {
+		term.emu.SetCellSize(cw, lh)
+		term.cellWidth, term.cellHeight = cw, lh
+	}
+	if cols != term.cols || rows != term.rows {
+		term.emu.Resize(cols, rows)
+	}
 	term.cols, term.rows = cols, rows
-	term.emu.Resize(cols, rows)
-	term.snapshot = term.emu.Snapshot()
+	term.snapshot = term.emu.FrameSnapshot()
 	term.mu.Unlock()
 	_ = c.session.DispatchAsync(map[string]any{"type": "terminal.resize", "terminal_id": term.id, "columns": cols, "lines": rows, "cell_width": cw, "cell_height": lh})
 }
@@ -157,7 +165,9 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		if cache.surface != nil {
 			cache.surface.Deallocate()
 		}
-		cache.surface = ebiten.NewImage(width, height)
+		// A large, repeatedly updated render target must not expand the shared
+		// glyph atlas to the next power-of-two size when its rows are sampled.
+		cache.surface = ebiten.NewImageWithOptions(image.Rect(0, 0, width, height), &ebiten.NewImageOptions{Unmanaged: true})
 		cache.rows = map[int]nativeRowTexture{}
 		v.cache = map[int]preparedRow{}
 		cache.style = style

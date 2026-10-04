@@ -82,6 +82,12 @@ try:
     assert initial["renderer"] == "ebitengine"
     assert initial["custom_titlebar"] and not initial["window_decorated"], {k: initial[k] for k in ("renderer", "window_decorated", "custom_titlebar")}
     if json.loads(config.read_text()).get("terminal", {}).get("font_family") == "Sarasa Term SC Nerd Font":
+        # Styles load on first rendering, not merely when metadata is queried.
+        ctl("pane", "input", "--pane", initial["frame_focused_pane"], "--text",
+            "printf '\\033[1mBold\\033[1;3mBold Italic\\033[0;3mItalic\\033[0m\\n'\n")
+        initial = wait(lambda s: s.get("terminal_font", {}).get("status") == "ready" and
+                       all(s.get("terminal_font_styles", {}).get(name, {}).get("status") == "ready"
+                           for name in ("bold", "italic", "bold_italic")), "configured font styles loaded")
         font = initial["terminal_font"]
         assert font["status"] == "ready" and font["resolved_family"].replace(" ", "") == "SarasaTermSCNerdFont", font
         assert font["path"].endswith("sarasa-term-sc-regular-nerd-font.ttf"), font

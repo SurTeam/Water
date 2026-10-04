@@ -15,6 +15,7 @@ const (
 
 // BufferLine stores a single terminal line as a flat []uint32 with 3 values per cell.
 type BufferLine struct {
+	revision      uint64
 	data          []uint32
 	combined      map[int]string
 	extendedAttrs map[int]*ExtendedAttrs
@@ -40,14 +41,14 @@ func NewBufferLine(cols int, fillCell *CellData, isWrapped bool) *BufferLine {
 }
 
 func (bl *BufferLine) ensureCombined() {
-	if bl.combined==nil {
-		bl.combined=make(map[int]string)
+	if bl.combined == nil {
+		bl.combined = make(map[int]string)
 	}
 }
 
 func (bl *BufferLine) ensureExtendedAttrs() {
-	if bl.extendedAttrs==nil {
-		bl.extendedAttrs=make(map[int]*ExtendedAttrs)
+	if bl.extendedAttrs == nil {
+		bl.extendedAttrs = make(map[int]*ExtendedAttrs)
 	}
 }
 
@@ -148,6 +149,7 @@ func (bl *BufferLine) Get(index int) CharData {
 
 // Set sets the cell at index from a legacy CharData tuple.
 func (bl *BufferLine) Set(index int, value CharData) {
+	bl.revision++
 	bl.data[index*cellSize+cellFg] = CharDataAttr(value)
 	ch := CharDataChar(value)
 	width := CharDataWidth(value)
@@ -188,16 +190,17 @@ func (bl *BufferLine) LoadCell(index int, cell *CellData) *CellData {
 
 // SetCell sets the cell at index from a CellData.
 func (bl *BufferLine) SetCell(index int, cell *CellData) {
+	bl.revision++
 	if cell.Content&ContentIsCombinedMask != 0 {
 		bl.ensureCombined()
 		bl.combined[index] = cell.CombinedData
-	} else if bl.combined!=nil {
+	} else if bl.combined != nil {
 		delete(bl.combined, index)
 	}
 	if cell.Bg&BgFlagHasExtended != 0 {
 		bl.ensureExtendedAttrs()
 		bl.extendedAttrs[index] = cell.Extended
-	} else if bl.extendedAttrs!=nil {
+	} else if bl.extendedAttrs != nil {
 		delete(bl.extendedAttrs, index)
 	}
 	si := index * cellSize
@@ -208,11 +211,14 @@ func (bl *BufferLine) SetCell(index int, cell *CellData) {
 
 // SetCellFromCodepoint sets a cell from a codepoint, width, and attribute data.
 func (bl *BufferLine) SetCellFromCodepoint(index int, codePoint uint32, width int, attrs *AttributeData) {
-	if bl.combined!=nil { delete(bl.combined, index) }
+	bl.revision++
+	if bl.combined != nil {
+		delete(bl.combined, index)
+	}
 	if attrs.Bg&BgFlagHasExtended != 0 {
 		bl.ensureExtendedAttrs()
 		bl.extendedAttrs[index] = attrs.Extended
-	} else if bl.extendedAttrs!=nil {
+	} else if bl.extendedAttrs != nil {
 		delete(bl.extendedAttrs, index)
 	}
 	si := index * cellSize
@@ -224,26 +230,36 @@ func (bl *BufferLine) SetCellFromCodepoint(index int, codePoint uint32, width in
 // setASCIIBytes writes printable 7-bit characters with width 1 into a
 // contiguous cell range. The caller guarantees that attrs has no extended
 // payload. Sparse cell metadata is cleared only when it exists.
-func (bl *BufferLine) setASCIIBytes(index int,data []byte,attrs *AttributeData){
-	if len(data)==0 || index<0 || index>=bl.Len{return}
-	if max:=bl.Len-index;len(data)>max{data=data[:max]}
-	if bl.combined!=nil {
-		for offset:=range data{delete(bl.combined,index+offset)}
+func (bl *BufferLine) setASCIIBytes(index int, data []byte, attrs *AttributeData) {
+	bl.revision++
+	if len(data) == 0 || index < 0 || index >= bl.Len {
+		return
 	}
-	if bl.extendedAttrs!=nil {
-		for offset:=range data{delete(bl.extendedAttrs,index+offset)}
+	if max := bl.Len - index; len(data) > max {
+		data = data[:max]
 	}
-	fg,bg:=attrs.Fg,attrs.Bg
-	for offset,b:=range data{
-		si:=(index+offset)*cellSize
-		bl.data[si+cellContent]=uint32(b)|(1<<ContentWidthShift)
-		bl.data[si+cellFg]=fg
-		bl.data[si+cellBg]=bg
+	if bl.combined != nil {
+		for offset := range data {
+			delete(bl.combined, index+offset)
+		}
+	}
+	if bl.extendedAttrs != nil {
+		for offset := range data {
+			delete(bl.extendedAttrs, index+offset)
+		}
+	}
+	fg, bg := attrs.Fg, attrs.Bg
+	for offset, b := range data {
+		si := (index + offset) * cellSize
+		bl.data[si+cellContent] = uint32(b) | (1 << ContentWidthShift)
+		bl.data[si+cellFg] = fg
+		bl.data[si+cellBg] = bg
 	}
 }
 
 // AddCodepointToCell adds a combining codepoint to the cell at index.
 func (bl *BufferLine) AddCodepointToCell(index int, codePoint uint32, width int) {
+	bl.revision++
 	content := bl.data[index*cellSize+cellContent]
 	if content&ContentIsCombinedMask != 0 {
 		bl.ensureCombined()
@@ -271,6 +287,7 @@ func (bl *BufferLine) AddCodepointToCell(index int, codePoint uint32, width int)
 // InsertCells inserts n cells at pos, shifting existing cells right.
 // Cells that fall off the end are lost. New cells are filled with fillCell.
 func (bl *BufferLine) InsertCells(pos, n int, fillCell *CellData) {
+	bl.revision++
 	pos %= bl.Len
 	// Handle fullwidth at pos: reset cell to the left if pos is second cell of a wide char
 	if pos > 0 && bl.GetWidth(pos-1) == 2 {
@@ -298,6 +315,7 @@ func (bl *BufferLine) InsertCells(pos, n int, fillCell *CellData) {
 // DeleteCells deletes n cells at pos, shifting remaining cells left.
 // Vacated cells at the end are filled with fillCell.
 func (bl *BufferLine) DeleteCells(pos, n int, fillCell *CellData) {
+	bl.revision++
 	pos %= bl.Len
 	if n < bl.Len-pos {
 		var tmp CellData
@@ -323,6 +341,7 @@ func (bl *BufferLine) DeleteCells(pos, n int, fillCell *CellData) {
 
 // ReplaceCells replaces cells in [start, end) with fillCell.
 func (bl *BufferLine) ReplaceCells(start, end int, fillCell *CellData, respectProtect bool) {
+	bl.revision++
 	if respectProtect {
 		if start > 0 && bl.GetWidth(start-1) == 2 && bl.IsProtected(start-1) == 0 {
 			bl.SetCellFromCodepoint(start-1, 0, 1, &fillCell.AttributeData)
@@ -376,6 +395,7 @@ func (bl *BufferLine) ReplaceCells(start, end int, fillCell *CellData, respectPr
 // Resize resizes the line to cols cells, filling new cells with fillCell.
 // Returns true if a CleanupMemory call would free excess memory.
 func (bl *BufferLine) Resize(cols int, fillCell *CellData) bool {
+	bl.revision++
 	if cols == bl.Len {
 		return len(bl.data)*4*cleanupThreshold < cap(bl.data)*4
 	}
@@ -423,6 +443,7 @@ func (bl *BufferLine) CleanupMemory() int {
 
 // Fill fills all cells with fillCell.
 func (bl *BufferLine) Fill(fillCell *CellData, respectProtect bool) {
+	bl.revision++
 	if respectProtect {
 		for i := range bl.Len {
 			if bl.IsProtected(i) == 0 {
@@ -431,8 +452,12 @@ func (bl *BufferLine) Fill(fillCell *CellData, respectProtect bool) {
 		}
 		return
 	}
-	if bl.combined!=nil { clear(bl.combined) }
-	if bl.extendedAttrs!=nil { clear(bl.extendedAttrs) }
+	if bl.combined != nil {
+		clear(bl.combined)
+	}
+	if bl.extendedAttrs != nil {
+		clear(bl.extendedAttrs)
+	}
 	for i := range bl.Len {
 		bl.SetCell(i, fillCell)
 	}
@@ -440,6 +465,7 @@ func (bl *BufferLine) Fill(fillCell *CellData, respectProtect bool) {
 
 // CopyFrom copies all data from another BufferLine.
 func (bl *BufferLine) CopyFrom(line *BufferLine) {
+	bl.revision++
 	if bl.Len != line.Len {
 		bl.data = make([]uint32, len(line.data))
 	}
@@ -486,6 +512,7 @@ func (bl *BufferLine) GetNoBgTrimmedLength() int {
 
 // CopyCellsFrom copies length cells from src starting at srcCol to bl starting at destCol.
 func (bl *BufferLine) CopyCellsFrom(src *BufferLine, srcCol, destCol, length int, applyInReverse bool) {
+	bl.revision++
 	srcData := src.data
 	if applyInReverse {
 		for cell := length - 1; cell >= 0; cell-- {
@@ -523,29 +550,33 @@ func (bl *BufferLine) copyCellMapsFrom(src *BufferLine, srcCol, destCol int) {
 }
 
 func (bl *BufferLine) copySparseMapsFrom(src *BufferLine) {
-	if len(src.combined)==0 {
-		if bl.combined!=nil { clear(bl.combined) }
+	if len(src.combined) == 0 {
+		if bl.combined != nil {
+			clear(bl.combined)
+		}
 	} else {
-		if bl.combined==nil {
-			bl.combined=make(map[int]string,len(src.combined))
+		if bl.combined == nil {
+			bl.combined = make(map[int]string, len(src.combined))
 		} else {
 			clear(bl.combined)
 		}
-		for key,value:=range src.combined {
-			bl.combined[key]=value
+		for key, value := range src.combined {
+			bl.combined[key] = value
 		}
 	}
 
-	if len(src.extendedAttrs)==0 {
-		if bl.extendedAttrs!=nil { clear(bl.extendedAttrs) }
+	if len(src.extendedAttrs) == 0 {
+		if bl.extendedAttrs != nil {
+			clear(bl.extendedAttrs)
+		}
 	} else {
-		if bl.extendedAttrs==nil {
-			bl.extendedAttrs=make(map[int]*ExtendedAttrs,len(src.extendedAttrs))
+		if bl.extendedAttrs == nil {
+			bl.extendedAttrs = make(map[int]*ExtendedAttrs, len(src.extendedAttrs))
 		} else {
 			clear(bl.extendedAttrs)
 		}
-		for key,value:=range src.extendedAttrs {
-			bl.extendedAttrs[key]=value
+		for key, value := range src.extendedAttrs {
+			bl.extendedAttrs[key] = value
 		}
 	}
 }

@@ -2,6 +2,8 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
+Current release: [0.3.2](releases/v0.3.2.md). GUI performance measurements and their limits are recorded in [the memory and input report](memory-input-profile-2026-10-04.md).
+
 ## Requirements
 
 Use the Go version specified in `go.mod`. Native macOS GUI builds need Xcode Command Line Tools; app packaging also uses `codesign`, `plutil`, `ditto` and `unzip`. Linux GUI builds need the Ebitengine/Gio native graphics dependencies and an available display/GPU. Remote connections use OpenSSH. Python smoke scripts use `~/.venv/bin/python`.
@@ -142,9 +144,48 @@ On macOS, the application menu follows the configured `hide_window` and `minimiz
 
 The Go settings panel covers the configuration schema, including sidebar, host/workspace/agent geometry, agent colors, dimming, tab-wheel behavior, cross-host workspace navigation and window shortcuts. Each control indicates whether it applies immediately, to new windows or after restarting. Existing override documents and unknown keys survive saving. Cmd+N starts a separate native GUI process attached to the current server, loading the saved window preferences. Workspace and tab rename dialogs use the normal command dispatcher; sidebar Agent rows activate their owning connection, tab and pane.
 
-Rounded windows use Ebitengine screen transparency, a cached alpha mask and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
+Rounded windows use Ebitengine screen transparency, a cached corner shader and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
 
 ## Startup options
+
+The GUI applies a soft Go memory budget of at least 192 MiB, increasing it when
+live data needs 64 MiB of allocation headroom. An explicit `GOMEMLIMIT` overrides
+this policy. GPU textures and native allocations are outside this budget; it is
+not a process memory ceiling. Fonts retain compact outlines with a bounded lazy
+cache, and bitmap emoji load the strike appropriate to the requested size.
+The local typesetting patch and its upgrade/test instructions are documented in
+`third_party/typesetting/WATER_CHANGES.md`.
+
+For isolated continuous-output memory and input measurements:
+
+```sh
+go build -tags water_cpu_diagnostic -o /tmp/water-profile ./cmd/water
+~/.venv/bin/python scripts/diagnose-gui-cpu.py --water /tmp/water-profile \
+  --memory --sustained-seconds 40 --config /path/to/config.json
+~/.venv/bin/python scripts/diagnose-gui-input.py --water /tmp/water-profile \
+  --timings --seconds 25 --rate-mib 4 --config /path/to/config.json
+```
+
+These scripts create owned GUI instances with unique sockets and temporary
+configuration, and close only those instances. `--memory` records memory without
+forcing GC. Input reports distinguish control-command round trips from bounded
+native update/draw timing counters; neither replaces manual OS keyboard/IME
+acceptance. The diagnostic HTTP endpoints exist only in the tagged build.
+`scripts/diagnose-gui-cadence.py --water /tmp/water-profile` exercises paced
+output and 50 Hz GUI text input through the same framed control transport,
+reporting changed-frame intervals separately from work duration. Rendering uses
+immutable changed-row views published on display consumption, without a separate
+snapshot timer; active frames follow display sync and idle windows retain the
+last frame. This does not replace physical keyboard/IME verification.
+See [the memory and input profiling report](memory-input-profile-2026-10-04.md)
+for the measured results and remaining limits.
+
+On macOS, `~/.venv/bin/python scripts/go-ui-detached-startup-smoke.py`
+verifies the packaged dev app's cold start through `open`, with no existing
+server and an inherited legacy `WATER_GO_DAEMON_CHILD=1` marker. It also checks
+standalone daemon startup and that the marker is absent from the new PTY shell.
+The script uses an owned temporary configuration/socket and closes its test
+GUI/server; it does not restart an existing user instance.
 
 For intermittent macOS beachballs when returning to a background window, monitor
 the existing GUI through its control API and capture its stacks while a request

@@ -2,6 +2,8 @@ module github.com/SurTeam/Water
 
 go 1.27
 
+replace github.com/go-text/typesetting => ./third_party/typesetting
+
 require (
 	gioui.org v0.10.3
 	github.com/creack/pty v1.1.24

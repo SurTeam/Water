@@ -33,21 +33,14 @@ func (w *EbitengineWindow) round(dst *ebiten.Image, r image.Rectangle, radius in
 		nativeRect(dst, r, c)
 		return
 	}
-	x, y, right, bottom, rad := float32(r.Min.X), float32(r.Min.Y), float32(r.Max.X), float32(r.Max.Y), float32(radius)
-	var p vector.Path
-	p.MoveTo(x+rad, y)
-	p.LineTo(right-rad, y)
-	p.QuadTo(right, y, right, y+rad)
-	p.LineTo(right, bottom-rad)
-	p.QuadTo(right, bottom, right-rad, bottom)
-	p.LineTo(x+rad, bottom)
-	p.QuadTo(x, bottom, x, bottom-rad)
-	p.LineTo(x, y+rad)
-	p.QuadTo(x, y, x+rad, y)
-	p.Close()
-	op := &vector.DrawPathOptions{AntiAlias: true}
+	// Rounded panes used a large rasterized vector-path atlas. Compute edge
+	// alpha in the shader instead, so pane/window size cannot grow that atlas.
+	op := &ebiten.DrawRectShaderOptions{Uniforms: map[string]any{
+		"Origin": []float32{float32(r.Min.X), float32(r.Min.Y)},
+		"Size":   []float32{float32(r.Dx()), float32(r.Dy())}, "Radius": float32(radius)}}
+	op.GeoM.Translate(float64(r.Min.X), float64(r.Min.Y))
 	op.ColorScale.ScaleWithColor(c)
-	vector.FillPath(dst, &p, nil, op)
+	dst.DrawRectShader(r.Dx(), r.Dy(), w.roundedShader(), op)
 }
 
 func (w *EbitengineWindow) label(dst *ebiten.Image, c *WorkspaceClient, r image.Rectangle, value string, size float64, clr color.NRGBA, bold bool) {

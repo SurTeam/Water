@@ -27,6 +27,8 @@ For setup, configuration, remote connections, control commands, tests, cross-bui
 
 ## Project status
 
+The latest patch, [Water 0.3.2](docs/releases/v0.3.2.md), reduces GUI memory use, improves continuous-output and input frame pacing, and fixes detached macOS startup.
+
 Water is an active workbench rather than a compatibility layer for an existing terminal app. The server owns sessions and bounded terminal replay; each client attaches its own emulator and UI state. That separation is what enables persistent remote sessions, reliable reconnect, bounded output memory, and deterministic control/API tests.
 
 ## License
