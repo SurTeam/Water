@@ -346,6 +346,17 @@ go test ./internal/gobench -count=1 -timeout=60s
 
 For a real GUI smoke run, start the current binary with a unique socket/config and exercise `ui key`, `pane input`, `pane content`, and `ui state` through `water ctl`. Record the GUI/server PID and clean it up after the run. Cross-build and headless tests do not replace a native GUI check.
 
+Cmd+N windows share one local server/socket and can select different workspaces, tabs and panes. Closing a window releases only its session; with `detach_on_quit=false`, the last window closes the server. An embedded server keeps running in its original process after that process's GUI closes while other windows remain. Explicit **Quit GUI and Local Server** shuts down the shared local server using the existing connection, even if its socket pathname has become unavailable.
+
+`water ctl server info` lists UUID `window_id` values and the current focus owner. `water ctl ui state --window <UUID>` (also supported by other `ui` commands) targets a specific window; omitted IDs target the latest focused GUI. `terminal_grids.columns/rows` describe that window's geometry; `terminal_columns/terminal_rows` report the shared terminal's current dimensions. Only the focused window changes shared PTY dimensions; obtaining focus reapplies its pane geometry. Protocol 5 / API v6 is required for this behavior, so an older running server must be retired before the new GUI can attach; its socket will never be replaced automatically.
+
+Native multiwindow checks cover both detached and embedded lifetimes:
+
+```sh
+~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water
+~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water --embedded
+```
+
 Builds and checks run locally. CI only retains `.github/workflows/macos-signed.yml`, which is manually dispatched and does no compilation.
 
 ## In-app updates (macOS and Linux)

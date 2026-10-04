@@ -368,7 +368,9 @@ func (w *EbitengineWindow) Update() error {
 	for view := range w.views {
 		if !liveViews[view] {
 			delete(w.views, view)
+			continue
 		}
+		view.updateWindowFocus(focused && view == c)
 	}
 	revision := w.frameRevision.Load()
 	if revision != w.layoutRevision || time.Since(w.lastLayout) >= 250*time.Millisecond {
@@ -564,6 +566,7 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		wx, wy := ebiten.WindowPosition()
 		ww, wh := ebiten.WindowSize()
 		state["renderer"] = "ebitengine"
+		state["window_id"] = c.session.WindowID
 		state["update_visible"] = w.updateVisible
 		state["update_restart_allowed"] = w.updateRestartAllowed
 		if w.updates != nil {
@@ -595,7 +598,10 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 			directory := pane.term.snapshot.WorkingDirectoryURI
 			yBase, yDisp := pane.term.snapshot.YBase, pane.term.snapshot.YDisp
 			pane.term.mu.RUnlock()
-			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp})
+			pane.term.mu.RLock()
+			columns, rows := pane.term.cols, pane.term.rows
+			pane.term.mu.RUnlock()
+			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "terminal_columns": columns, "terminal_rows": rows, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp})
 		}
 		state["terminal_grids"] = grids
 		state["ui_config"] = c.currentConfig().UI

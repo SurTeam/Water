@@ -33,19 +33,22 @@ type Server struct {
 	closing  chan struct{}
 	once     sync.Once
 
-	opsMu    sync.RWMutex
-	ops      map[uuid.UUID]OperationSnapshot
-	opOrder  []uuid.UUID
+	opsMu   sync.RWMutex
+	ops     map[uuid.UUID]OperationSnapshot
+	opOrder []uuid.UUID
 
-	sessionsMu sync.RWMutex
-	sessions map[*session]struct{}
+	sessionsMu      sync.RWMutex
+	sessions        map[*session]struct{}
+	focusedSession  *session
+	guiDraining     bool
+	sessionsChanged chan struct{}
 
-	uiSeq atomic.Uint64
+	uiSeq       atomic.Uint64
 	pendingUIMu sync.Mutex
-	pendingUI map[uint64]chan goprotocol.WireMessage
+	pendingUI   map[uint64]chan goprotocol.WireMessage
 
 	eventsMu sync.RWMutex
-	events []appEvent
+	events   []appEvent
 	eventSeq atomic.Uint64
 }
 
@@ -72,16 +75,17 @@ func New(socketPath string) *Server {
 func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 	config = config.Normalized()
 	return &Server{
-		SocketPath: socketPath,
-		Build:      gobuild.Variant,
-		Version:    gobuild.Version,
-		Config:     config,
-		registry:   goterminal.NewRegistryWithReplayLimit(config.Terminal.ReplayHistoryBytes),
-		model:      gomodel.New(),
-		closing:    make(chan struct{}),
-		ops:        make(map[uuid.UUID]OperationSnapshot),
-		sessions:   make(map[*session]struct{}),
-		pendingUI:  make(map[uint64]chan goprotocol.WireMessage),
+		SocketPath:      socketPath,
+		Build:           gobuild.Variant,
+		Version:         gobuild.Version,
+		Config:          config,
+		registry:        goterminal.NewRegistryWithReplayLimit(config.Terminal.ReplayHistoryBytes),
+		model:           gomodel.New(),
+		closing:         make(chan struct{}),
+		ops:             make(map[uuid.UUID]OperationSnapshot),
+		sessions:        make(map[*session]struct{}),
+		sessionsChanged: make(chan struct{}, 1),
+		pendingUI:       make(map[uint64]chan goprotocol.WireMessage),
 	}
 }
 
@@ -110,17 +114,12 @@ func (s *Server) ListenAndServe() error {
 	if err := os.MkdirAll(filepath.Dir(s.SocketPath), 0o755); err != nil {
 		return err
 	}
-	_ = os.Remove(s.SocketPath)
-	ln, err := net.Listen("unix", s.SocketPath)
+	ln, cleanup, err := listenOwnedSocket(s.SocketPath)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(s.SocketPath, 0o600); err != nil {
-		_ = ln.Close()
-		return err
-	}
 	s.listener = ln
-	defer os.Remove(s.SocketPath)
+	defer cleanup()
 	go s.monitorForegroundProcesses()
 
 	for {
@@ -145,15 +144,21 @@ func (s *Server) Close() error {
 		if s.listener != nil {
 			err = s.listener.Close()
 		}
+		s.sessionsMu.RLock()
+		for ss := range s.sessions {
+			_ = ss.conn.Close()
+		}
+		s.sessionsMu.RUnlock()
 	})
 	return err
 }
 
 type session struct {
-	conn        net.Conn
-	mu          sync.Mutex
-	attachments map[uuid.UUID]func()
+	conn             net.Conn
+	mu               sync.Mutex
+	attachments      map[uuid.UUID]func()
 	compactSnapshots bool
+	id               uuid.UUID
 
 	snapshotRequests chan struct{}
 	done             chan struct{}
@@ -193,10 +198,11 @@ func (ss *session) requestSnapshot() {
 
 func (s *Server) handleConn(conn net.Conn) {
 	ss := &session{
-		conn: conn,
-		attachments: make(map[uuid.UUID]func()),
-		snapshotRequests: make(chan struct{},1),
-		done: make(chan struct{}),
+		conn:             conn,
+		id:               uuid.New(),
+		attachments:      make(map[uuid.UUID]func()),
+		snapshotRequests: make(chan struct{}, 1),
+		done:             make(chan struct{}),
 	}
 	go s.snapshotLoop(ss)
 	defer func() {
@@ -254,35 +260,71 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
 			"ui_sessions":      s.uiSessionCount(),
+			"windows":          s.windowSessions(),
 		}))
 	case "session.open":
 		var p struct {
-			Role string `json:"role"`
-			CompactSnapshots bool `json:"compact_snapshots"`
+			Role             string `json:"role"`
+			CompactSnapshots bool   `json:"compact_snapshots"`
 		}
 		if len(msg.Params) > 0 {
 			if err := json.Unmarshal(msg.Params, &p); err != nil {
 				return err
 			}
 		}
-		isGUI:=p.Role=="gui"
+		isGUI := p.Role == "gui"
 		if isGUI {
-			ss.compactSnapshots=p.CompactSnapshots
+			ss.compactSnapshots = p.CompactSnapshots
 			// Register before acknowledging session.open. Once OpenSession
 			// returns, callers must be able to route UI automation immediately.
-			s.addSession(ss)
+			if !s.addSession(ss) {
+				return errors.New("server is shutting down after the last window closed")
+			}
 		}
 		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{
+			"window_id":        ss.id,
 			"server_pid":       os.Getpid(),
 			"protocol_version": goprotocol.ProtocolVersion,
 			"server_version":   s.Version,
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
 		})); err != nil {
-			if isGUI{s.dropSession(ss)}
+			if isGUI {
+				s.dropSession(ss)
+			}
 			return err
 		}
-		if isGUI{return s.pushSnapshot(ss)}
+		if isGUI {
+			return s.pushSnapshot(ss)
+		}
+		return nil
+	case "session.focus":
+		var p struct {
+			Focused bool `json:"focused"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			return err
+		}
+		s.sessionsMu.Lock()
+		if _, ok := s.sessions[ss]; ok && p.Focused {
+			s.focusedSession = ss
+		}
+		s.sessionsMu.Unlock()
+		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{}))
+	case "session.release":
+		var p struct {
+			ShutdownIfLast bool `json:"shutdown_if_last"`
+		}
+		if err := json.Unmarshal(msg.Params, &p); err != nil {
+			return err
+		}
+		shutdown := s.releaseSession(ss, p.ShutdownIfLast)
+		if shutdown {
+			defer func() { go s.Close() }()
+		}
+		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{})); err != nil {
+			return err
+		}
 		return nil
 	case "state.dump":
 		gometrics.StateDumps.Add(1)
@@ -292,31 +334,31 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	case "debug.metrics":
 		return ss.write(goprotocol.Success(msg.RequestID, s.metricsSnapshot()))
 	case "debug.memory":
-		modelMemory:=s.model.MemoryProjection()
+		modelMemory := s.model.MemoryProjection()
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-			"terminal_count": s.registry.Count(),
-			"scrollback_lines": s.Config.Terminal.ScrollbackLines,
+			"terminal_count":            s.registry.Count(),
+			"scrollback_lines":          s.Config.Terminal.ScrollbackLines,
 			"inactive_scrollback_lines": s.Config.Terminal.InactiveScrollbackLines,
-			"replay_history_bytes": s.Config.Terminal.ReplayHistoryBytes,
-			"retained_replay_bytes": s.registry.RetainedReplayBytes(),
-			"visible_cells": modelMemory.VisibleCells,
-			"surface_count": modelMemory.SurfaceCount,
-			"shape_cache_entries": 0,
-			"image_cache_bytes": 0,
+			"replay_history_bytes":      s.Config.Terminal.ReplayHistoryBytes,
+			"retained_replay_bytes":     s.registry.RetainedReplayBytes(),
+			"visible_cells":             modelMemory.VisibleCells,
+			"surface_count":             modelMemory.SurfaceCount,
+			"shape_cache_entries":       0,
+			"image_cache_bytes":         0,
 		}))
 	case "connection.list":
-		if s.uiSessionCount()>0 {
-			return s.forwardUI(ss,msg)
+		if s.uiSessionCount() > 0 {
+			return s.forwardUI(ss, msg)
 		}
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"connections": []any{map[string]any{
-				"id": uuid.MustParse("00000000-0000-0000-0000-000000000001"),
-				"name": "Local",
-				"kind": "local",
-				"status": "connected",
-				"socket_path": s.SocketPath,
+				"id":                 uuid.MustParse("00000000-0000-0000-0000-000000000001"),
+				"name":               "Local",
+				"kind":               "local",
+				"status":             "connected",
+				"socket_path":        s.SocketPath,
 				"remote_socket_path": nil,
-				"destination": nil,
+				"destination":        nil,
 			}},
 		}))
 	case "ui.keystroke", "ui.snapshot", "ui.click", "ui.drag", "ui.screenshot", "ui.wheel", "ui.menu":
@@ -545,24 +587,81 @@ func terminalReplayPayload(id uuid.UUID, t *goterminal.Terminal) map[string]any 
 	}
 	return map[string]any{
 		"terminal_id": id,
-		"process": process,
-		"first_seq": first,
-		"last_seq": last,
-		"size": size,
-		"events": wire,
+		"process":     process,
+		"first_seq":   first,
+		"last_seq":    last,
+		"size":        size,
+		"events":      wire,
 	}
 }
 
-func (s *Server) addSession(ss *session) {
+func (s *Server) addSession(ss *session) bool {
 	s.sessionsMu.Lock()
+	if s.guiDraining {
+		s.sessionsMu.Unlock()
+		return false
+	}
 	s.sessions[ss] = struct{}{}
+	if s.focusedSession == nil {
+		s.focusedSession = ss
+	}
 	s.sessionsMu.Unlock()
+	s.notifySessionsChanged()
+	return true
+}
+
+func (s *Server) releaseSession(ss *session, shutdownIfLast bool) bool {
+	s.sessionsMu.Lock()
+	_, registered := s.sessions[ss]
+	delete(s.sessions, ss)
+	if s.focusedSession == ss {
+		s.focusedSession = nil
+	}
+	shutdown := registered && shutdownIfLast && len(s.sessions) == 0
+	if shutdown {
+		s.guiDraining = true
+	}
+	s.sessionsMu.Unlock()
+	s.notifySessionsChanged()
+	return shutdown
 }
 
 func (s *Server) dropSession(ss *session) {
 	s.sessionsMu.Lock()
 	delete(s.sessions, ss)
+	if s.focusedSession == ss {
+		s.focusedSession = nil
+	}
 	s.sessionsMu.Unlock()
+	s.notifySessionsChanged()
+}
+
+func (s *Server) notifySessionsChanged() {
+	select {
+	case s.sessionsChanged <- struct{}{}:
+	default:
+	}
+}
+
+// Called after the owner's frame loop and session have finished. Other windows
+// can keep using an embedded server without keeping its original GUI open.
+func (s *Server) WaitForGUIRelease() {
+	for {
+		s.sessionsMu.Lock()
+		empty := len(s.sessions) == 0
+		if empty {
+			s.guiDraining = true
+		}
+		s.sessionsMu.Unlock()
+		if empty {
+			return
+		}
+		select {
+		case <-s.sessionsChanged:
+		case <-s.closing:
+			return
+		}
+	}
 }
 
 func (s *Server) uiSessionCount() int {
@@ -579,13 +678,13 @@ func (s *Server) pushSnapshot(ss *session) error {
 		return err
 	}
 	err = ss.write(goprotocol.WireMessage{
-		BuildVariant: s.Build,
+		BuildVariant:    s.Build,
 		ProtocolVersion: goprotocol.ProtocolVersion,
-		RequestID: 0,
-		Method: "push.snapshot",
-		Params: params,
+		RequestID:       0,
+		Method:          "push.snapshot",
+		Params:          params,
 	})
-	if err==nil {
+	if err == nil {
 		gometrics.ModelSnapshotPushes.Add(1)
 	}
 	return err
@@ -595,7 +694,9 @@ func (s *Server) snapshotLoop(ss *session) {
 	for {
 		select {
 		case <-ss.snapshotRequests:
-			if err:=s.pushSnapshot(ss);err!=nil{return}
+			if err := s.pushSnapshot(ss); err != nil {
+				return
+			}
 		case <-ss.done:
 			return
 		}

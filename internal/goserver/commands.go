@@ -31,20 +31,41 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 	}
 
 	id := uuid.New()
+	ignoreResize := false
+	// Reject delayed resize frames from a background GUI. CLI resize commands
+	// remain available for scenarios and explicit terminal control.
+	if head.Type == "terminal.resize" {
+		s.sessionsMu.RLock()
+		_, gui := s.sessions[ss]
+		allowed := !gui || s.focusedSession == nil || s.focusedSession == ss
+		s.sessionsMu.RUnlock()
+		if !allowed {
+			ignoreResize = true
+		}
+	}
 	op := OperationSnapshot{
 		ID:      id,
 		Command: append(json.RawMessage(nil), p.Command...),
 		Status:  "running",
 	}
-	result, rpcErr := s.executeCommand(head.Type, p.Command)
+	var result any
+	var rpcErr *goprotocol.RPCError
+	if ignoreResize {
+		result = map[string]any{"ignored": true}
+	} else {
+		result, rpcErr = s.executeCommand(head.Type, p.Command)
+	}
 	if rpcErr != nil {
 		op.Status = "failed"
 		op.Error = rpcErr
 	} else {
 		op.Status = "succeeded"
 		op.Result = result
-		s.recordCommandEvents(head.Type, p.Command, result)
-		s.broadcastSnapshot()
+		if !ignoreResize {
+			s.recordCommandEvents(head.Type, p.Command, result)
+			s.pushSelection(ss, head.Type, result)
+			s.broadcastSnapshot()
+		}
 	}
 	s.opsMu.Lock()
 	s.ops[id] = op
@@ -169,6 +190,7 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 	case "tab.new", "tab.new_in_workspace":
 		var c struct {
 			WorkspaceID *uuid.UUID `json:"workspace_id"`
+			PaneID      *uuid.UUID `json:"pane_id"`
 			Title       *string    `json:"title"`
 			CWD         string     `json:"cwd"`
 		}
@@ -183,7 +205,12 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 		if cwd != "" && !filepath.IsAbs(cwd) {
 			return fail("INVALID_COMMAND", errors.New("cwd must be absolute"))
 		}
-		if source, ok := s.model.WorkspaceActivePane(wid); ok {
+		if c.PaneID != nil {
+			if _, _, err := s.model.ResolvePane(c.PaneID); err != nil {
+				return fail("PANE_NOT_FOUND", err)
+			}
+			cwd = s.currentPaneDirectory(*c.PaneID, cwd)
+		} else if source, ok := s.model.WorkspaceActivePane(wid); ok {
 			cwd = s.currentPaneDirectory(source, cwd)
 		}
 		title := ""

@@ -5,13 +5,27 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goprotocol"
+	"github.com/google/uuid"
 )
 
 const uiForwardTimeout = 5 * time.Second
 
+func (s *Server) windowSessions() []map[string]any {
+	s.sessionsMu.RLock()
+	defer s.sessionsMu.RUnlock()
+	windows := make([]map[string]any, 0, len(s.sessions))
+	for ss := range s.sessions {
+		windows = append(windows, map[string]any{"window_id": ss.id, "focused": ss == s.focusedSession})
+	}
+	return windows
+}
+
 func (s *Server) firstUISession() *session {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
+	if s.focusedSession != nil {
+		return s.focusedSession
+	}
 	for ss := range s.sessions {
 		return ss
 	}
@@ -37,6 +51,20 @@ func (s *Server) deliverUIReply(msg goprotocol.WireMessage) bool {
 
 func (s *Server) forwardUI(caller *session, request goprotocol.WireMessage) error {
 	gui := s.firstUISession()
+	var target struct {
+		WindowID uuid.UUID `json:"window_id"`
+	}
+	if err := json.Unmarshal(request.Params, &target); err == nil && target.WindowID != uuid.Nil {
+		gui = nil
+		s.sessionsMu.RLock()
+		for ss := range s.sessions {
+			if ss.id == target.WindowID {
+				gui = ss
+				break
+			}
+		}
+		s.sessionsMu.RUnlock()
+	}
 	if gui == nil {
 		return caller.write(goprotocol.Failure(
 			request.RequestID,

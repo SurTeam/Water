@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	ProtocolVersion = 4
-	APISignature    = "water-control/v5"
+	ProtocolVersion = 5
+	APISignature    = "water-control/v6"
 	MaxFrameBytes   = 16 * 1024 * 1024
 
 	terminalOutput = byte(1)
@@ -124,8 +124,10 @@ func writePayload(w io.Writer, payload []byte) error {
 	}
 	var lenbuf [4]byte
 	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(payload)))
-	if err:=writeAll(w,lenbuf[:]);err!=nil{return err}
-	return writeAll(w,payload)
+	if err := writeAll(w, lenbuf[:]); err != nil {
+		return err
+	}
+	return writeAll(w, payload)
 }
 
 func WriteTerminal(w io.Writer, id uuid.UUID, ev TerminalEvent) error {
@@ -135,57 +137,65 @@ func WriteTerminal(w io.Writer, id uuid.UUID, ev TerminalEvent) error {
 	var frame [38]byte
 	copy(frame[4:8], terminalPrefix[:])
 
-	payloadLen:=0
+	payloadLen := 0
 	switch ev.Kind {
 	case OutputEvent:
-		frame[8]=terminalOutput
-		payloadLen=33+len(ev.Data)
+		frame[8] = terminalOutput
+		payloadLen = 33 + len(ev.Data)
 	case ResizeEvent:
-		frame[8]=terminalResize
-		payloadLen=33
+		frame[8] = terminalResize
+		payloadLen = 33
 	case ExitEvent:
-		frame[8]=terminalExit
-		payloadLen=34
+		frame[8] = terminalExit
+		payloadLen = 34
 	default:
 		return errors.New("unknown terminal event kind")
 	}
-	if payloadLen>MaxFrameBytes {
-		return fmt.Errorf("frame too large: %d",payloadLen)
+	if payloadLen > MaxFrameBytes {
+		return fmt.Errorf("frame too large: %d", payloadLen)
 	}
-	binary.BigEndian.PutUint32(frame[0:4],uint32(payloadLen))
-	copy(frame[9:25],id[:])
-	binary.BigEndian.PutUint64(frame[25:33],ev.Seq)
+	binary.BigEndian.PutUint32(frame[0:4], uint32(payloadLen))
+	copy(frame[9:25], id[:])
+	binary.BigEndian.PutUint64(frame[25:33], ev.Seq)
 
 	switch ev.Kind {
-	case OutputEvent,ResizeEvent:
-		size:=ev.Size.Normalized()
-		binary.BigEndian.PutUint16(frame[33:35],uint16(size.Columns))
-		binary.BigEndian.PutUint16(frame[35:37],uint16(size.Lines))
-		if err:=writeAll(w,frame[:37]);err!=nil{return err}
-		if ev.Kind==OutputEvent {
-			return writeAll(w,ev.Data)
+	case OutputEvent, ResizeEvent:
+		size := ev.Size.Normalized()
+		binary.BigEndian.PutUint16(frame[33:35], uint16(size.Columns))
+		binary.BigEndian.PutUint16(frame[35:37], uint16(size.Lines))
+		if err := writeAll(w, frame[:37]); err != nil {
+			return err
+		}
+		if ev.Kind == OutputEvent {
+			return writeAll(w, ev.Data)
 		}
 		return nil
 	case ExitEvent:
-		if ev.Code==nil {
-			frame[33]=0
-			for i:=34;i<38;i++{frame[i]=0}
-		}else{
-			frame[33]=1
-			binary.BigEndian.PutUint32(frame[34:38],uint32(*ev.Code))
+		if ev.Code == nil {
+			frame[33] = 0
+			for i := 34; i < 38; i++ {
+				frame[i] = 0
+			}
+		} else {
+			frame[33] = 1
+			binary.BigEndian.PutUint32(frame[34:38], uint32(*ev.Code))
 		}
-		return writeAll(w,frame[:38])
+		return writeAll(w, frame[:38])
 	default:
 		panic("unreachable")
 	}
 }
 
-func writeAll(w io.Writer,data []byte)error{
-	for len(data)>0{
-		n,err:=w.Write(data)
-		if err!=nil{return err}
-		if n<=0{return io.ErrShortWrite}
-		data=data[n:]
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[n:]
 	}
 	return nil
 }

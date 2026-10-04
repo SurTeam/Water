@@ -109,21 +109,14 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	defer w.Close()
 	settingsStore := goui.NewSettingsStore(cfg)
 
-	localSession, embedded, ownsDetached, localErr := connectOrStart(socket, configPath, cfg, buildVariant)
+	localSession, embedded, _, localErr := connectOrStart(socket, configPath, cfg, buildVariant)
 	w.SetUpdateRestartAllowed(embedded == nil)
 	if localErr == nil {
 		w.SetQuitServerHandler(func() error {
-			return goclient.New(socket).CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
+			return localSession.CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
 		})
 		if embedded != nil {
-			defer embedded.Close()
-		}
-		if embedded == nil && ownsDetached && !cfg.Server.DetachOnQuit {
-			defer func() {
-				if !w.Updating() {
-					_ = goclient.New(socket).Call("server.shutdown", map[string]any{}, nil)
-				}
-			}()
+			defer func() { embedded.WaitForGUIRelease(); _ = embedded.Close() }()
 		}
 		localView := goui.NewWorkspaceClientWithConnection(localSession, invalidate, cfg, "")
 		w.Attach(localView)
@@ -135,7 +128,12 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			Kind:       "local",
 			Status:     "connected",
 			SocketPath: socket,
-		}, localView, func() { _ = localSession.Close() }, len(sshDestinations) == 0); err != nil {
+		}, localView, func() {
+			if embedded == nil && !cfg.Server.DetachOnQuit && !w.Updating() {
+				_ = localSession.CallTimeout("session.release", map[string]any{"shutdown_if_last": true}, nil, time.Second)
+			}
+			_ = localSession.Close()
+		}, len(sshDestinations) == 0); err != nil {
 			return err
 		}
 	} else if len(sshDestinations) == 0 {
@@ -257,10 +255,19 @@ func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVari
 			}
 			return nil, nil, false, err
 		}
+		select {
+		case <-errCh:
+			_ = srv.Close()
+			return session, nil, false, nil
+		default:
+		}
 		return session, srv, false, nil
 	}
 
 	if err := startDetachedServer(socket, configPath, buildVariant); err != nil {
+		if session, connectErr := waitForSession(socket, 5*time.Second); connectErr == nil {
+			return session, nil, false, nil
+		}
 		return nil, nil, false, err
 	}
 	session, err := waitForSession(socket, 5*time.Second)

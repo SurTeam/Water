@@ -122,23 +122,24 @@ type ConnectionEntry struct {
 }
 
 type terminalClient struct {
-	id            uuid.UUID
-	mu            sync.RWMutex
-	parseMu       sync.Mutex
-	emu           *govt.Emulator
-	snapshot      govt.Snapshot
-	lastSeq       uint64
-	cols          int
-	rows          int
-	cellWidth     int
-	cellHeight    int
-	view          *TerminalView
-	input         *TerminalInput
-	selection     Selection
-	imePreedit    string
-	imeComposing  bool
-	defaultColors [259]uint32
-	inputPending  atomic.Bool
+	id               uuid.UUID
+	mu               sync.RWMutex
+	parseMu          sync.Mutex
+	emu              *govt.Emulator
+	snapshot         govt.Snapshot
+	lastSeq          uint64
+	cols             int
+	rows             int
+	cellWidth        int
+	resizeGeneration uint64
+	cellHeight       int
+	view             *TerminalView
+	input            *TerminalInput
+	selection        Selection
+	imePreedit       string
+	imeComposing     bool
+	defaultColors    [259]uint32
+	inputPending     atomic.Bool
 }
 
 func (t *terminalClient) close() {
@@ -175,6 +176,10 @@ type WorkspaceClient struct {
 
 	mu              sync.RWMutex
 	state           gomodel.StateDump
+	selection       windowSelection
+	nativeFocused   bool // Owned by the native frame loop.
+	focusKnown      bool
+	focusGeneration uint64
 	connectionError string
 	terminals       map[uuid.UUID]*terminalClient
 
@@ -379,6 +384,8 @@ func (c *WorkspaceClient) Run() {
 				continue
 			}
 			switch msg.Method {
+			case "push.selection":
+				c.applySelection(msg.Params)
 			case "push.snapshot":
 				var state gomodel.StateDump
 				if json.Unmarshal(msg.Params, &state) == nil {
@@ -899,7 +906,7 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 		c.mu.Unlock()
 		return
 	}
-	c.state = state
+	c.state = c.selection.project(state)
 	var remove []*terminalClient
 	for id, term := range c.terminals {
 		if _, ok := wanted[id]; !ok {

@@ -3,6 +3,7 @@ package goui
 import (
 	"net/url"
 	"path/filepath"
+	"strings"
 )
 
 // Carry the active pane's standard OSC 7 directory through AppCommand. The
@@ -10,6 +11,14 @@ import (
 // OSC report must not undo a later cd in a shell without directory integration.
 func (c *WorkspaceClient) creationCommand(kind string) map[string]any {
 	command := map[string]any{"type": kind}
+	c.mu.RLock()
+	if c.state.ActiveWorkspace != nil && kind == "tab.new" {
+		command["workspace_id"] = *c.state.ActiveWorkspace
+	}
+	if c.state.FocusedPane != nil && (strings.HasPrefix(kind, "pane.") || kind == "tab.new") {
+		command["pane_id"] = *c.state.FocusedPane
+	}
+	c.mu.RUnlock()
 	if kind != "tab.new" && kind != "pane.split" {
 		return command
 	}

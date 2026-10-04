@@ -141,6 +141,16 @@ func runUI(ctx cliContext, args []string) error {
 		return errors.New("ui requires key, state, screenshot, wheel, click, or menu")
 	}
 	var out any
+	call := func(method string, params map[string]any, out any) error {
+		if window, ok := option(args, "--window"); ok {
+			id, err := uuid.Parse(window)
+			if err != nil {
+				return fmt.Errorf("invalid window UUID: %w", err)
+			}
+			params["window_id"] = id
+		}
+		return ctx.client.Call(method, params, out)
+	}
 	switch args[0] {
 	case "menu":
 		action, ok := option(args, "--action")
@@ -150,7 +160,7 @@ func runUI(ctx cliContext, args []string) error {
 		if action == "" {
 			return errors.New("ui menu requires an action")
 		}
-		if err := ctx.client.Call("ui.menu", map[string]any{"action": action}, &out); err != nil {
+		if err := call("ui.menu", map[string]any{"action": action}, &out); err != nil {
 			return err
 		}
 	case "key", "keystroke":
@@ -162,11 +172,11 @@ func runUI(ctx cliContext, args []string) error {
 		if !ok {
 			return errors.New("ui key requires a keystroke")
 		}
-		if err := ctx.client.Call("ui.keystroke", map[string]any{"keystroke": value}, &out); err != nil {
+		if err := call("ui.keystroke", map[string]any{"keystroke": value}, &out); err != nil {
 			return err
 		}
 	case "state", "snapshot":
-		if err := ctx.client.Call("ui.snapshot", map[string]any{}, &out); err != nil {
+		if err := call("ui.snapshot", map[string]any{}, &out); err != nil {
 			return err
 		}
 	case "screenshot", "capture":
@@ -177,7 +187,7 @@ func runUI(ctx cliContext, args []string) error {
 		if path == "" {
 			path = "target/water-screenshot.png"
 		}
-		if err := ctx.client.Call("ui.screenshot", map[string]any{"path": path}, &out); err != nil {
+		if err := call("ui.screenshot", map[string]any{"path": path}, &out); err != nil {
 			return err
 		}
 	case "wheel":
@@ -197,7 +207,7 @@ func runUI(ctx cliContext, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ctx.client.Call("ui.wheel", map[string]any{"x": x, "y": y, "dx": dx, "dy": dy}, &out); err != nil {
+		if err := call("ui.wheel", map[string]any{"x": x, "y": y, "dx": dx, "dy": dy}, &out); err != nil {
 			return err
 		}
 	case "click":
@@ -213,7 +223,7 @@ func runUI(ctx cliContext, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ctx.client.Call("ui.click", map[string]any{"x": x, "y": y, "click_count": count}, &out); err != nil {
+		if err := call("ui.click", map[string]any{"x": x, "y": y, "click_count": count}, &out); err != nil {
 			return err
 		}
 	case "drag":
@@ -233,7 +243,7 @@ func runUI(ctx cliContext, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := ctx.client.Call("ui.drag", map[string]any{"x": x, "y": y, "to_x": toX, "to_y": toY}, &out); err != nil {
+		if err := call("ui.drag", map[string]any{"x": x, "y": y, "to_x": toX, "to_y": toY}, &out); err != nil {
 			return err
 		}
 	default:

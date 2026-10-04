@@ -154,6 +154,7 @@ type Session struct {
 	terminalError error
 	nextID        atomic.Uint64
 	Build         string
+	WindowID      uuid.UUID
 
 	Events chan TerminalPush
 	Pushes chan goprotocol.WireMessage
@@ -186,7 +187,9 @@ func (c *Client) OpenSession() (*Session, error) {
 	go s.writeLoop()
 	go s.readLoop()
 
-	var result map[string]any
+	var result struct {
+		WindowID uuid.UUID `json:"window_id"`
+	}
 	if err := s.Call("session.open", map[string]any{
 		"role":              "gui",
 		"compact_snapshots": true,
@@ -194,7 +197,17 @@ func (c *Client) OpenSession() (*Session, error) {
 		_ = s.Close()
 		return nil, err
 	}
+	s.WindowID = result.WindowID
 	return s, nil
+}
+
+// Notify queues a control message without blocking the GUI frame loop.
+func (s *Session) Notify(method string, params any) error {
+	raw, err := marshalParams(params)
+	if err != nil {
+		return err
+	}
+	return s.enqueue(goprotocol.WireMessage{BuildVariant: s.Build, ProtocolVersion: goprotocol.ProtocolVersion, RequestID: s.nextID.Add(1), Method: method, Params: raw}, false)
 }
 
 func (s *Session) Call(method string, params any, out any) error {

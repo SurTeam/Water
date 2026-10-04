@@ -100,6 +100,9 @@ func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []gov
 }
 
 func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClient, r image.Rectangle, cw, lh int) {
+	if !c.nativeFocused {
+		return
+	}
 	cols, rows := min(512, max(2, r.Dx()/cw)), min(256, max(1, r.Dy()/lh))
 	term.mu.Lock()
 	if term.emu == nil {
@@ -107,7 +110,7 @@ func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClie
 		return
 	}
 	cellChanged := cw != term.cellWidth || lh != term.cellHeight
-	if cols == term.cols && rows == term.rows && !cellChanged {
+	if cols == term.cols && rows == term.rows && !cellChanged && term.resizeGeneration == c.focusGeneration {
 		term.mu.Unlock()
 		return
 	}
@@ -121,9 +124,23 @@ func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClie
 		term.emu.Resize(cols, rows)
 	}
 	term.cols, term.rows = cols, rows
+	term.resizeGeneration = c.focusGeneration
 	term.snapshot = term.emu.FrameSnapshot()
 	term.mu.Unlock()
 	_ = c.session.DispatchAsync(map[string]any{"type": "terminal.resize", "terminal_id": term.id, "columns": cols, "lines": rows, "cell_width": cw, "cell_height": lh})
+}
+
+func (c *WorkspaceClient) updateWindowFocus(focused bool) {
+	if c.focusKnown && c.nativeFocused == focused {
+		return
+	}
+	if err := c.session.Notify("session.focus", map[string]any{"focused": focused}); err != nil {
+		return
+	}
+	c.focusKnown, c.nativeFocused = true, focused
+	if focused {
+		c.focusGeneration++
+	}
 }
 
 func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, term *terminalClient, r image.Rectangle, cw, lh int, focused bool) {
