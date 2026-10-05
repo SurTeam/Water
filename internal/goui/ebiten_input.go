@@ -426,6 +426,25 @@ func (w *EbitengineWindow) reportPointer(c *WorkspaceClient, p image.Point, acti
 		}
 	}
 }
+
+// Pointer coordinates stay current for input and cursor shape, but repainting is
+// only needed when entering or leaving a region with hover feedback. Check all
+// regions: a small control can overlap a larger titlebar or tab hit region.
+func nativeHoverChanged(regions []automationHit, previous, current image.Point) bool {
+	if previous == current {
+		return false
+	}
+	for _, h := range regions {
+		if h.Kind == hitPane || h.Kind == hitTitlebar {
+			continue
+		}
+		if previous.In(h.Rect) != current.In(h.Rect) {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *EbitengineWindow) updateCursor(c *WorkspaceClient) {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()

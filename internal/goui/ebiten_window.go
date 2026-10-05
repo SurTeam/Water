@@ -342,7 +342,7 @@ func (w *EbitengineWindow) Update() error {
 	focused := ebiten.IsFocused()
 	blink := time.Now().UnixMilli()%1000 < 600
 	fontGeneration := w.fonts.generation.Load()
-	if w.mouse != w.lastMouse || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || w.drag != nil {
+	if nativeHoverChanged(c.hitRegions, w.lastMouse, w.mouse) || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || w.drag != nil {
 		w.Invalidate()
 	}
 	if blink != w.lastBlink {

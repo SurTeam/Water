@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"sync/atomic"
 	"testing"
 
 	"github.com/SurTeam/Water/internal/goclient"
@@ -72,6 +73,38 @@ func TestRejectedTerminalMouseDoesNotReplaceSnapshot(t *testing.T) {
 	}
 	if len(term.emu.TakeResponses()) != 0 {
 		t.Fatal("accepted mouse report was not flushed to transport")
+	}
+}
+
+func TestAcceptedMouseReportsDoNotRebuildOrRedrawScreen(t *testing.T) {
+	c, term := attachedScrollTestTerminal(t)
+	term.emu.Write([]byte("\x1b[?1003h\x1b[?1006h"))
+	term.snapshot = term.emu.FrameSnapshot()
+	before := term.snapshot
+	var invalidations atomic.Int64
+	c.invalidate = func() { invalidations.Add(1) }
+	event := govt.MouseEvent{Col: 2, Row: 2, Button: govt.MouseNone, Action: govt.MouseMove}
+	if !term.input.OnMouse(event) {
+		t.Fatal("ANY tracking rejected movement")
+	}
+	if &before.RowsData[0] != &term.snapshot.RowsData[0] {
+		t.Fatal("mouse report rebuilt visible snapshot")
+	}
+	if invalidations.Load() != 0 {
+		t.Fatal("mouse report without visual changes invalidated the window")
+	}
+	term.selection = Selection{Active: true}
+	if !term.input.OnMouse(event) || term.selection.Active {
+		t.Fatal("accepted mouse report did not clear selection")
+	}
+	if invalidations.Load() != 1 {
+		t.Fatal("clearing selection must invalidate once")
+	}
+	if &before.RowsData[0] != &term.snapshot.RowsData[0] {
+		t.Fatal("clearing selection rebuilt visible snapshot")
+	}
+	if len(term.emu.TakeResponses()) != 0 {
+		t.Fatal("mouse reports were not flushed to transport")
 	}
 }
 

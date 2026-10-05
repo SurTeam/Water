@@ -13,6 +13,37 @@ import (
 	"testing"
 )
 
+func TestNativeHoverOnlyInvalidatesVisualTransitions(t *testing.T) {
+	regions := []automationHit{
+		{Kind: hitPane, Rect: image.Rect(100, 100, 500, 400)},
+		{Kind: hitTitlebar, Rect: image.Rect(0, 0, 500, 40)},
+		{Kind: hitTab, Rect: image.Rect(100, 0, 200, 40)},
+		{Kind: hitNewTab, Rect: image.Rect(180, 0, 200, 40)},
+		{Kind: hitDivider, Rect: image.Rect(250, 100, 256, 400)},
+	}
+	for _, tc := range []struct {
+		name     string
+		from, to image.Point
+		want     bool
+	}{
+		{"terminal movement", image.Pt(110, 110), image.Pt(220, 220), false},
+		{"terminal exit", image.Pt(110, 110), image.Pt(90, 110), false},
+		{"titlebar movement", image.Pt(10, 10), image.Pt(50, 10), false},
+		{"same tab", image.Pt(110, 10), image.Pt(150, 10), false},
+		{"enter tab", image.Pt(50, 10), image.Pt(110, 10), true},
+		{"leave tab", image.Pt(110, 10), image.Pt(50, 10), true},
+		{"overlapping control", image.Pt(150, 10), image.Pt(190, 10), true},
+		{"enter divider", image.Pt(220, 220), image.Pt(252, 220), true},
+		{"stationary", image.Pt(252, 220), image.Pt(252, 220), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nativeHoverChanged(regions, tc.from, tc.to); got != tc.want {
+				t.Fatalf("hover transition = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestNativePhysicalKeysReachVTEncoder(t *testing.T) {
 	for _, tc := range []struct {
 		physical   ebiten.Key

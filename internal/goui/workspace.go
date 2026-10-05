@@ -1050,15 +1050,16 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 				return false
 			}
 			accepted := term.emu.Mouse(ev)
+			selectionCleared := accepted && term.selection.Active
 			if accepted {
-				term.snapshot = term.emu.FrameSnapshot()
+				// Mouse reports only send input; output workers publish screen changes.
 				term.selection = Selection{}
 			}
 			term.mu.Unlock()
 			if accepted {
 				c.flushVTResponses(term)
 			}
-			if accepted && c.invalidate != nil {
+			if selectionCleared && c.invalidate != nil {
 				c.invalidate()
 			}
 			return accepted
