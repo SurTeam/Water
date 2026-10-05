@@ -881,12 +881,20 @@ func (c *WorkspaceClient) scrollActiveTerminal(deltaY float32) bool {
 		return false
 	}
 	term.emu.Scroll(lines)
-	term.snapshot = term.emu.Snapshot()
+	term.snapshot = term.emu.FrameSnapshot()
 	term.mu.Unlock()
-	if c.invalidate != nil {
+	c.invalidateScroll()
+	return true
+}
+
+// History movement is a discrete visual change, not a request to keep the
+// display-rate input loop active after the wheel event has been handled.
+func (c *WorkspaceClient) invalidateScroll() {
+	if window := c.native.Load(); window != nil {
+		window.invalidateOutput()
+	} else if c.invalidate != nil {
 		c.invalidate()
 	}
-	return true
 }
 
 func (c *WorkspaceClient) Bootstrap() error {
@@ -1042,8 +1050,8 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 				return false
 			}
 			accepted := term.emu.Mouse(ev)
-			term.snapshot = term.emu.FrameSnapshot()
 			if accepted {
+				term.snapshot = term.emu.FrameSnapshot()
 				term.selection = Selection{}
 			}
 			term.mu.Unlock()
@@ -1062,11 +1070,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 				return
 			}
 			term.emu.Scroll(lines)
-			term.snapshot = term.emu.Snapshot()
+			term.snapshot = term.emu.FrameSnapshot()
 			term.mu.Unlock()
-			if c.invalidate != nil {
-				c.invalidate()
-			}
+			c.invalidateScroll()
 		},
 		OnSelectionStart: func(col, row, clickCount int) {
 			if !c.hyperlinkConfig().Features.Selection {
@@ -1138,7 +1144,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 			before := term.snapshot.YDisp
 			term.emu.Scroll(lines)
-			term.snapshot = term.emu.Snapshot()
+			term.snapshot = term.emu.FrameSnapshot()
 			term.selection.FocusCol = col
 			if term.selection.Absolute {
 				term.selection.FocusRow = term.snapshot.YDisp + row
@@ -1147,8 +1153,8 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			}
 			changed := before != term.snapshot.YDisp
 			term.mu.Unlock()
-			if changed && c.invalidate != nil {
-				c.invalidate()
+			if changed {
+				c.invalidateScroll()
 			}
 		},
 		OnCopy: func() string {

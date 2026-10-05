@@ -640,6 +640,10 @@ func (v *TerminalView) prepareRow(row govt.Row) preparedRow {
 	return v.prepareRowInto(row, preparedRow{})
 }
 
+func terminalCellNeedsText(cell govt.Cell, hyperlinks bool) bool {
+	return cell.Width != 0 && !cell.Invisible && (cell.Text != "" || cell.Underline || cell.Strikethrough || (hyperlinks && cell.LinkURI != ""))
+}
+
 func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) preparedRow {
 	clear(prepared.text)
 	clear(prepared.backgrounds)
@@ -647,8 +651,14 @@ func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) prepar
 	prepared.text = prepared.text[:0]
 	prepared.backgrounds = prepared.backgrounds[:0]
 	var currentText *textRun
+	var currentTextMergeable bool
 	var currentBG *backgroundRun
 	var joined strings.Builder
+	// Size text builders for content, not trailing empty grid padding.
+	textEnd := len(row.Cells)
+	for textEnd > 0 && !terminalCellNeedsText(row.Cells[textEnd-1], v.Hyperlinks) {
+		textEnd--
+	}
 
 	for column, cell := range row.Cells {
 		fg, bg := v.resolveColors(cell)
@@ -668,7 +678,9 @@ func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) prepar
 			currentBG = nil
 		}
 
-		if cell.Width == 0 || cell.Invisible {
+		// Empty grid cells have no font ink. Backgrounds were handled above;
+		// decorated blanks still need a run so underline/strike/link survives.
+		if !terminalCellNeedsText(cell, v.Hyperlinks) {
 			currentText = nil
 			joined.Reset()
 			continue
@@ -692,13 +704,13 @@ func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) prepar
 		if width < 1 {
 			width = 1
 		}
-		if v.Ligatures && width == 1 && currentText != nil && !currentText.wide && currentText.style == style &&
-			!terminalCellGlyph(text) && !terminalCellGlyph(currentText.text) &&
+		mergeable := v.Ligatures && width == 1 && !terminalCellGlyph(text)
+		if v.Ligatures && mergeable && currentText != nil && currentTextMergeable && currentText.style == style &&
 			currentText.startColumn+currentText.spanColumns == column {
 			// A changing log line must not copy every growing prefix. Builder
 			// retains immutable strings while growing in amortized linear time.
 			if joined.Len() == 0 {
-				joined.Grow(len(row.Cells) - currentText.startColumn)
+				joined.Grow(textEnd - currentText.startColumn)
 				joined.WriteString(currentText.text)
 			}
 			joined.WriteString(text)
@@ -715,6 +727,7 @@ func (v *TerminalView) prepareRowInto(row govt.Row, prepared preparedRow) prepar
 				style:       style,
 			})
 			currentText = &prepared.text[len(prepared.text)-1]
+			currentTextMergeable = mergeable
 		}
 	}
 	return prepared

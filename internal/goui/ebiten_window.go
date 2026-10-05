@@ -230,7 +230,11 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 	defer timer.Stop()
 	select {
 	case w.queue <- r:
-		w.Invalidate()
+		if method == "ui.wheel" {
+			w.invalidateOutput()
+		} else {
+			w.Invalidate()
+		}
 		// Control input is latency-sensitive; wake the native event loop now
 		// rather than waiting for the next output coalescing tick.
 		ebiten.ScheduleFrame()
@@ -351,7 +355,7 @@ func (w *EbitengineWindow) Update() error {
 		w.Invalidate()
 	}
 	if dx, dy := ebiten.Wheel(); dx != 0 || dy != 0 {
-		w.Invalidate()
+		w.invalidateOutput()
 	}
 	platformConfig := c.currentConfig()
 	if ebiten.IsWindowMaximized() || ebiten.IsFullscreen() {

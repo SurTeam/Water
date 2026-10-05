@@ -25,9 +25,11 @@ type Color struct {
 
 type Cell struct {
 	Text          string
-	Width         uint8
+	LinkURI       string
+	URLID         int
 	FG            Color
 	BG            Color
+	Width         uint8
 	Bold          bool
 	Italic        bool
 	Dim           bool
@@ -35,8 +37,6 @@ type Cell struct {
 	Strikethrough bool
 	Inverse       bool
 	Invisible     bool
-	URLID         int
-	LinkURI       string
 }
 
 type Row struct {

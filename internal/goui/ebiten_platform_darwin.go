@@ -15,6 +15,12 @@ type macMenuItem struct {
 	menu, item objc.ID
 	index      int
 }
+type macMenuState struct {
+	title, key string
+	modifiers  uintptr
+	enabled    bool
+}
+
 type macNativePlatform struct {
 	emit          func(string)
 	canQuitServer bool
@@ -25,6 +31,9 @@ type macNativePlatform struct {
 	items              map[string]macMenuItem
 	configured         goconfig.AppConfig
 	menuTitles         map[objc.ID]string
+	menuState          map[string]macMenuState
+	publishedMenu      map[string]any
+	menuDirty          bool
 	window             objc.ID
 	layer              objc.ID
 	radius             float64
@@ -193,6 +202,7 @@ func (p *macNativePlatform) Update(cfg goconfig.AppConfig) {
 			p.install()
 		}
 		if p.configured.Shortcuts != cfg.Shortcuts {
+			p.menuDirty = true
 			for action, binding := range map[string]string{"hide-window": cfg.Shortcuts.HideWindow, "minimize-window": cfg.Shortcuts.MinimizeWindow} {
 				ref := p.items[action]
 				name, mask := macMenuEquivalent(binding)
@@ -202,6 +212,7 @@ func (p *macNativePlatform) Update(cfg goconfig.AppConfig) {
 		}
 		p.updateCorners(float64(cfg.UI.WindowCornerRadius))
 		if p.configured.UI.Language != cfg.UI.Language {
+			p.menuDirty = true
 			for item, title := range p.menuTitles {
 				macSend(item, "setTitle:", macText(ctext(cfg.UI.Language, title)))
 			}
@@ -239,24 +250,79 @@ func (p *macNativePlatform) updateCorners(radius float64) {
 	p.radius = radius
 	macSend(p.window, "invalidateShadow")
 }
+
+// Menu properties are owned by the main queue. Read configuration-owned
+// properties only when dirty, but observe enabled state on every publication.
+// New menu maps never mutate snapshots still held by the renderer or control API.
+func (p *macNativePlatform) snapshotMenu(read func(macMenuItem, bool) macMenuState) (map[string]any, bool) {
+	refresh := p.menuDirty || p.publishedMenu == nil
+	if p.menuState == nil {
+		p.menuState = make(map[string]macMenuState, len(p.items))
+	}
+	items, changed := p.publishedMenu, false
+	for action, ref := range p.items {
+		previous, exists := p.menuState[action]
+		current := previous
+		observed := read(ref, refresh)
+		if refresh {
+			current.title, current.key, current.modifiers = observed.title, observed.key, observed.modifiers
+		}
+		current.enabled = observed.enabled
+		if !exists || current != previous {
+			if !changed {
+				items = make(map[string]any, len(p.items))
+				for key, value := range p.publishedMenu {
+					items[key] = value
+				}
+				changed = true
+			}
+			items[action] = map[string]any{"title": current.title, "key": current.key, "modifiers": current.modifiers, "enabled": current.enabled}
+			p.menuState[action] = current
+		}
+	}
+	p.menuDirty = false
+	p.publishedMenu = items
+	return items, changed
+}
+
 func (p *macNativePlatform) publish() {
 	if end := traceNativeWork("platform.publish"); end != nil {
 		defer end()
 	}
-	items := map[string]any{}
-	for action, ref := range p.items {
-		items[action] = map[string]any{"title": macString(macSend(ref.item, "title")), "key": macString(macSend(ref.item, "keyEquivalent")),
-			"modifiers": uintptr(macSend(ref.item, "keyEquivalentModifierMask")), "enabled": macSend(ref.item, "isEnabled") != 0}
-	}
-	snapshot := map[string]any{"ready": p.installed, "hidden": macSend(macApplication(), "isHidden") != 0, "items": items}
+	items, menuChanged := p.snapshotMenu(func(ref macMenuItem, full bool) macMenuState {
+		value := macMenuState{enabled: macSend(ref.item, "isEnabled") != 0}
+		if full {
+			value.title = macString(macSend(ref.item, "title"))
+			value.key = macString(macSend(ref.item, "keyEquivalent"))
+			value.modifiers = uintptr(macSend(ref.item, "keyEquivalentModifierMask"))
+		}
+		return value
+	})
+	hidden := macSend(macApplication(), "isHidden") != 0
+	var number uintptr
+	var occluded, masks, opaque bool
+	var radius float64
 	if p.layer != 0 {
-		snapshot["window_number"] = uintptr(macSend(p.window, "windowNumber"))
+		number = uintptr(macSend(p.window, "windowNumber"))
+		occluded = macSend(p.window, "occlusionState")&(1<<1) == 0
+		radius = objc.Send[float64](p.layer, objc.RegisterName("cornerRadius"))
+		masks = macSend(p.layer, "masksToBounds") != 0
+		opaque = macSend(p.window, "isOpaque") != 0
+	}
+	if previous := p.state.Load(); previous != nil && !menuChanged && (*previous)["ready"] == p.installed && (*previous)["hidden"] == hidden {
+		if p.layer == 0 || ((*previous)["window_number"] == number && (*previous)["occluded"] == occluded && (*previous)["window_corner_radius"] == radius && (*previous)["window_masks_to_bounds"] == masks && (*previous)["window_opaque"] == opaque) {
+			return
+		}
+	}
+	snapshot := map[string]any{"ready": p.installed, "hidden": hidden, "items": items}
+	if p.layer != 0 {
+		snapshot["window_number"] = number
 		// NSWindowOcclusionStateVisible is bit 1: an absent bit means the
 		// entire window is covered, hidden, minimized, or on another Space.
-		snapshot["occluded"] = macSend(p.window, "occlusionState")&(1<<1) == 0
-		snapshot["window_corner_radius"] = objc.Send[float64](p.layer, objc.RegisterName("cornerRadius"))
-		snapshot["window_masks_to_bounds"] = macSend(p.layer, "masksToBounds") != 0
-		snapshot["window_opaque"] = macSend(p.window, "isOpaque") != 0
+		snapshot["occluded"] = occluded
+		snapshot["window_corner_radius"] = radius
+		snapshot["window_masks_to_bounds"] = masks
+		snapshot["window_opaque"] = opaque
 	}
 	p.state.Store(&snapshot)
 }

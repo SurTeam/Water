@@ -104,9 +104,6 @@ func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []gov
 }
 
 func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClient, r image.Rectangle, cw, lh int) {
-	if !c.nativeFocused {
-		return
-	}
 	cols, rows := min(512, max(2, r.Dx()/cw)), min(256, max(1, r.Dy()/lh))
 	term.mu.Lock()
 	if term.emu == nil {
@@ -114,15 +111,22 @@ func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClie
 		return
 	}
 	cellChanged := cw != term.cellWidth || lh != term.cellHeight
-	if cols == term.cols && rows == term.rows && !cellChanged && term.resizeGeneration == c.focusGeneration {
-		term.mu.Unlock()
-		return
-	}
-	// A retained view must not wait for the parser's lock every frame merely
-	// to reapply the same graphics cell metrics.
+	// Pixel metrics belong to this client's renderer, including before native
+	// focus arrives. Only changing the shared PTY's grid requires focus.
 	if cellChanged {
 		term.emu.SetCellSize(cw, lh)
 		term.cellWidth, term.cellHeight = cw, lh
+	}
+	if !c.nativeFocused {
+		if cellChanged {
+			term.snapshot = term.emu.FrameSnapshot()
+		}
+		term.mu.Unlock()
+		return
+	}
+	if cols == term.cols && rows == term.rows && !cellChanged && term.resizeGeneration == c.focusGeneration {
+		term.mu.Unlock()
+		return
 	}
 	if cols != term.cols || rows != term.rows {
 		term.emu.Resize(cols, rows)
