@@ -417,6 +417,9 @@ func (t *Terminal) ScrollLines(disp int) {
 	t.bufferService.ScrollLines(disp, false)
 }
 
+// HoldViewport keeps the current history position stable as output arrives.
+func (t *Terminal) HoldViewport() { t.bufferService.IsUserScrolling = true }
+
 // ScrollPages scrolls the viewport by pageCount pages.
 func (t *Terminal) ScrollPages(pageCount int) {
 	t.ScrollLines(pageCount * t.bufferService.Rows)

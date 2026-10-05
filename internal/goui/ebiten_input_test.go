@@ -20,6 +20,7 @@ func TestNativePhysicalKeysReachVTEncoder(t *testing.T) {
 	}{{ebiten.KeyArrowUp, "", "\x1b[A"}, {ebiten.KeyArrowDown, "", "\x1b[B"},
 		{ebiten.KeyArrowLeft, "", "\x1b[D"}, {ebiten.KeyArrowRight, "", "\x1b[C"},
 		{ebiten.KeyBackspace, "", "\x7f"}, {ebiten.KeyC, "ctrl-", "\x03"},
+		{ebiten.KeyDelete, "", "\x1b[3~"}, {ebiten.KeyDelete, "ctrl-", "\x1b[3;5~"},
 		{ebiten.KeySpace, "ctrl-", "\x00"}} {
 		specs := nativeKeySpecs(tc.mods, false, func(k ebiten.Key) int {
 			if k == tc.physical {

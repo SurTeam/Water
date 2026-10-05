@@ -314,7 +314,15 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		op.GeoM.Translate(float64(-source.Min.X), float64(-source.Min.Y))
 		op.GeoM.Scale(float64(graphic.Width*cw)/float64(source.Dx()), float64(graphic.Height*lh)/float64(source.Dy()))
 		op.GeoM.Translate(float64(r.Min.X+graphic.Column*cw), float64(r.Min.Y+graphic.Row*lh))
-		dst.DrawImage(tex.SubImage(source).(*ebiten.Image), op)
+		imageDst := dst
+		if graphic.ClipWidth > 0 && graphic.ClipHeight > 0 {
+			clip := image.Rect(r.Min.X+graphic.ClipColumn*cw, r.Min.Y+graphic.ClipRow*lh, r.Min.X+(graphic.ClipColumn+graphic.ClipWidth)*cw, r.Min.Y+(graphic.ClipRow+graphic.ClipHeight)*lh).Intersect(dst.Bounds())
+			if clip.Empty() {
+				continue
+			}
+			imageDst = dst.SubImage(clip).(*ebiten.Image)
+		}
+		imageDst.DrawImage(tex.SubImage(source).(*ebiten.Image), op)
 	}
 	for id, tex := range cache.images {
 		if !visibleImages[id] {

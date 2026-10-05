@@ -55,6 +55,7 @@ type Snapshot struct {
 	CursorBlink         bool
 	YBase               int
 	YDisp               int
+	TrimmedLines        uint64
 	AltScreen           bool
 	ApplicationCursor   bool
 	BracketedPaste      bool
@@ -114,6 +115,7 @@ type Emulator struct {
 	defaultColors        atomic.Pointer[[259]uint32]
 	colorOverrides       map[int]uint32
 	graphics             *graphicsState
+	trimmedLines         uint64
 	windowMetrics        atomic.Pointer[WindowMetrics]
 	workingDirectoryURI  string
 	clipboardWrite       []byte
@@ -142,6 +144,7 @@ func New(cols, rows, scrollback int) *Emulator {
 		),
 	}
 	e.term.SetCursorDefaults(xterm.CursorStyleBlock, true)
+	e.term.Buffer().Lines.OnTrimEmitter.Event(func(n int) { e.trimmedLines += uint64(n) })
 	e.term.OnData(func(data string) {
 		e.enqueueResponse([]byte(data))
 	})
@@ -162,6 +165,19 @@ func New(cols, rows, scrollback int) *Emulator {
 }
 
 func (e *Emulator) BellCount() uint64 { return e.bells.Load() }
+
+func (e *Emulator) HoldViewport() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.term.HoldViewport()
+}
+
+// HistoryState is cheap enough to inspect around each ordered output event.
+func (e *Emulator) HistoryState() (trimmed uint64, alt bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.trimmedLines, e.term.IsAltBufferActive()
+}
 
 func (e *Emulator) Close() {
 	e.mu.Lock()
@@ -415,6 +431,11 @@ func (e *Emulator) Title() string {
 func (e *Emulator) Mouse(ev MouseEvent) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// History belongs to the client; application mouse modes describe only the
+	// live screen. Let history clicks reach selection and local scrolling.
+	if e.term.Buffer().YDisp != e.term.Buffer().YBase {
+		return false
+	}
 
 	button := xterm.MouseButtonLeft
 	switch ev.Button {
@@ -470,8 +491,8 @@ func (e *Emulator) FrameSnapshot() Snapshot {
 }
 
 func (e *Emulator) snapshot(reuseRows bool) Snapshot {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
 
 	term := e.term
 	buf := term.Buffer()
@@ -484,6 +505,7 @@ func (e *Emulator) snapshot(reuseRows bool) Snapshot {
 		CursorHide:          term.IsCursorHidden(),
 		YBase:               buf.YBase,
 		YDisp:               buf.YDisp,
+		TrimmedLines:        e.trimmedLines,
 		AltScreen:           term.IsAltBufferActive(),
 		RowsData:            make([]Row, term.Rows()),
 	}
@@ -546,6 +568,9 @@ func (e *Emulator) snapshot(reuseRows bool) Snapshot {
 			if raw.Extended != nil {
 				cell.URLID = raw.Extended.URLID()
 				cell.LinkURI = e.term.HyperlinkURI(cell.URLID)
+			}
+			if strings.ContainsRune(cell.Text, terminalImagePlaceholder) {
+				cell.Invisible = true
 			}
 			if cell.Width == 0 && cell.Text == "" {
 				// xterm uses width zero for the trailing half of wide glyphs.

@@ -899,6 +899,12 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	}
 	if shortcutMatches(pressed, bindings.Paste) {
 		if w.clipboardReady {
+			// Coding agents read images directly from the system clipboard on
+			// Ctrl+V. Preserve the clipboard and deliver that key for image paste.
+			if clipboardHasImage() {
+				term.input.emit([]byte{0x16})
+				return true
+			}
 			data := clipboard.Read(clipboard.FmtText)
 			if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
 				data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)

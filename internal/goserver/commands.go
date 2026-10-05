@@ -572,6 +572,8 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 			PaneID     *uuid.UUID `json:"pane_id"`
 			Columns    int        `json:"columns"`
 			Lines      int        `json:"lines"`
+			CellWidth  int        `json:"cell_width"`
+			CellHeight int        `json:"cell_height"`
 		}
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return fail("INVALID_COMMAND", err)
@@ -582,7 +584,10 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 		}
 		t, _ := s.registry.Get(id)
 		size := goprotocol.TerminalSize{Columns: c.Columns, Lines: c.Lines}.Normalized()
-		if err := t.Resize(size); err != nil {
+		if c.CellWidth < 0 || c.CellWidth > 1024 || c.CellHeight < 0 || c.CellHeight > 1024 {
+			return fail("INVALID_COMMAND", errors.New("cell dimensions must be between 0 and 1024"))
+		}
+		if err := t.ResizeWithCells(size, c.CellWidth, c.CellHeight); err != nil {
 			return fail("TERMINAL_RESIZE_FAILED", err)
 		}
 		s.model.SetTerminalSize(id, size)

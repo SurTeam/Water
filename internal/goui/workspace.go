@@ -1079,6 +1079,9 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 				return
 			}
 			term.mu.Lock()
+			if term.emu != nil {
+				term.emu.HoldViewport()
+			}
 			if clickCount >= 2 {
 				term.selection = MultiClickSelection(term.snapshot, col, row, clickCount)
 			} else {
@@ -1386,6 +1389,7 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 	term.mu.Unlock()
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
+		beforeTrim, beforeAlt := emu.HistoryState()
 		bells := emu.BellCount()
 		end := traceNativeWork("terminal.parse")
 		emu.Write(push.Event.Data)
@@ -1402,7 +1406,18 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 			}
 		}
 		term.mu.Lock()
-		term.selection = Selection{}
+		afterTrim, afterAlt := emu.HistoryState()
+		if beforeAlt != afterAlt {
+			term.selection = Selection{}
+		} else if term.selection.Active && term.selection.Absolute && afterTrim > beforeTrim {
+			trim := int(afterTrim - beforeTrim)
+			term.selection.AnchorRow -= trim
+			term.selection.FocusRow -= trim
+			// Do not silently copy a different line when selected history expires.
+			if term.selection.AnchorRow < 0 || term.selection.FocusRow < 0 {
+				term.selection = Selection{}
+			}
+		}
 		term.mu.Unlock()
 	case goprotocol.ResizeEvent:
 		emu.Resize(push.Event.Size.Columns, push.Event.Size.Lines)

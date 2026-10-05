@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.10](releases/v0.3.10.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.3.11](releases/v0.3.11.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 ## Requirements
 
@@ -152,6 +152,43 @@ CSI 0 SP q restores the configured defaults.
 Agent rows use foreground-process detection and, when the program emits it, client-side OSC `9;4;<state>[;<percentage>]` progress metadata. States `1`/`3` show Running, `0` shows Idle, `2` shows Error, and `4` shows Paused. Paused can also mean a warning; it does not prove that approval is required. Programs without progress reports retain the process-based Running/Exited status. No Agent hooks are installed. With `ui.system_notifications` enabled, agent starts, stops and observed status changes send notifications; initial snapshots and reconnect recovery are baselined. Progress reports must reach Water directly; programs that gate reporting on terminal identity, or multiplexers that filter OSC, may not emit them to Water.
 
 Rounded windows use Ebitengine screen transparency, a cached corner shader and macOS content-layer clipping. `ui.window_corner_radius` applies immediately; 0 gives square corners. Maximized/fullscreen windows use square corners and restore the configured radius afterwards. The parity smoke checks actual native layer state and screenshot corner alpha, edits migrated settings through their real controls, and exercises rename, sidebar resizing/visibility, and Agent focus. Schema parity and round-trip tests catch fields silently omitted from the migration.
+
+## Terminal images, history and paste
+
+Text selection remains active while output arrives. History clicks remain local even
+when the foreground application enables mouse tracking. Selected lines follow
+history trimming; an expired selection is cleared rather than copying another line.
+
+Water displays static Kitty RGB/RGBA/PNG streams (including compressed chunks and
+Unicode placeholders), iTerm2 inline images and Sixel. Images follow their buffer's
+history, retain their cell height when partially visible, and disappear when their
+last covered row expires. Kitty screen deletion preserves history; `kitten icat
+--clear-all` also removes historical images. `kitten icat` negotiates stream transfer;
+shared-memory and temporary-file transfer are not advertised. Advanced Kitty
+animation and relative placements are not implemented.
+
+On macOS, the configured paste shortcut recognizes native PNG, TIFF and other image
+clipboard types and sends Ctrl+V to the foreground agent, preserving the clipboard
+for its own image reader. This is verified with Codex and Claude Code. Text uses
+the usual bracketed-paste path. Remote agents need their own clipboard integration;
+the local clipboard is not uploaded automatically.
+
+Zsh startup installs a one-shot forward-delete binding only when the key is
+unbound, without changing user startup files. Explicit `-f` and command-mode
+shells retain their isolated startup behavior.
+
+```sh
+go build -o target/go-ui-smoke/water ./cmd/water
+~/.venv/bin/python scripts/go-ui-graphics-history-smoke.py
+WATER_TEST_AGENT='codex --no-alt-screen' \
+  ~/.venv/bin/python scripts/go-ui-graphics-history-smoke.py
+WATER_TEST_AGENT=claude ~/.venv/bin/python scripts/go-ui-graphics-history-smoke.py
+```
+
+The macOS smoke preserves the native clipboard, creates an owned GUI/server with
+a unique socket/config, and saves screenshots. Set `WATER_TEST_IMAGE` to override
+the sample JPEG path. Agent verification attaches the image without submitting a
+model request. Kitty protocol details are defined in its [graphics specification](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
 
 ## Startup options
 

@@ -221,6 +221,13 @@ func (h *InputHandler) extractColor(params *Params, pos int, attr *AttributeData
 
 		if params.HasSubParams(pos + advance) {
 			subparams := params.GetSubParams(pos + advance)
+			// Both 38:2:r:g:b and 38:2::r:g:b occur in real clients.
+			// The former omits the optional colorspace slot entirely.
+			if advance == 0 && len(subparams) == 4 && subparams[0] == 2 {
+				accu[1] = 2
+				copy(accu[3:], subparams[1:])
+				break
+			}
 			i := 0
 			for {
 				if accu[1] == 5 {

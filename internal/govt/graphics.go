@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 
 	xterm "github.com/SurTeam/Water/internal/xterm"
 )
@@ -42,6 +41,10 @@ type TerminalImage struct {
 	SourceWidth  int
 	SourceHeight int
 	RGBA         []byte
+	ClipRow      int
+	ClipColumn   int
+	ClipWidth    int
+	ClipHeight   int
 }
 
 type decodedImage struct {
@@ -52,6 +55,7 @@ type decodedImage struct {
 
 type imagePlacement struct {
 	marker       *xterm.Marker
+	buffer       *xterm.Buffer
 	column       int
 	width        int
 	height       int
@@ -67,6 +71,8 @@ func (p *imagePlacement) dispose() {
 		p.marker.Dispose()
 	}
 }
+
+func (p *imagePlacement) row() int { return p.marker.Line - p.height + 1 }
 
 type imageRecord struct {
 	renderID           uint64
@@ -92,8 +98,8 @@ type pendingKitty struct {
 }
 
 type graphicsState struct {
-	parser graphicsParser
-	images map[uint32]*imageRecord
+	parser  graphicsParser
+	images  map[uint32]*imageRecord
 	pending *pendingKitty
 
 	nextProtocolID uint32
@@ -242,9 +248,11 @@ func (p *graphicsParser) feed(input []byte) []graphicsEvent {
 	return events
 }
 
-func hasPotentialGraphicsByte(data []byte)bool{
-	for _,b:=range data {
-		if b==0x1b || b>=0x80{return true}
+func hasPotentialGraphicsByte(data []byte) bool {
+	for _, b := range data {
+		if b == 0x1b || b >= 0x80 {
+			return true
+		}
 	}
 	return false
 }
@@ -253,28 +261,47 @@ func hasPotentialGraphicsByte(data []byte)bool{
 // interpreted: a split ESC graphics introducer, a split raw C1 Kitty APC
 // introducer, or an incomplete UTF-8 sequence whose continuation bytes may
 // otherwise look like raw C1 controls. Plain text therefore leaves no carry.
-func graphicsCarryLen(data []byte)int{
-	n:=len(data)
-	if n==0{return 0}
-	retain:=0
-	if data[n-1]==0x1b{retain=1}
-	if n>=2 && data[n-2]==0x1b && data[n-1]=='_'{retain=2}
-	if data[n-1]==0x9f && !isUTF8Continuation(data,n-1) && retain<1{retain=1}
+func graphicsCarryLen(data []byte) int {
+	n := len(data)
+	if n == 0 {
+		return 0
+	}
+	retain := 0
+	if data[n-1] == 0x1b {
+		retain = 1
+	}
+	if n >= 2 && data[n-2] == 0x1b && data[n-1] == '_' {
+		retain = 2
+	}
+	if data[n-1] == 0x9f && !isUTF8Continuation(data, n-1) && retain < 1 {
+		retain = 1
+	}
 
-	limit:=4
-	if n<limit{limit=n}
-	for back:=1;back<=limit;back++{
-		index:=n-back
-		b:=data[index]
-		if b<0x80{break}
-		if b&0xc0==0x80{continue}
-		required:=0
-		switch{
-		case b>=0xc2 && b<=0xdf:required=2
-		case b>=0xe0 && b<=0xef:required=3
-		case b>=0xf0 && b<=0xf4:required=4
+	limit := 4
+	if n < limit {
+		limit = n
+	}
+	for back := 1; back <= limit; back++ {
+		index := n - back
+		b := data[index]
+		if b < 0x80 {
+			break
 		}
-		if required>back && back>retain{retain=back}
+		if b&0xc0 == 0x80 {
+			continue
+		}
+		required := 0
+		switch {
+		case b >= 0xc2 && b <= 0xdf:
+			required = 2
+		case b >= 0xe0 && b <= 0xef:
+			required = 3
+		case b >= 0xf0 && b <= 0xf4:
+			required = 4
+		}
+		if required > back && back > retain {
+			retain = back
+		}
 		break
 	}
 	return retain
@@ -363,6 +390,32 @@ func (g *graphicsState) handle(term *xterm.Terminal, event graphicsEvent) (int, 
 }
 
 func (g *graphicsState) handleKitty(term *xterm.Terminal, payload []byte) (int, []byte) {
+	params, _ := splitBytes(payload, ';')
+	action := firstParamByte(params, 'a', 't')
+	id, explicit := paramUint(params, 'i')
+	quiet := intParam(params, 'q', 0)
+	if g.pending != nil && !explicit {
+		id, explicit = g.pending.imageID, true
+		quiet = intParam(g.pending.params, 'q', 0)
+	}
+	previousRender := g.nextRenderID
+	rows, response := g.handleKittyCommand(term, payload)
+	if action == 'q' || action == 'd' || !explicit || id == 0 || quiet == 2 || g.pending != nil {
+		return rows, response
+	}
+	message := "OK"
+	if action == 'p' && g.images[id] == nil {
+		message = "ENOENT:image not found"
+	} else if (action == 't' || action == 'T') && g.nextRenderID == previousRender {
+		message = "EINVAL:invalid image data or unsupported medium"
+	}
+	if message == "OK" && quiet == 1 {
+		return rows, nil
+	}
+	return rows, []byte("\x1b_Gi=" + strconv.FormatUint(uint64(id), 10) + ";" + message + "\x1b\\")
+}
+
+func (g *graphicsState) handleKittyCommand(term *xterm.Terminal, payload []byte) (int, []byte) {
 	params, encoded := splitBytes(payload, ';')
 	action := firstParamByte(params, 'a', 't')
 	if action == 'q' {
@@ -377,7 +430,7 @@ func (g *graphicsState) handleKitty(term *xterm.Terminal, payload []byte) (int, 
 		return 0, []byte("\x1b_Gi=" + strconv.FormatUint(uint64(id), 10) + ";" + message + "\x1b\\")
 	}
 	if action == 'd' {
-		g.deleteKitty(params)
+		g.deleteKitty(term, params)
 		return 0, nil
 	}
 	if action == 'p' {
@@ -390,19 +443,19 @@ func (g *graphicsState) handleKitty(term *xterm.Terminal, payload []byte) (int, 
 			return 0, nil
 		}
 		if paramEquals(params, 'U', "1") {
-			for _, placement := range record.placements {
-				placement.dispose()
-			}
-			record.placements = nil
 			record.unicodePlaceholder = true
 			record.placeholderSize = placeholderSize(params)
 			return 0, nil
 		}
-		rows := g.place(term, id, params)
+		placement := g.place(term, id, params)
+		if placement == nil {
+			return 0, nil
+		}
 		if paramEquals(params, 'C', "1") {
 			return 0, nil
 		}
-		return rows, nil
+		advanceKittyCursor(term, placement)
+		return 0, nil
 	}
 	if action != 't' && action != 'T' {
 		return 0, nil
@@ -441,7 +494,7 @@ func (g *graphicsState) handleKitty(term *xterm.Terminal, payload []byte) (int, 
 
 	pending := g.pending
 	g.pending = nil
-	raw, err := base64.StdEncoding.DecodeString(string(pending.encoded))
+	raw, err := decodeGraphicsBase64(pending.encoded)
 	if err != nil {
 		return 0, nil
 	}
@@ -465,9 +518,17 @@ func (g *graphicsState) handleKitty(term *xterm.Terminal, payload []byte) (int, 
 	}
 	g.store(imageID, decoded, placement, unicodePlaceholder, placeholderSize(pending.params))
 	if placement != nil && !paramEquals(pending.params, 'C', "1") {
-		return placement.height, nil
+		advanceKittyCursor(term, placement)
 	}
 	return 0, nil
+}
+
+func advanceKittyCursor(term *xterm.Terminal, placement *imagePlacement) {
+	// Line feed preserves the starting column; Kitty then moves to the right
+	// edge as well as below the image. C=1 callers manage their own cursor.
+	advance := bytes.Repeat([]byte{'\n'}, placement.height)
+	advance = append(advance, []byte("\x1b["+strconv.Itoa(placement.width)+"C")...)
+	_, _ = term.Write(advance)
 }
 
 func decompressBounded(raw []byte) []byte {
@@ -483,13 +544,25 @@ func decompressBounded(raw []byte) []byte {
 	return out
 }
 
+func decodeGraphicsBase64(encoded []byte) ([]byte, error) {
+	// Kitty's Go tools omit padding on the final chunk.
+	if !bytes.ContainsRune(encoded, '=') {
+		return base64.RawStdEncoding.DecodeString(string(encoded))
+	}
+	return base64.StdEncoding.DecodeString(string(encoded))
+}
+
 func decodeKittyImage(raw, params []byte) *decodedImage {
+	medium := firstParamByte(params, 't', 'd')
+	if medium != 'd' && medium != 'f' {
+		return nil
+	}
 	if paramEquals(params, 't', "f") {
 		if len(raw) == 0 || len(raw) > 4096 {
 			return nil
 		}
 		info, err := os.Stat(string(raw))
-		if err != nil || info.Size() < 0 || info.Size() > maxImageBytes {
+		if err != nil || !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > maxImageBytes {
 			return nil
 		}
 		data, err := os.ReadFile(string(raw))
@@ -535,7 +608,7 @@ func decodeEncodedImage(raw []byte) *decodedImage {
 	rgba := image.NewNRGBA(image.Rect(0, 0, width, height))
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
-			pixel:=color.NRGBAModel.Convert(img.At(bounds.Min.X+x,bounds.Min.Y+y)).(color.NRGBA)
+			pixel := color.NRGBAModel.Convert(img.At(bounds.Min.X+x, bounds.Min.Y+y)).(color.NRGBA)
 			off := y*rgba.Stride + x*4
 			rgba.Pix[off+0] = pixel.R
 			rgba.Pix[off+1] = pixel.G
@@ -612,7 +685,7 @@ func (g *graphicsState) handleIterm(term *xterm.Terminal, payload []byte) int {
 	}
 	id := g.allocateProtocolID()
 	g.store(id, decoded, placement, false, [2]int{})
-	return 0
+	return placement.height
 }
 
 func parseSemicolonOptions(raw []byte) map[string][]byte {
@@ -883,32 +956,30 @@ func (g *graphicsState) store(id uint32, decoded *decodedImage, placement *image
 	g.storedBytes += len(decoded.rgba)
 }
 
-func (g *graphicsState) place(term *xterm.Terminal, id uint32, params []byte) int {
+func (g *graphicsState) place(term *xterm.Terminal, id uint32, params []byte) *imagePlacement {
 	record := g.images[id]
 	if record == nil {
-		return 0
+		return nil
 	}
 	placement := g.newPlacement(term, record.width, record.height, params)
 	if placement == nil {
-		return 0
+		return nil
 	}
 	if placement.placementID != 0 {
 		for i, existing := range record.placements {
 			if existing.placementID == placement.placementID {
 				existing.dispose()
 				record.placements[i] = placement
-				record.unicodePlaceholder = false
-				return placement.height
+				return placement
 			}
 		}
 	}
 	if len(record.placements) >= maxImagePlacements {
 		placement.dispose()
-		return 0
+		return nil
 	}
 	record.placements = append(record.placements, placement)
-	record.unicodePlaceholder = false
-	return placement.height
+	return placement
 }
 
 func (g *graphicsState) newPlacement(term *xterm.Terminal, imageWidth, imageHeight int, params []byte) *imagePlacement {
@@ -953,9 +1024,12 @@ func (g *graphicsState) newDimensionPlacement(term *xterm.Terminal, pixelWidth, 
 		width = ceilDiv(pixelWidth, cellWidth)
 		height = ceilDiv(pixelHeight, cellHeight)
 	}
-	width, height = maxInt(width, 1), maxInt(height, 1)
+	width, height = minInt(maxInt(width, 1), maxImageDimension), minInt(maxInt(height, 1), maxImageDimension)
 	return &imagePlacement{
-		marker:       term.RegisterMarker(0),
+		// Anchor the last covered row: trimming the top of a tall image must
+		// retain the part still present in history.
+		marker:       term.RegisterMarker(height - 1),
+		buffer:       term.Buffer(),
 		column:       term.CursorX(),
 		width:        width,
 		height:       height,
@@ -964,11 +1038,41 @@ func (g *graphicsState) newDimensionPlacement(term *xterm.Terminal, pixelWidth, 
 	}
 }
 
-func (g *graphicsState) deleteKitty(params []byte) {
-	mode := firstParamByte(params, 'd', 0)
+func (g *graphicsState) deleteKitty(term *xterm.Terminal, params []byte) {
+	mode := firstParamByte(params, 'd', 'a')
 	switch mode {
+	case 'r', 'R':
+		first, last := uint32(intParam(params, 'x', 0)), uint32(intParam(params, 'y', int(^uint32(0))))
+		for id, record := range g.images {
+			if id < first || id > last {
+				continue
+			}
+			record.dispose()
+			record.placements = nil
+			record.unicodePlaceholder = false
+			if mode == 'R' {
+				g.storedBytes -= len(record.rgba)
+				delete(g.images, id)
+			}
+		}
 	case 'a', 'A':
-		g.clear()
+		// Screen deletion must leave placements already in history intact.
+		buf := term.Buffer()
+		for id, record := range g.images {
+			kept := record.placements[:0]
+			for _, p := range record.placements {
+				if p.buffer == buf && p.marker != nil && !p.marker.IsDisposed && p.row()+p.height > buf.YBase && p.row() < buf.YBase+term.Rows() {
+					p.dispose()
+				} else {
+					kept = append(kept, p)
+				}
+			}
+			record.placements = kept
+			if mode == 'A' && len(kept) == 0 && !record.unicodePlaceholder {
+				g.storedBytes -= len(record.rgba)
+				delete(g.images, id)
+			}
+		}
 	case 'i', 'I':
 		id, ok := paramUint(params, 'i')
 		if !ok {
@@ -991,8 +1095,12 @@ func (g *graphicsState) deleteKitty(params []byte) {
 			return
 		}
 		record.dispose()
-		g.storedBytes -= len(record.rgba)
-		delete(g.images, id)
+		record.placements = nil
+		record.unicodePlaceholder = false
+		if mode == 'I' {
+			g.storedBytes -= len(record.rgba)
+			delete(g.images, id)
+		}
 	}
 }
 
@@ -1018,43 +1126,57 @@ func (g *graphicsState) allocateProtocolID() uint32 {
 }
 
 func (g *graphicsState) eraseVisible(term *xterm.Terminal) {
-	if g==nil || term==nil { return }
-	buf:=term.Buffer()
-	start:=buf.YDisp
-	end:=start+term.Rows()
-	g.retainPlacements(func(p *imagePlacement)bool{
-		if p==nil || p.marker==nil || p.marker.IsDisposed || p.marker.Line<0 { return false }
-		pEnd:=p.marker.Line+maxInt(p.height,1)
-		return pEnd<=start || p.marker.Line>=end
+	if g == nil || term == nil {
+		return
+	}
+	buf := term.Buffer()
+	start := buf.YDisp
+	end := start + term.Rows()
+	g.retainPlacements(func(p *imagePlacement) bool {
+		if p == nil || p.marker == nil || p.marker.IsDisposed || p.marker.Line < 0 {
+			return false
+		}
+		if p.buffer != buf {
+			return true
+		}
+		pEnd := p.row() + maxInt(p.height, 1)
+		return pEnd <= start || p.row() >= end
 	})
 }
 
 func (g *graphicsState) eraseScrollback(term *xterm.Terminal) {
-	if g==nil || term==nil { return }
-	start:=term.Buffer().YDisp
-	g.retainPlacements(func(p *imagePlacement)bool{
-		return p!=nil && p.marker!=nil && !p.marker.IsDisposed && p.marker.Line>=start
+	if g == nil || term == nil {
+		return
+	}
+	start := term.Buffer().YDisp
+	g.retainPlacements(func(p *imagePlacement) bool {
+		return p != nil && p.marker != nil && !p.marker.IsDisposed && (p.buffer != term.Buffer() || p.row()+p.height > start)
 	})
 }
 
-func (g *graphicsState) retainPlacements(keep func(*imagePlacement)bool) {
-	for id,record:=range g.images {
-		if record==nil { delete(g.images,id);continue }
-		if len(record.placements)>0 {
-			next:=record.placements[:0]
-			for _,placement:=range record.placements {
+func (g *graphicsState) retainPlacements(keep func(*imagePlacement) bool) {
+	for id, record := range g.images {
+		if record == nil {
+			delete(g.images, id)
+			continue
+		}
+		if len(record.placements) > 0 {
+			next := record.placements[:0]
+			for _, placement := range record.placements {
 				if keep(placement) {
-					next=append(next,placement)
+					next = append(next, placement)
 				} else {
 					placement.dispose()
 				}
 			}
-			record.placements=next
+			record.placements = next
 		}
-		if len(record.placements)==0 && !record.unicodePlaceholder {
-			g.storedBytes-=len(record.rgba)
-			if g.storedBytes<0{g.storedBytes=0}
-			delete(g.images,id)
+		if len(record.placements) == 0 && !record.unicodePlaceholder {
+			g.storedBytes -= len(record.rgba)
+			if g.storedBytes < 0 {
+				g.storedBytes = 0
+			}
+			delete(g.images, id)
 		}
 	}
 }
@@ -1069,31 +1191,28 @@ func (g *graphicsState) snapshot(term *xterm.Terminal, rows []Row) []TerminalIma
 		if record == nil {
 			continue
 		}
-		if record.unicodePlaceholder {
-			minRow, minCol, maxRow, maxCol := 1<<30, 1<<30, -1, -1
-			for rowIndex, row := range rows {
-				for col, cell := range row.Cells {
-					if !strings.ContainsRune(cell.Text, terminalImagePlaceholder) {
-						continue
-					}
-					if placeholderImageID(cell.FG) != protocolID {
-						continue
-					}
-					minRow = minInt(minRow, rowIndex)
-					minCol = minInt(minCol, col)
-					maxRow = maxInt(maxRow, rowIndex)
-					maxCol = maxInt(maxCol, col)
+		if len(record.placements) > 0 {
+			kept := record.placements[:0]
+			for _, p := range record.placements {
+				if p != nil && p.marker != nil && !p.marker.IsDisposed {
+					kept = append(kept, p)
 				}
 			}
-			if maxRow >= minRow && maxCol >= minCol {
-				out = append(out, terminalImageFromRecord(record, minRow, minCol, maxCol-minCol+1, maxRow-minRow+1, nil))
-			}
-		}
-		for _, placement := range record.placements {
-			if placement == nil || placement.marker == nil || placement.marker.IsDisposed || placement.marker.Line < 0 {
+			record.placements = kept
+			if len(kept) == 0 && !record.unicodePlaceholder {
+				g.storedBytes -= len(record.rgba)
+				delete(g.images, protocolID)
 				continue
 			}
-			row := placement.marker.Line - buf.YDisp
+		}
+		if record.unicodePlaceholder {
+			out = append(out, g.placeholderSnapshot(protocolID, record, rows)...)
+		}
+		for _, placement := range record.placements {
+			if placement == nil || placement.buffer != buf || placement.marker == nil || placement.marker.IsDisposed || placement.marker.Line < 0 {
+				continue
+			}
+			row := placement.row() - buf.YDisp
 			if row+placement.height < -imageOverscanRows || row > term.Rows()+imageOverscanRows {
 				continue
 			}

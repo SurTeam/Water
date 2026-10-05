@@ -29,8 +29,10 @@ const (
 type Terminal struct {
 	ID uuid.UUID
 
-	cmd  *exec.Cmd
-	ptmx *os.File
+	cmd                   *exec.Cmd
+	ptmx                  *os.File
+	shellIntegrationDir   string
+	cellWidth, cellHeight int // owned by the ordered PTY reader
 
 	mu          sync.RWMutex
 	size        goprotocol.TerminalSize
@@ -85,6 +87,16 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		cmd.Dir = cwd
 	}
 	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor")
+	integrationDir, err := prepareShellIntegration(cmd, program, args)
+	if err != nil {
+		return nil, err
+	}
+	started := false
+	defer func() {
+		if !started && integrationDir != "" {
+			_ = os.RemoveAll(integrationDir)
+		}
+	}()
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(size.Lines), Cols: uint16(size.Columns)})
 	if err != nil {
 		return nil, err
@@ -98,20 +110,22 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 	}
 	ptmx = pollable
 	t := &Terminal{
-		ID:               uuid.New(),
-		cmd:              cmd,
-		ptmx:             ptmx,
-		size:             size,
-		replayLimit:      r.replayLimit,
-		subs:             make(map[uint64]*subscriber),
-		closed:           make(chan struct{}),
-		readerDone:       make(chan struct{}),
-		resizeRequests:   make(chan resizeRequest),
-		rawFlushRequests: make(chan rawFlushRequest, 1),
+		shellIntegrationDir: integrationDir,
+		ID:                  uuid.New(),
+		cmd:                 cmd,
+		ptmx:                ptmx,
+		size:                size,
+		replayLimit:         r.replayLimit,
+		subs:                make(map[uint64]*subscriber),
+		closed:              make(chan struct{}),
+		readerDone:          make(chan struct{}),
+		resizeRequests:      make(chan resizeRequest),
+		rawFlushRequests:    make(chan rawFlushRequest, 1),
 	}
 	r.mu.Lock()
 	r.terms[t.ID] = t
 	r.mu.Unlock()
+	started = true
 	go t.readLoop()
 	go t.waitLoop()
 	return t, nil
@@ -182,8 +196,9 @@ func (t *Terminal) Write(data []byte) error {
 }
 
 type resizeRequest struct {
-	size goprotocol.TerminalSize
-	done chan error
+	size                  goprotocol.TerminalSize
+	cellWidth, cellHeight int
+	done                  chan error
 }
 
 type rawFlushRequest struct {
@@ -192,7 +207,11 @@ type rawFlushRequest struct {
 }
 
 func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
-	req := resizeRequest{size: size.Normalized(), done: make(chan error, 1)}
+	return t.ResizeWithCells(size, 0, 0)
+}
+
+func (t *Terminal) ResizeWithCells(size goprotocol.TerminalSize, cellWidth, cellHeight int) error {
+	req := resizeRequest{size: size.Normalized(), cellWidth: cellWidth, cellHeight: cellHeight, done: make(chan error, 1)}
 	select {
 	case t.resizeRequests <- req:
 	case <-t.readerDone:
@@ -462,9 +481,17 @@ func (t *Terminal) readLoop() {
 			// ordering: Output(old geometry) -> Resize -> Output(new geometry).
 			drainObserved()
 			flush()
+			if req.cellWidth > 0 {
+				t.cellWidth = min(req.cellWidth, 1024)
+			}
+			if req.cellHeight > 0 {
+				t.cellHeight = min(req.cellHeight, 1024)
+			}
 			err := pty.Setsize(t.ptmx, &pty.Winsize{
 				Rows: uint16(req.size.Lines),
 				Cols: uint16(req.size.Columns),
+				X:    uint16(min(65535, t.cellWidth*req.size.Columns)),
+				Y:    uint16(min(65535, t.cellHeight*req.size.Lines)),
 			})
 			if err == nil {
 				t.mu.Lock()
@@ -596,6 +623,9 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 
 func (t *Terminal) waitLoop() {
 	err := t.cmd.Wait()
+	if t.shellIntegrationDir != "" {
+		_ = os.RemoveAll(t.shellIntegrationDir)
+	}
 	// Preserve stream ordering: all bytes
 	// readable from the PTY must be sequenced before the authoritative Exit.
 	<-t.readerDone

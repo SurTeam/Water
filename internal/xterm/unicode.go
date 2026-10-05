@@ -3,6 +3,7 @@ package xterm
 // Ported from xterm.js src/common/services/UnicodeService.ts and src/common/input/UnicodeV6.ts.
 
 import (
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/width"
@@ -157,6 +158,11 @@ func (u *UnicodeService) Wcwidth(cp rune) int {
 	}
 	if num < 127 {
 		return 1
+	}
+	// The legacy table misses marks used by Kitty placeholders (e.g. U+0487)
+	// and marks added after Unicode 6.0. They must join the preceding cell.
+	if unicode.Is(unicode.Mn, cp) || unicode.Is(unicode.Me, cp) {
+		return 0
 	}
 	if num < 65536 && bmpWidthTable[num] == 0 || num >= 65536 && bisearch(num, highCombining) {
 		return 0

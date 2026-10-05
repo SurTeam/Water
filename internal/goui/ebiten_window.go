@@ -609,11 +609,18 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 			yBase, yDisp := pane.term.snapshot.YBase, pane.term.snapshot.YDisp
 			cursorX, cursorY := pane.term.snapshot.CursorX, pane.term.snapshot.CursorY
 			cursorStyle, cursorBlink := pane.term.snapshot.CursorStyle, pane.term.snapshot.CursorBlink
+			selection := pane.term.selection
+			images := []map[string]any{}
+			for _, img := range pane.term.snapshot.Images {
+				images = append(images, map[string]any{"id": img.ID, "row": img.Row, "column": img.Column, "width": img.Width, "height": img.Height, "pixel_width": img.PixelWidth, "pixel_height": img.PixelHeight})
+			}
 			pane.term.mu.RUnlock()
 			pane.term.mu.RLock()
 			columns, rows := pane.term.cols, pane.term.rows
 			pane.term.mu.RUnlock()
 			grids = append(grids, map[string]any{"pane_id": id, "rect": []int{pane.rect.Min.X, pane.rect.Min.Y, pane.rect.Max.X, pane.rect.Max.Y}, "columns": pane.rect.Dx() / pane.cw, "rows": pane.rect.Dy() / pane.lh, "terminal_columns": columns, "terminal_rows": rows, "cell_width": pane.cw, "cell_height": pane.lh, "working_directory_uri": directory, "y_base": yBase, "y_disp": yDisp, "cursor_x": cursorX, "cursor_y": cursorY, "cursor_style": cursorStyle, "cursor_blink": cursorBlink})
+			grids[len(grids)-1]["selection"] = selection
+			grids[len(grids)-1]["images"] = images
 		}
 		state["terminal_grids"] = grids
 		state["ui_config"] = c.currentConfig().UI
