@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Verify cursor preferences and IME geometry through an owned native Water GUI."""
 import json
-import math
 import os
 from pathlib import Path
 import platform
@@ -101,9 +100,9 @@ finally:
                 return False
             x = g["rect"][0] + col*g["cell_width"]
             y = g["rect"][1] + row*g["cell_height"]
-            scale = s["display_scale"] if platform.system() == "Darwin" else 1
-            expected = [math.floor(x/scale), math.floor(y/scale),
-                math.ceil((x+g["cell_width"])/scale), math.ceil((y+g["cell_height"])/scale)]
+            # SessionOptions expects the same logical pixels as the rendered
+            # grid. Ebitengine performs the native coordinate conversion.
+            expected = [x, y, x+g["cell_width"], y+g["cell_height"]]
             return s["ime_caret_bounds"] == expected
         state = wait(positioned, "IME bounds follow cursor")
         geometry.append(state["ime_caret_bounds"])

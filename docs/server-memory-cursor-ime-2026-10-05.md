@@ -54,31 +54,33 @@ combination, checked the file and runtime snapshot, and captured screenshots.
 
 ## macOS IME finding and change
 
-Water renders its logical framebuffer at backing-pixel resolution. Ebitengine
-v2.10.0 converts logical caret coordinates to native client pixels, then uses
-them directly for the macOS text-input NSView frame. AppKit interprets that
-frame in points. On a Retina display, those units differ by the backing scale.
+Correction after observing the 小企鹅 candidate window: the previous backing-scale
+compensation applied the conversion twice. Ebitengine v2.10.0 converts logical
+caret coordinates to client coordinates, and on macOS `dipToGLFWPixel` is an
+identity operation because GLFW already uses AppKit points. Water must pass the
+rendered grid's logical framebuffer bounds unchanged to `SessionOptions`.
+Dividing them by the Retina backing scale placed the candidate window at about
+half the cursor's X and Y coordinates. That extra division is now removed.
 
-Water compensates for that pinned backend behavior using the monitor's backing
-scale, rather than the UI font scale. Integer bounds round outward so a narrow
-caret retains nonzero extent. Terminal geometry comes from the same fitted grid
-and cursor snapshot used for rendering; editors use their measured insertion
-position. Offscreen terminal cursors do not start a session.
+Terminal geometry comes from the same fitted grid and cursor snapshot used for
+rendering; editors use their measured insertion position. Offscreen terminal
+cursors do not start a session.
 
 Composer otherwise captures caret bounds only at session creation. Water now
 refreshes an idle session when the cursor or layout changes. A live composition
 is preserved; session restarts are deferred until marked text is empty. This
 avoids discarding input when asynchronous terminal output changes the cursor.
-If the dependency later fixes native-pixel-to-AppKit conversion or adds a live
-caret-update API, review this compensation and restart policy during upgrade.
+If the dependency adds a live
+caret-update API, review this restart policy during upgrade.
 
-The Retina smoke test parked a raw PTY at two known cursor positions and checked
-that the supplied IME bounds followed both:
+The original Retina smoke test parked a raw PTY at two known cursor positions
+and checked these supplied bounds. These historical results asserted the
+incorrect extra division; the smoke test now expects logical framebuffer bounds:
 
-| Cursor (zero based) | Caret bounds in points |
-| --- | --- |
-| column 10, row 4 | [278, 136, 286, 158] |
-| column 30, row 19 | [438, 466, 446, 488] |
+| Cursor (zero based) | Previous bounds | Correct logical bounds |
+| --- | --- | --- |
+| column 10, row 4 | [278, 136, 286, 158] | [556, 272, 572, 316] |
+| column 30, row 19 | [438, 466, 446, 488] | [876, 932, 892, 976] |
 
 This verifies native GUI geometry and session refresh. It does not constitute
 physical keyboard acceptance or direct observation of the 小企鹅 candidate

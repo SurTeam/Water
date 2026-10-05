@@ -5,18 +5,18 @@ import (
 	"testing"
 )
 
-func TestCaretBoundsInPoints(t *testing.T) {
-	for _, tc := range []struct {
-		bounds image.Rectangle
-		scale  float64
-		want   image.Rectangle
-	}{
-		{image.Rect(200, 100, 220, 140), 2, image.Rect(100, 50, 110, 70)},
-		{image.Rect(201, 101, 202, 141), 2, image.Rect(100, 50, 101, 71)},
-		{image.Rect(200, 100, 220, 140), 1, image.Rect(200, 100, 220, 140)},
-	} {
-		if got := caretBoundsInPoints(tc.bounds, tc.scale); got != tc.want {
-			t.Fatalf("%v at %v: got %v want %v", tc.bounds, tc.scale, got, tc.want)
+func TestCaretSessionUsesLogicalFramebufferBounds(t *testing.T) {
+	// Coordinates come from the rendered terminal grid, including its display
+	// scale. The text-input backend owns conversion to native platform units.
+	for _, scale := range []float64{1, 2} {
+		w := EbitengineWindow{scale: scale}
+		bounds := image.Rect(w.dp(176), w.dp(652), w.dp(184), w.dp(674))
+		opts := w.caretSessionOptions(bounds)
+		if opts.CaretBounds != bounds {
+			t.Fatalf("scale %v: session bounds %v, rendered bounds %v", scale, opts.CaretBounds, bounds)
+		}
+		if w.inputCaret != bounds {
+			t.Fatalf("scale %v: reported bounds %v, rendered bounds %v", scale, w.inputCaret, bounds)
 		}
 	}
 }

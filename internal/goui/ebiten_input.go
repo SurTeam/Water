@@ -5,7 +5,6 @@ import (
 	"image"
 	"math"
 	"reflect"
-	"runtime"
 	"strings"
 	"time"
 
@@ -1234,22 +1233,11 @@ func (w *EbitengineWindow) initComposer() {
 }
 
 func (w *EbitengineWindow) caretSessionOptions(bounds image.Rectangle) *textinput.SessionOptions {
-	// Water's logical framebuffer uses backing pixels. Ebitengine's macOS
-	// text-input view interprets caret bounds as AppKit points, so compensate
-	// for the monitor's backing scale (independent of Water's UI scale).
-	if runtime.GOOS == "darwin" {
-		bounds = caretBoundsInPoints(bounds, ebiten.Monitor().DeviceScaleFactor())
-	}
+	// Ebitengine converts logical framebuffer coordinates to platform units.
+	// On macOS its GLFW coordinates are already AppKit points; dividing here
+	// by the backing scale would apply that conversion a second time.
 	w.inputCaret = bounds
 	return &textinput.SessionOptions{CaretBounds: bounds}
-}
-
-func caretBoundsInPoints(bounds image.Rectangle, scale float64) image.Rectangle {
-	if scale <= 0 {
-		scale = 1
-	}
-	return image.Rect(int(math.Floor(float64(bounds.Min.X)/scale)), int(math.Floor(float64(bounds.Min.Y)/scale)),
-		int(math.Ceil(float64(bounds.Max.X)/scale)), int(math.Ceil(float64(bounds.Max.Y)/scale)))
 }
 
 func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
