@@ -225,6 +225,10 @@ func (c *WorkspaceClient) focusSettingsGroup() {
 
 func settingsLabel(name string) string {
 	switch name {
+	case "SidebarConnectionBackground":
+		return "Host card background"
+	case "SidebarConnectionActiveBackground":
+		return "Active host card background"
 	case "CopyOrInterrupt":
 		return "Copy"
 	case "TabMaxTitleLength":

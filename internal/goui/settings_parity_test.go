@@ -14,8 +14,20 @@ func TestEveryConfigFieldHasSettingsControlAndRoundTrips(t *testing.T) {
 	c := &WorkspaceClient{config: cfg}
 	c.openSettings()
 	controls := map[string]bool{}
-	for _, f := range c.settings.fields {
+	visible := map[int]int{}
+	for group := 0; group < len(settingsGroups); group++ {
+		c.settings.group = group
+		for _, row := range settingsRows(&c.settings) {
+			if row.field >= 0 {
+				visible[row.field]++
+			}
+		}
+	}
+	for i, f := range c.settings.fields {
 		controls[f.group+"."+f.name] = true
+		if visible[i] != 1 {
+			t.Errorf("control %s.%s appears in %d settings rows, want 1", f.group, f.name, visible[i])
+		}
 	}
 	config := reflect.ValueOf(cfg)
 	for i := 0; i < config.NumField(); i++ {

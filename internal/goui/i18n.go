@@ -37,7 +37,7 @@ var chineseText = map[string]string{
 	"Under workspace": "工作区下方", "Separate agents": "集中展示", "Left": "居左", "Center": "居中", "Right": "居右", "Discard changes": "放弃修改",
 	"Unsaved changes. Click Discard changes to cancel, or continue editing.": "有未保存的修改。点击“放弃修改”取消，或继续编辑。",
 	"Font and text": "字体与文字", "History and memory": "历史与内存", "Links and downloads": "链接与下载", "Language and interface": "语言与界面", "Tabs": "标签页", "Terminal panes": "终端窗格", "Agents": "Agent", "Workspaces": "工作区", "Sidebar layout": "侧栏布局", "Window appearance": "窗口外观",
-	"Connections and workspaces": "连接与工作区", "Panes": "窗格", "Windows and settings": "窗口与设置", "Terminal input": "终端输入", "Agent colors": "Agent 颜色", "ANSI palette": "ANSI 调色板", "Connection colors": "连接颜色", "Workspace colors": "工作区颜色", "Pane colors": "窗格颜色", "Tab colors": "标签页颜色", "Terminal colors": "终端颜色", "Interface colors": "界面颜色", "Minimum terminal size": "最小终端尺寸", "Initial terminal size": "初始终端尺寸", "Startup behavior": "启动行为", "Shell": "命令解释器", "Local server": "本地服务", "Terminal behavior": "终端行为",
+	"Connections and workspaces": "连接与工作区", "Panes": "窗格", "Windows and settings": "窗口与设置", "Terminal input": "终端输入", "Agent colors": "Agent 颜色", "ANSI palette": "ANSI 调色板", "Connection colors": "主机卡片颜色", "Workspace colors": "工作区颜色", "Pane colors": "窗格颜色", "Tab colors": "标签页颜色", "Terminal colors": "终端颜色", "Interface colors": "界面颜色", "Minimum terminal size": "最小终端尺寸", "Initial terminal size": "初始终端尺寸", "Startup behavior": "启动行为", "Shell": "命令解释器", "Local server": "本地服务", "Terminal behavior": "终端行为",
 	"Shell arguments: unfinished quote or escape": "Shell 参数：引号或转义未完成", "settings must be a JSON object": "设置必须是 JSON 对象", "settings overrides must be an object": "设置覆盖项必须是 JSON 对象",
 	"Enter an SSH destination": "请输入 SSH 目标",
 	"Saving…":                  "正在保存…", "Defaults": "默认值", "About Water": "关于 Water", "About Water Dev": "关于 Water Dev", "Hide Water Dev": "隐藏 Water Dev", "Services": "服务", "Enter Full Screen": "进入全屏", "Exit Full Screen": "退出全屏", "Bring All to Front": "全部置于最前",
@@ -93,7 +93,7 @@ var chineseFields = map[string]string{
 	"CursorForeground": "光标文字颜色", "SidebarConnectionActiveBorder": "活动连接边框颜色", "SidebarConnectionInactiveBorder": "非活动连接边框颜色", "SidebarConnectionOfflineColor": "离线连接文字颜色", "SidebarConnectionOfflineBorder": "离线连接边框颜色",
 	"SidebarAgentBackground": "Agent 背景颜色", "SidebarAgentActiveBackground": "活动 Agent 背景颜色", "SidebarDragIndicatorColor": "侧栏拖动指示颜色", "SelectionBackground": "选中文字背景颜色", "InactiveCursor": "非活动光标颜色", "InverseForeground": "反色文字颜色", "InverseBackground": "反色背景颜色",
 	"PaneBackground": "窗格背景颜色", "ActivePaneBorder": "活动窗格边框颜色", "InactivePaneBorder": "非活动窗格边框颜色", "AccentForeground": "强调文字颜色", "TabActiveBackground": "活动标签页背景颜色", "TabInactiveBackground": "非活动标签页背景颜色", "TabAddBackground": "新建标签按钮背景颜色",
-	"SidebarConnectionBackground": "连接背景颜色", "SidebarConnectionActiveBackground": "活动连接背景颜色", "SidebarWorkspaceBackground": "工作区背景颜色", "SidebarWorkspaceActiveBackground": "活动工作区背景颜色",
+	"SidebarConnectionBackground": "主机卡片背景颜色", "SidebarConnectionActiveBackground": "活动主机卡片背景颜色", "SidebarWorkspaceBackground": "工作区背景颜色", "SidebarWorkspaceActiveBackground": "活动工作区背景颜色",
 	"TerminalBackground": "终端背景颜色", "TerminalForeground": "终端文字颜色", "CursorBackground": "光标背景颜色", "ChromeBackground": "界面背景颜色", "Accent": "强调颜色", "UIForeground": "界面文字颜色", "SidebarBackground": "侧栏背景颜色",
 }
 
