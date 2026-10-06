@@ -111,6 +111,8 @@ type EbitengineWindow struct {
 	platform                nativePlatform
 	notificationAgents      map[string]nativeAgent
 	notificationConnections map[uuid.UUID]string
+	notificationAgentRuns   map[string]notificationRun
+	notificationShellRuns   map[string]notificationRun
 	bellNotifications       chan uuid.UUID
 	lastBellNotification    map[uuid.UUID]time.Time
 	menuEvents              chan string
@@ -362,7 +364,7 @@ func (w *EbitengineWindow) Update() error {
 		platformConfig.UI.WindowCornerRadius = 0
 	}
 	w.platform.Update(platformConfig)
-	w.processNotifications(c)
+	w.processNotificationsAt(c, focused, time.Now())
 	w.processTerminalReports()
 	w.multi.mu.RLock()
 	liveViews := make(map[*WorkspaceClient]bool, len(w.multi.connections))

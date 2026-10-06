@@ -234,6 +234,9 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 		}
 		h.dirtyRowTracker.MarkDirty(0)
 	case 3: // erase scrollback
+		if h.preserveScrollbackOnErase {
+			return true
+		}
 		scrollBackSize := buf.Lines.Length() - h.bufferService.Rows
 		if scrollBackSize > 0 {
 			buf.Lines.TrimStart(scrollBackSize)

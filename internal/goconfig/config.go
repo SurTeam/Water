@@ -88,63 +88,65 @@ type TerminalConfig struct {
 }
 
 type UIConfig struct {
-	SystemNotifications            bool    `json:"system_notifications"`
-	SidebarAgentMode               string  `json:"sidebar_agent_mode"`
-	SidebarHostFontSize            float32 `json:"sidebar_host_font_size"`
-	SidebarWorkspaceFontSize       float32 `json:"sidebar_workspace_font_size"`
-	SidebarAgentFontSize           float32 `json:"sidebar_agent_font_size"`
-	SidebarRemoteButtonHeight      float32 `json:"sidebar_remote_button_height"`
-	SidebarRemoteButtonFontSize    float32 `json:"sidebar_remote_button_font_size"`
-	SidebarWorkspaceButtonHeight   float32 `json:"sidebar_workspace_button_height"`
-	SidebarWorkspaceButtonFontSize float32 `json:"sidebar_workspace_button_font_size"`
-	SidebarHostAlignment           string  `json:"sidebar_host_alignment"`
-	SidebarWorkspaceAlignment      string  `json:"sidebar_workspace_alignment"`
-	SidebarAgentAlignment          string  `json:"sidebar_agent_alignment"`
-	SidebarHostRowWidth            float32 `json:"sidebar_host_row_width"`
-	SidebarWorkspaceRowWidth       float32 `json:"sidebar_workspace_row_width"`
-	Language                       string  `json:"language"`
-	SidebarVisible                 bool    `json:"sidebar_visible"`
-	SidebarShowAgentCount          bool    `json:"sidebar_show_agent_count"`
-	DimInactivePanes               bool    `json:"dim_inactive_panes"`
-	TabBarVerticalWheelScroll      bool    `json:"tab_bar_vertical_wheel_scroll"`
-	WorkspaceNavigationAcrossHosts bool    `json:"workspace_navigation_across_hosts"`
-	SidebarMinWidth                float32 `json:"sidebar_min_width"`
-	SidebarMaxWidth                float32 `json:"sidebar_max_width"`
-	SidebarResizeHandleWidth       float32 `json:"sidebar_resize_handle_width"`
-	TitlebarHeight                 float32 `json:"titlebar_height"`
-	TabHeight                      float32 `json:"tab_height"`
-	SidebarHeaderHeight            float32 `json:"sidebar_header_height"`
-	WindowPadding                  float32 `json:"window_padding"`
-	SidebarSurfaceMargin           float32 `json:"sidebar_surface_margin"`
-	SidebarAgentRowGap             float32 `json:"sidebar_agent_row_gap"`
-	SidebarAgentPadding            float32 `json:"sidebar_agent_padding"`
-	SidebarHostHeaderHeight        float32 `json:"sidebar_host_header_height"`
-	SidebarHostWorkspaceGap        float32 `json:"sidebar_host_workspace_gap"`
-	SidebarAgentRowWidth           float32 `json:"sidebar_agent_row_width"`
-	SidebarWorkspaceRowPadding     float32 `json:"sidebar_workspace_row_padding"`
-	SidebarAgentRowPadding         float32 `json:"sidebar_agent_row_padding"`
-	SidebarAgentRowHeight          float32 `json:"sidebar_agent_row_height"`
-	SidebarWorkspaceGap            float32 `json:"sidebar_workspace_gap"`
-	SidebarMargin                  float32 `json:"sidebar_margin"`
-	SidebarCardGap                 float32 `json:"sidebar_card_gap"`
-	SidebarCardPadding             float32 `json:"sidebar_card_padding"`
-	SidebarRowPadding              float32 `json:"sidebar_row_padding"`
-	TitlebarPadding                float32 `json:"titlebar_padding"`
-	TitlebarGap                    float32 `json:"titlebar_gap"`
-	TabGap                         float32 `json:"tab_gap"`
-	TabPadding                     float32 `json:"tab_padding"`
-	TabFontSize                    float32 `json:"tab_font_size"`
-	TabMaxTitleLength              int     `json:"tab_max_title_length"`
-	WindowCornerRadius             float32 `json:"window_corner_radius"`
-	SidebarCardRadius              float32 `json:"sidebar_card_radius"`
-	SidebarWorkspaceRadius         float32 `json:"sidebar_workspace_radius"`
-	SidebarWidth                   float32 `json:"sidebar_width"`
-	PanePadding                    float32 `json:"pane_padding"`
-	PaneMargin                     float32 `json:"pane_margin"`
-	PaneCornerRadius               float32 `json:"pane_corner_radius"`
-	PaneDividerWidth               float32 `json:"pane_divider_width"`
-	UIFontSize                     float32 `json:"font_size"`
-	UIFontFamily                   string  `json:"font_family"`
+	SystemNotifications             bool    `json:"system_notifications"`
+	AgentLongRunNotificationSeconds int     `json:"agent_long_run_notification_seconds"`
+	ShellLongRunNotificationSeconds int     `json:"shell_long_run_notification_seconds"`
+	SidebarAgentMode                string  `json:"sidebar_agent_mode"`
+	SidebarHostFontSize             float32 `json:"sidebar_host_font_size"`
+	SidebarWorkspaceFontSize        float32 `json:"sidebar_workspace_font_size"`
+	SidebarAgentFontSize            float32 `json:"sidebar_agent_font_size"`
+	SidebarRemoteButtonHeight       float32 `json:"sidebar_remote_button_height"`
+	SidebarRemoteButtonFontSize     float32 `json:"sidebar_remote_button_font_size"`
+	SidebarWorkspaceButtonHeight    float32 `json:"sidebar_workspace_button_height"`
+	SidebarWorkspaceButtonFontSize  float32 `json:"sidebar_workspace_button_font_size"`
+	SidebarHostAlignment            string  `json:"sidebar_host_alignment"`
+	SidebarWorkspaceAlignment       string  `json:"sidebar_workspace_alignment"`
+	SidebarAgentAlignment           string  `json:"sidebar_agent_alignment"`
+	SidebarHostRowWidth             float32 `json:"sidebar_host_row_width"`
+	SidebarWorkspaceRowWidth        float32 `json:"sidebar_workspace_row_width"`
+	Language                        string  `json:"language"`
+	SidebarVisible                  bool    `json:"sidebar_visible"`
+	SidebarShowAgentCount           bool    `json:"sidebar_show_agent_count"`
+	DimInactivePanes                bool    `json:"dim_inactive_panes"`
+	TabBarVerticalWheelScroll       bool    `json:"tab_bar_vertical_wheel_scroll"`
+	WorkspaceNavigationAcrossHosts  bool    `json:"workspace_navigation_across_hosts"`
+	SidebarMinWidth                 float32 `json:"sidebar_min_width"`
+	SidebarMaxWidth                 float32 `json:"sidebar_max_width"`
+	SidebarResizeHandleWidth        float32 `json:"sidebar_resize_handle_width"`
+	TitlebarHeight                  float32 `json:"titlebar_height"`
+	TabHeight                       float32 `json:"tab_height"`
+	SidebarHeaderHeight             float32 `json:"sidebar_header_height"`
+	WindowPadding                   float32 `json:"window_padding"`
+	SidebarSurfaceMargin            float32 `json:"sidebar_surface_margin"`
+	SidebarAgentRowGap              float32 `json:"sidebar_agent_row_gap"`
+	SidebarAgentPadding             float32 `json:"sidebar_agent_padding"`
+	SidebarHostHeaderHeight         float32 `json:"sidebar_host_header_height"`
+	SidebarHostWorkspaceGap         float32 `json:"sidebar_host_workspace_gap"`
+	SidebarAgentRowWidth            float32 `json:"sidebar_agent_row_width"`
+	SidebarWorkspaceRowPadding      float32 `json:"sidebar_workspace_row_padding"`
+	SidebarAgentRowPadding          float32 `json:"sidebar_agent_row_padding"`
+	SidebarAgentRowHeight           float32 `json:"sidebar_agent_row_height"`
+	SidebarWorkspaceGap             float32 `json:"sidebar_workspace_gap"`
+	SidebarMargin                   float32 `json:"sidebar_margin"`
+	SidebarCardGap                  float32 `json:"sidebar_card_gap"`
+	SidebarCardPadding              float32 `json:"sidebar_card_padding"`
+	SidebarRowPadding               float32 `json:"sidebar_row_padding"`
+	TitlebarPadding                 float32 `json:"titlebar_padding"`
+	TitlebarGap                     float32 `json:"titlebar_gap"`
+	TabGap                          float32 `json:"tab_gap"`
+	TabPadding                      float32 `json:"tab_padding"`
+	TabFontSize                     float32 `json:"tab_font_size"`
+	TabMaxTitleLength               int     `json:"tab_max_title_length"`
+	WindowCornerRadius              float32 `json:"window_corner_radius"`
+	SidebarCardRadius               float32 `json:"sidebar_card_radius"`
+	SidebarWorkspaceRadius          float32 `json:"sidebar_workspace_radius"`
+	SidebarWidth                    float32 `json:"sidebar_width"`
+	PanePadding                     float32 `json:"pane_padding"`
+	PaneMargin                      float32 `json:"pane_margin"`
+	PaneCornerRadius                float32 `json:"pane_corner_radius"`
+	PaneDividerWidth                float32 `json:"pane_divider_width"`
+	UIFontSize                      float32 `json:"font_size"`
+	UIFontFamily                    string  `json:"font_family"`
 }
 
 func (u *UIConfig) UnmarshalJSON(data []byte) error {
@@ -266,6 +268,7 @@ func Default() AppConfig {
 			HyperlinkDownloadDirectory: "~/Downloads/Water",
 		},
 		UI: UIConfig{
+			SystemNotifications: true, AgentLongRunNotificationSeconds: 600, ShellLongRunNotificationSeconds: 300,
 			SidebarAgentMode: "workspace", SidebarHostFontSize: 12, SidebarWorkspaceFontSize: 12, SidebarAgentFontSize: 12,
 			SidebarRemoteButtonHeight: 30, SidebarRemoteButtonFontSize: 12, SidebarWorkspaceButtonHeight: 30, SidebarWorkspaceButtonFontSize: 12,
 			SidebarHostAlignment: "center", SidebarWorkspaceAlignment: "center", SidebarAgentAlignment: "center",

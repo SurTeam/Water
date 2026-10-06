@@ -76,8 +76,9 @@ type InputHandler struct {
 	oscLinkService *OscLinkService
 	unicodeService *UnicodeService
 
-	curAttrData           AttributeData
-	eraseAttrDataInternal AttributeData
+	curAttrData               AttributeData
+	eraseAttrDataInternal     AttributeData
+	preserveScrollbackOnErase bool
 
 	utf8Decoder     Utf8ToUtf32
 	parseBuffer     []uint32

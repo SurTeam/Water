@@ -88,7 +88,9 @@
     "socket_path": null
   },
   "ui": {
-    "system_notifications": false,
+    "system_notifications": true,
+    "agent_long_run_notification_seconds": 600,
+    "shell_long_run_notification_seconds": 300,
     "sidebar_agent_mode": "workspace",
     "sidebar_host_font_size": 12.0,
     "sidebar_workspace_font_size": 12.0,

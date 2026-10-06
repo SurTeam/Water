@@ -1,13 +1,16 @@
 package goui
 
 import (
+	"encoding/json"
+	"image"
+	"image/color"
+	"testing"
+	"time"
+
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
-	"image"
-	"image/color"
-	"testing"
 )
 
 type recordingNotifications struct {
@@ -102,12 +105,20 @@ func TestSidebarAgentOSCTitlesAndStatuses(t *testing.T) {
 	check("Pinned name", "custom", "Running")
 	delete(raw, "custom_label")
 	raw["status"] = map[string]any{"exited": map[string]any{"code": 0}}
-	check("Restored session", "osc", "Exited")
+	check("Restored session", "osc", "Completed")
 	emu.Write([]byte("\x1b]2;\x07"))
-	check("Codex", "kind", "Exited")
+	check("Codex", "kind", "Completed")
 }
 
-func TestAgentProgressNotificationsOnlyOnTransitions(t *testing.T) {
+func TestAgentStatusGlyphsUseConsistentCircleFamily(t *testing.T) {
+	for status, want := range map[string]string{"Running": "◔", "Paused": "◑", "Error": "◕", "Idle": "○", "Completed": "◌", "Offline": "◍"} {
+		if got := agentStatusGlyph(status); got != want {
+			t.Fatalf("%s glyph=%q, want %q", status, got, want)
+		}
+	}
+}
+
+func TestAgentProgressNotificationsDistinguishAttentionCompletionAndErrors(t *testing.T) {
 	cfg := goconfig.Default()
 	cfg.UI.SystemNotifications = true
 	manager := NewMultiWorkspaceClient(nil)
@@ -131,12 +142,24 @@ func TestAgentProgressNotificationsOnlyOnTransitions(t *testing.T) {
 	if len(platform.messages) != 0 {
 		t.Fatal("initial replay notified")
 	}
-	for i, transition := range []struct{ osc, status string }{{"3", "Running"}, {"0", "Idle"}, {"4", "Paused"}, {"2", "Error"}} {
+	transitions := []struct{ osc, message string }{
+		{"3", ""},
+		{"0", "Water: Agent completed: Codex"},
+		{"4", "Water: Agent paused; it may need your attention: Codex"},
+		{"2", "Water: Agent reported an error: Codex"},
+	}
+	for _, transition := range transitions {
 		emu.Write([]byte("\x1b]9;4;" + transition.osc + "\x07"))
 		window.processNotifications(view)
 		window.processNotifications(view)
-		if len(platform.messages) != i+1 || platform.messages[i] != "Water: Codex: "+transition.status {
-			t.Fatalf("transition %s notifications=%v", transition.status, platform.messages)
+		if transition.message == "" {
+			if len(platform.messages) != 0 {
+				t.Fatalf("running transition notified: %v", platform.messages)
+			}
+			continue
+		}
+		if len(platform.messages) == 0 || platform.messages[len(platform.messages)-1] != transition.message {
+			t.Fatalf("transition %s notifications=%v", transition.osc, platform.messages)
 		}
 	}
 	manager.markDisconnected(connection)
@@ -160,6 +183,7 @@ func TestSidebarFooterIndependentHeights(t *testing.T) {
 	cfg := goconfig.Default()
 	cfg.UI.SidebarRemoteButtonHeight, cfg.UI.SidebarWorkspaceButtonHeight = 40, 22
 	cfg.UI.SidebarRemoteButtonFontSize, cfg.UI.SidebarWorkspaceButtonFontSize = 18, 9
+	cfg.UI.AgentLongRunNotificationSeconds, cfg.UI.ShellLongRunNotificationSeconds = 1, 3
 	manager := NewMultiWorkspaceClient(nil)
 	defer manager.Close()
 	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
@@ -179,8 +203,110 @@ func TestSidebarFooterIndependentHeights(t *testing.T) {
 	}
 	view.openSettings()
 	parsed, err := view.settings.parse()
-	if err != nil || parsed.UI.SidebarRemoteButtonFontSize != 18 || parsed.UI.SidebarWorkspaceButtonFontSize != 9 {
-		t.Fatalf("footer settings lost: %v", err)
+	if err != nil || parsed.UI.SidebarRemoteButtonFontSize != 18 || parsed.UI.SidebarWorkspaceButtonFontSize != 9 || parsed.UI.AgentLongRunNotificationSeconds != 1 || parsed.UI.ShellLongRunNotificationSeconds != 3 || !parsed.UI.SystemNotifications {
+		t.Fatalf("settings lost values: %v", err)
+	}
+}
+
+func TestAgentStartNotificationIsEmittedOnceAfterBaseline(t *testing.T) {
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	connection := uuid.New()
+	if err := manager.AddConnection(ConnectionEntry{ID: connection, Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	window.processNotificationsAt(view, false, time.Unix(300, 0))
+	if len(platform.messages) != 0 {
+		t.Fatalf("initial baseline notified: %v", platform.messages)
+	}
+	view.state.Agents = []any{map[string]any{"kind": "codex", "label": "Codex", "pane_id": uuid.New(), "status": "running"}}
+	window.processNotificationsAt(view, false, time.Unix(301, 0))
+	window.processNotificationsAt(view, false, time.Unix(302, 0))
+	if len(platform.messages) != 1 || platform.messages[0] != "Water: Agent started: Codex" {
+		t.Fatalf("Agent start notifications=%v", platform.messages)
+	}
+}
+
+func TestAgentLongRunNotificationUsesConfiguredThreshold(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.AgentLongRunNotificationSeconds = 3
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	connection, pane := uuid.New(), uuid.New()
+	otherPane := uuid.New()
+	view.state.Agents = []any{map[string]any{"kind": "codex", "label": "Codex", "pane_id": pane, "status": "running"}}
+	view.state.FocusedPane = &pane
+	if err := manager.AddConnection(ConnectionEntry{ID: connection, Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	start := time.Unix(100, 0)
+	window.processNotificationsAt(view, false, start)
+	window.processNotificationsAt(view, false, start.Add(3*time.Second-time.Nanosecond))
+	if len(platform.messages) != 0 {
+		t.Fatalf("Agent notified before threshold: %v", platform.messages)
+	}
+	window.processNotificationsAt(view, true, start.Add(4*time.Second))
+	if len(platform.messages) != 0 {
+		t.Fatalf("focused window notified for Agent: %v", platform.messages)
+	}
+	window.processNotificationsAt(view, false, start.Add(5*time.Second))
+	if len(platform.messages) != 0 {
+		t.Fatalf("focused Agent pane notified: %v", platform.messages)
+	}
+	view.state.FocusedPane = &otherPane
+	window.processNotificationsAt(view, false, start.Add(6*time.Second))
+	window.processNotificationsAt(view, false, start.Add(7*time.Second))
+	if len(platform.messages) != 1 || platform.messages[0] != "Water: Agent is still running: Codex" {
+		t.Fatalf("Agent long-run notifications=%v", platform.messages)
+	}
+}
+
+func TestBackgroundShellCommandNotificationRequiresUnfocusedPaneAndWindow(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.ShellLongRunNotificationSeconds = 1
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	connection, workspace, pane, terminal := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	focused := uuid.New()
+	tree, err := json.Marshal(map[string]any{
+		"type": "leaf", "pane_id": pane,
+		"terminal": map[string]any{"summary": map[string]any{"terminal_id": terminal, "process": "running", "process_name": "sleep"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.state = gomodel.StateDump{
+		Workspaces:  []gomodel.WorkspaceDump{{ID: workspace, Title: "test", Tabs: []gomodel.TabDump{{ID: uuid.New(), Tree: tree}}}},
+		FocusedPane: &focused,
+	}
+	if err := manager.AddConnection(ConnectionEntry{ID: connection, Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	start := time.Unix(200, 0)
+	window.processNotificationsAt(view, false, start)
+	window.processNotificationsAt(view, true, start.Add(2*time.Second))
+	if len(platform.messages) != 0 {
+		t.Fatalf("focused window notified for shell command: %v", platform.messages)
+	}
+	view.state.FocusedPane = &pane
+	window.processNotificationsAt(view, false, start.Add(3*time.Second))
+	if len(platform.messages) != 0 {
+		t.Fatalf("focused pane notified for shell command: %v", platform.messages)
+	}
+	view.state.FocusedPane = &focused
+	window.processNotificationsAt(view, false, start.Add(4*time.Second))
+	window.processNotificationsAt(view, false, start.Add(5*time.Second))
+	if len(platform.messages) != 1 || platform.messages[0] != "Water: Long-running command: sleep" {
+		t.Fatalf("background command notifications=%v", platform.messages)
 	}
 }
 
@@ -204,7 +330,7 @@ func TestNotificationsBaselineDeduplicateAndHonorSetting(t *testing.T) {
 	view.state.Agents = nil
 	window.processNotifications(view)
 	window.processNotifications(view)
-	if len(platform.messages) != 1 {
+	if len(platform.messages) != 1 || platform.messages[0] != "Water: Agent completed: Codex" {
 		t.Fatalf("agent completion notifications=%v", platform.messages)
 	}
 	manager.markDisconnected(connection)

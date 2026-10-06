@@ -20,7 +20,7 @@ func TestZshForwardDeletePreservesStartupAndCustomBinding(t *testing.T) {
 		t.Run(map[bool]string{false: "missing", true: "custom"}[custom], func(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("ZDOTDIR", dir)
-			rc := "PS1='WATER_READY> '\n"
+			rc := "bindkey -e\nPS1='WATER_READY> '\n"
 			if custom {
 				rc += "bindkey -M emacs $'\\e[3~' backward-delete-char\n"
 			}
@@ -31,13 +31,31 @@ func TestZshForwardDeletePreservesStartupAndCustomBinding(t *testing.T) {
 				t.Fatal(err)
 			}
 			r := NewRegistry()
-			defer r.CloseAll()
 			term, err := r.Spawn(zsh, []string{"-i"}, goprotocol.TerminalSize{Columns: 100, Lines: 12})
 			if err != nil {
 				t.Fatal(err)
 			}
 			events, done, cancel := term.Subscribe()
-			defer cancel()
+			t.Cleanup(func() {
+				_ = term.Close()
+				timer := time.NewTimer(3 * time.Second)
+				defer timer.Stop()
+				for {
+					select {
+					case ev := <-events:
+						if ev.Kind == goprotocol.ExitEvent {
+							cancel()
+							r.CloseAll()
+							return
+						}
+					case <-timer.C:
+						cancel()
+						r.CloseAll()
+						t.Errorf("terminal did not exit during cleanup")
+						return
+					}
+				}
+			})
 			var output bytes.Buffer
 			wait := func(marker string) {
 				t.Helper()

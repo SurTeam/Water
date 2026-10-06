@@ -6,6 +6,8 @@ func DefaultAgentColors() map[string]string {
 }
 
 func (u UIConfig) normalized() UIConfig {
+	u.AgentLongRunNotificationSeconds = clamp(u.AgentLongRunNotificationSeconds, 0, 86400)
+	u.ShellLongRunNotificationSeconds = clamp(u.ShellLongRunNotificationSeconds, 0, 86400)
 	if u.SidebarAgentMode != "split" {
 		u.SidebarAgentMode = "workspace"
 	}

@@ -126,6 +126,11 @@ func New(opts ...Option) *Terminal {
 	return t
 }
 
+// SetPreserveScrollbackOnErase controls whether CSI 3 J may delete retained lines.
+func (t *Terminal) SetPreserveScrollbackOnErase(preserve bool) {
+	t.inputHandler.preserveScrollbackOnErase = preserve
+}
+
 // Write writes data to the terminal, implementing io.Writer.
 func (t *Terminal) Write(p []byte) (n int, err error) {
 	if t.isDisposed {

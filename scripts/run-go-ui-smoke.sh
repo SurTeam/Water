@@ -219,6 +219,40 @@ if ! "$WATER_BIN" --socket "$SOCKET" terminal contains \
   exit 1
 fi
 
+# The notification controls must be present in the rendered Settings model.
+"$WATER_BIN" --socket "$SOCKET" ui key cmd-, >/dev/null
+settings_visible=0
+for _ in $(seq 1 160); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then
+    settings_visible="$($PYTHON - "$SNAPSHOT" <<'PY'
+import json, sys
+settings=json.load(open(sys.argv[1]))
+required={"UI.SystemNotifications", "UI.AgentLongRunNotificationSeconds", "UI.ShellLongRunNotificationSeconds"}
+fields={field["name"] for field in settings.get("settings_fields", [])}
+print(1 if settings.get("settings_visible") and required <= fields else 0)
+PY
+)"
+    if [[ "$settings_visible" == "1" ]]; then
+      break
+    fi
+  fi
+  sleep 0.025
+done
+if [[ "$settings_visible" != "1" ]]; then
+  echo "notification controls were not exposed in Settings" >&2
+  cat "$SNAPSHOT" >&2 || true
+  cat "$LOG" >&2 || true
+  exit 1
+fi
+"$WATER_BIN" --socket "$SOCKET" ui key cmd-, >/dev/null
+for _ in $(seq 1 160); do
+  if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null &&
+     [[ "$("$PYTHON" -c 'import json,sys; print(int(json.load(open(sys.argv[1])).get("settings_visible", False)))' "$SNAPSHOT")" == "0" ]]; then
+    break
+  fi
+  sleep 0.025
+done
+
 remote_hit=""
 for _ in $(seq 1 160); do
   if "$WATER_BIN" --socket "$SOCKET" ui snapshot >"$SNAPSHOT" 2>/dev/null; then

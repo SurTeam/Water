@@ -143,6 +143,7 @@ func New(cols, rows, scrollback int) *Emulator {
 			xterm.WithScrollback(scrollback),
 		),
 	}
+	e.term.SetPreserveScrollbackOnErase(true)
 	e.term.SetCursorDefaults(xterm.CursorStyleBlock, true)
 	e.term.Buffer().Lines.OnTrimEmitter.Event(func(n int) { e.trimmedLines += uint64(n) })
 	e.term.OnData(func(data string) {
@@ -267,9 +268,6 @@ func (e *Emulator) canFastWriteOrdinary(p []byte) bool {
 func (e *Emulator) applyGraphicsEraseLocked(p []byte) {
 	if e.graphics == nil || len(p) == 0 || bytes.IndexByte(p, 0x1b) < 0 {
 		return
-	}
-	if bytes.Contains(p, []byte("\x1b[3J")) {
-		e.graphics.eraseScrollback(e.term)
 	}
 	if e.term.IsAltBufferActive() && bytes.Contains(p, []byte("\x1b[2J")) {
 		e.graphics.eraseVisible(e.term)

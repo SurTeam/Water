@@ -261,7 +261,9 @@ except KeyboardInterrupt:
     wait(lambda s: s["window_position"] != sidebar["window_position"], "sidebar blank area moves window")
     ctl("ui", "screenshot", "--output", str(directory / "workspace.png"))
     ctl("ui", "key", "cmd-,")
-    wait(lambda s: s.get("settings_visible"), "settings open")
+    settings = wait(lambda s: s.get("settings_visible"), "settings open")
+    setting_names = {field["name"] for field in settings.get("settings_fields", [])}
+    assert {"UI.SystemNotifications", "UI.AgentLongRunNotificationSeconds", "UI.ShellLongRunNotificationSeconds"} <= setting_names
     ctl("ui", "screenshot", "--output", str(directory / "settings.png"))
     edit("Terminal.FontSize", "1234")
     ctl("ui", "key", "shift-left")
@@ -299,6 +301,8 @@ except KeyboardInterrupt:
     edit("UI.SidebarRemoteButtonFontSize", "16")
     edit("UI.SidebarWorkspaceButtonHeight", "24")
     edit("UI.SidebarWorkspaceButtonFontSize", "9")
+    edit("UI.AgentLongRunNotificationSeconds", "1")
+    edit("UI.ShellLongRunNotificationSeconds", "3")
     hit(label="category:Theme")
     edit("Theme.TerminalBackground", "#182838")
     edit("Theme.1", "#ee5566")
@@ -308,7 +312,7 @@ except KeyboardInterrupt:
     edit("Shortcuts.IgnoreQuit", "cmd-alt-q")
     edit("Shortcuts.SplitDown", "ctrl-alt-s")
     hit(label="save")
-    saved = wait(lambda s: s.get("settings_visible") and s.get("settings_message") == "Settings saved" and s.get("effective_config", {}).get("ui", {}).get("sidebar_width") == 240, "saved settings projected and panel remains open")
+    saved = wait(lambda s: s.get("settings_visible") and s.get("settings_message") == "Settings saved" and s.get("effective_config", {}).get("ui", {}).get("sidebar_width") == 240 and s.get("effective_config", {}).get("ui", {}).get("agent_long_run_notification_seconds") == 1 and s.get("effective_config", {}).get("ui", {}).get("shell_long_run_notification_seconds") == 3, "saved settings projected and panel remains open")
     hit(label="cancel")
     saved = wait(lambda s: not s.get("settings_visible"), "cancel saved settings without discard prompt")
     scale = saved["frame_size"][0] / saved["window_size"][0]
@@ -335,6 +339,9 @@ except KeyboardInterrupt:
     if platform.system() == "Darwin":
         wait(lambda s: s["native_menu"].get("items", {}).get("hide-window", {}).get("modifiers") == (1 << 20 | 1 << 19), "native menu reflects updated shortcut")
     assert persisted["terminal"]["font_size"] == 18
+    assert persisted["ui"]["system_notifications"] is True
+    assert persisted["ui"]["agent_long_run_notification_seconds"] == 1
+    assert persisted["ui"]["shell_long_run_notification_seconds"] == 3
     assert persisted["terminal"]["font_family"] == font_chain
     assert persisted["theme"]["ansi_colors"][1] == "#ee5566"
     ctl("ui", "key", "cmd-\\")

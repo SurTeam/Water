@@ -53,11 +53,8 @@ func sidebarAgents(state gomodel.StateDump) []nativeAgent {
 		}
 		kind := fmt.Sprint(a["kind"])
 		active, _ := a["active"].(bool)
-		status := "Exited"
-		if a["status"] == "running" {
-			status = "Running"
-		}
-		agents = append(agents, nativeAgent{kind: kind, label: label, workspace: nativeUUID(a["workspace_id"]), tab: nativeUUID(a["tab_id"]), pane: nativeUUID(a["pane_id"]), terminal: nativeUUID(a["terminal_id"]), active: active, running: a["status"] == "running", status: status, titleSource: titleSource})
+		status, running := agentNotificationStatus(a["status"])
+		agents = append(agents, nativeAgent{kind: kind, label: label, workspace: nativeUUID(a["workspace_id"]), tab: nativeUUID(a["tab_id"]), pane: nativeUUID(a["pane_id"]), terminal: nativeUUID(a["terminal_id"]), active: active, running: running, status: status, titleSource: titleSource})
 	}
 	return agents
 }
@@ -83,7 +80,7 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 			if term.emu != nil {
 				title = term.emu.Title()
 				if state, reported := term.emu.ProgressState(); reported && a.running {
-					a.status = [...]string{"Idle", "Running", "Error", "Running", "Paused"}[state]
+					a.status = agentProgressStatus(state)
 				}
 			}
 			term.mu.RUnlock()
@@ -101,6 +98,38 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 	}
 	return agents
 }
+func agentProgressStatus(state int) string {
+	switch state {
+	case 0:
+		return "Idle"
+	case 1, 3:
+		return "Running"
+	case 2:
+		return "Error"
+	case 4:
+		return "Paused"
+	default:
+		return "Running"
+	}
+}
+
+func agentStatusGlyph(status string) string {
+	switch status {
+	case "Running":
+		return "◔"
+	case "Paused":
+		return "◑"
+	case "Error":
+		return "◕"
+	case "Completed":
+		return "◌"
+	case "Offline":
+		return "◍"
+	default:
+		return "○"
+	}
+}
+
 func (w *EbitengineWindow) hosts() []nativeHost {
 	w.multi.mu.RLock()
 	var hosts []nativeHost
@@ -399,13 +428,7 @@ func (w *EbitengineWindow) drawAgentLabel(c *WorkspaceClient, dst *ebiten.Image,
 	}
 	pad := min(w.dp(float64(u.SidebarAgentRowPadding)), max(0, row.Dx()/8))
 	if !shelf {
-		glyph := "▶"
-		if !a.running || a.status == "Idle" || a.status == "Paused" || offline {
-			glyph = "Ⅱ"
-		}
-		if a.status == "Error" && !offline {
-			glyph = "!"
-		}
+		glyph := agentStatusGlyph(status)
 		icon := image.Rect(row.Min.X+pad, row.Min.Y, row.Min.X+pad+w.dp(16), row.Max.Y)
 		w.centeredLabel(dst, c, icon, glyph, float64(u.SidebarAgentFontSize), statusColor, false)
 		name := image.Rect(icon.Max.X+w.dp(6), row.Min.Y, row.Max.X-pad, row.Max.Y)
