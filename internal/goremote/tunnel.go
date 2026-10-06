@@ -2,6 +2,7 @@ package goremote
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"hash/fnv"
@@ -79,20 +80,54 @@ func Connect(destination string) (*Tunnel, error) {
 		remoteSocket:  remote,
 		forwardSpec:   spec,
 	}
-	if t.compatible() {
-		return t, nil
+	if info, err := t.Client().Inspect(time.Second); err == nil {
+		if info.BuildVariant != gobuild.Variant {
+			_ = t.Close()
+			return nil, errors.New("remote server variant mismatch")
+		}
+		return t, nil // OpenSession negotiates capabilities, including diagnostic mode.
 	}
-
-	var info serverInfo
-	infoErr := goclient.New(local).CallTimeout("server.info", map[string]any{}, &info, time.Second)
-	if infoErr == nil {
-		_ = t.Close()
-		return nil, fmt.Errorf(
-			"remote Water server is incompatible: protocol=%d signature=%q version=%q",
-			info.ProtocolVersion,
-			info.APISignature,
-			info.ServerVersion,
-		)
+	if os.Getenv("WATER_REMOTE_CONTROL_SOCKET") == "" {
+		legacy, err := legacyRemoteSockets(destination, control)
+		if err != nil {
+			_ = t.Close()
+			return nil, err
+		}
+		var found *Tunnel
+		for _, candidate := range legacy {
+			probe, err := forwardSocket(destination, control, candidate)
+			if err != nil {
+				if found != nil {
+					_ = found.Close()
+				}
+				_ = t.Close()
+				return nil, err
+			}
+			info, err := probe.Client().Inspect(time.Second)
+			if err != nil {
+				_ = probe.Close()
+				if found != nil {
+					_ = found.Close()
+				}
+				_ = t.Close()
+				return nil, fmt.Errorf("legacy server at %s cannot be inspected; keep it running and migrate explicitly: %w", candidate, err)
+			}
+			if info.BuildVariant != gobuild.Variant {
+				_ = probe.Close()
+				continue
+			}
+			if found != nil {
+				_ = found.Close()
+				_ = probe.Close()
+				_ = t.Close()
+				return nil, errors.New("multiple legacy remote servers found; choose one with WATER_REMOTE_CONTROL_SOCKET")
+			}
+			found = probe
+		}
+		if found != nil {
+			_ = t.Close()
+			return found, nil
+		}
 	}
 
 	if err := startRemoteServer(destination, control, remote); err != nil {
@@ -101,7 +136,7 @@ func Connect(destination string) (*Tunnel, error) {
 	}
 	deadline := time.Now().Add(startTimeout)
 	for time.Now().Before(deadline) {
-		if t.compatible() {
+		if info, err := t.Client().Inspect(time.Second); err == nil && info.BuildVariant == gobuild.Variant {
 			return t, nil
 		}
 		time.Sleep(retryInterval)
@@ -118,14 +153,11 @@ func (t *Tunnel) Client() *goclient.Client {
 }
 
 func (t *Tunnel) compatible() bool {
-	var info serverInfo
-	if err := t.Client().CallTimeout("server.info", map[string]any{}, &info, time.Second); err != nil {
+	info, err := t.Client().Inspect(time.Second)
+	if err != nil {
 		return false
 	}
-	return info.ProtocolVersion == goprotocol.ProtocolVersion &&
-		info.APISignature == goprotocol.APISignature &&
-		info.BuildVariant == gobuild.Variant &&
-		info.ServerVersion == gobuild.Version
+	return goprotocol.Assess(goclient.Descriptor(gobuild.Variant), info.Descriptor).Compatible
 }
 
 func (t *Tunnel) Close() error {
@@ -149,13 +181,7 @@ func remoteControlSocket(destination string) string {
 	}
 	return filepath.Join(
 		"/tmp",
-		fmt.Sprintf(
-			"water-go-%s-p%d-%016x-%016x.sock",
-			buildIdentityToken(),
-			goprotocol.ProtocolVersion,
-			stableID(gobuild.Version+"|"+gobuild.Variant),
-			stableID(destination),
-		),
+		fmt.Sprintf("water-go-%s-%016x.sock", buildIdentityToken(), stableID(destination)),
 	)
 }
 
@@ -237,22 +263,35 @@ func startRemoteServer(destination, control, remoteSocket string) error {
 		return errors.New("WATER_REMOTE_SERVER_COMMAND must be a simple remote executable path")
 	}
 
+	probe, err := boundedSSHOutput(command("ssh", "-S", control, "-o", "BatchMode=yes", destination, program+" --server-info"))
+	if err != nil {
+		return fmt.Errorf("inspect remote server executable: %w", err)
+	}
+	var descriptor goprotocol.Descriptor
+	if err := json.Unmarshal(probe, &descriptor); err != nil {
+		return fmt.Errorf("inspect remote server descriptor: %w", err)
+	}
+	if descriptor.BuildVariant != gobuild.Variant || descriptor.ProtocolVersion != goprotocol.ProtocolVersion || descriptor.APISignature != goprotocol.APISignature || descriptor.ServerRevision != gobuild.ServerRevision {
+		return errors.New("remote server payload does not match GUI variant, protocol or server revision")
+	}
 	remoteQuoted := shellQuote(remoteSocket)
 	var commandText string
 	if embedded {
 		// program begins with $HOME and is composed only from fixed build
 		// identity components, so leave it unquoted to permit HOME expansion.
 		commandText = fmt.Sprintf(
-			"%s --socket %s >/tmp/water-go-server.log 2>&1 </dev/null &",
+			"%s --socket %s --empty-workspace >/tmp/water-go-%s-server.log 2>&1 </dev/null &",
 			program,
 			remoteQuoted,
+			buildIdentityToken(),
 		)
 	} else {
 		commandText = fmt.Sprintf(
-			"command -v %s >/dev/null 2>&1 || exit 127; %s --socket %s >/tmp/water-go-server.log 2>&1 </dev/null &",
+			"command -v %s >/dev/null 2>&1 || exit 127; %s --socket %s --empty-workspace >/tmp/water-go-%s-server.log 2>&1 </dev/null &",
 			program,
 			program,
 			remoteQuoted,
+			buildIdentityToken(),
 		)
 	}
 	return runSSH("-S", control, "-o", "BatchMode=yes", destination, commandText)

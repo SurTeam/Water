@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.14](releases/v0.3.14.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.3.15](releases/v0.3.15.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 ## Requirements
 
@@ -304,6 +304,8 @@ The default shell is the configured real shell; on macOS, zsh resolution prefers
 
 The GUI and server are separate when `server.detached` is enabled. `--empty-workspace` and `--no-initial-terminal` are test entry points, not alternate product modes.
 
+Settings → **Server** shows bilateral capabilities for the selected Local or Remote connection. Product-version differences are allowed when the API remains compatible; a server source-revision change prompts an explicit restart. Save layout and confirmed restart retain layout/selection/current directories and create new shells. Running jobs and terminal history are not resumed. Legacy servers without advertised recovery support remain running. See [Server compatibility and recovery](server-compatibility.md) for admission, stable remote discovery, failure handling and artifact locations.
+
 ## `water ctl`
 
 The control client is built into the `water` binary; the old standalone `waterctl` binary no longer exists. Prefer the explicit `ctl` namespace:
@@ -426,7 +428,7 @@ For a real GUI smoke run, start the current binary with a unique socket/config a
 
 Cmd+N windows share one local server/socket and can select different workspaces, tabs and panes. Closing a window releases only its session; with `detach_on_quit=false`, the last window closes the server. An embedded server keeps running in its original process after that process's GUI closes while other windows remain. Explicit **Quit GUI and Local Server** shuts down the shared local server using the existing connection, even if its socket pathname has become unavailable.
 
-`water ctl server info` lists UUID `window_id` values and the current focus owner. `water ctl ui state --window <UUID>` (also supported by other `ui` commands) targets a specific window; omitted IDs target the latest focused GUI. `terminal_grids.columns/rows` describe that window's geometry; `terminal_columns/terminal_rows` report the shared terminal's current dimensions. Only the focused window changes shared PTY dimensions; obtaining focus reapplies its pane geometry. Protocol 5 / API v6 is required for this behavior, so an older running server must be retired before the new GUI can attach; its socket will never be replaced automatically.
+`water ctl server info` lists UUID `window_id` values and the current focus owner, plus build/revision/capability metadata. `water ctl ui state --window <UUID>` (also supported by other `ui` commands) targets a specific window; omitted IDs target the latest focused GUI. `terminal_grids.columns/rows` describe that window's geometry; `terminal_columns/terminal_rows` report the shared terminal's current dimensions. Only the focused window changes shared PTY dimensions; obtaining focus reapplies its pane geometry. Protocol/API or required-capability mismatches enter diagnostic mode instead of normal workspace operations. Existing sockets are never silently replaced.
 
 Native multiwindow checks cover both detached and embedded lifetimes:
 

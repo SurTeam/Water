@@ -176,7 +176,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	workspace := activeWorkspace(state)
 	if sideWidth > 0 {
-		w.centeredLabel(dst, c, image.Rect(controlsEnd, 0, sideWidth-w.dp(14), baseHeight), "Water", float64(min(11, cfg.UI.TitlebarHeight-2)), muted, true)
+		w.centeredLabel(dst, c, image.Rect(controlsEnd, 0, sideWidth-w.dp(14), baseHeight), w.windowTitle(), float64(min(11, cfg.UI.TitlebarHeight-2)), muted, true)
 		w.drawSidebar(c, dst, image.Rect(0, titleHeight, sideWidth, w.size.Y), sidebar)
 		handle := w.dp(float64(cfg.UI.SidebarResizeHandleWidth))
 		edge := sideWidth - w.dp(float64(cfg.UI.WindowPadding))
@@ -555,9 +555,9 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 		w.button(dst, c, image.Rect(r.Max.X-w.dp(190), r.Min.Y+w.dp(16), r.Max.X-w.dp(24), r.Min.Y+w.dp(46)), "Software update", hitSettingsControl, uuid.Nil, false)
 		c.hitRegions[len(c.hitRegions)-1].Label = "update:open"
 	}
-	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
+	groups := settingsGroups
 	top := r.Min.Y + w.dp(60)
-	tabWidth := (r.Dx() - w.dp(48)) / 5
+	tabWidth := (r.Dx() - w.dp(48)) / len(groups)
 	w.round(dst, image.Rect(r.Min.X+w.dp(24), top-w.dp(3), r.Max.X-w.dp(24), top+w.dp(33)), w.dp(8), mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .045))
 	for i, name := range groups {
 		tr := image.Rect(r.Min.X+w.dp(24)+i*tabWidth, top, r.Min.X+w.dp(24)+(i+1)*tabWidth-w.dp(8), top+w.dp(32))
@@ -566,6 +566,10 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	listTop := top + w.dp(52)
 	footer := r.Max.Y - w.dp(72)
+	if s.group == 5 {
+		w.drawServerSettings(c, dst, r, listTop, footer)
+		return
+	}
 	rowHeight := w.dp(44)
 	rows := settingsRows(s)
 	visible := max(1, (footer-listTop-w.dp(20))/rowHeight)

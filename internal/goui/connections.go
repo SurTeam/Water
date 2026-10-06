@@ -3,6 +3,7 @@ package goui
 import (
 	"errors"
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/SurTeam/Water/internal/goprotocol"
 	"sync"
 	"time"
 
@@ -16,6 +17,7 @@ type managedWorkspaceClient struct {
 	entry ConnectionEntry
 	view  *WorkspaceClient
 	close func()
+	busy  bool
 }
 
 type MultiWorkspaceClient struct {
@@ -29,6 +31,7 @@ type MultiWorkspaceClient struct {
 	bootstrapped    bool
 	running         bool
 	remoteConnector func(string) (ConnectionEntry, *WorkspaceClient, func(), error)
+	serverOperator  func(ConnectionEntry, *goclient.Session, string) (ConnectionEntry, *WorkspaceClient, func(), string, error)
 }
 
 func NewMultiWorkspaceClient(invalidate func()) *MultiWorkspaceClient {
@@ -124,7 +127,7 @@ func (m *MultiWorkspaceClient) AddConnection(entry ConnectionEntry, view *Worksp
 
 func (m *MultiWorkspaceClient) markDisconnected(id uuid.UUID) {
 	m.mu.Lock()
-	if connection := m.connections[id]; connection != nil {
+	if connection := m.connections[id]; connection != nil && !connection.busy {
 		connection.entry.Status = "disconnected"
 		m.syncSwitchersLocked()
 	}
@@ -136,7 +139,7 @@ func (m *MultiWorkspaceClient) markDisconnected(id uuid.UUID) {
 
 func (m *MultiWorkspaceClient) markViewDisconnected(id uuid.UUID, view *WorkspaceClient) {
 	m.mu.Lock()
-	if connection := m.connections[id]; connection != nil && connection.view == view {
+	if connection := m.connections[id]; connection != nil && connection.view == view && !connection.busy {
 		connection.entry.Status = "disconnected"
 		m.syncSwitchersLocked()
 	}
@@ -348,8 +351,12 @@ func (m *MultiWorkspaceClient) monitorRemote(id uuid.UUID) {
 			return
 		}
 		entry := old.entry
+		busy := old.busy
 		m.mu.RUnlock()
-		err := goclient.New(entry.SocketPath).CallTimeout("server.info", nil, nil, time.Second)
+		if busy {
+			continue
+		}
+		_, err := goclient.New(entry.SocketPath).Inspect(time.Second)
 		if err == nil && entry.Status == "connected" {
 			failures = 0
 			continue
@@ -368,11 +375,16 @@ func (m *MultiWorkspaceClient) monitorRemote(id uuid.UUID) {
 			continue
 		}
 		m.mu.Lock()
-		if m.connections[id] != old || m.closed {
+		if m.connections[id] != old || m.closed || old.busy {
+			closed := m.closed
 			m.mu.Unlock()
-			return
+			if closed {
+				return
+			}
+			continue
 		}
 		old.entry.Status = "reconnecting"
+		old.busy = true
 		m.syncSwitchersLocked()
 		m.mu.Unlock()
 		if m.invalidate != nil {
@@ -389,6 +401,9 @@ func (m *MultiWorkspaceClient) monitorRemote(id uuid.UUID) {
 			if closeFn != nil {
 				closeFn()
 			}
+			m.mu.Lock()
+			old.busy = false
+			m.mu.Unlock()
 			m.markDisconnected(id)
 			nextAttempt = time.Now().Add(retryDelay)
 			retryDelay = min(30*time.Second, retryDelay*2)
@@ -401,6 +416,7 @@ func (m *MultiWorkspaceClient) monitorRemote(id uuid.UUID) {
 		view.connectionMu.Unlock()
 		m.mu.Lock()
 		if m.closed || m.connections[id] != old {
+			old.busy = false
 			m.mu.Unlock()
 			view.Close()
 			if closeFn != nil {
@@ -456,5 +472,7 @@ func (m *MultiWorkspaceClient) syncSwitchersLocked() {
 	for _, connection := range m.connections {
 		connection.view.SetConnectionSwitcher(active, entries, activate)
 		connection.view.SetConnectionActions(connect, remove)
+		id := connection.entry.ID
+		connection.view.setServerOperator(func(action string) (goprotocol.ServerInfo, string, error) { return m.serverOperation(id, action) })
 	}
 }

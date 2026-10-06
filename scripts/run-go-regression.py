@@ -17,9 +17,12 @@ parser.add_argument("--profile", choices=("unit", "terminal", "agent", "full"), 
 parser.add_argument("--list", action="store_true", help="print the plan without running it")
 args = parser.parse_args()
 version = (root / "VERSION").read_text().strip()
-binary = root / "target/go-ui-smoke/water"
-server = root / "target/go-ui-smoke/water-server"
-ldflags = "-X github.com/SurTeam/Water/internal/gobuild.Variant=dev -X github.com/SurTeam/Water/internal/gobuild.Version=" + version
+run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
+directory = root / "target/test-runs" / run_id
+binary = directory / "bin/water-test-gui"
+server = directory / "bin/water-srv-dev"
+server_revision = subprocess.run([sys.executable, str(root / "scripts/server-revision.py")], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
+ldflags = "-X github.com/SurTeam/Water/internal/gobuild.Variant=dev -X github.com/SurTeam/Water/internal/gobuild.Version=" + version + " -X github.com/SurTeam/Water/internal/gobuild.ServerRevision=" + server_revision
 plan = [("vet", ["go", "vet", "./..."]),
         ("unit", ["go", "test", "./...", "-count=1", "-timeout=60s"]),
         ("race", ["go", "test", "-race", "./internal/goclient", "./internal/goserver", "./internal/goterminal", "./internal/govt", "./internal/xterm", "./internal/goui", "-timeout=60s"])]
@@ -28,7 +31,7 @@ if args.profile != "unit":
              ("build-server", ["go", "build", "-ldflags", ldflags, "-o", str(server), "./cmd/water-server"]),
              ("scenarios", ["bash", "scripts/run-go-scenario-suite.sh"]),
              ("gui", ["bash", "scripts/run-go-ui-smoke.sh"])]
-    scripts = ["go-ui-content-smoke.py"]
+    scripts = ["go-ui-content-smoke.py", "go-ui-server-smoke.py"]
     if args.profile in ("terminal", "full"):
         scripts += ["go-ui-query-smoke.py", "go-ui-graphics-history-smoke.py", "go-ui-pi-redraw-smoke.py"]
     if args.profile in ("agent", "full"):
@@ -41,11 +44,10 @@ if args.list:
                       "steps": [{"name": name, "command": command} for name, command in plan]}, indent=2))
     sys.exit(0)
 
-run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8]
-directory = root / "target/test-runs" / run_id
 directory.mkdir(parents=True)
 env = dict(os.environ, WATER_BIN=str(binary), WATER_SERVER_BIN=str(server), WATER_SCENARIO_REQUIRE_ALL="1",
-           WATER_KEEP_UI_SMOKE="1", PYTHONDONTWRITEBYTECODE="1")
+           WATER_KEEP_UI_SMOKE="1", PYTHONDONTWRITEBYTECODE="1", WATER_TEST_INSTANCE="regression-" + run_id,
+           WATER_TEST_EVIDENCE_DIR=str(directory / "gui-artifacts"))
 if args.profile in ("terminal", "full"):
     from PIL import Image
     image = directory / "fixture.png"

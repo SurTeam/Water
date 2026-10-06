@@ -8,6 +8,17 @@ import (
 // UI text is localized on the client. Model names and terminal output remain
 // user content; automation keys and protocol identifiers never depend on locale.
 var chineseText = map[string]string{
+	"Server": "服务", "Connection: %s": "连接：%s", "Server revision: %s": "服务构建：%s",
+	"Capability": "能力", "Provided": "提供", "Required": "需要", "Unknown": "未知",
+	"Refresh": "刷新", "Save layout": "保存布局", "Restart server": "重启服务", "Retry restore": "重试恢复",
+	"Save layout and restart": "保存布局并重启", "Working…": "正在处理…",
+	"GUI and server support each other":                                                        "GUI 与服务端能力相互兼容",
+	"Server changed. Restart to apply the server update.":                                      "服务端有更新，重启后生效。",
+	"Legacy server: capability and recovery support are unknown":                               "旧服务端的能力与恢复支持未知",
+	"Legacy server cannot safely export current directories. Restart recovery is unavailable.": "旧服务端不能可靠导出当前目录，暂不支持自动重启恢复。",
+	"Restart restores layout and directories. Running tasks will end.":                         "重启会恢复布局与目录，正在运行的任务将结束。",
+	"Server operation completed":                                                               "服务操作已完成", "Server restarted and layout restored": "服务已重启，布局已恢复",
+	"protocol version mismatch": "协议版本不匹配", "API signature mismatch": "API 接口不匹配", "dev/release variant mismatch": "开发版与正式版不匹配",
 	"Software update": "软件更新", "Check for updates": "检查更新", "Checking for updates…": "正在检查更新…",
 	"Current version: %s": "当前版本：%s", "Version %s is available": "发现新版本 %s", "Version %s is ready to install": "版本 %s 已准备好安装",
 	"No compatible updates are available": "暂无适用于此平台的新版本", "Downloading and verifying…": "正在下载并校验…",

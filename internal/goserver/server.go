@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,10 +24,15 @@ import (
 )
 
 type Server struct {
-	SocketPath string
-	Build      string
-	Version    string
-	Config     goconfig.AppConfig
+	SocketPath   string
+	Build        string
+	Version      string
+	Revision     string
+	InstanceID   uuid.UUID
+	commandMu    sync.Mutex
+	recovery     *recoveryLease
+	lastRecovery uuid.UUID
+	Config       goconfig.AppConfig
 
 	registry *goterminal.Registry
 	model    *gomodel.Model
@@ -79,6 +85,8 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 		SocketPath:      socketPath,
 		Build:           gobuild.Variant,
 		Version:         gobuild.Version,
+		Revision:        gobuild.ServerRevision,
+		InstanceID:      uuid.New(),
 		Config:          config,
 		registry:        goterminal.NewRegistryWithReplayLimit(config.Terminal.ReplayHistoryBytes),
 		model:           gomodel.New(),
@@ -160,6 +168,8 @@ type session struct {
 	attachments      map[uuid.UUID]func()
 	compactSnapshots bool
 	id               uuid.UUID
+	diagnostic       bool
+	opened           bool
 
 	snapshotRequests chan struct{}
 	done             chan struct{}
@@ -228,7 +238,8 @@ func (s *Server) handleConn(conn net.Conn) {
 			_ = ss.write(goprotocol.Failure(0, "INVALID_JSON", err.Error()))
 			continue
 		}
-		if msg.OK == nil && (msg.ProtocolVersion != goprotocol.ProtocolVersion || msg.BuildVariant != s.Build) {
+		metadata := msg.Method == "server.inspect" || msg.Method == "session.open" || msg.Method == "recovery.prepare" || msg.Method == "recovery.cancel" || msg.Method == "recovery.shutdown" || strings.HasPrefix(msg.Method, "ui.") && ss.diagnostic
+		if msg.OK == nil && (msg.BuildVariant != s.Build || msg.ProtocolVersion != goprotocol.ProtocolVersion && !metadata) {
 			_ = ss.write(goprotocol.Failure(
 				msg.RequestID,
 				"INCOMPATIBLE_SERVER",
@@ -247,26 +258,26 @@ func (s *Server) handleConn(conn net.Conn) {
 }
 
 func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
+	if ss.diagnostic && msg.Method != "session.open" && msg.Method != "session.release" && msg.Method != "server.inspect" && msg.Method != "server.info" && !strings.HasPrefix(msg.Method, "recovery.") && !strings.HasPrefix(msg.Method, "ui.") {
+		return errors.New("server is incompatible; use Server settings to inspect or restart with recovery")
+	}
 	switch msg.Method {
 	case "ping":
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"protocol_version": goprotocol.ProtocolVersion,
 		}))
-	case "server.info":
-		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
-			"build_variant":    s.Build,
-			"server_pid":       os.Getpid(),
-			"protocol_version": goprotocol.ProtocolVersion,
-			"server_version":   s.Version,
-			"api_signature":    goprotocol.APISignature,
-			"socket_path":      s.SocketPath,
-			"ui_sessions":      s.uiSessionCount(),
-			"windows":          s.windowSessions(),
-		}))
+	case "server.inspect", "server.info":
+		return ss.write(goprotocol.Success(msg.RequestID, s.serverInfo()))
+	case "recovery.prepare", "recovery.cancel", "recovery.shutdown":
+		return s.recoveryRequest(ss, msg)
 	case "session.open":
+		if ss.opened {
+			return errors.New("session is already open")
+		}
 		var p struct {
-			Role             string `json:"role"`
-			CompactSnapshots bool   `json:"compact_snapshots"`
+			Role             string                 `json:"role"`
+			CompactSnapshots bool                   `json:"compact_snapshots"`
+			Client           *goprotocol.Descriptor `json:"client"`
 		}
 		if len(msg.Params) > 0 {
 			if err := json.Unmarshal(msg.Params, &p); err != nil {
@@ -274,6 +285,19 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			}
 		}
 		isGUI := p.Role == "gui"
+		var compatibility goprotocol.Compatibility
+		if p.Client != nil {
+			compatibility = goprotocol.Assess(*p.Client, s.descriptor())
+			ss.diagnostic = !compatibility.Compatible
+		} else if msg.ProtocolVersion != goprotocol.ProtocolVersion {
+			return errors.New("diagnostic session requires a GUI descriptor")
+		}
+		s.commandMu.Lock()
+		defer s.commandMu.Unlock()
+		busy := s.recovery != nil && time.Now().Before(s.recovery.expires)
+		if busy {
+			return errors.New("server recovery is in progress")
+		}
 		if isGUI {
 			ss.compactSnapshots = p.CompactSnapshots
 			// Register before acknowledging session.open. Once OpenSession
@@ -282,6 +306,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 				return errors.New("server is shutting down after the last window closed")
 			}
 		}
+		ss.opened = true
 		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"window_id":        ss.id,
 			"server_pid":       os.Getpid(),
@@ -289,13 +314,16 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"server_version":   s.Version,
 			"api_signature":    goprotocol.APISignature,
 			"socket_path":      s.SocketPath,
+			"server":           s.serverInfo(),
+			"compatibility":    compatibility,
+			"diagnostic":       ss.diagnostic,
 		})); err != nil {
 			if isGUI {
 				s.dropSession(ss)
 			}
 			return err
 		}
-		if isGUI {
+		if isGUI && !ss.diagnostic {
 			return s.pushSnapshot(ss)
 		}
 		return nil
@@ -679,6 +707,9 @@ func (s *Server) uiSessionCount() int {
 }
 
 func (s *Server) pushSnapshot(ss *session) error {
+	if ss.diagnostic {
+		return nil
+	}
 	state := s.model.Dump()
 	params, err := json.Marshal(state)
 	if err != nil {

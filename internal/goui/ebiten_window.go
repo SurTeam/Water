@@ -82,6 +82,7 @@ type nativeDrag struct {
 type EbitengineWindow struct {
 	multi                   *MultiWorkspaceClient
 	cfg                     goconfig.AppConfig
+	testInstance            string
 	queue                   chan nativeRequest
 	done                    chan struct{}
 	once                    sync.Once
@@ -123,9 +124,9 @@ type EbitengineWindow struct {
 	quitError               string
 	updates                 *goupdate.Manager
 	updateVisible           bool
-	updateRestartAllowed    bool
+	updateRestartAllowed    atomic.Bool
 	updateResult            chan error
-	updating                bool
+	updating                atomic.Bool
 	startupAcknowledged     bool
 	startupFrameDrawn       bool
 	frameRevision           atomic.Uint64
@@ -200,6 +201,13 @@ func (w *EbitengineWindow) scheduleFrames() {
 			blink = phase
 		}
 	}
+}
+func (w *EbitengineWindow) SetTestInstance(instance string) { w.testInstance = instance }
+func (w *EbitengineWindow) windowTitle() string {
+	if w.testInstance != "" {
+		return "Water Test"
+	}
+	return "Water"
 }
 func (w *EbitengineWindow) Attach(c *WorkspaceClient) { c.native.Store(w) }
 func (w *EbitengineWindow) Close()                    { w.once.Do(func() { close(w.done); w.fonts.close() }) }
@@ -329,8 +337,10 @@ func (w *EbitengineWindow) Update() error {
 		case err := <-w.updateResult:
 			w.updateResult = nil
 			if err == nil {
-				w.updating = true
+				w.updating.Store(true)
 				w.closing = true
+			} else {
+				w.updating.Store(false)
 			}
 			w.Invalidate()
 		default:
@@ -577,9 +587,10 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		wx, wy := ebiten.WindowPosition()
 		ww, wh := ebiten.WindowSize()
 		state["renderer"] = "ebitengine"
+		state["test_instance"] = w.testInstance
 		state["window_id"] = c.session.WindowID
 		state["update_visible"] = w.updateVisible
-		state["update_restart_allowed"] = w.updateRestartAllowed
+		state["update_restart_allowed"] = w.updateRestartAllowed.Load()
 		if w.updates != nil {
 			state["update"] = w.updates.Snapshot()
 		}
@@ -640,9 +651,11 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["sidebar_width"] = w.dp(float64(w.view(c).sidebarWidth))
 		state["sidebar_visible"] = !c.sidebarHidden
 		state["rename_visible"] = w.view(c).rename != nil
+		state["server_status"] = c.ServerPanelState()
 		if c.settings.visible {
+			state["settings_category"] = settingsGroups[c.settings.group]
 			fields := make([]map[string]any, 0, len(c.settings.fields))
-			for group := 0; group < 5; group++ {
+			for group := 0; group < len(settingsGroups); group++ {
 				panel := settingsPanel{fields: c.settings.fields}
 				panel.group = group
 				for _, row := range settingsRows(&panel) {

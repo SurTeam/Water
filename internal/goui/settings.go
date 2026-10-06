@@ -57,13 +57,14 @@ type settingsSave struct {
 type settingsPanel struct {
 	initial                       []string
 	confirmDiscard                bool
+	serverConfirm                 bool
 	visible, saving               bool
 	group, focus                  int
 	requestFocus                  bool
 	draft                         goconfig.AppConfig
 	base                          *goconfig.AppConfig
 	fields                        []settingsField
-	tabs                          [5]widget.Clickable
+	tabs                          [6]widget.Clickable
 	save, cancel, defaults, scrim widget.Clickable
 	list                          widget.List
 	result                        chan settingsSave
@@ -495,7 +496,7 @@ func (c *WorkspaceClient) layoutSettings(gtx layout.Context, th *material.Theme)
 			}()
 		}
 	}
-	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
+	groups := settingsGroups
 	for i := range s.tabs {
 		for s.tabs[i].Clicked(gtx) {
 			s.group = i

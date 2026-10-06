@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goclient"
@@ -118,10 +119,13 @@ func dispatchCLI(ctx cliContext, args []string) error {
 
 func clientInfo() map[string]any {
 	return map[string]any{
-		"build_variant":    buildVariant,
-		"client_version":   clientVersion,
-		"protocol_version": goprotocol.ProtocolVersion,
-		"api_signature":    goprotocol.APISignature,
+		"build_variant":         buildVariant,
+		"client_version":        clientVersion,
+		"protocol_version":      goprotocol.ProtocolVersion,
+		"api_signature":         goprotocol.APISignature,
+		"server_revision":       gobuild.ServerRevision,
+		"capabilities":          goprotocol.ClientCapabilities(),
+		"required_capabilities": goclient.Descriptor(buildVariant).RequiredCapabilities,
 	}
 }
 
@@ -282,8 +286,10 @@ func runServer(ctx cliContext, args []string) error {
 	var out any
 	switch args[0] {
 	case "info", "version":
-		if err := ctx.client.Call("server.info", map[string]any{}, &out); err != nil {
-			return err
+		if err := ctx.client.CallTimeout("server.inspect", nil, &out, time.Second); err != nil {
+			if err := ctx.client.CallTimeout("server.info", nil, &out, time.Second); err != nil {
+				return err
+			}
 		}
 	case "connections", "connection", "sockets", "socket":
 		return runConnections(ctx, args[1:])

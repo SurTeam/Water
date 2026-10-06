@@ -1,6 +1,8 @@
 package gouiapp
 
 import (
+	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -17,6 +19,7 @@ import (
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goremote"
 	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/SurTeam/Water/internal/goui"
@@ -82,6 +85,7 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	}
 	multi := goui.NewMultiWorkspaceClient(invalidate)
 	w = goui.NewEbitengineWindow(multi, cfg)
+	w.SetTestInstance(os.Getenv("WATER_TEST_INSTANCE"))
 	restartArgs := []string{"--control-socket", socket, "--config", configPath}
 	for _, destination := range sshDestinations {
 		restartArgs = append(restartArgs, "--ssh", destination)
@@ -108,27 +112,25 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	})
 	defer w.Close()
 	settingsStore := goui.NewSettingsStore(cfg)
+	operations := &serverOperations{configPath: configPath, variant: buildVariant, cfg: cfg, window: w, settings: settingsStore, multi: multi}
+	multi.SetServerOperator(operations.operate)
+	localEntry := goui.ConnectionEntry{ID: uuid.New(), Name: "Local", Kind: "local", Status: "connected", SocketPath: socket}
 
-	localSession, embedded, _, localErr := connectOrStart(socket, configPath, cfg, buildVariant)
+	localSession, embedded, _, localErr := connectOrStartWithRecovery(socket, configPath, cfg, buildVariant, pendingRecovery(configPath, buildVariant, localEntry))
 	w.SetUpdateRestartAllowed(embedded == nil)
 	if localErr == nil {
 		w.SetQuitServerHandler(func() error {
-			return localSession.CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
+			session := multi.ConnectionSession(localEntry.ID)
+			if session == nil {
+				return fmt.Errorf("local connection is unavailable")
+			}
+			return session.CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
 		})
 		if embedded != nil {
 			defer func() { embedded.WaitForGUIRelease(); _ = embedded.Close() }()
 		}
-		localView := goui.NewWorkspaceClientWithConnection(localSession, invalidate, cfg, "")
-		w.Attach(localView)
-		localView.SetConfigPath(configPath)
-		localView.SetSettingsStore(settingsStore)
-		if err := multi.AddConnection(goui.ConnectionEntry{
-			ID:         uuid.New(),
-			Name:       "Local",
-			Kind:       "local",
-			Status:     "connected",
-			SocketPath: socket,
-		}, localView, func() {
+		localView := operations.newView(localSession, localEntry)
+		if err := multi.AddConnection(localEntry, localView, func() {
 			if embedded == nil && !cfg.Server.DetachOnQuit && !w.Updating() {
 				_ = localSession.CallTimeout("session.release", map[string]any{"shutdown_if_last": true}, nil, time.Second)
 			}
@@ -158,10 +160,6 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			_ = tunnel.Close()
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("open remote Water session %s: %w", destination, err)
 		}
-		view := goui.NewWorkspaceClientWithConnection(session, invalidate, cfg, destination)
-		w.Attach(view)
-		view.SetConfigPath(configPath)
-		view.SetSettingsStore(settingsStore)
 		entry := goui.ConnectionEntry{
 			ID:               uuid.New(),
 			Name:             destination,
@@ -171,6 +169,7 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			RemoteSocketPath: tunnel.RemoteSocket(),
 			Destination:      destination,
 		}
+		view := operations.newView(session, entry)
 		closeRemote := func() {
 			_ = session.Close()
 			_ = tunnel.Close()
@@ -203,7 +202,11 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	}
 	multi.Run()
 
-	ebiten.SetWindowTitle("Water")
+	title := "Water"
+	if os.Getenv("WATER_TEST_INSTANCE") != "" {
+		title = "Water Test · " + os.Getenv("WATER_TEST_INSTANCE")
+	}
+	ebiten.SetWindowTitle(title)
 	ebiten.SetWindowDecorated(false)
 	initialSize, minimumSize := w.InitialWindowSize(), w.MinimumWindowSize()
 	ebiten.SetWindowSize(initialSize.X, initialSize.Y)
@@ -224,6 +227,10 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 }
 
 func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVariant string) (*goclient.Session, *goserver.Server, bool, error) {
+	return connectOrStartWithRecovery(socket, configPath, cfg, buildVariant, false)
+}
+
+func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfig, buildVariant string, empty bool) (*goclient.Session, *goserver.Server, bool, error) {
 	client := goclient.New(socket)
 	if session, err := client.OpenSession(); err == nil {
 		return session, nil, false, nil
@@ -238,7 +245,7 @@ func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVari
 
 	if !cfg.Server.Detached {
 		srv := goserver.NewWithConfig(socket, cfg)
-		if err := srv.Initialize(cfg.Startup.InitialWorkspace, cfg.Startup.InitialTerminal && cfg.Startup.InitialWorkspace); err != nil {
+		if err := srv.Initialize(cfg.Startup.InitialWorkspace && !empty, cfg.Startup.InitialTerminal && cfg.Startup.InitialWorkspace && !empty); err != nil {
 			return nil, nil, false, err
 		}
 		errCh := make(chan error, 1)
@@ -264,7 +271,7 @@ func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVari
 		return session, srv, false, nil
 	}
 
-	if err := startDetachedServer(socket, configPath, buildVariant); err != nil {
+	if err := startDetachedServerWithRecovery(socket, configPath, buildVariant, empty); err != nil {
 		if session, connectErr := waitForSession(socket, 5*time.Second); connectErr == nil {
 			return session, nil, false, nil
 		}
@@ -295,42 +302,24 @@ func waitForSession(socket string, timeout time.Duration) (*goclient.Session, er
 }
 
 func startDetachedServer(socket, configPath, buildVariant string) error {
+	return startDetachedServerWithRecovery(socket, configPath, buildVariant, false)
+}
+
+func startDetachedServerWithRecovery(socket, configPath, buildVariant string, empty bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(exe)
-	candidates := []string{filepath.Join(dir, "water-server"), filepath.Join(dir, "water-srv-dev")}
-	if buildVariant != "release" {
-		candidates[0], candidates[1] = candidates[1], candidates[0]
-	}
-	serverPath := ""
-	for _, candidate := range candidates {
-		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
-			serverPath = candidate
-			break
-		}
-	}
-	if serverPath == "" {
-		if found, lookErr := exec.LookPath("water-server"); lookErr == nil {
-			serverPath = found
-		} else {
-			return fmt.Errorf("water-server executable not found next to %s or in PATH", exe)
-		}
-	}
-	variantOut, err := exec.Command(serverPath, "--build-variant").Output()
+	serverPath, err := resolveSiblingServer(exe, buildVariant)
 	if err != nil {
-		return fmt.Errorf("inspect sibling water-server: %w", err)
+		return err
 	}
-	if got := strings.TrimSpace(string(variantOut)); got != buildVariant {
-		return fmt.Errorf("sibling water-server variant %q does not match GUI variant %q", got, buildVariant)
+
+	args := []string{"--control-socket", socket, "--config", configPath, "--daemonize"}
+	if empty {
+		args = append(args, "--empty-workspace")
 	}
-	cmd := exec.Command(
-		serverPath,
-		"--control-socket", socket,
-		"--config", configPath,
-		"--daemonize",
-	)
+	cmd := exec.Command(serverPath, args...)
 	// Older Water servers leaked their private daemon marker into PTY shells.
 	// A GUI launched from one of those shells must still start a fresh launcher.
 	for _, value := range os.Environ() {
@@ -346,6 +335,46 @@ func startDetachedServer(socket, configPath, buildVariant string) error {
 		return fmt.Errorf("could not start water-server: %s", message)
 	}
 	return nil
+}
+
+func resolveSiblingServer(executable, variant string) (string, error) {
+	names := []string{"water-server"}
+	if variant == "dev" {
+		names = []string{"water-srv-dev", "water-server"}
+	}
+	var candidates []string
+	for _, name := range names {
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), name))
+	}
+	// PATH fallback is variant-specific and must pass the same full descriptor check.
+	pathName := "water-server"
+	if variant == "dev" {
+		pathName = "water-srv-dev"
+	}
+	if found, err := exec.LookPath(pathName); err == nil {
+		candidates = append(candidates, found)
+	}
+	var failures []string
+	for _, candidate := range candidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		raw, err := exec.CommandContext(ctx, candidate, "--server-info").Output()
+		cancel()
+		if err != nil {
+			failures = append(failures, filepath.Base(candidate)+": descriptor unavailable")
+			continue
+		}
+		var descriptor goprotocol.Descriptor
+		if json.Unmarshal(raw, &descriptor) != nil || descriptor.BuildVariant != variant || descriptor.ProtocolVersion != goprotocol.ProtocolVersion || descriptor.APISignature != goprotocol.APISignature || descriptor.ServerRevision != gobuild.ServerRevision {
+			failures = append(failures, filepath.Base(candidate)+": variant, protocol or server revision differs")
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("no matching server executable next to %s: %s", executable, strings.Join(failures, "; "))
 }
 
 func resolveGUISocket(explicit string, cfg goconfig.AppConfig, buildVariant string) string {

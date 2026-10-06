@@ -10,7 +10,9 @@ import (
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
+	"github.com/SurTeam/Water/internal/goterminal"
 	"github.com/google/uuid"
+	"time"
 )
 
 func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
@@ -84,11 +86,31 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 }
 
 func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
+	s.commandMu.Lock()
+	defer s.commandMu.Unlock()
+	if s.recovery != nil && time.Now().Before(s.recovery.expires) {
+		return nil, &goprotocol.RPCError{Code: "RECOVERY_IN_PROGRESS", Message: "server restart is being prepared; retry after completion"}
+	}
+	return s.executeCommandUnlocked(kind, raw)
+}
+
+func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
 	fail := func(code string, err error) (any, *goprotocol.RPCError) {
 		return nil, &goprotocol.RPCError{Code: code, Message: err.Error()}
 	}
 
 	switch kind {
+	case "recovery.restore":
+		var c struct {
+			Layout gomodel.RecoveryLayout `json:"layout"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fail("INVALID_RECOVERY", err)
+		}
+		if err := s.restoreLayout(c.Layout); err != nil {
+			return fail("RECOVERY_FAILED", err)
+		}
+		return map[string]any{"recovery_id": c.Layout.ID}, nil
 	case "internal.terminal.foreground":
 		var command struct {
 			TerminalID uuid.UUID `json:"terminal_id"`
@@ -714,6 +736,10 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 		s.registry.Remove(oldID)
 	}
 
+	return s.watchTerminal(t, paneID, meta)
+}
+
+func (s *Server) watchTerminal(t *goterminal.Terminal, paneID uuid.UUID, meta gomodel.TerminalMeta) (*goterminalRef, error) {
 	if meta.Agent != nil {
 		s.emitEvent(map[string]any{
 			"type":        "agent_started",

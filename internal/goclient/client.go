@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -146,6 +147,9 @@ type pendingSessionFrame struct {
 }
 
 type Session struct {
+	Server        goprotocol.ServerInfo
+	Compatibility goprotocol.Compatibility
+	Diagnostic    bool
 	conn          net.Conn
 	writeMu       sync.Mutex
 	outbound      chan pendingSessionFrame
@@ -171,7 +175,7 @@ type TerminalPush struct {
 }
 
 func (c *Client) OpenSession() (*Session, error) {
-	conn, err := net.Dial("unix", c.SocketPath)
+	conn, err := net.DialTimeout("unix", c.SocketPath, time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -187,17 +191,37 @@ func (c *Client) OpenSession() (*Session, error) {
 	go s.writeLoop()
 	go s.readLoop()
 
+	var info goprotocol.ServerInfo
+	if err := s.CallTimeout("server.inspect", nil, &info, time.Second); err != nil {
+		if err := s.CallTimeout("server.info", nil, &info, time.Second); err != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("inspect server compatibility: %w", err)
+		}
+	}
+	s.Server = info
+	clientInfo := Descriptor(c.Build)
+	s.Compatibility = goprotocol.Assess(clientInfo, info.Descriptor)
+	s.Diagnostic = !s.Compatibility.Compatible
 	var result struct {
-		WindowID uuid.UUID `json:"window_id"`
+		WindowID      uuid.UUID                `json:"window_id"`
+		Server        goprotocol.ServerInfo    `json:"server"`
+		Diagnostic    bool                     `json:"diagnostic"`
+		Compatibility goprotocol.Compatibility `json:"compatibility"`
 	}
 	if err := s.Call("session.open", map[string]any{
 		"role":              "gui",
+		"client":            clientInfo,
 		"compact_snapshots": true,
 	}, &result); err != nil {
 		_ = s.Close()
 		return nil, err
 	}
 	s.WindowID = result.WindowID
+	if result.Server.ProtocolVersion != 0 {
+		s.Server = result.Server
+		s.Compatibility = result.Compatibility
+		s.Diagnostic = result.Diagnostic
+	}
 	return s, nil
 }
 
@@ -425,6 +449,9 @@ func (s *Session) Err() error { s.errMu.Lock(); defer s.errMu.Unlock(); return s
 // Enqueue never performs socket I/O. One writer preserves accepted frame order.
 // Saturation ends the session explicitly instead of dropping input silently.
 func (s *Session) enqueue(message goprotocol.WireMessage, wait bool) error {
+	if s.Diagnostic && message.OK == nil && message.Method != "session.open" && message.Method != "session.release" && message.Method != "server.inspect" && message.Method != "server.info" && !strings.HasPrefix(message.Method, "recovery.") && !strings.HasPrefix(message.Method, "ui.") {
+		return &goprotocol.RPCError{Code: "INCOMPATIBLE_SERVER", Message: s.Compatibility.Reason}
+	}
 	cost := len(message.Params) + len(message.Result) + len(message.Method) + len(message.BuildVariant) + 256
 	if message.Error != nil {
 		cost += len(message.Error.Code) + len(message.Error.Message)

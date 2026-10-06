@@ -44,7 +44,8 @@ version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
 
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"
-ldflags="-X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version}"
+server_revision="$(bash "$root_dir/scripts/server-revision.sh")"
+ldflags="-X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version} -X ${identity_pkg}.ServerRevision=${server_revision}"
 if [[ "$variant" == "release" ]]; then
   ldflags="-s -w ${ldflags}"
 fi

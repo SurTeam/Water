@@ -61,7 +61,7 @@ func deployEmbeddedServer(destination, control string, target RemoteTarget, payl
 	}
 	remoteDir := path.Join(
 		"$HOME", ".cache", "water-go", buildIdentityToken(),
-		fmt.Sprintf("v-%016x", stableID(gobuild.Version+"|"+gobuild.Variant)),
+		fmt.Sprintf("v-%016x-r-%016x", stableID(gobuild.Version+"|"+gobuild.Variant), stableID(gobuild.ServerRevision)),
 		fmt.Sprintf("p%d", goprotocol.ProtocolVersion),
 		target.OS+"-"+target.Arch,
 	)

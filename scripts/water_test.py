@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -12,8 +13,25 @@ class ControlError(RuntimeError):
     pass
 
 
+def water_processes():
+    result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True, timeout=3)
+    names = {"water", "water-dev", "water-server", "water-srv-dev", "water-test-gui"}
+    found = {}
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        command = parts[1]
+        if command.startswith("/Applications/Water") or Path(command.split()[0]).name in names:
+            found[int(parts[0])] = command
+    return found
+
+
 class WaterGUI:
-    def __init__(self, prefix="water-test.", config=None, binary=None):
+    def __init__(self, prefix="water-test.", config=None, binary=None, variant="dev"):
+        self.variant = variant
+        if variant not in ("dev", "release"):
+            raise ValueError("test variant must be dev or release")
         self.root = Path(__file__).resolve().parent.parent
         self.binary = str(binary or os.environ.get("WATER_BIN", self.root / "target/go-ui-smoke/water"))
         self.directory = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
@@ -30,6 +48,8 @@ class WaterGUI:
         self.log = None
         self.window = None
         self.previous_sigterm = None
+        self.existing_water = water_processes()
+        self.server_instances = {}
 
     def __enter__(self):
         self.previous_sigterm = signal.getsignal(signal.SIGTERM)
@@ -37,16 +57,25 @@ class WaterGUI:
         config = self.directory / "config.json"
         config.write_text(json.dumps(self.config))
         self.log = (self.directory / "gui.log").open("w")
+        env = dict(os.environ, WATER_TEST_INSTANCE=self.directory.name,
+                   WATER_CONTROL_SOCKET=self.socket, WATER_CONFIG=str(config))
+        env.pop("WATER_SOCKET", None)
+        env.pop("WATER_GO_DAEMON_CHILD", None)
         self.gui = subprocess.Popen([self.binary, "--control-socket", self.socket, "--config", str(config)],
-                                    stdout=self.log, stderr=subprocess.STDOUT)
+                                    stdout=self.log, stderr=subprocess.STDOUT, env=env)
         self.ownership = {"gui_pid": self.gui.pid, "socket": self.socket, "config": str(config)}
         self.save("ownership.json", self.ownership)
         try:
             self.wait(lambda: self.ctl("ping"), "control readiness", transient=True)
             snapshot = self.wait(lambda: self.ctl("ui", "snapshot"), "GUI snapshot", transient=True)
+            if snapshot.get("test_instance") != self.directory.name:
+                raise RuntimeError("GUI identity is not the owned test instance")
             self.window = snapshot["window_id"]
             self.wait(lambda: self.ctl("ui", "snapshot").get("frame_focused_pane"), "first GUI frame")
-            self.ownership.update(server_pid=self.ctl("server", "info")["server_pid"], window_id=self.window)
+            info = self.ctl("server", "info")
+            self.record_server_info(info)
+            self.ownership.update(server_pid=info["server_pid"], window_id=self.window,
+                                  existing_water=self.existing_water)
             self.save("ownership.json", self.ownership)
             return self
         except BaseException as error:
@@ -143,17 +172,41 @@ class WaterGUI:
     def interrupted(signum, frame):
         raise KeyboardInterrupt("test interrupted; closing owned GUI")
 
+    def record_server_info(self, info):
+        if info.get("socket_path") != self.socket or info.get("build_variant") != self.variant:
+            raise RuntimeError("refusing a server outside the owned test socket/variant")
+        pid = info["server_pid"]
+        command = subprocess.run(["ps", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=3).stdout.strip()
+        if pid != self.gui.pid and not (self.socket in command and str(self.directory / "config.json") in command):
+            raise RuntimeError("server PID does not belong to this test config/socket")
+        if pid in self.existing_water:
+            raise RuntimeError("refusing to adopt a pre-existing Water process")
+        self.server_instances[info.get("instance_id", str(pid))] = pid
+        self.ownership["owned_server_instances"] = self.server_instances
+        self.save("ownership.json", self.ownership)
+
     def close(self):
         if self.previous_sigterm is not None:
             signal.signal(signal.SIGTERM, self.previous_sigterm)
             self.previous_sigterm = None
         if self.gui is None:
             return
+        cleanup_error = None
         try:
             if Path(self.socket).exists():
+                info = self.ctl("server", "info")
+                self.record_server_info(info)
+                if info.get("ui_sessions", 0) > 1:
+                    raise RuntimeError("another window attached to the test server; refusing shutdown")
                 self.ctl("server", "shutdown")
         except (ControlError, subprocess.TimeoutExpired):
             pass
+        except RuntimeError as error:
+            cleanup_error = error
+        if cleanup_error:
+            self.save("cleanup.json", {"guard_error": str(cleanup_error), "cleanup_refused": True,
+                                       "gui_pid": self.gui.pid, "socket": self.socket})
+            raise cleanup_error
         if self.gui.poll() is None:
             self.gui.terminate()
         try:
@@ -163,6 +216,22 @@ class WaterGUI:
             self.gui.wait(timeout=5)
         if self.log:
             self.log.close()
+        current = water_processes()
+        preserved = all(current.get(pid) == command for pid, command in self.existing_water.items())
         self.save("cleanup.json", {"gui_exited": self.gui.poll() is not None,
-                                   "socket_removed": not Path(self.socket).exists()})
+                                   "socket_removed": not Path(self.socket).exists(),
+                                   "existing_water_preserved": preserved,
+                                   "existing_water_before": self.existing_water,
+                                   "existing_water_after": {pid: current.get(pid) for pid in self.existing_water},
+                                   "guard_error": str(cleanup_error) if cleanup_error else None})
+        export = os.environ.get("WATER_TEST_EVIDENCE_DIR")
+        if export:
+            shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True)
+        print("PASS owned GUI cleanup; existing Water preserved=" + str(preserved)
+              + "; existing PIDs=" + ",".join(map(str, self.existing_water))
+              + "; artifacts=" + str(self.directory), flush=True)
         self.gui = None
+        if cleanup_error:
+            raise cleanup_error
+        if not preserved:
+            raise RuntimeError("existing Water process changed during the test; inspect ownership/cleanup evidence")

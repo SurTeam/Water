@@ -14,8 +14,10 @@ func (w *EbitengineWindow) SetUpdateManager(m *goupdate.Manager) {
 	w.updates = m
 	w.updateVisible = m.Snapshot().Error != ""
 }
-func (w *EbitengineWindow) SetUpdateRestartAllowed(allowed bool) { w.updateRestartAllowed = allowed }
-func (w *EbitengineWindow) Updating() bool                       { return w.updating }
+func (w *EbitengineWindow) SetUpdateRestartAllowed(allowed bool) {
+	w.updateRestartAllowed.Store(allowed)
+}
+func (w *EbitengineWindow) Updating() bool { return w.updating.Load() }
 
 func (w *EbitengineWindow) updateAction(action string) {
 	if w.updates == nil {
@@ -36,11 +38,12 @@ func (w *EbitengineWindow) updateAction(action string) {
 	case "download":
 		w.updates.Download()
 	case "install":
-		if !w.updateRestartAllowed || w.updateResult != nil {
+		if !w.updateRestartAllowed.Load() || w.updateResult != nil || w.multi != nil && w.multi.serverOperationBusy() {
 			return
 		}
 		result := make(chan error, 1)
 		w.updateResult = result
+		w.updating.Store(true)
 		go func() { result <- w.updates.Install(); w.Invalidate() }()
 	}
 	w.Invalidate()
@@ -104,7 +107,7 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	if s.Phase == "ready" {
 		warning := "Restart keeps detached terminal servers running."
-		if !w.updateRestartAllowed {
+		if !w.updateRestartAllowed.Load() {
 			warning = "Restart requires a detached local server. Change Server settings first."
 		}
 		label(210, c.tr(warning), 10, true)
@@ -120,7 +123,7 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 		w.button(dst, c, rect, title, hitSettingsControl, uuid.Nil, false)
 		c.hitRegions[len(c.hitRegions)-1].Label = "update:" + action
 	}
-	if s.Phase != "checking" && s.Phase != "downloading" && s.Phase != "installing" && w.updateResult == nil && (action != "install" || w.updateRestartAllowed) {
+	if s.Phase != "checking" && s.Phase != "downloading" && s.Phase != "installing" && w.updateResult == nil && (action != "install" || w.updateRestartAllowed.Load()) {
 		button(image.Rect(r.Max.X-w.dp(250), r.Max.Y-w.dp(58), r.Max.X-w.dp(24), r.Max.Y-w.dp(24)), primary, action)
 	}
 	if w.updateResult == nil {

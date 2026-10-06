@@ -49,11 +49,11 @@ GUI 命令写入在 session worker 上执行，帧循环不做 socket I/O。sess
 
 每个 Local/Remote connection 有独立 transport、model projection 和 client terminal state。实体与 operation 使用完整 UUIDv4；JSON/CLI 传递 UUID 字符串，二进制终端事件保留完整 16 字节。命令必须发到对象所属 connection。
 
-控制协议版本为 5，API signature 为 `water-control/v6`。JSON control frame 使用 32-bit big-endian 长度前缀，live terminal frame 仍使用 `\0WT4` 和 UUID/sequence/geometry 布局。`water ctl server info` 与 `connections list` 用于检查变体、版本与协议兼容性。
+控制协议版本为 5，API signature 为 `water-control/v6`。JSON control frame 使用 32-bit big-endian 长度前缀，live terminal frame 仍使用 `\0WT4` 和 UUID/sequence/geometry 布局。`server.inspect` 提供跨应用协议的只读探测，`session.open` 双向校验能力；不兼容连接保留诊断界面并拦截普通操作。产品版本不作为兼容性条件，打包时另生成 server dependency source revision。Settings → Server 提供检测、布局保存与有保护的重启恢复；恢复通过 dispatcher 提交，先持久保存当前目录和布局，再关闭旧 server。详细契约与旧版限制见 [docs/server-compatibility.md](docs/server-compatibility.md)。
 
 Cmd+N 启动独立 GUI 进程并复用当前 socket/config；各客户端保留自己的 workspace、tab、pane 选择，通过 `push.selection` 接收仅属于自身的命令选择结果。共享模型快照不会覆盖其他窗口的选择。GUI session 使用完整 UUID window ID；`session.focus` 声明焦点，server 只接受当前焦点 session 的自动 PTY resize，客户端获得焦点时重发当前几何。socket listener 持有整个生命周期的文件锁，拒绝替换活跃 listener，清理只删除自己创建的 inode。退出使用已有 session，`detach_on_quit=false` 时最后一个 GUI release 才关闭 server；embedded server 的宿主在窗口关闭后可继续服务其他 GUI，直到所有 GUI release。
 
-SSH 使用系统 OpenSSH ControlMaster 和 Unix socket forwarding。首次连接按远端 Darwin/Linux、amd64/arm64 选择 embedded Go server payload；远端缓存和 socket 按版本、协议、namespace、destination 隔离。兼容 server 可复用，不兼容 server 不能被静默替换。断线保留 offline host 与服务端 workspace。
+SSH 使用系统 OpenSSH ControlMaster 和 Unix socket forwarding。首次连接按远端 Darwin/Linux、amd64/arm64 选择 embedded Go server payload；远端 payload 缓存按产品版本、server revision、协议、namespace 和平台隔离，socket 按变体与 destination 稳定发现，并探测旧版版本化 endpoint。产品升级不自动新建空工作区；旧实例歧义或无法探测时明确报错，不静默替换。断线保留 offline host 与服务端 workspace。
 
 Agent 检测来自终端前台进程及 argv，绑定、状态和侧栏交互沿既有 model/connection 路径进行。
 

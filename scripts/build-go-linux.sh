@@ -46,7 +46,8 @@ case "$arch" in
 esac
 
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"
-ldflags="-X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version}"
+server_revision="$(bash "$root_dir/scripts/server-revision.sh")"
+ldflags="-X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version} -X ${identity_pkg}.ServerRevision=${server_revision}"
 if [[ "$variant" == "release" ]]; then
   ldflags="-s -w ${ldflags}"
 fi

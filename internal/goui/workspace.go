@@ -178,6 +178,8 @@ type WorkspaceClient struct {
 	runtimeConfig        *goconfig.AppConfig // Owned by layoutMu; server settings change on restart.
 	settingsStore        *SettingsStore
 	settings             settingsPanel
+	server               serverPanel
+	recoveryBlocked      bool
 	configPath           string
 	settingsButton       widget.Clickable
 	splitRightButton     widget.Clickable
@@ -259,6 +261,15 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 		connectionDisconnectClicks: make(map[uuid.UUID]*widget.Clickable),
 	}
 	c.remoteEditor.SingleLine = true
+	if session != nil {
+		c.server.info = session.Server
+		c.server.compatibility = session.Compatibility
+		if session.Server.ProtocolVersion != 0 && (session.Diagnostic || session.Compatibility.RestartRecommended) {
+			c.openSettingsConfig(c.config)
+			c.settings.group = 5
+			c.settings.focus = -1
+		}
+	}
 	return c
 }
 
@@ -914,6 +925,9 @@ func (c *WorkspaceClient) invalidateScroll() {
 }
 
 func (c *WorkspaceClient) Bootstrap() error {
+	if c.session.Diagnostic || c.recoveryBlocked {
+		return nil
+	}
 	var state gomodel.StateDump
 	if err := c.session.Call("state.dump", map[string]any{}, &state); err != nil {
 		return err
@@ -926,6 +940,9 @@ func (c *WorkspaceClient) Bootstrap() error {
 }
 
 func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
+	if c.session != nil && c.session.Diagnostic {
+		return
+	}
 	wanted := collectTerminalIDs(state)
 	scrollbackOnClearScreen := make(map[uuid.UUID]bool, len(wanted))
 	for id := range wanted {

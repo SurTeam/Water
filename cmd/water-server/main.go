@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goserver"
 )
 
@@ -27,6 +29,7 @@ func main() {
 	var daemonize bool
 	var printVariant bool
 	var printVersion bool
+	var printServerInfo bool
 
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flags.StringVar(&socket, "socket", "", "Unix control socket (compatibility alias)")
@@ -38,6 +41,7 @@ func main() {
 	flags.BoolVar(&daemonize, "daemonize", false, "detach the server process")
 	flags.BoolVar(&printVariant, "build-variant", false, "print build variant and exit")
 	flags.BoolVar(&printVersion, "version", false, "print version and exit")
+	flags.BoolVar(&printServerInfo, "server-info", false, "print server compatibility descriptor and exit")
 	flags.BoolVar(&printVersion, "V", false, "print version and exit")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "water-server [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [--daemonize]")
@@ -45,6 +49,10 @@ func main() {
 	}
 	_ = flags.Parse(os.Args[1:])
 
+	if printServerInfo {
+		_ = json.NewEncoder(os.Stdout).Encode(goprotocol.Descriptor{BuildVariant: buildVariant, Version: serverVersion, ServerRevision: gobuild.ServerRevision, ProtocolVersion: goprotocol.ProtocolVersion, APISignature: goprotocol.APISignature, Capabilities: goprotocol.ServerCapabilities()})
+		return
+	}
 	if printVariant {
 		fmt.Println(buildVariant)
 		return

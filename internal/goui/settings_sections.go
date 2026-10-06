@@ -2,6 +2,8 @@ package goui
 
 import "strings"
 
+var settingsGroups = []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup", "Server"}
+
 func settingsSection(f settingsField) string {
 	switch f.group {
 	case "Terminal":
@@ -96,7 +98,10 @@ type settingsRow struct {
 }
 
 func settingsRows(s *settingsPanel) []settingsRow {
-	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"}
+	groups := settingsGroups
+	if s.group < 0 || s.group >= len(groups) || s.group == 5 {
+		return nil
+	}
 	bySection := map[string][]int{}
 	for i, f := range s.fields {
 		if f.group != groups[s.group] && !(s.group == 4 && (f.group == "Shell" || f.group == "Server" || f.group == "Features")) {
@@ -112,6 +117,7 @@ func settingsRows(s *settingsPanel) []settingsRow {
 		{"Windows and settings", "Connections and workspaces", "Tabs", "Panes", "Terminal input"},
 		{"Terminal colors", "ANSI palette", "Interface colors", "Tab colors", "Pane colors", "Connection colors", "Workspace colors", "Agent colors"},
 		{"Initial terminal size", "Minimum terminal size", "Startup behavior", "Shell", "Local server", "Terminal behavior"},
+		{"Local server"},
 	}
 	for _, section := range order[s.group] {
 		if len(bySection[section]) == 0 {

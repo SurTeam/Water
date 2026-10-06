@@ -627,8 +627,12 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 				}
 			}
 		}
+		if strings.HasPrefix(label, "server:") {
+			c.serverAction(strings.TrimPrefix(label, "server:"))
+			return
+		}
 		if strings.HasPrefix(label, "category:") {
-			for i, name := range []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup"} {
+			for i, name := range settingsGroups {
 				if label == "category:"+name {
 					s.group = i
 					s.focus = -1

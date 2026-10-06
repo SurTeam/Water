@@ -57,7 +57,9 @@ water ctl server info
 ~~~
 
 'water ctl server info' reports 'build_variant', 'server_version',
-'protocol_version', and 'api_signature'. When a local client talks to a
+'protocol_version', 'api_signature', 'server_revision', 'capabilities',
+'required_capabilities', and instance/window metadata. Product version alone
+is not a compatibility contract. When a local client talks to a
 server of a different build (dev vs release), expect identity mismatches and
 report them instead of forcing the connection.
 
@@ -107,10 +109,16 @@ Remote mechanics (needed for debugging):
   bundled payload (cached under '~/.cache/<namespace>/server/' on the remote,
   running as 'water-server' or 'water-srv-dev' there). Set
   'WATER_REMOTE_SERVER_COMMAND' to use a specific remote binary instead.
-- The remote control socket is versioned:
-  '/tmp/<namespace>-v<version>-p<protocol>-<hash>.sock'. A client only
-  auto-starts a remote server when no compatible server owns that socket;
-  it refuses to replace a socket owned by a different version/protocol.
+- Default remote control sockets are stable across GUI upgrades:
+  '/tmp/water-go-<variant>-<destination-hash>.sock'. Payload caches remain
+  scoped by version/revision/protocol/platform. Discovery also probes legacy
+  versioned sockets; ambiguous or uninspectable old instances are reported,
+  never silently replaced.
+- Settings → Server shows bilateral GUI/server capabilities for the selected
+  connection. Save layout and explicit confirmed restart use live directory
+  export and a persisted recovery artifact. Restart ends running jobs and
+  recreates shells; legacy servers without recovery support are not stopped
+  automatically. See 'docs/server-compatibility.md'.
 - Override knobs: 'WATER_REMOTE_CONTROL_SOCKET' (remote socket path),
   'WATER_SSH_PROGRAM', 'WATER_SSH_CONFIG' (ssh -F config file).
 
