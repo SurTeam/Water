@@ -131,6 +131,30 @@ func (t *Terminal) SetPreserveScrollbackOnErase(preserve bool) {
 	t.inputHandler.preserveScrollbackOnErase = preserve
 }
 
+// SetScrollbackOnClearScreen selects the common screen-clear policy. Retention
+// saves a cleared viewport; redraw replaces application history while protecting
+// the lines preceding the application's first synchronized output frame.
+func (t *Terminal) SetScrollbackOnClearScreen(enabled bool) {
+	h := t.inputHandler
+	if h.scrollbackOnClearScreen == enabled {
+		return
+	}
+	h.scrollbackOnClearScreen = enabled
+	if enabled {
+		if h.redrawHistoryStart != nil {
+			h.redrawHistoryStart.Dispose()
+			h.redrawHistoryStart = nil
+		}
+	}
+}
+
+func (h *InputHandler) markRedrawHistoryStart() {
+	buf := h.bufferService.Buffers.Normal()
+	// The marker is the last protected row, so deleting the first application
+	// row does not dispose the boundary. A disposed marker means history expired.
+	h.redrawHistoryStart = buf.AddMarker(buf.YBase + buf.Y - 1)
+}
+
 // Write writes data to the terminal, implementing io.Writer.
 func (t *Terminal) Write(p []byte) (n int, err error) {
 	if t.isDisposed {

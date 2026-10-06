@@ -204,13 +204,21 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 		}
 		h.dirtyRowTracker.MarkDirty(0)
 	case 2: // erase all
+		if !h.scrollbackOnClearScreen && h.redrawHistoryStart == nil && buf.HasScrollback() && !respectProtect {
+			// Unsynchronized applications can only identify a history boundary.
+			h.redrawHistoryStart = buf.AddMarker(buf.YBase - 1)
+		}
 		if buf.HasScrollback() && !respectProtect {
-			// Shell clear-screen (Ctrl+L) clears the live viewport while
-			// retaining its contents in bounded history.
-			// CSI 3 J remains the explicit history erase.
-			last := h.bufferService.Rows - 1
-			for last >= 0 && buf.Lines.Get(buf.YBase+last).GetTrimmedLength() == 0 {
-				last--
+			// Retain shell clear-screen contents, but during application redraw
+			// only move the protected prefix out of the viewport before erasing.
+			last := -1
+			if h.scrollbackOnClearScreen {
+				last = h.bufferService.Rows - 1
+				for last >= 0 && buf.Lines.Get(buf.YBase+last).GetTrimmedLength() == 0 {
+					last--
+				}
+			} else if marker := h.redrawHistoryStart; marker != nil && !marker.IsDisposed {
+				last = min(h.bufferService.Rows-1, marker.Line-buf.YBase)
 			}
 			for n := 0; n <= last; n++ {
 				full := buf.Lines.IsFull()
@@ -235,6 +243,23 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 		h.dirtyRowTracker.MarkDirty(0)
 	case 3: // erase scrollback
 		if h.preserveScrollbackOnErase {
+			if !h.scrollbackOnClearScreen && buf.HasScrollback() {
+				protected := buf.YBase
+				if marker := h.redrawHistoryStart; marker != nil {
+					protected = 0
+					if !marker.IsDisposed {
+						protected = min(buf.YBase, max(0, marker.Line+1))
+					}
+				}
+				removed := buf.YBase - protected
+				if removed > 0 {
+					buf.Lines.Splice(protected, removed)
+					buf.YBase = protected
+					buf.YDisp = min(buf.YDisp, buf.YBase)
+					h.bufferService.OnScrollEmitter.Fire(buf.YDisp)
+					h.dirtyRowTracker.MarkRangeDirty(0, h.bufferService.Rows-1)
+				}
+			}
 			return true
 		}
 		scrollBackSize := buf.Lines.Length() - h.bufferService.Rows
@@ -717,6 +742,11 @@ func (h *InputHandler) setModePrivate(params *Params) bool {
 		case 2004:
 			h.coreService.DecPrivateModes.BracketedPasteMode = true
 		case 2026:
+			// Capture before output, even if foreground metadata arrives after
+			// the first frame. The clear policy decides whether to use it.
+			if h.redrawHistoryStart == nil && h.activeBuffer().HasScrollback() {
+				h.markRedrawHistoryStart()
+			}
 			h.coreService.DecPrivateModes.SynchronizedOutput = true
 		case 2031:
 			if h.optionsService.Options.VtExtensions.colorSchemeQueryEnabled() {
@@ -785,6 +815,12 @@ func (h *InputHandler) resetModePrivate(params *Params) bool {
 			h.OnRequestSyncScrollBarEmitter.Fire(struct{}{})
 		case 2004:
 			h.coreService.DecPrivateModes.BracketedPasteMode = false
+			if h.redrawHistoryStart != nil {
+				// Ending bracketed input releases the rendering lifetime. This
+				// also separates successive applications in an attach replay.
+				h.redrawHistoryStart.Dispose()
+				h.redrawHistoryStart = nil
+			}
 		case 2026:
 			h.coreService.DecPrivateModes.SynchronizedOutput = false
 			h.OnRequestRefreshRowsEmitter.Fire(RowRange{})

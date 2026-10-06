@@ -102,6 +102,42 @@ func TestTerminalCloseSerializesWithParsing(t *testing.T) {
 	}
 }
 
+func TestInputAtBottomFollowsDelayedOutputAfterViewportHold(t *testing.T) {
+	id := uuid.New()
+	emu := govt.New(24, 5, 64)
+	defer emu.Close()
+	emu.Write([]byte("prompt> command"))
+	emu.HoldViewport()
+	term := &terminalClient{id: id, emu: emu, snapshot: emu.Snapshot()}
+	if term.snapshot.YDisp != term.snapshot.YBase {
+		t.Fatal("fixture must start at the live viewport bottom")
+	}
+	invalidations := 0
+	c := &WorkspaceClient{
+		terminals:  map[uuid.UUID]*terminalClient{id: term},
+		invalidate: func() { invalidations++ },
+	}
+
+	term.inputPending.Store(true)
+	if c.publishTerminalSnapshots(make(map[*terminalClient]bool)) {
+		t.Fatal("input request at the live bottom should wait for PTY echo")
+	}
+	if !term.inputPending.Load() {
+		t.Fatal("input follow-up was cleared before output arrived")
+	}
+
+	c.applyTerminalEvents([]goclient.TerminalPush{{
+		TerminalID: id,
+		Event: goprotocol.TerminalEvent{
+			Seq: 1, Kind: goprotocol.OutputEvent,
+			Data: bytes.Repeat([]byte("command output\r\n"), 20),
+		},
+	}})
+	if term.inputPending.Load() || term.snapshot.YDisp != term.snapshot.YBase || invalidations != 1 {
+		t.Fatalf("delayed output did not publish at bottom: viewport=%d base=%d pending=%t invalidations=%d", term.snapshot.YDisp, term.snapshot.YBase, term.inputPending.Load(), invalidations)
+	}
+}
+
 func TestInputFollowsViewportWithoutWaitingForOutput(t *testing.T) {
 	id := uuid.New()
 	emu := govt.New(24, 5, 64)

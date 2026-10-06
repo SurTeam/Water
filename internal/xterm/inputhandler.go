@@ -79,6 +79,8 @@ type InputHandler struct {
 	curAttrData               AttributeData
 	eraseAttrDataInternal     AttributeData
 	preserveScrollbackOnErase bool
+	scrollbackOnClearScreen   bool
+	redrawHistoryStart        *Marker
 
 	utf8Decoder     Utf8ToUtf32
 	parseBuffer     []uint32
@@ -664,6 +666,10 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 
 // Reset resets the input handler state.
 func (h *InputHandler) Reset() {
+	if h.redrawHistoryStart != nil {
+		h.redrawHistoryStart.Dispose()
+		h.redrawHistoryStart = nil
+	}
 	h.curAttrData = DefaultAttrData()
 	h.eraseAttrDataInternal = DefaultAttrData()
 }

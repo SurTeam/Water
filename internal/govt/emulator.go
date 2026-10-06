@@ -144,6 +144,7 @@ func New(cols, rows, scrollback int) *Emulator {
 		),
 	}
 	e.term.SetPreserveScrollbackOnErase(true)
+	e.term.SetScrollbackOnClearScreen(true)
 	e.term.SetCursorDefaults(xterm.CursorStyleBlock, true)
 	e.term.Buffer().Lines.OnTrimEmitter.Event(func(n int) { e.trimmedLines += uint64(n) })
 	e.term.OnData(func(data string) {
@@ -166,6 +167,12 @@ func New(cols, rows, scrollback int) *Emulator {
 }
 
 func (e *Emulator) BellCount() uint64 { return e.bells.Load() }
+
+func (e *Emulator) SetScrollbackOnClearScreen(enabled bool) {
+	e.mu.Lock()
+	e.term.SetScrollbackOnClearScreen(enabled)
+	e.mu.Unlock()
+}
 
 func (e *Emulator) HoldViewport() {
 	e.mu.Lock()

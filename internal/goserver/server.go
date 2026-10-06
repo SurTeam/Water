@@ -368,7 +368,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 				"destination":        nil,
 			}},
 		}))
-	case "ui.keystroke", "ui.snapshot", "ui.click", "ui.drag", "ui.screenshot", "ui.wheel", "ui.menu":
+	case "ui.keystroke", "ui.snapshot", "ui.content", "ui.click", "ui.drag", "ui.screenshot", "ui.wheel", "ui.menu":
 		return s.forwardUI(ss, msg)
 	case "terminal.replay", "terminal.snapshot":
 		var p struct {

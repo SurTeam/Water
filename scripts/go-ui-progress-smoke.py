@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import time
 
+from PIL import Image
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/go-ui-smoke/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-progress.", dir="/tmp"))
@@ -66,14 +68,33 @@ try:
                      if a["pane_id"] == pane), None)
 
     wait(lambda: status() == "Running", "foreground probe detection")
+    icon_sizes = {}
     for report, expected in (("4;25", "Paused"), ("3", "Running"),
                              ("2;50", "Error"), ("0", "Idle"), ("1;75", "Running")):
         ctl("pane", "input", "--pane", pane, "--text", report + "\n")
         wait(lambda: status() == expected, "OSC status " + expected)
+        snapshot = ctl("ui", "snapshot")
+        hit = next(h for h in snapshot["automation_hits"] if h["kind"] == "agent" and h["id"] == pane)
+        x0, y0, x1, y1 = hit["rect"]
+        scale = snapshot["display_scale"]
+        pad = min(round(snapshot["effective_config"]["ui"]["sidebar_agent_row_padding"] * scale), (x1-x0)//8)
+        path = directory / (expected.lower() + "-icon.png")
+        ctl("ui", "screenshot", "--output", path)
+        image = Image.open(path).convert("RGB").crop((x0+pad, y0, x0+pad+round(16*scale), y1))
+        background = image.getpixel((0, 0))
+        ink = [(x, y) for y in range(image.height) for x in range(image.width)
+               if max(abs(a-b) for a, b in zip(image.getpixel((x, y)), background)) > 30]
+        assert ink, "missing status icon: " + expected
+        width = max(x for x, y in ink) - min(x for x, y in ink) + 1
+        height = max(y for x, y in ink) - min(y for x, y in ink) + 1
+        icon_sizes[expected] = (width, height)
+    assert max(v[0] for v in icon_sizes.values()) - min(v[0] for v in icon_sizes.values()) <= 1, icon_sizes
+    assert max(v[1] for v in icon_sizes.values()) - min(v[1] for v in icon_sizes.values()) <= 1, icon_sizes
+    (directory / "icon-sizes.json").write_text(json.dumps(icon_sizes))
     ctl("ui", "screenshot", "--output", directory / "progress.png")
     ctl("terminal", "spawn", "--pane", pane, "--program", shell, "--", "-f")
     wait(lambda: not ctl("ui", "snapshot")["sidebar_agents"], "stopped probe cleared")
-    print("PASS OSC Running/Paused/Error/Idle, stopped probe, Enter/Backspace; artifacts=" + str(directory))
+    print("PASS OSC Running/Paused/Error/Idle with equal rendered icon bounds " + str(icon_sizes) + ", stopped probe, Enter/Backspace; artifacts=" + str(directory))
 finally:
     try:
         ctl("server", "shutdown")

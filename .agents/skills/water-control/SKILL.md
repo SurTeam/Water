@@ -144,9 +144,31 @@ water ctl terminal snapshot --terminal <TERMINAL_ID>
 ~~~
 
 'pane content' returns JSON in current builds, including fields such as
-'pane_id', 'terminal_id', 'text', and 'lines'. For verification, inspect the
-non-blank tail of 'lines' rather than dumping an entire screen into the
-conversation.
+'pane_id', 'terminal_id', 'text', and 'lines'. It reconstructs the live screen
+from server PTY replay in the CLI; it does not read the GUI's viewport or apply
+that GUI client's Agent clear policy. Use it for ordinary shell output checks.
+
+For GUI text/history assertions, use the read-only client query:
+
+~~~sh
+water ctl ui content --pane <PANE_ID> --window <WINDOW_ID>
+water ctl ui content --pane <PANE_ID> --start-row 0 --rows 256 --window <WINDOW_ID>
+~~~
+
+Without '--start-row', it reads the client's current viewport. With it, rows
+are absolute within retained history. Each request is limited to 256 rows and
+1 MiB of cell text. Check 'source=gui-client', window/pane/terminal IDs,
+'last_seq', 'y_base', 'y_disp', 'trimmed_lines', 'alt_screen', and
+'synchronized_output'. Pages must have matching sequence/trim/buffer metadata;
+retry a changing range rather than combining inconsistent pages. The query
+does not scroll, select, copy, publish a frame or touch the clipboard. Text
+comes from the client's parsed buffer; use 'ui screenshot' separately to prove
+actual rendering. Use the object's owning connection socket for remote panes.
+
+Do not drag-select/copy or use OCR merely to read content. Reserve those paths
+for selection/clipboard tests and restore their side effects. Reusable owned
+GUI fixtures are in 'scripts/water_test.py'; regression profiles and evidence
+rules are documented in 'docs/testing-strategy.md'.
 
 ## Terminal round-trip
 
@@ -206,7 +228,7 @@ native desktop automation.
 | --- | --- |
 | Introspection | 'version', 'client info', 'server info', 'info', 'connections list', 'socket list' |
 | Connection/state | 'ping', 'state' |
-| UI | 'ui state', 'ui key', 'ui wheel', 'ui screenshot', 'ui click' |
+| UI | 'ui state', 'ui content', 'ui key', 'ui wheel', 'ui screenshot', 'ui click' |
 | Workspace/tab | 'workspace list/new/activate/rename/reorder/close', 'tab activate/new/rename/close' |
 | Pane | 'pane content/input/focus/split/resize/resize-split/close', 'pane rename-agent', 'pane move-to-workspace' |
 | Terminal | 'terminal send/send-bytes/spawn/contains/snapshot/wait-exit/resize/scroll' |

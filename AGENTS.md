@@ -24,6 +24,12 @@
 
 ## 验证与进程安全
 
+- 可复用测试策略见 [docs/testing-strategy.md](docs/testing-strategy.md)。优先运行已有 fixture 和 `~/.venv/bin/python scripts/run-go-regression.py --profile unit|terminal|agent|full`；`--list` 先展示执行计划。修复时先运行最小相关测试，交付前运行一次匹配范围的完整 profile；通过后不无依据重复整套测试。
+- 每个测试先明确证据来源：`pane content` 是 CLI 从 PTY replay 重建的当前屏幕，只用于普通输出检查；真实 GUI viewport、scrollback、清屏策略使用 `ui content --pane UUID [--window UUID]`。`ui content --start-row N --rows M` 只读客户端历史，按 `last_seq`、`trimmed_lines`、`alt_screen` 校验分页一致性；截图单独验证真实 Draw。
+- 普通内容断言不得通过拖选、复制、`pbpaste` 或 OCR 获取文本；这些操作只用于测试选区/剪贴板本身，并恢复副作用。新增 GUI 测试复用 `scripts/water_test.py` 的实例所有权、就绪条件、有界查询和清理，不留下选区或改变用户剪贴板。
+- Agent 渲染测试优先使用本地保存的会话/tool-output fixture，驱动真实安装的 CLI 与快捷键，不提交模型请求、不安装 hooks。等待具体输出、sequence、同步输出完成或模型状态；只在启动连接阶段容忍瞬时连接错误，运行阶段控制错误直接失败。
+- 每个验证必须有行为断言、超时和证据目录。profile runner 保存命令、PID、耗时、退出码与日志；GUI fixture 保存 GUI/server/window/socket 所有权及清理结果。遇到失败保留现场并定位最小原因，不静默跳过必需依赖、不靠重复运行取得一次 PASS。
+
 - 运行与改动匹配的 gofmt、go vet、Go 单元/集成测试、scenario 和 GUI 检查；测试应在一分钟内完成。等待用 operation、event、revision、terminal output 或 process exit 的有界条件，不用固定 `sleep` 掩盖竞态、死锁或超时。
 - GUI 交互使用 `water ctl`；headless 测试不能替代真实 GUI 验证。先检查当前机器的 display/GPU/X11/Wayland 环境，不硬编码 `DISPLAY` 或 `XAUTHORITY`。
 - scenario shell 使用检测到的 zsh，优先 `/opt/homebrew/bin/zsh`；隔离启动文件的交互测试使用 `-f`。`--no-initial-terminal` 保留 workspace，`--empty-workspace` 从空模型开始。
@@ -38,11 +44,12 @@
 
 详细构建、测试、`water ctl`、scenario 和发布命令集中在 [docs/Documents.md](docs/Documents.md)。
 
-## 签名与发布不可变规则
+## 签名与发布规则
 
 - `.github/workflows/macos-signed.yml` 是唯一保留的 CI，为 signing-only workflow，唯一触发方式是 `workflow_dispatch`；不得把源码 checkout、编译或完整构建放回该 workflow。本地执行构建和验证。
 - workflow 必须接收 `variant`、`publication`、`tag`、`source_release`、`source_asset`。release 只接受 `v*` tag，dev 只接受 `dev-*` tag；`prerelease` 只给 dev，`release` 只给正式版，`draft`/`none` 可用于两者。
-- 固定顺序是：本地 `CODESIGN_SKIP=1` 构建 unsigned zip → `test -s`/`unzip -t` → 上传目标 tag 的 draft release → 触发 signing workflow。unsigned app 不提交 Git，也不能当作已交付安装包。
+- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供 `CODESIGN_IDENTITY`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
+- 非 macOS 开发机或本地证书不可用时，CI signing-only 路径保留为备用：本地 `CODESIGN_SKIP=1` 构建 unsigned zip → `test -s`/`unzip -t` → 上传目标 tag 的 draft release → 触发 signing workflow。本地签名失败必须报告原因，不自动降级为 ad-hoc 或触发 CI 掩盖失败。unsigned app 不提交 Git，也不能当作已交付安装包。
 - 需要真实签名时显式设置 `CODESIGN_IDENTITY` 和 `CODESIGN_REQUIRED=1`；本地 ad-hoc/unsigned 产物只能作为构建或签名交接中间物。
 - `SurTeamCode.p12` 只作为本地导入材料，放在仓库外并限制权限；`.env`、密码、p12、明文 identity 不得进入源码、workflow、日志或 shell tracing。Actions 只使用 `SURTEAM_CODE_P12_BASE64`、`SURTEAM_SIGN_PASS` 和可选的 `SURTEAM_SIGNING_IDENTITY`。
-- Action 必须使用临时 keychain，签 nested GUI/server 和 app，并执行 `codesign --verify --deep --strict`；失败不得发布，`always()` 清理 keychain 和 p12。`CODESIGN_SKIP=1` 与 `CODESIGN_REQUIRED` 互斥。
+- 本地与 Action 均必须签 nested updater/server/GUI 和 app，并执行 `codesign --verify --deep --strict`；失败不得发布。Action 使用临时 keychain，`always()` 清理 keychain 和 p12。`CODESIGN_SKIP=1` 与 `CODESIGN_REQUIRED` 互斥。

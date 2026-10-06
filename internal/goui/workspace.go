@@ -122,26 +122,27 @@ type ConnectionEntry struct {
 }
 
 type terminalClient struct {
-	id               uuid.UUID
-	mu               sync.RWMutex
-	parseMu          sync.Mutex
-	emu              *govt.Emulator
-	snapshot         govt.Snapshot
-	lastSeq          uint64
-	cols             int
-	rows             int
-	cellWidth        int
-	resizeGeneration uint64
-	cellHeight       int
-	view             *TerminalView
-	input            *TerminalInput
-	selection        Selection
-	imePreedit       string
-	imeComposing     bool
-	defaultColors    [259]uint32
-	cursorStyle      string
-	cursorBlink      bool
-	inputPending     atomic.Bool
+	id                      uuid.UUID
+	mu                      sync.RWMutex
+	parseMu                 sync.Mutex
+	emu                     *govt.Emulator
+	snapshot                govt.Snapshot
+	lastSeq                 uint64
+	cols                    int
+	rows                    int
+	cellWidth               int
+	resizeGeneration        uint64
+	cellHeight              int
+	view                    *TerminalView
+	input                   *TerminalInput
+	selection               Selection
+	scrollbackOnClearScreen bool
+	imePreedit              string
+	imeComposing            bool
+	defaultColors           [259]uint32
+	cursorStyle             string
+	cursorBlink             bool
+	inputPending            atomic.Bool
 }
 
 func (t *terminalClient) close() {
@@ -151,6 +152,17 @@ func (t *terminalClient) close() {
 	if t.emu != nil {
 		t.emu.Close()
 		t.emu = nil
+	}
+	t.mu.Unlock()
+}
+
+func (t *terminalClient) setScrollbackOnClearScreen(enabled bool) {
+	t.parseMu.Lock()
+	defer t.parseMu.Unlock()
+	t.mu.Lock()
+	t.scrollbackOnClearScreen = enabled
+	if t.emu != nil {
+		t.emu.SetScrollbackOnClearScreen(enabled)
 	}
 	t.mu.Unlock()
 }
@@ -451,6 +463,9 @@ func (c *WorkspaceClient) handleUIPush(msg goprotocol.WireMessage) {
 }
 
 func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage) (any, error) {
+	if method == "ui.content" {
+		return c.readTerminalContent(params)
+	}
 	if window := c.native.Load(); window != nil && strings.HasPrefix(method, "ui.") {
 		return window.request(c, method, params)
 	}
@@ -864,6 +879,7 @@ func (c *WorkspaceClient) scrollActiveTerminal(deltaY float32) bool {
 	if term == nil {
 		return false
 	}
+	term.inputPending.Store(false)
 	lines := int(deltaY / 20)
 	if lines == 0 {
 		if deltaY < 0 {
@@ -911,6 +927,18 @@ func (c *WorkspaceClient) Bootstrap() error {
 
 func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 	wanted := collectTerminalIDs(state)
+	scrollbackOnClearScreen := make(map[uuid.UUID]bool, len(wanted))
+	for id := range wanted {
+		scrollbackOnClearScreen[id] = true
+	}
+	for _, raw := range state.Agents {
+		if agent, ok := raw.(map[string]any); ok && agent["status"] == "running" {
+			id := nativeUUID(agent["terminal_id"])
+			if enabled, ok := agent["scrollback_on_clear_screen"].(bool); ok && id != uuid.Nil {
+				scrollbackOnClearScreen[id] = enabled
+			}
+		}
+	}
 	c.mu.Lock()
 	if state.StateRevision < c.state.StateRevision {
 		c.mu.Unlock()
@@ -925,8 +953,11 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 		}
 	}
 	var add []terminalSummary
+	var update []*terminalClient
 	for id, summary := range wanted {
-		if _, ok := c.terminals[id]; !ok {
+		if term := c.terminals[id]; term != nil {
+			update = append(update, term)
+		} else {
 			add = append(add, summary)
 		}
 	}
@@ -936,8 +967,11 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 		_ = c.session.Detach(term.id)
 		term.close()
 	}
+	for _, term := range update {
+		term.setScrollbackOnClearScreen(scrollbackOnClearScreen[term.id])
+	}
 	for _, summary := range add {
-		c.attachTerminal(summary)
+		c.attachTerminal(summary, scrollbackOnClearScreen[summary.TerminalID])
 	}
 	if c.invalidate != nil {
 		c.invalidate()
@@ -979,12 +1013,13 @@ func collectTreeTerminals(node *paneTree, out map[uuid.UUID]terminalSummary) {
 	collectTreeTerminals(node.Second, out)
 }
 
-func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
+func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnClearScreen bool) {
 	var attached terminalAttach
 	if err := c.session.Attach(summary.TerminalID, &attached); err != nil {
 		return
 	}
 	emu := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	emu.SetScrollbackOnClearScreen(scrollbackOnClearScreen)
 	emu.SetCursorDefaults(c.currentConfig().Terminal.CursorStyle, c.currentConfig().Terminal.CursorBlink)
 	emu.SetDefaultColors(terminalDefaultColors(c.config))
 	emu.SetCellSize(
@@ -1014,7 +1049,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 	view.Theme.Selection = configColor(c.config.Theme.Accent, 0x5e81ac)
 	view.Theme.Selection.A = 0x88
 	term := &terminalClient{
-		id: summary.TerminalID, emu: emu, lastSeq: last,
+		id: summary.TerminalID, emu: emu, lastSeq: last, scrollbackOnClearScreen: scrollbackOnClearScreen,
 		cols: attached.Size.Columns, rows: attached.Size.Lines,
 		view: view,
 	}
@@ -1065,6 +1100,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			return accepted
 		},
 		OnScroll: func(lines int) {
+			term.inputPending.Store(false)
 			term.mu.Lock()
 			if term.emu == nil {
 				term.mu.Unlock()
@@ -1076,6 +1112,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary) {
 			c.invalidateScroll()
 		},
 		OnSelectionStart: func(col, row, clickCount int) {
+			term.inputPending.Store(false)
 			if !c.hyperlinkConfig().Features.Selection {
 				return
 			}
@@ -1323,11 +1360,10 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 			term.mu.Lock()
 			if term.snapshot.YDisp != term.snapshot.YBase || term.selection.Active {
 				changed[term] = true
-			} else {
-				// Most typing already follows the live viewport. Do not publish
-				// a duplicate pre-echo view and delay the actual PTY echo behind it.
-				term.inputPending.Store(false)
 			}
+			// If the published view is already at the bottom, keep the request
+			// until PTY output arrives. Input can race ahead of echo; a selection
+			// or held viewport may still keep later output from following the tail.
 			term.mu.Unlock()
 		}
 	}
@@ -1443,7 +1479,11 @@ func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
 	if err := c.session.Attach(id, &attached); err != nil {
 		return
 	}
+	old.mu.RLock()
+	scrollbackOnClearScreen := old.scrollbackOnClearScreen
+	old.mu.RUnlock()
 	next := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
+	next.SetScrollbackOnClearScreen(scrollbackOnClearScreen)
 	next.SetCursorDefaults(c.currentConfig().Terminal.CursorStyle, c.currentConfig().Terminal.CursorBlink)
 	next.SetDefaultColors(terminalDefaultColors(c.config))
 	next.SetCellSize(

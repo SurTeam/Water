@@ -110,10 +110,12 @@ func TestSidebarAgentOSCTitlesAndStatuses(t *testing.T) {
 	check("Codex", "kind", "Completed")
 }
 
-func TestAgentStatusGlyphsUseConsistentCircleFamily(t *testing.T) {
-	for status, want := range map[string]string{"Running": "◔", "Paused": "◑", "Error": "◕", "Idle": "○", "Completed": "◌", "Offline": "◍"} {
-		if got := agentStatusGlyph(status); got != want {
-			t.Fatalf("%s glyph=%q, want %q", status, got, want)
+func TestAgentStatusIconBoundsUseFixedColumnWidth(t *testing.T) {
+	row := image.Rect(10, 4, 110, 28)
+	for _, pad := range []int{2, 8, 12} {
+		bounds := agentStatusIconBounds(row, pad, 16)
+		if bounds.Dx() != 16 || bounds.Min.X != row.Min.X+pad {
+			t.Fatalf("icon bounds=%v", bounds)
 		}
 	}
 }

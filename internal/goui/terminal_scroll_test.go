@@ -39,7 +39,7 @@ func attachedScrollTestTerminal(t *testing.T) (*WorkspaceClient, *terminalClient
 	t.Cleanup(func() { _ = session.Close() })
 	c := NewWorkspaceClientWithConfig(session, nil, goconfig.Default())
 	t.Cleanup(c.Close)
-	c.attachTerminal(terminalSummary{TerminalID: spawned.TerminalID})
+	c.attachTerminal(terminalSummary{TerminalID: spawned.TerminalID}, true)
 	term := c.terminals[spawned.TerminalID]
 	if term == nil {
 		t.Fatal("terminal attach failed")

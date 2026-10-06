@@ -138,7 +138,7 @@ func runConnections(ctx cliContext, args []string) error {
 
 func runUI(ctx cliContext, args []string) error {
 	if len(args) == 0 {
-		return errors.New("ui requires key, state, screenshot, wheel, click, or menu")
+		return errors.New("ui requires key, state, content, screenshot, wheel, click, or menu")
 	}
 	var out any
 	call := func(method string, params map[string]any, out any) error {
@@ -177,6 +177,29 @@ func runUI(ctx cliContext, args []string) error {
 		}
 	case "state", "snapshot":
 		if err := call("ui.snapshot", map[string]any{}, &out); err != nil {
+			return err
+		}
+	case "content":
+		pane, err := requiredIDOrBare(args, "--pane", 1)
+		if err != nil {
+			return err
+		}
+		params := map[string]any{"pane_id": pane}
+		if _, ok := option(args, "--start-row"); ok {
+			start, err := optionIntDefault(args, "--start-row", 0)
+			if err != nil || start < 0 {
+				return errors.New("ui content --start-row must be a nonnegative integer")
+			}
+			params["start_row"] = start
+		}
+		if _, ok := option(args, "--rows"); ok {
+			rows, err := optionIntDefault(args, "--rows", 0)
+			if err != nil || rows < 1 || rows > govt.MaxContentRows {
+				return errors.New("ui content --rows must be between 1 and 256")
+			}
+			params["rows"] = rows
+		}
+		if err := call("ui.content", params, &out); err != nil {
 			return err
 		}
 	case "screenshot", "capture":
@@ -1224,6 +1247,7 @@ Introspection:
 UI:
   water ctl ui key cmd-t
   water ctl ui state
+  water ctl ui content --pane UUID [--start-row 0 --rows 256] [--window UUID]
   water ctl ui screenshot --output target/water.png
   water ctl ui click --x 240 --y 100 --click-count 2
   water ctl ui drag --x 600 --y 300 --to-x 720 --to-y 300

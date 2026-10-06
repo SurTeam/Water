@@ -720,6 +720,7 @@ func (m *Model) Dump() StateDump {
 					"label":goagent.Label(pane.Terminal.Agent.Kind),
 					"custom_label":pane.Terminal.AgentLabel,
 					"active":pane.Terminal.Agent.Active,
+					"scrollback_on_clear_screen":goagent.ScrollbackOnClearScreen(pane.Terminal.Agent.Kind),
 					"workspace_id":wid,
 					"tab_id":tabID,
 					"pane_id":paneID,

@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.13](releases/v0.3.13.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.3.14](releases/v0.3.14.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 ## Requirements
 
@@ -158,6 +158,23 @@ Rounded windows use Ebitengine screen transparency, a cached corner shader and m
 Text selection remains active while output arrives. History clicks remain local even
 when the foreground application enables mouse tracking. Selected lines follow
 history trimming; an expired selection is cleared rather than copying another line.
+
+Terminal screen clears use a common client-side policy. Shell `CSI 2 J` moves
+cleared content into bounded history. Agents that redraw their transcript can
+instead replace their own history while retaining the prefix preceding their
+first synchronized output frame. Pi selects this policy through the Agent
+registry; its `CSI 3 J` removes previous Pi renderings, so Ctrl+O expansion and
+collapse do not accumulate duplicate welcome or tool output. The boundary
+follows history trimming and reflow and is rebuilt during attach replay.
+
+Run `~/.venv/bin/python scripts/go-ui-pi-redraw-smoke.py` to verify the installed
+Pi in regular mode against a local saved tool-output fixture, without submitting
+a model request. It checks two Ctrl+O cycles across a viewport, retained shell
+history, a single welcome, and keyboard/Enter following the bottom. It saves
+screenshots and reads the GUI's actual history through the bounded, read-only
+`ui content` interface, without selecting text or touching the clipboard.
+`scripts/go-ui-progress-smoke.py` also measures the rendered status-icon bounds
+for Running, Paused, Error and Idle in real GUI screenshots.
 
 Water displays static Kitty RGB/RGBA/PNG streams (including compressed chunks and
 Unicode placeholders), iTerm2 inline images and Sixel. Images follow their buffer's
@@ -383,6 +400,12 @@ The packaging scripts build the GUI, dedicated server and four embedded server t
 
 ## Tests and validation
 
+The reusable execution procedure is [testing-strategy.md](testing-strategy.md).
+Use `~/.venv/bin/python scripts/run-go-regression.py --profile full --list` to
+inspect the plan, then run the matching `unit`, `terminal`, `agent`, or `full`
+profile. Each step has a 60-second deadline; logs and a machine-readable summary
+are retained under `target/test-runs`. New GUI tests reuse `scripts/water_test.py`.
+
 ```sh
 gofmt -l cmd internal
 go vet ./...
@@ -399,7 +422,7 @@ bash scripts/run-go-scenario-suite.sh
 go test ./internal/gobench -count=1 -timeout=60s
 ```
 
-For a real GUI smoke run, start the current binary with a unique socket/config and exercise `ui key`, `pane input`, `pane content`, and `ui state` through `water ctl`. Record the GUI/server PID and clean it up after the run. Cross-build and headless tests do not replace a native GUI check.
+For a real GUI smoke run, start the current binary with a unique socket/config and exercise `ui key`, `pane input`, and `ui state` through `water ctl`. Ordinary shell output can use `pane content`, which reconstructs replay in the CLI. To inspect the actual GUI client viewport or history, use `water ctl ui content --pane UUID [--window UUID]`; `--start-row N --rows M` reads absolute retained rows without scrolling or selection (maximum 256 rows / 1 MiB of cell text). Check response identity and sequence/trim/buffer consistency across pages. Parsed content is distinct from a rendered frame, so use screenshots for drawing assertions. Record the GUI/server PID and clean it up after the run. Cross-build and headless tests do not replace a native GUI check.
 
 Cmd+N windows share one local server/socket and can select different workspaces, tabs and panes. Closing a window releases only its session; with `detach_on_quit=false`, the last window closes the server. An embedded server keeps running in its original process after that process's GUI closes while other windows remain. Explicit **Quit GUI and Local Server** shuts down the shared local server using the existing connection, even if its socket pathname has become unavailable.
 
@@ -430,7 +453,8 @@ are not updates: increment `WATER_APP_VERSION` when publishing an update.
 macOS uses `Water[- Dev]-VERSION-macOS-{arm64,amd64}.zip` (GitHub replaces spaces
 with periods); Linux uses `water[-dev]-VERSION-{aarch64,x86_64}-linux.tar.gz`.
 Publish Linux packages to the matching release after building them natively.
-The existing macOS signing-only workflow remains the signing/publishing path.
+macOS development machines sign locally with the same certificate as CI; the
+signing-only workflow remains a fallback for machines without local signing.
 
 Both platforms require the SHA256 digest provided by GitHub's release-assets
 API and verify the complete download before extracting it. macOS additionally
@@ -469,14 +493,37 @@ to the native test binary. It uses an isolated socket/config and real Water
 control actions, checks the localized panel/menu and bounded release lookup,
 and captures screenshots without installing a release.
 
-## macOS signing handoff
+## macOS local signing and CI fallback
 
 The macOS app registers as an alternate handler for `.command` files. Choose
 Water in Finder's **Open With** menu to run an executable command file in a new
 local workspace. Its working directory is the script's directory; the configured
 shell remains open after it finishes. Local files are rejected in `--ssh` sessions.
 
-Signing is two-stage. The build machine creates a real unsigned archive; the GitHub Action only downloads, signs, verifies, and publishes it.
+On a macOS development machine, build and sign locally with the same SurTeam
+certificate used by CI. Supply `CODESIGN_IDENTITY` securely from the local
+keychain/environment; do not put the literal identity or credentials in source,
+logs or shell tracing. Do not dispatch signing CI after successful local signing.
+
+```sh
+# CODESIGN_IDENTITY must already be set to the matching CI certificate.
+WATER_APP_VARIANT=release CODESIGN_REQUIRED=1 \
+  bash scripts/build-go-macos-app.sh
+codesign --verify --deep --strict dist/Water.app
+APP_VERSION="${WATER_APP_VERSION:-$(cat VERSION)}"
+case "$(uname -m)" in arm64) ARCH=arm64 ;; x86_64) ARCH=amd64 ;; esac
+test -s "dist/Water-${APP_VERSION}-macOS-${ARCH}.zip"
+unzip -tq "dist/Water-${APP_VERSION}-macOS-${ARCH}.zip"
+```
+
+The native script signs updater, server, GUI and app using the same runtime and
+timestamp options as CI, then verifies the bundle. Commit/push the version and
+tag before uploading the signed archive to the matching release. Local signing
+failure is a blocker; never silently substitute ad-hoc signing or CI.
+
+When local signing is unavailable, the existing two-stage CI handoff is retained:
+the build machine creates an unsigned archive and the signing-only GitHub Action
+downloads, signs, verifies and publishes it. It never checks out or compiles source.
 
 ```sh
 # Release: push the vVERSION tag first.

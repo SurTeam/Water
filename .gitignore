@@ -1,6 +1,7 @@
 /target
 /dist
 /.tmp
+/internal/goremote/payloads/water-server-*
 .DS_Store
 *.sock
 .pi/

@@ -113,20 +113,31 @@ func agentProgressStatus(state int) string {
 	}
 }
 
-func agentStatusGlyph(status string) string {
+func agentStatusIconBounds(row image.Rectangle, pad, width int) image.Rectangle {
+	return image.Rect(row.Min.X+pad, row.Min.Y, row.Min.X+pad+width, row.Max.Y)
+}
+
+func drawAgentStatusIcon(dst *ebiten.Image, bounds image.Rectangle, status string, clr color.NRGBA, scale float64) {
+	if dst == nil || bounds.Empty() {
+		return
+	}
+	cx, cy := float32(bounds.Min.X+bounds.Max.X)/2, float32(bounds.Min.Y+bounds.Max.Y)/2
+	radius := float32(min(bounds.Dx(), bounds.Dy())) * .3
+	stroke := max(1, int(scale+.5))
+	vector.StrokeCircle(dst, cx, cy, radius, float32(stroke), clr, true)
 	switch status {
 	case "Running":
-		return "◔"
+		vector.FillCircle(dst, cx, cy, radius*.26, clr, true)
 	case "Paused":
-		return "◑"
+		vector.StrokeLine(dst, cx, cy-radius*.34, cx, cy+radius*.34, float32(stroke*2), clr, true)
 	case "Error":
-		return "◕"
+		vector.StrokeLine(dst, cx, cy-radius*.38, cx, cy+radius*.08, float32(stroke)*1.5, clr, true)
+		vector.FillCircle(dst, cx, cy+radius*.38, float32(stroke), clr, true)
 	case "Completed":
-		return "◌"
+		vector.StrokeLine(dst, cx-radius*.4, cy, cx-radius*.08, cy+radius*.3, float32(stroke)*1.5, clr, true)
+		vector.StrokeLine(dst, cx-radius*.08, cy+radius*.3, cx+radius*.42, cy-radius*.3, float32(stroke)*1.5, clr, true)
 	case "Offline":
-		return "◍"
-	default:
-		return "○"
+		vector.StrokeLine(dst, cx-radius*.35, cy, cx+radius*.35, cy, float32(stroke), clr, true)
 	}
 }
 
@@ -428,9 +439,8 @@ func (w *EbitengineWindow) drawAgentLabel(c *WorkspaceClient, dst *ebiten.Image,
 	}
 	pad := min(w.dp(float64(u.SidebarAgentRowPadding)), max(0, row.Dx()/8))
 	if !shelf {
-		glyph := agentStatusGlyph(status)
-		icon := image.Rect(row.Min.X+pad, row.Min.Y, row.Min.X+pad+w.dp(16), row.Max.Y)
-		w.centeredLabel(dst, c, icon, glyph, float64(u.SidebarAgentFontSize), statusColor, false)
+		icon := agentStatusIconBounds(row, pad, w.dp(16))
+		drawAgentStatusIcon(dst, icon, status, statusColor, w.scale)
 		name := image.Rect(icon.Max.X+w.dp(6), row.Min.Y, row.Max.X-pad, row.Max.Y)
 		w.sidebarLabel(dst, c, name, a.label, u.SidebarAgentFontSize, fg, focused, u.SidebarAgentAlignment)
 		return
