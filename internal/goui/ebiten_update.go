@@ -54,7 +54,7 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 		return
 	}
 	s := w.updates.Snapshot()
-	r := w.overlayPanel(c, dst, w.dp(590), w.dp(320), !c.settings.visible, false)
+	r := w.overlayPanel(c, dst, w.dp(590), w.dp(320), !c.settings.visible)
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .6)

@@ -1128,6 +1128,36 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			term.mu.Unlock()
 			c.invalidateScroll()
 		},
+		OnSelectionBoundaryStart: func(col, row int, extend bool) {
+			term.inputPending.Store(false)
+			if !c.hyperlinkConfig().Features.Selection {
+				return
+			}
+			term.mu.Lock()
+			if term.emu != nil {
+				term.emu.HoldViewport()
+			}
+			absoluteRow := term.snapshot.YDisp + row
+			if extend && !term.selection.empty() {
+				if !term.selection.Boundaries {
+					// Convert inclusive endpoints without changing the selected text.
+					if term.selection.AnchorRow > term.selection.FocusRow || (term.selection.AnchorRow == term.selection.FocusRow && term.selection.AnchorCol > term.selection.FocusCol) {
+						term.selection.AnchorCol++
+					} else {
+						term.selection.FocusCol++
+					}
+					term.selection.Boundaries = true
+				}
+				term.selection.FocusCol = col
+				term.selection.FocusRow = absoluteRow
+			} else {
+				term.selection = Selection{AnchorCol: col, AnchorRow: absoluteRow, FocusCol: col, FocusRow: absoluteRow, Active: true, Absolute: true, Boundaries: true}
+			}
+			term.mu.Unlock()
+			if c.invalidate != nil {
+				c.invalidate()
+			}
+		},
 		OnSelectionStart: func(col, row, clickCount int) {
 			term.inputPending.Store(false)
 			if !c.hyperlinkConfig().Features.Selection {
@@ -1224,7 +1254,7 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			snapshot := term.snapshot
 			emu := term.emu
 			term.mu.RUnlock()
-			if !selection.Active {
+			if selection.empty() {
 				return ""
 			}
 			if selection.Absolute && emu != nil {

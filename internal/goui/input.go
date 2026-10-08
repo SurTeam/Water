@@ -27,20 +27,21 @@ type TerminalInput struct {
 	tag      struct{}
 	mouseTag struct{}
 
-	OnInput               func([]byte)
-	OnShortcut            func(key.Event) bool
-	Shortcuts             *goconfig.ShortcutConfig
-	OnMouse               func(govt.MouseEvent) bool
-	OnScroll              func(int)
-	OnSelectionStart      func(col, row, clickCount int)
-	OnSelectionMove       func(col, row int)
-	OnSelectionEnd        func(col, row int)
-	OnSelectionAutoScroll func(col, row, lines int)
-	OnCopy                func() string
-	OnHyperlink           func(uri string)
-	BracketedPaste        bool
-	Hyperlinks            bool
-	HyperlinkCommandClick bool
+	OnInput                  func([]byte)
+	OnShortcut               func(key.Event) bool
+	Shortcuts                *goconfig.ShortcutConfig
+	OnMouse                  func(govt.MouseEvent) bool
+	OnScroll                 func(int)
+	OnSelectionStart         func(col, row, clickCount int)
+	OnSelectionBoundaryStart func(col, row int, extend bool)
+	OnSelectionMove          func(col, row int)
+	OnSelectionEnd           func(col, row int)
+	OnSelectionAutoScroll    func(col, row, lines int)
+	OnCopy                   func() string
+	OnHyperlink              func(uri string)
+	BracketedPaste           bool
+	Hyperlinks               bool
+	HyperlinkCommandClick    bool
 
 	composing                bool
 	pendingComposition       string

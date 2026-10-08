@@ -19,7 +19,15 @@ import (
 	"golang.design/x/clipboard"
 )
 
-func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count int) bool {
+func selectionBoundaryAt(pane nativePane, p image.Point) (col, row int) {
+	col = int(math.Floor(float64(p.X-pane.rect.Min.X)/float64(max(1, pane.cw)) + .5))
+	col = min(max(0, col), pane.rect.Dx()/max(1, pane.cw))
+	row = int(math.Floor(float64(p.Y-pane.rect.Min.Y) / float64(max(1, pane.lh))))
+	row = min(max(0, row), max(0, pane.rect.Dy()/max(1, pane.lh)-1))
+	return
+}
+
+func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count int, shift ...bool) bool {
 	w.composer.Confirm()
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
@@ -98,16 +106,22 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 			uri := hyperlinkURIAt(pane.term.snapshot, col, row)
 			pane.term.mu.RUnlock()
 			cfg := c.currentConfig()
-			if count == 1 && cfg.Terminal.Hyperlinks && uri != "" && (!cfg.Terminal.HyperlinkCommandClick || ebiten.IsKeyPressed(ebiten.KeyMeta) || ebiten.IsKeyPressed(ebiten.KeyControl)) {
+			extend := ebiten.IsKeyPressed(ebiten.KeyShift) || (len(shift) > 0 && shift[0])
+			if count == 1 && !extend && cfg.Terminal.Hyperlinks && uri != "" && (!cfg.Terminal.HyperlinkCommandClick || ebiten.IsKeyPressed(ebiten.KeyMeta) || ebiten.IsKeyPressed(ebiten.KeyControl)) {
 				w.drag = &nativeDrag{kind: hitPane, pane: pane, start: p, hyperlink: uri}
 				return true
 			}
-			if !w.terminalMouse(pane, p, govt.MouseDown, govt.MouseLeft) && cfg.Features.Selection {
-				if pane.term.input.OnSelectionStart != nil {
+			selecting := false
+			if (extend || !w.terminalMouse(pane, p, govt.MouseDown, govt.MouseLeft)) && cfg.Features.Selection {
+				selecting = count == 1 || extend
+				if selecting && pane.term.input.OnSelectionBoundaryStart != nil {
+					boundary, line := selectionBoundaryAt(pane, p)
+					pane.term.input.OnSelectionBoundaryStart(boundary, line, extend)
+				} else if pane.term.input.OnSelectionStart != nil {
 					pane.term.input.OnSelectionStart(col, row, count)
 				}
 			}
-			w.drag = &nativeDrag{kind: hitPane, pane: pane, start: p}
+			w.drag = &nativeDrag{kind: hitPane, pane: pane, start: p, selecting: selecting}
 		case hitRemoteField:
 			w.view(c).remoteFocused = true
 		case hitSettingsControl:
@@ -201,6 +215,9 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 		return
 	}
 	switch d.kind {
+	case hitWorkspace:
+		delta := p.Sub(d.start)
+		d.moved = d.moved || delta.X*delta.X+delta.Y*delta.Y > w.dp(5)*w.dp(5)
 	case hitSettingsControl:
 		if d.editor != nil {
 			_, anchor := d.editor.Selection()
@@ -233,11 +250,11 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 		if d.hyperlink != "" {
 			return
 		}
-		if w.terminalMouse(d.pane, p, govt.MouseMove, govt.MouseLeft) {
+		if !d.selecting {
+			w.terminalMouse(d.pane, p, govt.MouseMove, govt.MouseLeft)
 			return
 		}
-		col := min(max(0, (p.X-d.pane.rect.Min.X)/d.pane.cw), max(0, d.pane.rect.Dx()/d.pane.cw-1))
-		row := (p.Y - d.pane.rect.Min.Y) / d.pane.lh
+		col, row := selectionBoundaryAt(d.pane, p)
 		if p.Y < d.pane.rect.Min.Y || p.Y >= d.pane.rect.Max.Y {
 			if d.pane.term.input.OnSelectionAutoScroll != nil {
 				lines := 1
@@ -263,7 +280,7 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 			if view == nil {
 				return
 			}
-			if p.Y-d.start.Y > w.dp(5) || d.start.Y-p.Y > w.dp(5) {
+			if d.moved {
 				for _, target := range c.hitRegions {
 					if target.Kind != hitWorkspace || target.Label != d.hit.Label || !p.In(target.Rect) {
 						continue
@@ -299,8 +316,11 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 				}
 				return
 			}
-			if !w.terminalMouse(d.pane, p, govt.MouseUp, govt.MouseLeft) && d.pane.term.input.OnSelectionEnd != nil {
-				d.pane.term.input.OnSelectionEnd((p.X-d.pane.rect.Min.X)/d.pane.cw, (p.Y-d.pane.rect.Min.Y)/d.pane.lh)
+			if d.selecting && d.pane.term.input.OnSelectionEnd != nil {
+				col, row := selectionBoundaryAt(d.pane, p)
+				d.pane.term.input.OnSelectionEnd(col, row)
+			} else if !d.selecting {
+				w.terminalMouse(d.pane, p, govt.MouseUp, govt.MouseLeft)
 			}
 			return
 		default:

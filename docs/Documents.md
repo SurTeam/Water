@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.16](releases/v0.3.16.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.3.17](releases/v0.3.17.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 ## Requirements
 
@@ -48,7 +48,8 @@ independently; `ui.tab_max_title_length` limits captions (default 32 characters)
 Tabs remain in the titlebar when the sidebar is hidden and start after the
 window controls. Each tab measures its caption with one space on each side,
 plus the configured tab padding; overflow scrolls horizontally.
-Settings categories have section headings and leave the background undimmed.
+Settings categories have section headings. Window popups dim the background
+without a drop shadow; stacked panels do not dim it twice.
 These settings affect new windows. Older pixel
 fields are accepted but ignored by the Go frontend and removed when its Settings
 page saves. They are not converted to cells, since the old dimensions did not
@@ -64,8 +65,10 @@ Glyphs use their actual ink bounds, scale down proportionally when necessary,
 and center in their available drawing space.
 Combining marks remain part of their base cell; selection, wrapping and the
 block cursor follow the same logical columns and drawing policy.
-Selection highlights complete two-cell glyphs even when a drag endpoint touches
-only one half. Copying uses the same boundaries, including icon drawing space
+Drag selection uses character-cell midpoints to choose insertion boundaries.
+Shift-click preserves the existing anchor and moves the other endpoint, including
+across the anchor. Selection highlights complete two-cell glyphs even when a
+drag endpoint touches only one half. Copying uses the same boundaries, including icon drawing space
 borrowed from a following blank, without changing shell column calculations.
 The language/grid smoke checks actual shell dimensions, both languages and native
 menu titles, persisted settings and restart, different font sizes and sidebar

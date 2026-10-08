@@ -345,7 +345,7 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 	for i := hitStart; i < len(c.hitRegions); i++ {
 		c.hitRegions[i].Rect = c.hitRegions[i].Rect.Intersect(list)
 	}
-	if w.drag != nil && w.drag.kind == hitWorkspace {
+	if w.drag != nil && w.drag.kind == hitWorkspace && w.drag.moved {
 		for _, h := range c.hitRegions[hitStart:] {
 			if h.Kind == hitWorkspace && w.mouse.In(h.Rect) && h.Label == w.drag.hit.Label {
 				nativeRect(content, image.Rect(h.Rect.Min.X, h.Rect.Min.Y, h.Rect.Max.X, h.Rect.Min.Y+w.dp(2)), configColor(t.SidebarDragIndicatorColor, 0x8eaeed))

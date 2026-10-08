@@ -31,7 +31,7 @@ if args.profile != "unit":
              ("build-server", ["go", "build", "-ldflags", ldflags, "-o", str(server), "./cmd/water-server"]),
              ("scenarios", ["bash", "scripts/run-go-scenario-suite.sh"]),
              ("gui", ["bash", "scripts/run-go-ui-smoke.sh"])]
-    scripts = ["go-ui-settings-visual-smoke.py", "go-ui-content-smoke.py", "go-ui-server-smoke.py"]
+    scripts = ["go-ui-settings-visual-smoke.py", "go-ui-selection-modal-smoke.py", "go-ui-content-smoke.py", "go-ui-server-smoke.py"]
     if args.profile in ("terminal", "full"):
         scripts += ["go-ui-query-smoke.py", "go-ui-graphics-history-smoke.py", "go-ui-pi-redraw-smoke.py"]
     if args.profile in ("agent", "full"):

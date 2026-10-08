@@ -75,6 +75,8 @@ type nativeDrag struct {
 	windowX, windowY, width, height int
 	edges                           int
 	hyperlink                       string
+	selecting                       bool
+	moved                           bool
 }
 
 // EbitengineWindow owns rendering, input and window chrome. Transport requests
@@ -561,7 +563,8 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		Action                 string `json:"action"`
 		Keystroke              string `json:"keystroke"`
 		X, Y, ToX, ToY, DX, DY float32
-		ClickCount             int `json:"click_count"`
+		ClickCount             int  `json:"click_count"`
+		Shift                  bool `json:"shift"`
 	}
 	// JSON's snake-case coordinates are separate from Go field names.
 	var coords struct {
@@ -696,7 +699,7 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		value = map[string]any{"handled": err == nil, "action": p.Action}
 	case "ui.click":
 		point := image.Pt(int(p.X), int(p.Y))
-		handled := w.pointerDown(c, point, max(1, p.ClickCount))
+		handled := w.pointerDown(c, point, max(1, p.ClickCount), p.Shift)
 		w.pointerUp(c, point)
 		value = map[string]any{"handled": handled, "window_count": 1, "has_active_window": true}
 	case "ui.drag":

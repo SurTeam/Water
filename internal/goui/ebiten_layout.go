@@ -461,18 +461,15 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 }
 
 func (w *EbitengineWindow) overlay(c *WorkspaceClient, dst *ebiten.Image, width, height int) image.Rectangle {
-	return w.overlayPanel(c, dst, width, height, !c.settings.visible, !c.settings.visible)
+	return w.overlayPanel(c, dst, width, height, !c.settings.visible)
 }
 
-func (w *EbitengineWindow) overlayPanel(c *WorkspaceClient, dst *ebiten.Image, width, height int, dim, shadow bool) image.Rectangle {
+func (w *EbitengineWindow) overlayPanel(c *WorkspaceClient, dst *ebiten.Image, width, height int, dim bool) image.Rectangle {
 	width = min(width, w.size.X-w.dp(32))
 	height = min(height, w.size.Y-w.dp(96))
 	r := image.Rect((w.size.X-width)/2, (w.size.Y-height)/2, (w.size.X+width)/2, (w.size.Y+height)/2)
 	if dim {
 		nativeRect(dst, image.Rect(0, w.titleHeight(c), w.size.X, w.size.Y), color.NRGBA{A: 130})
-	}
-	if shadow {
-		w.round(dst, r.Add(image.Pt(0, w.dp(8))), w.dp(12), color.NRGBA{A: 80})
 	}
 	w.round(dst, r, w.dp(10), mixColor(configColor(c.currentConfig().Theme.ChromeBackground, 0x171b20), configColor(c.currentConfig().Theme.UIForeground, 0xe6eaea), .15))
 	w.round(dst, r.Inset(1), w.dp(10), configColor(c.currentConfig().Theme.ChromeBackground, 0x171b20))
@@ -547,7 +544,9 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 	if dst != nil && value != "" {
 		face := w.fonts.face(cfg.UI.UIFontFamily, float64(w.dp(float64(cfg.UI.UIFontSize))), false, false, false)
 		op := &text.DrawOptions{}
-		op.GeoM.Translate(float64(content.Min.X)-offset, float64(r.Min.Y+w.dp(8)))
+		metrics := face.Metrics()
+		y := float64(r.Min.Y) + (float64(r.Dy())-metrics.HAscent-metrics.HDescent)/2
+		op.GeoM.Translate(float64(content.Min.X)-offset, y)
 		op.ColorScale.ScaleWithColor(fg)
 		text.Draw(dst, value, face, op)
 	}
@@ -555,7 +554,7 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	s := &c.settings
 	v := w.view(c)
-	r := w.overlayPanel(c, dst, w.dp(680), w.dp(540), true, false)
+	r := w.overlayPanel(c, dst, w.dp(680), w.dp(540), true)
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .52)

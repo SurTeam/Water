@@ -559,39 +559,40 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 
 		n := 0
 		var readErr error
-		// Drain immediately available bytes into one reader-owned block. Only
-		// park when the block is empty; a short read must not trigger a channel
-		// handoff/timer reset for every ~1 KiB Darwin PTY fragment.
+		// Drain available fragments into one reader-owned block. A partial
+		// block can wait for readiness up to the idle/max-age deadline, avoiding
+		// a channel handoff/timer reset for every ~1 KiB Darwin PTY fragment.
+		var burstStarted time.Time
+		waitingForData := false
 		err := raw.Read(func(fd uintptr) bool {
-			var burstStarted, lastData time.Time
-			wouldBlocks := 0
 			for n < len(buf) {
 				gometrics.PTYReadCalls.Add(1)
 				count, callErr := syscall.Read(int(fd), buf[n:])
 				if count > 0 {
 					n += count
 					gometrics.PTYBytesRead.Add(uint64(count))
-					lastData = time.Now()
 					if burstStarted.IsZero() {
-						burstStarted = lastData
+						burstStarted = time.Now()
 					}
-					wouldBlocks = 0
 				}
 				if errors.Is(callErr, syscall.EINTR) {
 					continue
 				}
 				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
+					gometrics.PTYReadWouldBlock.Add(1)
 					if n == 0 {
 						return false
 					}
-					// Use a bounded successful-data
-					// micro-burst. Never spin on empty/spurious readiness.
-					wouldBlocks++
-					now := time.Now()
-					if wouldBlocks >= 64 || now.Sub(lastData) >= outputBatchIdle || now.Sub(burstStarted) >= outputBatchMaxAge {
-						return true
+					// Keep this partial block while the poller waits for readiness.
+					// Bound that wait so a prompt or resize cannot get stuck behind
+					// an unfinished block, without spinning on an empty PTY.
+					deadline := time.Now().Add(outputBatchIdle)
+					if maximum := burstStarted.Add(outputBatchMaxAge); maximum.Before(deadline) {
+						deadline = maximum
 					}
-					continue
+					_ = t.ptmx.SetReadDeadline(deadline)
+					waitingForData = true
+					return false
 				}
 				if callErr != nil {
 					readErr = callErr
@@ -607,6 +608,9 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 			}
 			return true
 		})
+		if waitingForData {
+			_ = t.ptmx.SetReadDeadline(time.Time{})
+		}
 		if n > 0 {
 			out <- buf[:n]
 			buf = nil

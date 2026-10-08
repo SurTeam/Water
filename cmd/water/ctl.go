@@ -250,7 +250,7 @@ func runUI(ctx cliContext, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := call("ui.click", map[string]any{"x": x, "y": y, "click_count": count}, &out); err != nil {
+		if err := call("ui.click", map[string]any{"x": x, "y": y, "click_count": count, "shift": hasFlag(args, "--shift")}, &out); err != nil {
 			return err
 		}
 	case "drag":
@@ -1255,7 +1255,7 @@ UI:
   water ctl ui state
   water ctl ui content --pane UUID [--start-row 0 --rows 256] [--window UUID]
   water ctl ui screenshot --output target/water.png
-  water ctl ui click --x 240 --y 100 --click-count 2
+  water ctl ui click --x 240 --y 100 --click-count 2 [--shift]
   water ctl ui drag --x 600 --y 300 --to-x 720 --to-y 300
   water ctl ui wheel --x 120 --y 20 --dx 0 --dy 3
 

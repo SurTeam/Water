@@ -108,6 +108,12 @@ type Selection struct {
 	FocusRow  int
 	Active    bool
 	Absolute  bool
+	// Boundaries uses insertion positions, with the final position excluded.
+	Boundaries bool
+}
+
+func (s Selection) empty() bool {
+	return !s.Active || (s.Boundaries && s.AnchorCol == s.FocusCol && s.AnchorRow == s.FocusRow)
 }
 
 func (s Selection) normalized() (startCol, startRow, endCol, endRow int) {
@@ -117,11 +123,14 @@ func (s Selection) normalized() (startCol, startRow, endCol, endRow int) {
 		startCol, endCol = endCol, startCol
 		startRow, endRow = endRow, startRow
 	}
+	if s.Boundaries {
+		endCol--
+	}
 	return
 }
 
 func SelectedText(snap govt.Snapshot, selection Selection) string {
-	if !selection.Active || snap.Rows <= 0 || snap.Cols <= 0 {
+	if selection.empty() || snap.Rows <= 0 || snap.Cols <= 0 {
 		return ""
 	}
 	_, startRow, _, endRow := selection.normalized()
@@ -773,7 +782,7 @@ func resolveColor(c govt.Color, fallback color.NRGBA, theme TerminalTheme) color
 }
 
 func selectionColumns(selection Selection, row, cols int) (int, int, bool) {
-	if !selection.Active || cols <= 0 {
+	if selection.empty() || cols <= 0 {
 		return 0, 0, false
 	}
 	startCol, startRow, endCol, endRow := selection.normalized()

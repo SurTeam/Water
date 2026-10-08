@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/goprotocol"
 )
 
@@ -34,6 +35,48 @@ func TestPTYRemainsPollableAcrossResize(t *testing.T) {
 	}
 	if errno != 0 || flags&syscall.O_NONBLOCK == 0 {
 		t.Fatalf("resize restored blocking descriptor: flags=%#x error=%v", flags, errno)
+	}
+}
+
+func TestRawReaderFlushesSparseOutputWithoutBusyRetry(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := &Terminal{ptmx: reader, closed: make(chan struct{}), rawFlushRequests: make(chan rawFlushRequest, 1)}
+	out := make(chan []byte, 2)
+	free := make(chan []byte, 2)
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(term.closed)
+		_ = writer.Close()
+		_ = reader.Close()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("raw reader did not stop")
+		}
+	})
+	calls := gometrics.PTYReadCalls.Load()
+	go func() { defer close(done); term.rawReadLoop(out, free) }()
+	// The writer stays open and idle between fragments. Each fragment must
+	// flush without EOF, and the next read must recover from the idle deadline.
+	for _, value := range []string{"prompt", "next prompt"} {
+		if _, err := writer.Write([]byte(value)); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case block, ok := <-out:
+			if !ok || string(block) != value {
+				t.Fatalf("sparse output %q, want %q", block, value)
+			}
+			free <- block[:readBlockBytes]
+		case <-time.After(time.Second):
+			t.Fatal("sparse output stuck behind a partial block")
+		}
+	}
+	if reads := gometrics.PTYReadCalls.Load() - calls; reads > 16 {
+		t.Fatalf("two sparse fragments needed %d PTY reads; empty reads are busy-retried", reads)
 	}
 }
 
