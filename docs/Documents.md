@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.3.17](releases/v0.3.17.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.3.18](releases/v0.3.18.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 ## Requirements
 
@@ -251,7 +251,14 @@ for the measured results and remaining limits.
 The [server memory and cursor report](server-memory-cursor-ime-2026-10-05.md)
 records the idle PTY allocation fix and native Retina cursor/IME checks.
 `water ctl debug memory` reports Go heap allocated, in-use, idle and released
-bytes separately from retained PTY replay. Queue capacity does not reserve an
+bytes separately from retained PTY replay. `terminal_count` counts active PTYs;
+`exited_terminal_count` and `exited_replay_bytes` report the recent-exit cache.
+Natural exits retain complete replay for `terminal.wait_exit` and
+`terminal.snapshot`, up to 32 terminals and 8 MiB total replay accounting. The
+oldest exits are evicted when either limit is exceeded; queries for evicted IDs
+return terminal-not-found. `retained_replay_bytes` includes active and cached
+replay. Explicit closure removes the terminal instead of caching it.
+Queue capacity does not reserve an
 8 MiB read pool per idle PTY: reader blocks are allocated on demand, with at
 most two spare 128 KiB blocks cached after bursts.
 Run `WATER_BIN=/path/to/dev/water ~/.venv/bin/python scripts/go-ui-cursor-smoke.py`

@@ -24,10 +24,14 @@ const (
 	outputBatchIdle      = time.Millisecond
 	outputBatchMaxAge    = 5 * time.Millisecond
 	replayEventOverhead  = 64
+	exitedTerminalLimit  = 32
+	exitedReplayLimit    = 8 * 1024 * 1024
 )
 
 type Terminal struct {
 	ID uuid.UUID
+
+	registry *Registry
 
 	cmd                   *exec.Cmd
 	ptmx                  *os.File
@@ -50,10 +54,18 @@ type Terminal struct {
 	once             sync.Once
 }
 
+type exitedTerminal struct {
+	terminal *Terminal
+	bytes    int
+}
+
 type Registry struct {
 	mu          sync.RWMutex
 	terms       map[uuid.UUID]*Terminal
 	replayLimit int
+	exited      map[uuid.UUID]exitedTerminal
+	exitOrder   []uuid.UUID
+	exitedBytes int
 }
 
 func NewRegistry() *Registry {
@@ -69,6 +81,7 @@ func NewRegistryWithReplayLimit(limit int) *Registry {
 	}
 	return &Registry{
 		terms:       make(map[uuid.UUID]*Terminal),
+		exited:      make(map[uuid.UUID]exitedTerminal),
 		replayLimit: limit,
 	}
 }
@@ -110,6 +123,7 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 	}
 	ptmx = pollable
 	t := &Terminal{
+		registry:            r,
 		shellIntegrationDir: integrationDir,
 		ID:                  uuid.New(),
 		cmd:                 cmd,
@@ -134,17 +148,65 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 func (r *Registry) Get(id uuid.UUID) (*Terminal, bool) {
 	r.mu.RLock()
 	t, ok := r.terms[id]
+	if !ok {
+		entry, found := r.exited[id]
+		t, ok = entry.terminal, found
+	}
 	r.mu.RUnlock()
 	return t, ok
 }
 
+// retire runs after the authoritative Exit has been published and the PTY has
+// closed. Preserve recent replay for wait_exit/snapshot, but never keep an
+// unbounded history of Terminal objects. Explicit removal must not resurrect one.
+func (r *Registry) retire(id uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.terms[id]
+	if !ok {
+		return
+	}
+	delete(r.terms, id)
+	t.mu.RLock()
+	n := t.replayBytes
+	t.mu.RUnlock()
+	r.exited[id] = exitedTerminal{terminal: t, bytes: n}
+	r.exitOrder = append(r.exitOrder, id)
+	r.exitedBytes += n
+	for len(r.exitOrder) > exitedTerminalLimit || r.exitedBytes > exitedReplayLimit {
+		r.removeExitedLocked(r.exitOrder[0])
+	}
+}
+
+func (r *Registry) removeExitedLocked(id uuid.UUID) *Terminal {
+	entry, ok := r.exited[id]
+	if !ok {
+		return nil
+	}
+	delete(r.exited, id)
+	r.exitedBytes -= entry.bytes
+	for i, candidate := range r.exitOrder {
+		if candidate == id {
+			copy(r.exitOrder[i:], r.exitOrder[i+1:])
+			r.exitOrder[len(r.exitOrder)-1] = uuid.Nil
+			r.exitOrder = r.exitOrder[:len(r.exitOrder)-1]
+			break
+		}
+	}
+	return entry.terminal
+}
+
 func (r *Registry) CloseAll() {
-	r.mu.RLock()
+	r.mu.Lock()
 	terms := make([]*Terminal, 0, len(r.terms))
 	for _, t := range r.terms {
 		terms = append(terms, t)
 	}
-	r.mu.RUnlock()
+	clear(r.terms)
+	clear(r.exited)
+	r.exitOrder = nil
+	r.exitedBytes = 0
+	r.mu.Unlock()
 	for _, t := range terms {
 		_ = t.Close()
 	}
@@ -154,6 +216,9 @@ func (r *Registry) Remove(id uuid.UUID) {
 	r.mu.Lock()
 	t := r.terms[id]
 	delete(r.terms, id)
+	if exited := r.removeExitedLocked(id); exited != nil {
+		t = exited
+	}
 	r.mu.Unlock()
 	if t != nil {
 		_ = t.Close()
@@ -167,14 +232,21 @@ func (r *Registry) Count() int {
 	return n
 }
 
+// ExitedRetention reports the bounded, queryable history, separate from live PTYs.
+func (r *Registry) ExitedRetention() (count, replayBytes int) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.exited), r.exitedBytes
+}
+
 func (r *Registry) RetainedReplayBytes() int {
 	r.mu.RLock()
 	terms := make([]*Terminal, 0, len(r.terms))
 	for _, term := range r.terms {
 		terms = append(terms, term)
 	}
+	total := r.exitedBytes
 	r.mu.RUnlock()
-	total := 0
 	for _, term := range terms {
 		term.mu.RLock()
 		total += term.replayBytes
@@ -643,6 +715,7 @@ func (t *Terminal) waitLoop() {
 	}
 	t.publish(goprotocol.TerminalEvent{Kind: goprotocol.ExitEvent, Code: code})
 	_ = t.Close()
+	t.registry.retire(t.ID)
 }
 
 func (t *Terminal) publish(ev goprotocol.TerminalEvent) {

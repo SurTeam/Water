@@ -364,6 +364,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		return ss.write(goprotocol.Success(msg.RequestID, s.metricsSnapshot()))
 	case "debug.memory":
 		modelMemory := s.model.MemoryProjection()
+		exitedCount, exitedReplayBytes := s.registry.ExitedRetention()
 		var memory runtime.MemStats
 		runtime.ReadMemStats(&memory)
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{
@@ -372,6 +373,8 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			"heap_idle_bytes":           memory.HeapIdle,
 			"heap_released_bytes":       memory.HeapReleased,
 			"terminal_count":            s.registry.Count(),
+			"exited_terminal_count":     exitedCount,
+			"exited_replay_bytes":       exitedReplayBytes,
 			"scrollback_lines":          s.Config.Terminal.ScrollbackLines,
 			"inactive_scrollback_lines": s.Config.Terminal.InactiveScrollbackLines,
 			"replay_history_bytes":      s.Config.Terminal.ReplayHistoryBytes,
