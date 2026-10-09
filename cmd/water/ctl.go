@@ -281,7 +281,7 @@ func runUI(ctx cliContext, args []string) error {
 
 func runServer(ctx cliContext, args []string) error {
 	if len(args) == 0 {
-		return errors.New("server requires info or shutdown")
+		return errors.New("server requires info, web or shutdown")
 	}
 	var out any
 	switch args[0] {
@@ -291,6 +291,8 @@ func runServer(ctx cliContext, args []string) error {
 				return err
 			}
 		}
+	case "web":
+		return runServerWeb(ctx, args[1:])
 	case "connections", "connection", "sockets", "socket":
 		return runConnections(ctx, args[1:])
 	case "shutdown":

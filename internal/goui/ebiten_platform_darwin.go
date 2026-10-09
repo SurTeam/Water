@@ -42,6 +42,9 @@ type macNativePlatform struct {
 	pendingCalls       atomic.Int32
 	state              atomic.Pointer[map[string]any]
 	notificationStatus atomic.Pointer[string]
+	filePanel          objc.ID // main queue only
+	fileChoice         string  // explicit control API selection, main queue only
+	filePickerOpen     atomic.Bool
 }
 
 func macSend(id objc.ID, selector string, args ...any) objc.ID {
@@ -335,6 +338,7 @@ func (p *macNativePlatform) Snapshot() map[string]any {
 		if status := p.notificationStatus.Load(); status != nil {
 			copy["notification_status"] = *status
 		}
+		copy["file_picker_open"] = p.filePickerOpen.Load()
 		return copy
 	}
 	return map[string]any{"ready": false, "hidden": false}
@@ -353,6 +357,23 @@ func (p *macNativePlatform) Show() {
 	})
 }
 func (p *macNativePlatform) Invoke(action string) error {
+	if action == "file-picker-cancel" || strings.HasPrefix(action, "file-picker-select:") {
+		if !p.filePickerOpen.Load() {
+			return fmt.Errorf("no file picker is open")
+		}
+		if !p.onMain(func() {
+			if p.filePanel == 0 {
+				return
+			}
+			if strings.HasPrefix(action, "file-picker-select:") {
+				p.fileChoice = strings.TrimPrefix(action, "file-picker-select:")
+			}
+			macSend(p.filePanel, "cancel:", objc.ID(0))
+		}) {
+			return fmt.Errorf("native queue is busy")
+		}
+		return nil
+	}
 	snapshot := p.Snapshot()
 	items, ok := snapshot["items"].(map[string]any)
 	if !ok {

@@ -3,6 +3,7 @@ package goconfig
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 )
@@ -41,6 +42,18 @@ func Save(path string, cfg AppConfig) error {
 		return err
 	}
 	mergeConfig(target, known)
+	for _, object := range []map[string]any{root, target} {
+		if web, ok := object["web"].(map[string]any); ok {
+			delete(web, "public_url")
+			if _, hasPort := web["listen_port"]; !hasPort {
+				if address, ok := web["listen_address"].(string); ok {
+					if _, _, err := net.SplitHostPort(address); err == nil {
+						delete(web, "listen_address")
+					}
+				}
+			}
+		}
+	}
 	if terminal, ok := target["terminal"].(map[string]any); ok {
 		delete(terminal, "default_columns")
 		delete(terminal, "default_lines")

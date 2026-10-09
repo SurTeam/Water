@@ -84,6 +84,8 @@ func settingsSection(f settingsField) string {
 		return "Startup behavior"
 	case "Shell":
 		return "Shell"
+	case "Web":
+		return "Web server"
 	case "Server":
 		return "Local server"
 	case "Features":
@@ -104,7 +106,7 @@ func settingsRows(s *settingsPanel) []settingsRow {
 	}
 	bySection := map[string][]int{}
 	for i, f := range s.fields {
-		if f.group != groups[s.group] && !(s.group == 4 && (f.group == "Shell" || f.group == "Server" || f.group == "Features")) {
+		if f.group != groups[s.group] && !(s.group == 4 && (f.group == "Shell" || f.group == "Server" || f.group == "Features" || f.group == "Web")) {
 			continue
 		}
 		section := settingsSection(f)
@@ -116,7 +118,7 @@ func settingsRows(s *settingsPanel) []settingsRow {
 		{"Language and interface", "Tabs", "Window appearance", "Terminal panes", "Sidebar layout", "Sidebar buttons", "Workspaces", "Agents"},
 		{"Windows and settings", "Connections and workspaces", "Tabs", "Panes", "Terminal input"},
 		{"Terminal colors", "ANSI palette", "Interface colors", "Tab colors", "Pane colors", "Connection colors", "Workspace colors", "Agent colors"},
-		{"Initial terminal size", "Minimum terminal size", "Startup behavior", "Shell", "Local server", "Terminal behavior"},
+		{"Initial terminal size", "Minimum terminal size", "Startup behavior", "Shell", "Local server", "Web server", "Terminal behavior"},
 		{"Local server"},
 	}
 	for _, section := range order[s.group] {

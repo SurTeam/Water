@@ -36,6 +36,7 @@ func (s *Server) serverInfo() map[string]any {
 	out := map[string]any{}
 	_ = json.Unmarshal(raw, &out)
 	out["windows"] = s.windowSessions()
+	out["web"] = s.web.status()
 	return out
 }
 

@@ -245,6 +245,7 @@ func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfi
 
 	if !cfg.Server.Detached {
 		srv := goserver.NewWithConfig(socket, cfg)
+		srv.ConfigPath = configPath
 		if err := srv.Initialize(cfg.Startup.InitialWorkspace && !empty, cfg.Startup.InitialTerminal && cfg.Startup.InitialWorkspace && !empty); err != nil {
 			return nil, nil, false, err
 		}

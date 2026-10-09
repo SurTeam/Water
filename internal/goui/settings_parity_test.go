@@ -35,6 +35,9 @@ func TestEveryConfigFieldHasSettingsControlAndRoundTrips(t *testing.T) {
 		value := config.Field(i)
 		for j := 0; j < value.NumField(); j++ {
 			field := value.Type().Field(j).Name
+			if group == "Web" && field == "PublicURL" {
+				continue // legacy JSON migration field, not an editable setting
+			}
 			if group == "Startup" && legacyPixelField(field) {
 				continue
 			}

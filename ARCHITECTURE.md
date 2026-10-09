@@ -14,6 +14,7 @@
 | RPC、GUI session 和有界传输队列 | [`internal/goclient/`](internal/goclient/) |
 | 客户端模拟、终端查询和图形解析 | [`internal/govt/`](internal/govt/)、[`internal/xterm/`](internal/xterm/) |
 | 窗口、布局、终端绘制、输入和 Settings | [`internal/goui/`](internal/goui/) 中的 `ebiten_*` 和共享客户端模块 |
+| 服务端 Web、HTTP/HTTPS/WebSocket、配对与浏览器客户端 | [`internal/goserver/web.go`](internal/goserver/web.go)、[`internal/goserver/web_auth.go`](internal/goserver/web_auth.go)、[`internal/goserver/webassets/`](internal/goserver/webassets/)，使用方法见 [docs/server-web.md](docs/server-web.md) |
 | SSH 与 embedded server payload | [`internal/goremote/`](internal/goremote/) |
 | Agent 检测与绑定 | [`internal/goagent/`](internal/goagent/) |
 | 配置与构建身份 | [`internal/goconfig/`](internal/goconfig/)、[`internal/gobuild/`](internal/gobuild/)、[`VERSION`](VERSION) |
@@ -56,6 +57,12 @@ Cmd+N 启动独立 GUI 进程并复用当前 socket/config；各客户端保留�
 SSH 使用系统 OpenSSH ControlMaster 和 Unix socket forwarding。首次连接按远端 Darwin/Linux、amd64/arm64 选择 embedded Go server payload；远端 payload 缓存按产品版本、server revision、协议、namespace 和平台隔离，socket 按变体与 destination 稳定发现，并探测旧版版本化 endpoint。产品升级不自动新建空工作区；旧实例歧义或无法探测时明确报错，不静默替换。断线保留 offline host 与服务端 workspace。
 
 Agent 检测来自终端前台进程及 argv，绑定、状态和侧栏交互沿既有 model/connection 路径进行。
+
+## Server Web 直连
+
+server 可选启用独立 HTTP/HTTPS 与 WebSocket listener，提供自托管浏览器终端和一次性配对入口。GUI Settings → Server 通过当前 connection 的既有 IPC/SSH session 配置、启动/停止目标 server 的 Web 服务、显示二维码和撤销设备。浏览器直接访问 server 派生的访问地址；HTTP 监听地址和端口分开配置，默认 `127.0.0.1:8080`，可手动设置 `0.0.0.0` 监听所有 IPv4 网卡，二维码使用实际 IP。HTTP 无需证书并使用 WS，HTTPS 校验证书并使用 WSS；已配对设备的摘要保存在配置文件旁，身份不依赖控制 socket，可跨 server 重启恢复。网络可达性由 Tailscale 等外部环境保证，无中继或 NAT 穿透。
+
+WS adapter 使用受限的已认证 browser session，共用命令 dispatcher、模型和有界终端流。浏览器拥有独立选择、终端模拟及 viewport，不能调用 Web 管理、recovery、GUI automation 或 server shutdown。Web listener 与浏览器会话纳入 server 生命周期，避免最后一个 GUI release 误关可直连的 server。详见 [docs/server-web.md](docs/server-web.md)。
 
 ## 配置与构建
 

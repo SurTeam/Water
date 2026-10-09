@@ -221,9 +221,13 @@ func (m *MultiWorkspaceClient) ActivateConnection(id uuid.UUID) bool {
 		return false
 	}
 	changed := m.active != id
+	previous := m.connections[m.active]
 	m.active = id
 	m.syncSwitchersLocked()
 	m.mu.Unlock()
+	if changed && previous != nil {
+		previous.view.closeWebService()
+	}
 	if changed && m.invalidate != nil {
 		m.invalidate()
 	}

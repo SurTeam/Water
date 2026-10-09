@@ -8,6 +8,27 @@ import (
 // UI text is localized on the client. Model names and terminal output remain
 // user content; automation keys and protocol identifiers never depend on locale.
 var chineseText = map[string]string{
+	"Upgrade this server to import local TLS files": "请升级当前服务端，以支持导入本机 TLS 文件",
+	"Choose…": "选择文件…",
+	"HTTPS needs both a PEM certificate chain (.pem/.crt) and its key.":                 "HTTPS 需同时提供 PEM 证书链（.pem/.crt）和匹配的私钥。",
+	"Key: unencrypted PEM (.pem/.key), RSA / EC / PKCS#8; not .p12/.pfx.":               "私钥：未加密 PEM（.pem/.key），支持 RSA／EC／PKCS#8；不支持 .p12/.pfx。",
+	"Choose both files locally; Apply imports them to this server.":                     "两份文件均从本机选择；点击应用后导入当前服务端（包括远程）。",
+	"Choose PEM certificate / chain":                                                    "选择 PEM 证书／证书链",
+	"Choose unencrypted PEM private key":                                                "选择未加密的 PEM 私钥",
+	"Choose a file on this computer":                                                    "请从本机选择文件",
+	"Select both files on this computer before applying":                                "请从本机选择证书和私钥两份文件后再应用",
+	"File picker unavailable":                                                           "文件选择器不可用",
+	"cannot open selected TLS file":                                                     "无法打开所选 TLS 文件",
+	"select a regular PEM file":                                                         "请选择普通 PEM 文件",
+	"TLS files must be at most 256 KiB each":                                            "每份 TLS 文件不能超过 256 KiB",
+	"use PEM certificates and an unencrypted PEM private key":                           "请使用 PEM 证书和未加密的 PEM 私钥",
+	"invalid TLS pair: use PEM certificates and a matching unencrypted PEM private key": "证书与私钥无效：请提供 PEM 证书和匹配的未加密 PEM 私钥",
+	"HTTP service: enter a listen IP/hostname and a fixed port separately.":             "HTTP 服务：分别填写监听 IP／主机名和固定端口。",
+	"Web service": "Web 服务", "On": "开启", "Off": "关闭",
+	"Start Web with server": "随 server 启动 Web",
+	"Manage browser access, pairing and devices in a separate window.": "在独立窗口中管理网页访问、扫码配对和设备。",
+	"HTTP example: http://server-ip:8080. The saved port stays fixed.": "HTTP 示例：http://服务端IP:8080，保存后端口保持固定。",
+	"Web server": "Web 服务", "Start Web": "启动 Web", "Stop Web": "停止 Web", "Web settings": "Web 设置", "Apply Web settings": "应用 Web 设置", "Pair device": "配对设备", "Cancel pairing": "取消配对", "Devices": "设备", "Paired browsers": "已配对浏览器", "No paired browsers": "没有已配对浏览器", "Revoke": "撤销", "Back": "返回", "Capabilities": "能力详情", "Capability · GUI / Server": "能力 · GUI / 服务端", "Expires at %s": "有效期至 %s", "Scan to connect directly to this server.": "扫码后直连此服务端。", "Pairing expired. Create a new invitation.": "配对已过期，请创建新邀请。", "Pairing invitation is no longer active": "配对邀请已使用或失效", "Web settings belong to this server. Stop Web before applying.": "这些设置属于当前服务端，应用前请先停止 Web。", "This server does not support Web access. Upgrade the server to enable it.": "当前服务端不支持 Web 接入，请升级服务端。", "Applies when Web service starts": "启动 Web 服务时生效",
 	"Server": "服务", "Connection: %s": "连接：%s", "Server revision: %s": "服务构建：%s",
 	"Capability": "能力", "Provided": "提供", "Required": "需要", "Unknown": "未知",
 	"Refresh": "刷新", "Save layout": "保存布局", "Restart server": "重启服务", "Retry restore": "重试恢复",
@@ -64,6 +85,7 @@ var chineseText = map[string]string{
 }
 
 var chineseFields = map[string]string{
+	"Enabled": "服务启动时启用 Web", "ListenAddress": "HTTP 监听地址", "ListenPort": "HTTP 监听端口", "TLS": "启用 HTTPS（TLS）", "PublicURL": "Web 地址", "TLSCertFile": "TLS 证书文件（仅 HTTPS）", "TLSKeyFile": "TLS 私钥文件（仅 HTTPS）",
 	"SidebarRemoteButtonHeight": "连接远程按钮高度", "SidebarRemoteButtonFontSize": "连接远程按钮字号",
 	"SidebarWorkspaceButtonHeight": "新建工作区按钮高度", "SidebarWorkspaceButtonFontSize": "新建工作区按钮字号",
 	"TabFontSize": "标签页字号", "TabMaxTitleLength": "标签名称最大字符数",

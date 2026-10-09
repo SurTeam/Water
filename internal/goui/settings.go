@@ -123,11 +123,14 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 	c.settings.focus = -1
 	c.settings.list.Axis = layout.Vertical
 	c.settings.list.Position = layout.Position{}
-	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Shell", "Startup", "Server", "Features"}
+	groups := []string{"Terminal", "UI", "Shortcuts", "Theme", "Shell", "Startup", "Server", "Features", "Web"}
 	for _, group := range groups {
 		value := reflect.ValueOf(c.settings.draft).FieldByName(group)
 		for i := 0; i < value.NumField(); i++ {
 			field := value.Type().Field(i)
+			if group == "Web" && field.Name == "PublicURL" {
+				continue
+			}
 			if group == "Startup" && legacyPixelField(field.Name) {
 				continue
 			}
@@ -223,8 +226,36 @@ func (c *WorkspaceClient) focusSettingsGroup() {
 	}
 }
 
+func webSettingsFieldVisible(fields []settingsField, index int) bool {
+	f := fields[index]
+	if f.group != "Web" || f.name == "Enabled" || f.name == "PublicURL" {
+		return false
+	}
+	if f.name == "TLSCertFile" || f.name == "TLSKeyFile" {
+		for _, field := range fields {
+			if field.group == "Web" && field.name == "TLS" {
+				return field.toggle.Value
+			}
+		}
+		return false
+	}
+	return true
+}
+
 func settingsLabel(name string) string {
 	switch name {
+	case "ListenAddress":
+		return "HTTP listen address"
+	case "ListenPort":
+		return "HTTP listen port"
+	case "TLS":
+		return "Enable HTTPS (TLS)"
+	case "PublicURL":
+		return "Web address"
+	case "TLSCertFile":
+		return "TLS certificate (HTTPS only)"
+	case "TLSKeyFile":
+		return "TLS private key (HTTPS only)"
 	case "SidebarConnectionBackground":
 		return "Host card background"
 	case "SidebarConnectionActiveBackground":
@@ -263,6 +294,9 @@ func settingsApplyKind(f settingsField) string {
 	if f.group == "Startup" && strings.HasPrefix(f.name, "Window") {
 		return "New windows"
 	}
+	if f.group == "Web" {
+		return "Applies when Web service starts"
+	}
 	if f.group == "Startup" || f.group == "Server" || f.group == "Shell" {
 		return "Restart"
 	}
@@ -273,6 +307,32 @@ func settingsApplyKind(f settingsField) string {
 		}
 	}
 	return "Applies immediately"
+}
+
+// parseWeb keeps the independent server dialog from validating other drafts.
+func (s *settingsPanel) parseWeb() (goconfig.WebConfig, error) {
+	cfg := s.draft.Web
+	for i := range s.fields {
+		f := &s.fields[i]
+		if f.group != "Web" {
+			continue
+		}
+		value := reflect.ValueOf(&cfg).Elem().FieldByName(f.name)
+		switch value.Kind() {
+		case reflect.String:
+			value.SetString(strings.TrimSpace(f.editor.Text()))
+		case reflect.Int:
+			n, err := strconv.ParseInt(strings.TrimSpace(f.editor.Text()), 10, 64)
+			if err != nil {
+				return cfg, fmt.Errorf(ctext(s.draft.UI.Language, "%s: enter a whole number"), localizedField(s.draft.UI.Language, *f))
+			}
+			value.SetInt(n)
+		case reflect.Bool:
+			value.SetBool(f.toggle.Value)
+		}
+	}
+	cfg = cfg.Normalized()
+	return cfg, cfg.Validate()
 }
 
 func (s *settingsPanel) parse() (goconfig.AppConfig, error) {

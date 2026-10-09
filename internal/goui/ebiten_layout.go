@@ -92,12 +92,27 @@ func (w *EbitengineWindow) buttonWithFontSize(dst *ebiten.Image, c *WorkspaceCli
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	if selected {
 		w.round(dst, r, w.dp(7), configColor(cfg.Theme.SidebarWorkspaceActiveBackground, 0x353539))
+	} else if kind == hitSettingsControl {
+		border := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .28)
+		w.round(dst, r, w.dp(5), border)
+		fill := configColor(cfg.Theme.ChromeBackground, 0x171b20)
+		if w.mouse.In(r) {
+			fill = mixColor(fill, fg, .08)
+		}
+		w.round(dst, r.Inset(max(1, w.dp(1))), w.dp(4), fill)
 	} else if w.mouse.In(r) && !c.settings.visible {
 		w.round(dst, r, w.dp(6), mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .06))
 	}
 	textRect := image.Rect(r.Min.X+w.dp(4), r.Min.Y, r.Max.X-w.dp(4), r.Max.Y)
 	w.centeredLabel(dst, c, textRect, c.tr(title), float64(fontSize), fg, selected)
 	w.hit(c, r, kind, id, "")
+}
+
+func (w *EbitengineWindow) settingsPrimaryButton(dst *ebiten.Image, c *WorkspaceClient, r image.Rectangle, title string) {
+	cfg := c.currentConfig()
+	w.round(dst, r, w.dp(5), configColor(cfg.Theme.Accent, 0x72d6ab))
+	w.centeredLabel(dst, c, r.Inset(w.dp(4)), c.tr(title), 11, configColor(cfg.Theme.AccentForeground, 0x111714), true)
+	w.hit(c, r, hitSettingsControl, uuid.Nil, "")
 }
 
 func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
@@ -311,7 +326,11 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 		w.drawRemote(c, dst)
 	}
 	if c.settings.visible {
-		w.drawSettings(c, dst)
+		if c.ServerPanelState().WebVisible {
+			w.drawWebService(c, dst)
+		} else {
+			w.drawSettings(c, dst)
+		}
 	}
 	if v.rename != nil {
 		w.drawRename(c, dst)
@@ -610,19 +629,7 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 				c.hitRegions[len(c.hitRegions)-1].Label = "language:" + choice.code
 			}
 		} else if f.kind == reflect.Bool {
-			toggle := image.Rect(fr.Min.X, y+w.dp(7), fr.Min.X+w.dp(30), y+w.dp(24))
-			bg := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .15)
-			if f.toggle.Value {
-				bg = configColor(cfg.Theme.Accent, 0x72d6ab)
-			}
-			w.round(dst, toggle, w.dp(9), bg)
-			cx := toggle.Min.X + w.dp(8)
-			if f.toggle.Value {
-				cx = toggle.Max.X - w.dp(8)
-			}
-			if dst != nil {
-				vector.FillCircle(dst, float32(cx), float32((toggle.Min.Y+toggle.Max.Y)/2), float32(w.dp(6)), fg, true)
-			}
+			w.drawSettingsToggle(c, dst, fr, f.toggle.Value)
 		} else {
 			w.field(c, dst, fr, f.editor.Text(), s.focus == i, &f.editor)
 			if f.group == "Theme" {
@@ -666,9 +673,8 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 		}
 		br := image.Rect(x, footer+w.dp(24), x+width, footer+w.dp(52))
 		if i == 0 {
-			w.round(dst, br, w.dp(5), configColor(cfg.Theme.Accent, 0x72d6ab))
-			w.centeredLabel(dst, c, br.Inset(w.dp(4)), c.tr(item.label), 11, configColor(cfg.Theme.AccentForeground, 0x111714), true)
-			w.hit(c, br, hitSettingsControl, uuid.Nil, item.name)
+			w.settingsPrimaryButton(dst, c, br, item.label)
+			c.hitRegions[len(c.hitRegions)-1].Label = item.name
 		} else {
 			w.button(dst, c, br, item.label, hitSettingsControl, uuid.Nil, false)
 			c.hitRegions[len(c.hitRegions)-1].Label = item.name

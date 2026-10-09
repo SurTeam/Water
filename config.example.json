@@ -9,6 +9,14 @@
     "window_min_columns": 40,
     "window_min_rows": 10
   },
+  "web": {
+    "enabled": false,
+    "listen_address": "127.0.0.1",
+    "listen_port": 8080,
+    "tls": false,
+    "tls_cert_file": "",
+    "tls_key_file": ""
+  },
   "shell": {
     "program": "/opt/homebrew/bin/zsh",
     "args": ["-l"]

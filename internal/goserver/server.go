@@ -33,6 +33,9 @@ type Server struct {
 	recovery     *recoveryLease
 	lastRecovery uuid.UUID
 	Config       goconfig.AppConfig
+	ConfigPath   string
+	web          *webService
+	webActive    atomic.Bool
 
 	registry *goterminal.Registry
 	model    *gomodel.Model
@@ -81,7 +84,7 @@ func New(socketPath string) *Server {
 
 func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 	config = config.Normalized()
-	return &Server{
+	srv := &Server{
 		SocketPath:      socketPath,
 		Build:           gobuild.Variant,
 		Version:         gobuild.Version,
@@ -96,6 +99,8 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 		sessionsChanged: make(chan struct{}, 1),
 		pendingUI:       make(map[uint64]chan goprotocol.WireMessage),
 	}
+	srv.web = newWebService(srv, config.Web)
+	return srv
 }
 
 func (s *Server) Initialize(initialWorkspace, initialTerminal bool) error {
@@ -129,6 +134,12 @@ func (s *Server) ListenAndServe() error {
 	}
 	s.listener = ln
 	defer cleanup()
+	if s.Config.Web.Enabled {
+		if err := s.web.start(); err != nil {
+			return err
+		}
+	}
+	defer s.web.stop()
 	go s.monitorForegroundProcesses()
 
 	for {
@@ -149,6 +160,7 @@ func (s *Server) Close() error {
 	var err error
 	s.once.Do(func() {
 		close(s.closing)
+		s.web.stop()
 		s.registry.CloseAll()
 		if s.listener != nil {
 			err = s.listener.Close()
@@ -170,6 +182,7 @@ type session struct {
 	id               uuid.UUID
 	diagnostic       bool
 	opened           bool
+	browser          bool
 
 	snapshotRequests chan struct{}
 	done             chan struct{}
@@ -215,6 +228,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		snapshotRequests: make(chan struct{}, 1),
 		done:             make(chan struct{}),
 	}
+	_, ss.browser = conn.(*webConnection)
 	go s.snapshotLoop(ss)
 	defer func() {
 		s.dropSession(ss)
@@ -247,6 +261,16 @@ func (s *Server) handleConn(conn net.Conn) {
 			))
 			continue
 		}
+		if ss.browser {
+			if !ss.opened && msg.Method != "session.open" && msg.Method != "ping" && msg.Method != "server.inspect" && msg.Method != "server.info" {
+				_ = ss.write(goprotocol.Failure(msg.RequestID, "FORBIDDEN", "open an authenticated browser session first"))
+				continue
+			}
+			if err := validateWebRequest(msg); err != nil {
+				_ = ss.write(goprotocol.Failure(msg.RequestID, "FORBIDDEN", err.Error()))
+				continue
+			}
+		}
 		if msg.OK != nil {
 			s.deliverUIReply(msg)
 			continue
@@ -260,6 +284,9 @@ func (s *Server) handleConn(conn net.Conn) {
 func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	if ss.diagnostic && msg.Method != "session.open" && msg.Method != "session.release" && msg.Method != "server.inspect" && msg.Method != "server.info" && !strings.HasPrefix(msg.Method, "recovery.") && !strings.HasPrefix(msg.Method, "ui.") {
 		return errors.New("server is incompatible; use Server settings to inspect or restart with recovery")
+	}
+	if strings.HasPrefix(msg.Method, "server.web.") {
+		return s.webRequest(ss, msg)
 	}
 	switch msg.Method {
 	case "ping":
@@ -284,7 +311,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 				return err
 			}
 		}
-		isGUI := p.Role == "gui"
+		isGUI := p.Role == "gui" || ss.browser
 		var compatibility goprotocol.Compatibility
 		if p.Client != nil {
 			compatibility = goprotocol.Assess(*p.Client, s.descriptor())
@@ -307,6 +334,9 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			}
 		}
 		ss.opened = true
+		if ss.browser {
+			_ = ss.conn.SetReadDeadline(time.Time{})
+		}
 		if err := ss.write(goprotocol.Success(msg.RequestID, map[string]any{
 			"window_id":        ss.id,
 			"server_pid":       os.Getpid(),
@@ -335,8 +365,12 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			return err
 		}
 		s.sessionsMu.Lock()
-		if _, ok := s.sessions[ss]; ok && p.Focused {
-			s.focusedSession = ss
+		if _, ok := s.sessions[ss]; ok {
+			if p.Focused {
+				s.focusedSession = ss
+			} else if s.focusedSession == ss {
+				s.focusedSession = nil
+			}
 		}
 		s.sessionsMu.Unlock()
 		return ss.write(goprotocol.Success(msg.RequestID, map[string]any{}))
@@ -347,7 +381,10 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		if err := json.Unmarshal(msg.Params, &p); err != nil {
 			return err
 		}
-		shutdown := s.releaseSession(ss, p.ShutdownIfLast)
+		shutdown := s.releaseSession(ss, p.ShutdownIfLast && !ss.browser)
+		if ss.browser {
+			defer ss.conn.Close()
+		}
 		if shutdown {
 			defer func() { go s.Close() }()
 		}
@@ -493,7 +530,11 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 		Size:       t.Size(),
 		Replay:     wire,
 	}
-	if err := ss.write(goprotocol.Success(requestID, resp)); err != nil {
+	var response any = resp
+	if ss.browser {
+		response = webAttachPayload(resp)
+	}
+	if err := ss.write(goprotocol.Success(requestID, response)); err != nil {
 		cancel()
 		return err
 	}
@@ -655,7 +696,7 @@ func (s *Server) releaseSession(ss *session, shutdownIfLast bool) bool {
 	if s.focusedSession == ss {
 		s.focusedSession = nil
 	}
-	shutdown := registered && shutdownIfLast && len(s.sessions) == 0
+	shutdown := registered && shutdownIfLast && len(s.sessions) == 0 && !s.webActive.Load()
 	if shutdown {
 		s.guiDraining = true
 	}
@@ -686,7 +727,7 @@ func (s *Server) notifySessionsChanged() {
 func (s *Server) WaitForGUIRelease() {
 	for {
 		s.sessionsMu.Lock()
-		empty := len(s.sessions) == 0
+		empty := len(s.sessions) == 0 && !s.webActive.Load()
 		if empty {
 			s.guiDraining = true
 		}
@@ -704,7 +745,12 @@ func (s *Server) WaitForGUIRelease() {
 
 func (s *Server) uiSessionCount() int {
 	s.sessionsMu.RLock()
-	n := len(s.sessions)
+	n := 0
+	for ss := range s.sessions {
+		if !ss.browser {
+			n++
+		}
+	}
 	s.sessionsMu.RUnlock()
 	return n
 }

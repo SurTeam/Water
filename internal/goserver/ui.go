@@ -15,6 +15,9 @@ func (s *Server) windowSessions() []map[string]any {
 	defer s.sessionsMu.RUnlock()
 	windows := make([]map[string]any, 0, len(s.sessions))
 	for ss := range s.sessions {
+		if ss.browser {
+			continue
+		}
 		windows = append(windows, map[string]any{"window_id": ss.id, "focused": ss == s.focusedSession})
 	}
 	return windows
@@ -23,11 +26,13 @@ func (s *Server) windowSessions() []map[string]any {
 func (s *Server) firstUISession() *session {
 	s.sessionsMu.RLock()
 	defer s.sessionsMu.RUnlock()
-	if s.focusedSession != nil {
+	if s.focusedSession != nil && !s.focusedSession.browser {
 		return s.focusedSession
 	}
 	for ss := range s.sessions {
-		return ss
+		if !ss.browser {
+			return ss
+		}
 	}
 	return nil
 }
@@ -58,7 +63,7 @@ func (s *Server) forwardUI(caller *session, request goprotocol.WireMessage) erro
 		gui = nil
 		s.sessionsMu.RLock()
 		for ss := range s.sessions {
-			if ss.id == target.WindowID {
+			if ss.id == target.WindowID && !ss.browser {
 				gui = ss
 				break
 			}

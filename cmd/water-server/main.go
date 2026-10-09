@@ -34,7 +34,7 @@ func main() {
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flags.StringVar(&socket, "socket", "", "Unix control socket (compatibility alias)")
 	flags.StringVar(&socket, "control-socket", "", "Unix control socket")
-	flags.StringVar(&configPath, "config", goconfig.DefaultLoadPath(buildVariant), "Water config JSON")
+	flags.StringVar(&configPath, "config", goconfig.ConfiguredLoadPath(buildVariant), "Water config JSON")
 	flags.BoolVar(&noInitialTerminal, "no-initial-terminal", false, "create the initial workspace without a terminal")
 	flags.BoolVar(&emptyWorkspace, "empty-workspace", false, "start without an initial workspace")
 	flags.BoolVar(&emptyWorkspace, "no-initial-workspace", false, "start without an initial workspace")
@@ -82,6 +82,7 @@ func main() {
 	initialTerminal := cfg.Startup.InitialTerminal && !noInitialTerminal && initialWorkspace
 
 	srv := goserver.NewWithConfig(socket, cfg)
+	srv.ConfigPath = configPath
 	srv.Build = buildVariant
 	srv.Version = serverVersion
 	if err := srv.Initialize(initialWorkspace, initialTerminal); err != nil {

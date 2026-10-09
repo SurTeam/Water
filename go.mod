@@ -6,10 +6,12 @@ replace github.com/go-text/typesetting => ./third_party/typesetting
 
 require (
 	gioui.org v0.10.3
+	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
 	github.com/ebitengine/purego v0.11.0
 	github.com/google/uuid v1.6.0
 	github.com/hajimehoshi/ebiten/v2 v2.10.0
+	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
 	golang.design/x/clipboard v0.7.0
 	golang.org/x/image v0.45.0
 )

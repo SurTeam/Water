@@ -350,6 +350,7 @@ func (c *WorkspaceClient) connectionListResponse() map[string]any {
 }
 
 func (c *WorkspaceClient) Close() {
+	c.closeWebService()
 	c.mu.Lock()
 	terms := make([]*terminalClient, 0, len(c.terminals))
 	for _, term := range c.terminals {

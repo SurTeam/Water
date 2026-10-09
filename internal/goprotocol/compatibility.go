@@ -16,12 +16,13 @@ type Descriptor struct {
 
 type ServerInfo struct {
 	Descriptor
-	ServerVersion  string `json:"server_version"`
-	ServerPID      int    `json:"server_pid"`
-	InstanceID     string `json:"instance_id,omitempty"`
-	SocketPath     string `json:"socket_path"`
-	UISessions     int    `json:"ui_sessions"`
-	RecoverySchema int    `json:"recovery_schema,omitempty"`
+	ServerVersion  string     `json:"server_version"`
+	ServerPID      int        `json:"server_pid"`
+	InstanceID     string     `json:"instance_id,omitempty"`
+	SocketPath     string     `json:"socket_path"`
+	UISessions     int        `json:"ui_sessions"`
+	RecoverySchema int        `json:"recovery_schema,omitempty"`
+	Web            *WebStatus `json:"web,omitempty"`
 }
 
 type Compatibility struct {
@@ -34,7 +35,7 @@ type Compatibility struct {
 }
 
 func ServerCapabilities() []string {
-	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1"}
+	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1", WebCapability, WebTLSImportCapability}
 }
 func ClientCapabilities() []string {
 	return []string{"terminal-stream/v1", "window-selection/v1", "ui-control/v1"}

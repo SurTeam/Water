@@ -129,6 +129,10 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 				return true
 			}
 			if strings.HasPrefix(h.Label, "field:") {
+				if c.ServerPanelState().WebVisible && (h.Label == "field:Web.TLSCertFile" || h.Label == "field:Web.TLSKeyFile") {
+					c.settings.focus = -1
+					return true
+				}
 				for i := range c.settings.fields {
 					f := &c.settings.fields[i]
 					if h.Label == "field:"+f.group+"."+f.name {
@@ -604,10 +608,23 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 	if s.saving {
 		return
 	}
+	if c.ServerPanelState().WebVisible && (label == "field:Web.TLSCertFile" || label == "field:Web.TLSKeyFile") {
+		action := "web-select-cert"
+		if label == "field:Web.TLSKeyFile" {
+			action = "web-select-key"
+		}
+		c.webServerAction(action)
+		return
+	}
 	switch label {
 	case "cancel":
+		c.closeWebService()
 		s.cancelChanges()
 	case "scrim":
+		if c.ServerPanelState().WebVisible {
+			c.webServerAction("web-dismiss")
+			return
+		}
 		if !s.visible {
 			c.connectionMu.Lock()
 			if !c.remoteConnecting {
@@ -652,6 +669,12 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 			return
 		}
 		if strings.HasPrefix(label, "category:") {
+			if label != "category:Server" {
+				c.cancelWebPairing()
+				if s.group == 5 {
+					c.setWebConfigFields(c.currentConfig().Web)
+				}
+			}
 			for i, name := range settingsGroups {
 				if label == "category:"+name {
 					s.group = i
@@ -680,6 +703,9 @@ func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 	if err != nil {
 		s.message = err.Error()
 		return
+	}
+	if c.remoteDestination != "" {
+		cfg.Web = c.currentConfig().Web
 	}
 	if c.configPath == "" {
 		s.message = "Settings path is unavailable"
@@ -849,7 +875,12 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	}
 	if c.settings.visible {
 		if strings.EqualFold(spec, "escape") {
+			if c.ServerPanelState().WebVisible {
+				c.webServerAction("web-dismiss")
+				return true
+			}
 			if !c.settings.saving {
+				c.cancelWebPairing()
 				c.settings.cancelChanges()
 			}
 			return true
@@ -857,8 +888,19 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 		if c.settings.saving {
 			return true
 		}
+		webState := c.ServerPanelState()
+		if webState.WebVisible && !webState.WebConfigVisible {
+			return true
+		}
 		if strings.EqualFold(spec, "Tab") || strings.EqualFold(spec, "shift-Tab") {
 			indices := []int{}
+			if webState.WebVisible && webState.WebConfigVisible {
+				for i := range c.settings.fields {
+					if webSettingsFieldVisible(c.settings.fields, i) {
+						indices = append(indices, i)
+					}
+				}
+			}
 			for _, row := range settingsRows(&c.settings) {
 				if row.field >= 0 {
 					indices = append(indices, row.field)

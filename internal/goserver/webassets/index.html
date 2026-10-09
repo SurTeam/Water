@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="referrer" content="no-referrer"><title>Water</title>
+<link rel="stylesheet" href="/xterm.css"><link rel="stylesheet" href="/style.css">
+<script defer src="/xterm.js"></script><script defer src="/fit.js"></script><script defer src="/app.js"></script>
+</head>
+<body>
+<header><strong>Water</strong><button id="controls-toggle" type="button" aria-label="Collapse controls" aria-expanded="true" aria-controls="top-controls">▾</button><span id="status" role="status">Connecting…</span></header>
+<section id="top-controls" aria-label="Server and terminal controls"><div class="header-actions"><button id="settings-open" aria-haspopup="dialog" aria-controls="web-settings">Settings</button><button id="scan-qr">Scan QR code</button><button id="reconnect" hidden>Reconnect</button><button id="logout" hidden>Unpair</button></div>
+<nav id="server-controls" aria-label="Servers"><label for="servers">Server</label><select id="servers" aria-label="Server"></select><button id="server-add" aria-haspopup="dialog" aria-controls="server-dialog">Add server</button></nav>
+<nav id="terminal-controls" aria-label="Terminals" hidden><select id="panes" aria-label="Workspace, tab and pane"></select><button id="new-workspace">New workspace</button><button id="new-tab">New tab</button><button id="split">Split</button></nav>
+<section id="scan-feedback" role="status" aria-live="polite" hidden><span id="scan-message"></span><button id="scan-dismiss" disabled>Dismiss</button></section></section>
+<dialog id="web-settings" aria-labelledby="settings-title"><form method="dialog"><div class="settings-titlebar"><h2 id="settings-title">Settings</h2><button>Close</button></div><label for="font-family">Font</label><select id="font-family" autofocus></select><p class="settings-help">Applies to this page and terminal. Choose from system fonts available on this device.</p><p id="font-preview">Water terminal · Aa Bb 0123456789<br>中文显示 · $ printf 'Hello Water'</p><p id="settings-note" class="settings-help" role="status">Saved in this browser for this website.</p></form></dialog>
+<dialog id="server-dialog" aria-labelledby="server-title"><form id="server-form"><div class="settings-titlebar"><h2 id="server-title">Add server</h2><button id="server-close" type="button">Close</button></div><label for="server-address">Server address or pairing link</label><input id="server-address" type="text" inputmode="url" autocomplete="off" placeholder="http://192.168.1.10:8080" required autofocus><p id="server-note" class="settings-help" role="status">Saved addresses stay in this browser. Each server needs its own pairing.</p><button type="submit">Open server</button></form></dialog>
+<section id="pairing-panel" aria-labelledby="pairing-title"><h1 id="pairing-title">Pair this browser</h1><p>In desktop Water, open Server → Web service → Pair device. Use Scan QR code to photograph the code, or choose a QR image below.</p><button id="choose-qr">Choose QR image</button><p class="pairing-note">The image is read on this device and is not uploaded.</p></section>
+<input id="qr-camera" type="file" accept="image/*" capture="environment" hidden><input id="qr-image" type="file" accept="image/*" hidden>
+<main id="terminal" aria-label="Terminal" hidden></main>
+<footer id="keyboard-helpers" aria-label="Keyboard helpers" hidden><button id="keyboard-toggle" aria-label="Show keyboard">Show keyboard</button><button data-key="\u001b">Esc</button><button data-key="\t">Tab</button><button id="ctrl">Ctrl</button><button data-key="\u0003">Ctrl-C</button><button data-key="\u001b[A">↑</button><button data-key="\u001b[B">↓</button><button data-key="\u001b[D">←</button><button data-key="\u001b[C">→</button><button data-key="\r">Enter</button></footer>
+</body></html>

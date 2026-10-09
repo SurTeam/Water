@@ -6,11 +6,13 @@ import re
 import subprocess
 
 root = Path(__file__).resolve().parent.parent
-result = subprocess.run(["go", "list", "-deps", "-f", '{{if .Module}}{{if eq .Module.Path "github.com/SurTeam/Water"}}{{.Dir}}{{end}}{{end}}', "./cmd/water-server"], cwd=root, check=True, capture_output=True, text=True)
+result = subprocess.run(["go", "list", "-deps", "-f", '{{if .Module}}{{if eq .Module.Path "github.com/SurTeam/Water"}}{{.Dir}}{{range .EmbedFiles}}{{printf "\\t%s" .}}{{end}}{{end}}{{end}}', "./cmd/water-server"], cwd=root, check=True, capture_output=True, text=True)
 files = {root / "go.mod", root / "go.sum"}
-for directory in result.stdout.splitlines():
-    if directory.strip():
+for line in result.stdout.splitlines():
+    if line.strip():
+        directory, *embedded = line.split("\t")
         files.update(p for p in Path(directory).glob("*.go") if not p.name.endswith("_test.go"))
+        files.update(Path(directory) / name for name in embedded)
 hash_value = hashlib.sha256()
 for path in sorted(files):
     content = path.read_bytes()

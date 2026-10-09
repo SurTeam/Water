@@ -1,5 +1,6 @@
 """Owned loopback OpenSSH daemon; never modifies the system SSH service."""
 import getpass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,11 @@ class OpenSSHServer:
         self.remote_instances = {}
         self.existing_pids = set()
         self.previous_env = {}
+        directory = "water-dev" if variant == "dev" else "water"
+        candidates = [Path.home() / "Library/Application Support" / directory / "config.json",
+                      Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / directory / "config.json"]
+        self.user_configs = {path: hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+                             for path in candidates}
 
     def run(self, command, timeout=10, check=True):
         result = subprocess.run(["/usr/bin/ssh", "-F", str(self.directory / "ssh_config"), self.alias, command],
@@ -166,13 +172,20 @@ class OpenSSHServer:
                     os.environ[key] = value
             for name in ("host", "client"):
                 (self.directory / name).unlink(missing_ok=True)
+            user_configs_preserved = all(
+                (hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None) == digest
+                for path, digest in self.user_configs.items())
+            if not user_configs_preserved:
+                cleanup_error = cleanup_error or RuntimeError("owned SSH fixture changed a user configuration")
             self.save("sshd-cleanup.json", {"sshd_exited": not self.sshd or self.sshd.poll() is not None,
                                            "master_removed": master_removed, "remote_socket_removed": remote_removed,
                                            "private_keys_removed": True,
+                                           "user_configs_preserved": user_configs_preserved,
                                            "error": str(cleanup_error) if cleanup_error else None})
             export = os.environ.get("WATER_TEST_EVIDENCE_DIR")
             if export:
-                shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True)
+                shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("web-tls-*"))
         if cleanup_error:
             raise cleanup_error
         if not master_removed:

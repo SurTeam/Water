@@ -4,6 +4,8 @@ This is the operational reference for contributors and users who need commands. 
 
 Current release: [0.3.18](releases/v0.3.18.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
+Server Web direct access, GUI/SSH QR pairing, TLS configuration and `water ctl server web` commands are documented in [Server Web access](server-web.md).
+
 ## Requirements
 
 Use the Go version specified in `go.mod`. Native macOS GUI builds need Xcode Command Line Tools; app packaging also uses `codesign`, `plutil`, `ditto` and `unzip`. Linux GUI builds need the Ebitengine/Gio native graphics dependencies and an available display/GPU. Remote connections use OpenSSH. Python smoke scripts use `~/.venv/bin/python`.

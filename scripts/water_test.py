@@ -226,7 +226,8 @@ class WaterGUI:
                                    "guard_error": str(cleanup_error) if cleanup_error else None})
         export = os.environ.get("WATER_TEST_EVIDENCE_DIR")
         if export:
-            shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True)
+            shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("web-tls-*"))
         print("PASS owned GUI cleanup; existing Water preserved=" + str(preserved)
               + "; existing PIDs=" + ",".join(map(str, self.existing_water))
               + "; artifacts=" + str(self.directory), flush=True)

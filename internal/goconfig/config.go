@@ -25,6 +25,7 @@ const (
 type AppConfig struct {
 	Startup   StartupConfig  `json:"startup"`
 	Server    ServerConfig   `json:"server"`
+	Web       WebConfig      `json:"web"`
 	Shell     ShellConfig    `json:"shell"`
 	Features  FeatureConfig  `json:"features"`
 	Terminal  TerminalConfig `json:"terminal"`
@@ -249,6 +250,7 @@ func Default() AppConfig {
 			WindowMinRows:    10,
 		},
 		Server:   ServerConfig{Detached: true, AutoStart: true, DetachOnQuit: true},
+		Web:      WebConfig{ListenAddress: "127.0.0.1", ListenPort: 8080},
 		Shell:    ShellConfig{Program: DefaultShellProgram()},
 		Features: FeatureConfig{MouseReporting: true, BracketedPaste: true, Selection: true},
 		Terminal: TerminalConfig{
@@ -356,6 +358,7 @@ func DefaultShellArgs(program string) []string {
 }
 
 func (c AppConfig) Normalized() AppConfig {
+	c.Web = c.Web.Normalized()
 	agentColors := DefaultAgentColors()
 	for kind, value := range c.Theme.AgentColors {
 		agentColors[kind] = value
@@ -465,16 +468,28 @@ func Load(path string) (AppConfig, error) {
 		(len(shellOverride.Shell.Args) == 0 || string(shellOverride.Shell.Args) == "null") {
 		cfg.Shell.Args = DefaultShellArgs(cfg.Shell.Program)
 	}
-	return cfg.Normalized(), nil
+	cfg = cfg.Normalized()
+	if cfg.Web.Enabled {
+		if err := cfg.Web.Validate(); err != nil {
+			return AppConfig{}, err
+		}
+	}
+	return cfg, nil
 }
 
 func LoadDefault(buildVariant string) (AppConfig, string, error) {
-	path := os.Getenv("WATER_CONFIG")
-	if path == "" {
-		path = DefaultLoadPath(buildVariant)
-	}
+	path := ConfiguredLoadPath(buildVariant)
 	cfg, err := Load(path)
 	return cfg, path, err
+}
+
+// ConfiguredLoadPath applies the same environment override to GUI and server.
+// Explicit --config flags can still replace this default.
+func ConfiguredLoadPath(buildVariant string) string {
+	if path := os.Getenv("WATER_CONFIG"); path != "" {
+		return path
+	}
+	return DefaultLoadPath(buildVariant)
 }
 
 func DefaultLoadPath(buildVariant string) string {
