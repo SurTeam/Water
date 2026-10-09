@@ -45,6 +45,8 @@ type macNativePlatform struct {
 	filePanel          objc.ID // main queue only
 	fileChoice         string  // explicit control API selection, main queue only
 	filePickerOpen     atomic.Bool
+	onDrop             func(paths []string) // file drop callback
+	dropView           objc.ID             // content view registered for file drags
 }
 
 func macSend(id objc.ID, selector string, args ...any) objc.ID {

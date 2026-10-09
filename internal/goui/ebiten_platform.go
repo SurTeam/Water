@@ -11,6 +11,7 @@ type nativePlatform interface {
 	Show()
 	Invoke(string) error
 	Snapshot() map[string]any
+	RegisterFileDrop(func(paths []string))
 }
 
 func (w *EbitengineWindow) SetQuitServerHandler(handler func() error) { w.quitServer = handler }

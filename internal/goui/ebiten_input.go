@@ -990,6 +990,15 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 				term.input.emit([]byte{0x16})
 				return true
 			}
+			// File/folder paste: convert to shell-quoted absolute paths unless
+			// the foreground program has bracketed paste enabled (it handles
+			// the raw content itself).
+			if !snap.BracketedPaste || !c.currentConfig().Features.BracketedPaste {
+				if paths := clipboardFileURLs(); len(paths) > 0 {
+					term.input.emit([]byte(fileDropToText(paths)))
+					return true
+				}
+			}
 			data := clipboard.Read(clipboard.FmtText)
 			if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
 				data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)

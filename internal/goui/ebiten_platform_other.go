@@ -36,3 +36,4 @@ func (p *otherNativePlatform) Invoke(action string) error {
 	p.emit(action)
 	return nil
 }
+func (p *otherNativePlatform) RegisterFileDrop(func(paths []string)) {}

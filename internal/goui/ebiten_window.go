@@ -146,6 +146,7 @@ type EbitengineWindow struct {
 	lastBlink               bool
 	lastFontGeneration      uint64
 	wasInvisible            bool
+	fileDropText            string // pending file-drop text to insert into the terminal
 }
 
 // Invalidate coalesces worker updates without doing graphics work off-thread.
@@ -294,6 +295,18 @@ func (w *EbitengineWindow) Update() error {
 		}
 		w.platform = platform
 		w.windowConfigured = true
+		// Register the window as a file drop target. Dropped file paths are
+		// delivered to the active terminal as shell-quoted absolute paths.
+		w.platform.RegisterFileDrop(func(paths []string) {
+			text := fileDropToText(paths)
+			select {
+			case <-w.done:
+				return
+			default:
+			}
+			w.fileDropText = text
+			w.Invalidate()
+		})
 	}
 	c := w.active()
 	if c == nil {
@@ -426,6 +439,26 @@ func (w *EbitengineWindow) Update() error {
 		w.keyRepeat = nativeKeyRepeater{}
 		w.composer.Cancel()
 		return nil
+	}
+	// Deliver pending file-drop text to the active terminal.
+	if w.fileDropText != "" {
+		text := w.fileDropText
+		w.fileDropText = ""
+		if id, ok := c.activeTerminalID(); ok {
+			c.mu.RLock()
+			term := c.terminals[id]
+			c.mu.RUnlock()
+			if term != nil {
+				term.mu.RLock()
+				snap := term.snapshot
+				term.mu.RUnlock()
+				data := []byte(text)
+				if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
+					data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
+				}
+				term.input.emit(data)
+			}
+		}
 	}
 	// Command chords must not be swallowed or turned into text by the IME.
 	// Active composition remains owned by the input method until it commits.
