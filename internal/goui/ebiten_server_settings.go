@@ -112,6 +112,13 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 			label(y, key+" · "+describe(state.Client, key)+" / "+describe(state.Server.Descriptor, key), true)
 			y += w.dp(24)
 		}
+		if !web {
+			y += w.dp(12)
+			if !state.Busy {
+				label(y, c.tr("Manage browser access, pairing and devices in a separate window."), true)
+				button(left, y+w.dp(30), w.dp(150), "Web service", "web-open")
+			}
+		}
 		if !state.Busy {
 			button(left, footer-w.dp(72), w.dp(90), "Back", "web-close")
 		}
@@ -192,69 +199,75 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 			button(left, footer-w.dp(72), w.dp(90), "Back", "web-close")
 		}
 	} else if !web && goprotocol.HasCapability(state.Server.Capabilities, goprotocol.WebCapability) {
-		label(y, c.tr("Manage browser access, pairing and devices in a separate window."), true)
+		// The Web service entry sits directly under the header so related
+		// content stays together and the page below is free for content output.
+		y += w.dp(12)
 		if !state.Busy {
+			label(y, c.tr("Manage browser access, pairing and devices in a separate window."), true)
 			button(left, y+w.dp(30), w.dp(150), "Web service", "web-open")
 		}
-	} else if goprotocol.HasCapability(state.Server.Capabilities, goprotocol.WebCapability) {
-		web := state.Server.Web
-		running := web != nil && web.State == "running"
-		text := "Web: stopped"
-		if web != nil {
-			text = "Web: " + web.State
-			if web.PublicURL != "" {
-				text += " · " + web.PublicURL
+	} else if web && goprotocol.HasCapability(state.Server.Capabilities, goprotocol.WebCapability) {
+		// Inline controls render only inside the Web modal.
+		{
+			webStatus := state.Server.Web
+			running := webStatus != nil && webStatus.State == "running"
+			text := "Web: stopped"
+			if webStatus != nil {
+				text = "Web: " + webStatus.State
+				if webStatus.PublicURL != "" {
+					text += " · " + webStatus.PublicURL
+				}
 			}
-		}
-		label(y, text, true)
-		y += w.dp(26)
-		if !state.Busy {
-			action, title := "web-start", "Start Web"
-			if running {
-				action, title = "web-stop", "Stop Web"
+			label(y, text, true)
+			y += w.dp(26)
+			if !state.Busy {
+				action, title := "web-start", "Start Web"
+				if running {
+					action, title = "web-stop", "Stop Web"
+				}
+				button(left, y, w.dp(100), title, action)
+				button(left+w.dp(108), y, w.dp(112), "Web settings", "web-settings")
+				button(left+w.dp(228), y, w.dp(90), "Devices", "web-devices")
+				if running {
+					button(left+w.dp(326), y, w.dp(110), "Pair device", "web-pair")
+				}
 			}
-			button(left, y, w.dp(100), title, action)
-			button(left+w.dp(108), y, w.dp(112), "Web settings", "web-settings")
-			button(left+w.dp(228), y, w.dp(90), "Devices", "web-devices")
-			if running {
-				button(left+w.dp(326), y, w.dp(110), "Pair device", "web-pair")
+			y += w.dp(42)
+			fr := image.Rect(r.Min.X+r.Dx()*42/100, y, r.Max.X-w.dp(36), y+w.dp(34))
+			w.label(dst, c, image.Rect(left, y+w.dp(3), fr.Min.X-w.dp(8), y+w.dp(22)), c.tr("Start Web with server"), 11, fg, false)
+			w.drawSettingsToggle(c, dst, fr, state.WebEnabled)
+			if !state.Busy {
+				w.hit(c, fr, hitSettingsControl, uuid.Nil, "server:web-autostart")
 			}
-		}
-		y += w.dp(42)
-		fr := image.Rect(r.Min.X+r.Dx()*42/100, y, r.Max.X-w.dp(36), y+w.dp(34))
-		w.label(dst, c, image.Rect(left, y+w.dp(3), fr.Min.X-w.dp(8), y+w.dp(22)), c.tr("Start Web with server"), 11, fg, false)
-		w.drawSettingsToggle(c, dst, fr, state.WebEnabled)
-		if !state.Busy {
-			w.hit(c, fr, hitSettingsControl, uuid.Nil, "server:web-autostart")
-		}
-		y += w.dp(40)
-		if state.PairingExpiresAt != nil {
-			if state.PairQR != nil {
-				size := min(w.dp(176), footer-y-w.dp(35))
-				c.server.mu.Lock()
-				if c.server.pairTextureSource != state.PairQR {
-					if c.server.pairTexture != nil {
-						c.server.pairTexture.Deallocate()
+			y += w.dp(40)
+			if state.PairingExpiresAt != nil {
+				if state.PairQR != nil {
+					size := min(w.dp(176), footer-y-w.dp(35))
+					c.server.mu.Lock()
+					if c.server.pairTextureSource != state.PairQR {
+						if c.server.pairTexture != nil {
+							c.server.pairTexture.Deallocate()
+						}
+						c.server.pairTexture = ebiten.NewImageFromImage(state.PairQR)
+						c.server.pairTextureSource = state.PairQR
 					}
-					c.server.pairTexture = ebiten.NewImageFromImage(state.PairQR)
-					c.server.pairTextureSource = state.PairQR
+					texture := c.server.pairTexture
+					c.server.mu.Unlock()
+					if dst != nil && size > 0 {
+						op := &ebiten.DrawImageOptions{}
+						op.GeoM.Scale(float64(size)/float64(texture.Bounds().Dx()), float64(size)/float64(texture.Bounds().Dy()))
+						op.GeoM.Translate(float64(left), float64(y))
+						dst.DrawImage(texture, op)
+					}
+					text := c.trf("Expires at %s", state.PairingExpiresAt.Local().Format("15:04:05"))
+					w.label(dst, c, image.Rect(left+size+w.dp(16), y, r.Max.X-w.dp(24), y+w.dp(24)), text, 10, fg, false)
+					w.label(dst, c, image.Rect(left+size+w.dp(16), y+w.dp(28), r.Max.X-w.dp(24), y+w.dp(70)), c.tr("Scan to connect directly to this server."), 10, fg, false)
+					if !state.Busy {
+						button(left+size+w.dp(16), y+w.dp(78), w.dp(120), "Cancel pairing", "web-close")
+					}
+				} else if time.Now().After(*state.PairingExpiresAt) {
+					label(y, c.tr("Pairing expired. Create a new invitation."), true)
 				}
-				texture := c.server.pairTexture
-				c.server.mu.Unlock()
-				if dst != nil && size > 0 {
-					op := &ebiten.DrawImageOptions{}
-					op.GeoM.Scale(float64(size)/float64(texture.Bounds().Dx()), float64(size)/float64(texture.Bounds().Dy()))
-					op.GeoM.Translate(float64(left), float64(y))
-					dst.DrawImage(texture, op)
-				}
-				text := c.trf("Expires at %s", state.PairingExpiresAt.Local().Format("15:04:05"))
-				w.label(dst, c, image.Rect(left+size+w.dp(16), y, r.Max.X-w.dp(24), y+w.dp(24)), text, 10, fg, false)
-				w.label(dst, c, image.Rect(left+size+w.dp(16), y+w.dp(28), r.Max.X-w.dp(24), y+w.dp(70)), c.tr("Scan to connect directly to this server."), 10, fg, false)
-				if !state.Busy {
-					button(left+size+w.dp(16), y+w.dp(78), w.dp(120), "Cancel pairing", "web-close")
-				}
-			} else if time.Now().After(*state.PairingExpiresAt) {
-				label(y, c.tr("Pairing expired. Create a new invitation."), true)
 			}
 		}
 	} else {
