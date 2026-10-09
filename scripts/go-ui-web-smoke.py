@@ -179,6 +179,26 @@ def exercise(test, browser, control, kind, disconnect_ssh=None, scheme="https", 
     context = browser.new_context(ignore_https_errors=scheme == "https", viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
     install_visual_viewport_fixture(context)
     page = context.new_page()
+    resize_events = []
+    def watch_socket(websocket):
+        pending = bytearray()
+        def frame_received(payload):
+            if not isinstance(payload, bytes):
+                return
+            pending.extend(payload)
+            assert len(pending) <= 2 * 1024 * 1024, 'test frame buffer exceeded bound'
+            while len(pending) >= 4:
+                length = int.from_bytes(pending[:4], 'big')
+                assert length <= 1024 * 1024, 'oversized test protocol frame'
+                if len(pending) < length + 4:
+                    return
+                frame = bytes(pending[4:length + 4])
+                del pending[:length + 4]
+                if len(frame) >= 33 and frame[:5] == b'\x00WT4\x02':
+                    resize_events.append(int.from_bytes(frame[29:31], 'big'))
+                    del resize_events[:-64]
+        websocket.on('framereceived', frame_received)
+    page.on('websocket', watch_socket)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.goto(origin, timeout=10000)
@@ -229,6 +249,13 @@ def exercise(test, browser, control, kind, disconnect_ssh=None, scheme="https", 
     # Reload restores the server's replay into a new browser emulator.
     page.reload(timeout=10000)
     expect(page.locator('.xterm-accessibility-tree')).to_contain_text(marker, timeout=5000)
+    page.bring_to_front()
+    page.locator('.xterm-helper-textarea').focus()
+    selected_terminal = page.locator('#panes').input_value()
+    control('terminal', 'resize', '--terminal', selected_terminal, '--columns', 160, '--lines', 40)
+    test.wait(lambda: page.evaluate('true') and 160 in resize_events, 'browser receives foreign PTY resize')
+    page.wait_for_function("() => {const s=document.querySelector('.xterm-screen').getBoundingClientRect(),t=document.getElementById('terminal').getBoundingClientRect();return s.width>0 && s.width<=t.width+1 && s.height<=t.height+1;}", timeout=5000)
+    test.save(kind + '-foreign-resize-assertions.json', {'received_columns': 160, 'mobile_viewport_width': 390, 'refitted_after_foreign_resize': True})
     verify_web_fonts(page, test.directory, kind, marker)
     verify_keyboard_helpers(page, test.directory, kind)
     if disconnect_ssh:
@@ -267,6 +294,7 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="local IPv4 interface used by this owned fixture")
     parser.add_argument("--language", choices=("en", "zh-Hans"), default="en", help="native GUI language")
     parser.add_argument("--port", type=int, help="explicit test Web port; default reserves an isolated random port")
+    parser.add_argument("--variant", choices=("dev", "release"), default="dev", help="runtime identity of the tested GUI/server")
     args = parser.parse_args()
     if args.port is not None and not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
@@ -278,16 +306,16 @@ def main():
         browser = p.chromium.launch(headless=True, executable_path=os.environ.get("WATER_BROWSER_EXECUTABLE"))
         try:
             if not args.remote_only:
-                with WaterGUI("water-web-local.", config={"ui": {"language": args.language}}) as test:
+                with WaterGUI("water-web-local.", config={"ui": {"language": args.language}}, variant=args.variant) as test:
                     exercise(test, browser, test.ctl, "local", **options)
             if not args.local_only:
-                with ssh_module.OpenSSHServer() as ssh:
+                with ssh_module.OpenSSHServer(variant=args.variant) as ssh:
                     value = 14695981039346656037
                     for byte in (ssh.alias + "|" + str(ssh.directory / "ssh_config")).encode():
                         value = ((value ^ byte) * 1099511628211) & ((1 << 64) - 1)
-                    ssh.control = f"/tmp/water-go-ssh-dev-{os.geteuid()}-{value:016x}.ctl"
+                    ssh.control = f"/tmp/water-go-ssh-{args.variant}-{os.geteuid()}-{value:016x}.ctl"
                     os.environ["WATER_REMOTE_SERVER_COMMAND"] = os.environ["WATER_SERVER_BIN"]
-                    with WaterGUI("water-web-remote.", config={"ui": {"language": args.language}}) as test:
+                    with WaterGUI("water-web-remote.", config={"ui": {"language": args.language}}, variant=args.variant) as test:
                         assert test.ctl("ui", "key", "cmd-shift-k")["handled"]
                         assert test.ctl("ui", "key", "text:" + ssh.alias)["handled"]
                         assert test.ctl("ui", "key", "enter")["handled"]

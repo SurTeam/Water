@@ -164,7 +164,12 @@
   if(slot.seq && seq!==slot.seq+1n){fail('Terminal sequence gap; reconnecting');socket?.close();return;}
   slot.seq=seq;
   if(kind===1)output(slot,bytes);
-  else if(kind===2)slot.term.resize(columns,lines);
+  else if(kind===2){
+   slot.term.resize(columns,lines);
+   // Another client can resize this PTY. Keep replay geometry, then refit
+   // the foreground browser after queued output has finished rendering.
+   slot.term.write('',()=>{if(active===slot && !slot.replaying)resize();});
+  }
   else if(kind===3)status('Terminal exited'+(code===null?'':': '+code));
  }
  function binary(data){
