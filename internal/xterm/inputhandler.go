@@ -225,6 +225,9 @@ func NewInputHandler(
 	p.RegisterCsiHandler(FunctionIdentifier{Final: 'b'}, h.repeatPrecedingCharacter)
 	p.RegisterCsiHandler(FunctionIdentifier{Final: 'c'}, h.sendDeviceAttributesPrimary)
 	p.RegisterCsiHandler(FunctionIdentifier{Prefix: '>', Final: 'c'}, h.sendDeviceAttributesSecondary)
+	// CSI ? c (RIS, VT340+) — full reset, per xterm.js. DA1 (CSI Ps c) and
+	// DA2 (CSI > Ps c) remain queries handled above.
+	p.RegisterCsiHandler(FunctionIdentifier{Prefix: '?', Final: 'c'}, h.csiFullReset)
 	p.RegisterCsiHandler(FunctionIdentifier{Prefix: '>', Final: 'q'}, h.sendXtVersion)
 	p.RegisterCsiHandler(FunctionIdentifier{Final: 'g'}, h.tabClear)
 	p.RegisterCsiHandler(FunctionIdentifier{Final: 'm'}, h.charAttributes)

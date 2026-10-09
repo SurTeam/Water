@@ -575,6 +575,13 @@ func (h *InputHandler) deviceStatusPrivate(params *Params) bool {
 	return true
 }
 
+// csiFullReset handles CSI ? c — full terminal reset (RIS, VT340+).
+// ESC c (no parameters) is handled separately by the ESC parser and performs the
+// same reset; CSI Ps c (Ps=0) remains the DA1 device attributes query.
+func (h *InputHandler) csiFullReset(_ *Params) bool {
+	return h.FullReset()
+}
+
 // --- Soft reset ---
 
 func (h *InputHandler) softReset(_ *Params) bool {
