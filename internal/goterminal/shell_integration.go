@@ -44,6 +44,12 @@ if [[ -o interactive ]]; then
         bindkey -M $water_map $'\e[3~' delete-char
       fi
     done
+    # 0x7f (DEL) is used by both the Delete and Backspace keys. Bind it to
+    # backward-delete-char so the Delete key deletes the character before
+    # the cursor (the user-expected direction) in both editing modes.
+    for water_map in emacs viins; do
+      bindkey -M $water_map $'\x7f' backward-delete-char 2>/dev/null
+    done
     precmd_functions=(${precmd_functions:#_water_terminal_keys})
     unfunction _water_terminal_keys
   }

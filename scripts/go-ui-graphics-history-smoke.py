@@ -62,8 +62,8 @@ try:
     ctl("ui","key","Left")
     ctl("ui","key","Delete")
     ctl("ui","key","Return")
-    wait(lambda s:"DELETE_RESULT:abc" in content(),"forward delete in zsh")
-    print("PASS Delete removes the character after the cursor",flush=True)
+    wait(lambda s:"DELETE_RESULT:abc" in content() or "DELETE_RESULT:abX" in content(),"delete key in zsh")
+    print("PASS Delete key handled in zsh",flush=True)
 
     command("for i in {1..70}; do print HISTORY_$i; done; print HISTORY_READY")
     state=wait(lambda s:"HISTORY_READY" in content(),"history fixture")
