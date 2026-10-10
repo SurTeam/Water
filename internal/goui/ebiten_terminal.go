@@ -279,6 +279,10 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 			rendered = nativeRowTexture{row.Hash, target}
 			cache.rows[y] = rendered
 		}
+		if !w.rasterDeadline.IsZero() && rasterRows > 0 && time.Now().After(w.rasterDeadline) {
+			w.rasterPending = true
+			break
+		}
 	}
 	if endRaster != nil {
 		endRaster()
@@ -294,6 +298,9 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 	nativeRect(dst, r, v.Theme.Background)
 	for y := 0; y < rowCount; y++ {
 		rendered := cache.rows[y]
+		if rendered.image == nil {
+			continue
+		}
 		op := &ebiten.DrawImageOptions{}
 		op.GeoM.Translate(float64(r.Min.X), float64(r.Min.Y+y*lh))
 		dst.DrawImage(rendered.image, op)

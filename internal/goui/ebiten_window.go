@@ -146,6 +146,13 @@ type EbitengineWindow struct {
 	lastBlink               bool
 	lastFontGeneration      uint64
 	wasInvisible            bool
+	catchingUp              bool
+	rasterPending           bool
+	rasterDeadline          time.Time
+	lastPacingVisible       bool
+	revealHold              int
+	titlebarZoom            atomic.Bool
+	dragTargets             atomic.Pointer[dragTargetList]
 	fileDropText            string // pending file-drop text to insert into the terminal
 }
 
@@ -314,13 +321,21 @@ func (w *EbitengineWindow) deliverFileDrop(c *WorkspaceClient) {
 
 func (w *EbitengineWindow) Update() error {
 	defer w.updateFramePacing()
+	noteLiveWindow(w)
+	ensureWindowDragHook()
+	if w.consumeTitlebarZoom() {
+		w.toggleMaximize()
+	}
 	ensureTextCommandHook()
 	applySystemKeyRepeat(&w.keyRepeat)
 	if end := traceNativeWork("native.update"); end != nil {
 		defer end()
 	}
 	defer func() {
-		w.continuousInput.Store(len(inpututil.AppendPressedKeys(nil)) > 0 || w.drag != nil || w.composition != "")
+		// Moving the window is handled outside the frame loop. Keeping a
+		// titlebar drag "active" would turn vsync on and redraw every tick,
+		// which is what makes the window lag the cursor.
+		w.continuousInput.Store(len(inpututil.AppendPressedKeys(nil)) > 0 || windowDragNeedsFrames(w.drag) || w.composition != "")
 	}()
 	if !w.windowConfigured {
 		// Apply decoration to the live native window too: platform startup can
@@ -408,7 +423,7 @@ func (w *EbitengineWindow) Update() error {
 	focused := ebiten.IsFocused()
 	blink := time.Now().UnixMilli()%1000 < 600
 	fontGeneration := w.fonts.generation.Load()
-	if nativeHoverChanged(c.hitRegions, w.lastMouse, w.mouse) || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || w.drag != nil {
+	if nativeHoverChanged(c.hitRegions, w.lastMouse, w.mouse) || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || windowDragNeedsFrames(w.drag) {
 		w.Invalidate()
 	}
 	if blink != w.lastBlink {
@@ -552,10 +567,26 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 			}
 		}
 	}()
-	if revision == w.drawnRevision && !w.wasInvisible && len(w.shots) == 0 {
+	if revision == w.drawnRevision && !w.wasInvisible && !w.catchingUp && len(w.shots) == 0 {
 		return
 	}
+	if w.wasInvisible {
+		// The frame that shows the window again used to rasterize every dirty
+		// row and then wait on a newly enabled display link. That stalls the
+		// main thread long enough for the beachball. Paint within a budget and
+		// finish on later ticks.
+		w.catchingUp = true
+	}
 	w.wasInvisible = false
+	w.rasterPending = false
+	if w.catchingUp && len(w.shots) == 0 {
+		w.rasterDeadline = time.Now().Add(12 * time.Millisecond)
+	} else {
+		w.rasterDeadline = time.Time{}
+		if len(w.shots) > 0 {
+			w.catchingUp = false
+		}
+	}
 	w.drawnRevision = revision
 	if end := traceNativeWork("native.present"); end != nil {
 		defer end()
@@ -578,6 +609,12 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 				delete(w.textures, id)
 			}
 		}
+	}
+	w.rasterDeadline = time.Time{}
+	if w.rasterPending {
+		w.Invalidate()
+	} else {
+		w.catchingUp = false
 	}
 	w.maskWindow(screen)
 	w.startupFrameDrawn = true

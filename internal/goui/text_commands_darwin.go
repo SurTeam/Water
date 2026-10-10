@@ -11,6 +11,7 @@ import (
 
 	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 var textCommandHooked atomic.Bool
@@ -139,6 +140,12 @@ func repositionTextInput(bounds image.Rectangle, scale float64) {
 	if !ok {
 		return
 	}
+	// AppKit view geometry from the game thread deadlocks the main thread when
+	// the window is being activated. The beachball is that deadlock.
+	ebiten.RunOnMainThread(func() { repositionTextInputOnMain(x, y, width, height) })
+}
+
+func repositionTextInputOnMain(x, y, width, height float64) {
 	window := macApplication().Send(objc.RegisterName("mainWindow"))
 	if window == 0 {
 		return

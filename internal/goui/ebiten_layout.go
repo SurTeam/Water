@@ -118,6 +118,7 @@ func (w *EbitengineWindow) settingsPrimaryButton(dst *ebiten.Image, c *Workspace
 func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
+	defer w.publishDragTargets(c)
 	c.pollSettingsSave()
 	c.mu.RLock()
 	state, connectionError := c.state, c.connectionError

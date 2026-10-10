@@ -18,22 +18,47 @@ func outputPublicationDelay(published, now time.Time) time.Duration {
 // Active input/output follows display presentation rather than two free-running
 // 60Hz clocks. Idle/occluded windows sleep and retain their last rendered frame.
 func (w *EbitengineWindow) updateFramePacing() {
-	visible := !ebiten.IsWindowMinimized()
-	if w.platform != nil {
-		state := w.platform.Snapshot()
-		visible = visible && state["hidden"] != true && state["occluded"] != true
-	}
+	visible := windowChromeVisible(w)
+	w.revealHold = nextRevealHold(w.revealHold, w.lastPacingVisible, visible)
+	w.lastPacingVisible = visible
 	active := w.continuousInput.Load() || len(w.queue) > 0 || time.Since(time.Unix(0, w.frameActivity.Load())) < 120*time.Millisecond
 	if w.continuousInput.Load() {
 		countNativeWork("count.continuous_input", 1)
 	}
+	// Enabling vsync in the same frame the window becomes visible makes Metal
+	// wait on a display link that cannot produce a drawable until this thread
+	// returns to the run loop. Keep event-paced frames until the reveal settles.
 	mode := ebiten.FPSModeVsyncOffMinimum
-	if visible && active {
+	if visible && w.revealHold == 0 && active && !w.catchingUp {
 		mode = ebiten.FPSModeVsyncOn
 	}
 	if ebiten.FPSMode() != mode {
 		ebiten.SetFPSMode(mode)
 	}
+}
+
+func windowChromeVisible(w *EbitengineWindow) bool {
+	visible := !ebiten.IsWindowMinimized()
+	if w.platform != nil {
+		state := w.platform.Snapshot()
+		visible = visible && state["hidden"] != true && state["occluded"] != true
+	}
+	return visible
+}
+
+// nextRevealHold counts down frames after the window becomes visible again.
+// A positive value keeps presentation off the display link.
+func nextRevealHold(hold int, wasVisible, visible bool) int {
+	if !visible {
+		return hold
+	}
+	if !wasVisible {
+		return 8
+	}
+	if hold > 0 {
+		return hold - 1
+	}
+	return 0
 }
 
 type nativeKeyRepeater struct {
