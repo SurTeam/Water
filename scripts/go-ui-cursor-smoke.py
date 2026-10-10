@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import time
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/go-ui-smoke/water"))
 if platform.system() == "Linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
@@ -55,7 +57,7 @@ def grid(state):
     return next(g for g in state["terminal_grids"] if g["pane_id"] == state["frame_focused_pane"])
 
 try:
-    initial = wait(lambda s: bool(s.get("terminal_grids")) and s.get("window_focused"), "focused native terminal")
+    initial = wait(lambda s: bool(s.get("terminal_grids")) and s.get("window_focused") is False, "unfocused native terminal")
     pane = initial["frame_focused_pane"]
     # Reset any shell DECSCUSR override before checking user defaults.
     ctl("pane", "input", "--pane", pane, "--text", "printf '\\033[0 q'\n")

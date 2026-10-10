@@ -25,6 +25,8 @@ from water_test import WaterGUI, ControlError
 from fixtures.web_viewport import install_visual_viewport_fixture, verify_keyboard_helpers
 from fixtures.web_fonts import verify_web_fonts
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location("owned_web_ssh", root / "scripts/fixtures/openssh_server.py")
 ssh_module = importlib.util.module_from_spec(spec)

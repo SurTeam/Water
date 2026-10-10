@@ -8,7 +8,7 @@ import (
 type nativePlatform interface {
 	Update(goconfig.AppConfig)
 	Hide()
-	Show()
+	Show(activate bool)
 	Invoke(string) error
 	Snapshot() map[string]any
 	RegisterFileDrop(func(paths []string))
@@ -26,7 +26,11 @@ func (w *EbitengineWindow) menuAction(action string) {
 		if ebiten.IsWindowMinimized() {
 			ebiten.RestoreWindow()
 		}
-		w.platform.Show()
+		// In unfocused-test mode the regression runner keeps every GUI
+		// InitUnfocused so no test window steals the user's key window.
+		// Showing without activating lets tests assert the peer's
+		// window_focused=false transition.
+		w.platform.Show(!w.testUnfocused())
 	case "minimize-window":
 		w.minimize()
 	case "quit-gui":

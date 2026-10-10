@@ -15,6 +15,8 @@ import tempfile
 import time
 import uuid
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -216,9 +218,9 @@ def main():
                     subprocess.run(["open", "-a", str(app), "--args", "--control-socket", socket,
                                     "--config", str(config)], check=True, timeout=5)
                 state = ctl("ui", "snapshot", measured=True)
-                if not state.get("window_focused") or state.get("application_hidden") or state.get("window_minimized"):
-                    state = wait(lambda s: s.get("window_focused") is True and
-                                 not s.get("application_hidden") and not s.get("window_minimized"), "restored application")
+                if state.get("window_focused") or state.get("application_hidden") or state.get("window_minimized"):
+                    state = wait(lambda s: s.get("window_focused") is False and
+                                 not s.get("application_hidden") and not s.get("window_minimized"), "restored visible unfocused application")
                 assert state["gui_pid"] == gui.pid
                 if args.workload != "idle":
                     assert state["active_terminal_last_seq"] > before["active_terminal_last_seq"], "output did not advance in the background"

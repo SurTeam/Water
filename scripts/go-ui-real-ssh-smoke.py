@@ -9,6 +9,8 @@ import time
 from fixtures.openssh_server import OpenSSHServer
 from water_test import WaterGUI, water_processes
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 spec = importlib.util.spec_from_file_location("water_server_smoke", Path(__file__).with_name("go-ui-server-smoke.py"))
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)

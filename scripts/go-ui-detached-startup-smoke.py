@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import time
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--app", type=Path, default=root / "dist/Water Dev.app")

@@ -103,6 +103,24 @@ across a viewport, retained pre-Agent history, a single welcome, and keyboard
 input/Enter following the bottom. No mouse selection or clipboard access is
 needed. Screenshots should show the normal unselected terminal.
 
+### Unfocused test windows
+
+All `scripts/go-ui-*.py` tests, the shared `WaterGUI` fixture, the shell UI
+smoke runner, and `run-go-regression.py` set `WATER_TEST_UNFOCUSED=1` before
+launching a GUI. Water passes Ebitengine's `RunGameOptions.InitUnfocused`, so
+the window is shown without activating the app or taking the user's key window
+on macOS. The control API drives input (key, click, menu, content) while the
+window remains unfocused.
+
+This is separate from `WATER_TEST_INSTANCE`, which names the test window and
+is used for ownership checks. Every GUI smoke script sets the unfocused flag
+itself, so running one directly has the same startup behavior as running it
+through the regression runner. `window_focused` remains the actual OS focus
+state; startup checks should wait for a frame/menu/pane rather than requiring
+focus. Tests specifically covering focus transitions should assert visibility
+and unfocused status, while the background smoke may activate its configured
+external app to exercise occlusion.
+
 ## Keep machine-readable evidence
 
 The runner writes `target/test-runs/<run>/summary.json` with every command, PID,

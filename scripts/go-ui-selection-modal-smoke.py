@@ -4,6 +4,8 @@ import os
 from PIL import Image
 from water_test import WaterGUI
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 config = {"startup": {"window_columns": 100, "window_rows": 36},
           "theme": {"chrome_background": "#808080", "terminal_background": "#808080", "pane_background": "#808080", "ui_foreground": "#ffffff"}}
 with WaterGUI("water-selection-modal.", config=config, variant=os.environ.get("WATER_TEST_VARIANT", "dev")) as test:

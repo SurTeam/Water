@@ -68,7 +68,7 @@ cat >"$CONFIG" <<JSON
 }
 JSON
 
-"$WATER_BIN" --control-socket "$SOCKET" --config "$CONFIG" >"$LOG" 2>&1 &
+WATER_TEST_UNFOCUSED=1 "$WATER_BIN" --control-socket "$SOCKET" --config "$CONFIG" >"$LOG" 2>&1 &
 gui_pid=$!
 
 for _ in $(seq 1 240); do

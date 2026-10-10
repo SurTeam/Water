@@ -5,6 +5,8 @@ import platform
 from PIL import Image
 from water_test import WaterGUI
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 
 def snapshot(test):
     return test.ctl("ui", "snapshot")
@@ -28,11 +30,15 @@ def control_colors(state, pixels):
 
 
 variant = os.environ.get("WATER_TEST_VARIANT", "dev")
+unfocused = os.environ.get("WATER_TEST_UNFOCUSED", "") == "1"
 config = {"startup": {"window_columns": 100, "window_rows": 36},
           "theme": {"chrome_background": "#808080", "terminal_background": "#808080", "pane_background": "#808080"},
           "ui": {"language": "zh-Hans"}}
 with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
-    initial = test.wait(lambda: (lambda s: s if s.get("window_focused") and s.get("native_menu", {}).get("ready") else None)(snapshot(test)), "focused native GUI")
+    if unfocused:
+        initial = test.wait(lambda: (lambda s: s if not s.get("window_focused") and s.get("native_menu", {}).get("ready") else None)(snapshot(test)), "unfocused native GUI")
+    else:
+        initial = test.wait(lambda: (lambda s: s if s.get("window_focused") and s.get("native_menu", {}).get("ready") else None)(snapshot(test)), "focused native GUI")
     test.save("initial.json", initial)
     before = image(test, "before.png")
     point = (before.width-40, before.height-40)
@@ -76,19 +82,31 @@ with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
     assert test.ctl("ui", "key", "escape")["handled"]
     test.wait(lambda: not snapshot(test)["update_visible"], "update closed")
     if platform.system() == "Darwin":
-        focused = control_colors(snapshot(test), image(test, "focused.png"))
-        assert len(set(focused)) == 3, focused
-        with WaterGUI("water-focus-peer.", config=config, variant=variant) as peer:
-            test.wait(lambda: not snapshot(test)["window_focused"], "owned peer takes native focus")
-            inactive_state = snapshot(test)
-            inactive = control_colors(inactive_state, image(test, "inactive.png"))
+        if unfocused:
+            # The window deliberately remains unfocused in this mode; check
+            # its inactive titlebar colors and verify show-window preserves
+            # visibility without activating the app.
+            inactive = control_colors(snapshot(test), image(test, "inactive.png"))
             assert len(set(inactive)) == 1, inactive
-            assert max(inactive[0])-min(inactive[0]) <= 2, inactive
-            test.save("inactive.json", inactive_state)
-        test.ctl("ui", "menu", "show-window")
-        test.wait(lambda: snapshot(test)["window_focused"], "focus restored")
-        restored = control_colors(snapshot(test), image(test, "restored.png"))
-        assert restored == focused, (restored, focused)
+            test.ctl("ui", "menu", "hide-window")
+            test.wait(lambda: snapshot(test)["application_hidden"], "test app hidden")
+            test.ctl("ui", "menu", "show-window")
+            restored_state = test.wait(lambda: (lambda s: s if not s["application_hidden"] and not s["window_minimized"] and not s["window_focused"] else None)(snapshot(test)), "visible and still unfocused")
+            test.save("unfocused-restored.json", restored_state)
+        else:
+            focused = control_colors(snapshot(test), image(test, "focused.png"))
+            assert len(set(focused)) == 3, focused
+            with WaterGUI("water-focus-peer.", config=config, variant=variant) as peer:
+                test.wait(lambda: not snapshot(test)["window_focused"], "owned peer takes native focus")
+                inactive_state = snapshot(test)
+                inactive = control_colors(inactive_state, image(test, "inactive.png"))
+                assert len(set(inactive)) == 1, inactive
+                assert max(inactive[0])-min(inactive[0]) <= 2, inactive
+                test.save("inactive.json", inactive_state)
+            test.ctl("ui", "menu", "show-window")
+            test.wait(lambda: snapshot(test)["window_focused"], "focus restored")
+            restored = control_colors(snapshot(test), image(test, "restored.png"))
+            assert restored == focused, (restored, focused)
     test.save("assertions.json", {"settings_fields": len(fields), "baseline": baseline, "settings_dimmed": dimmed,
                                   "update_near_edge": near, "update_far_edge": far})
     print("PASS settings reachability, localized host backgrounds, settings dimming, shadowless update and native focus colors; artifacts="+str(test.directory), flush=True)

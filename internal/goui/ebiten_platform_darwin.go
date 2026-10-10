@@ -46,7 +46,7 @@ type macNativePlatform struct {
 	fileChoice         string  // explicit control API selection, main queue only
 	filePickerOpen     atomic.Bool
 	onDrop             func(paths []string) // file drop callback
-	dropView           objc.ID             // content view registered for file drags
+	dropView           objc.ID              // content view registered for file drags
 }
 
 func macSend(id objc.ID, selector string, args ...any) objc.ID {
@@ -345,15 +345,18 @@ func (p *macNativePlatform) Snapshot() map[string]any {
 	}
 	return map[string]any{"ready": false, "hidden": false}
 }
+
 func (p *macNativePlatform) Hide() {
 	p.onMain(func() { macSend(macApplication(), "hide:", objc.ID(0)); p.publish() })
 }
-func (p *macNativePlatform) Show() {
+func (p *macNativePlatform) Show(activate bool) {
 	p.onMain(func() {
 		macSend(macApplication(), "unhide:", objc.ID(0))
-		macSend(macApplication(), "activateIgnoringOtherApps:", true)
-		if p.window != 0 {
-			macSend(p.window, "makeKeyAndOrderFront:", objc.ID(0))
+		if activate {
+			macSend(macApplication(), "activateIgnoringOtherApps:", true)
+			if p.window != 0 {
+				macSend(p.window, "makeKeyAndOrderFront:", objc.ID(0))
+			}
 		}
 		p.publish()
 	})

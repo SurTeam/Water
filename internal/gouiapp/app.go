@@ -41,6 +41,9 @@ func (values *stringListFlag) Set(value string) error {
 	return nil
 }
 
+// testUnfocusedStartup is set once at process start when WATER_TEST_UNFOCUSED=1.
+var testUnfocusedStartup = os.Getenv("WATER_TEST_UNFOCUSED") == "1"
+
 func Run(arguments []string, buildVariant string) error {
 	var socket string
 	var configPath string
@@ -223,7 +226,20 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	// Update exactly once before each presentation, including minimum mode;
 	// text events must not accumulate while fixed-tick catch-up skips an Update.
 	ebiten.SetTPS(ebiten.SyncWithFPS)
-	return ebiten.RunGameWithOptions(w, &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant})
+	runOptions := &ebiten.RunGameOptions{ScreenTransparent: true, X11ClassName: "Water", X11InstanceName: "water-" + buildVariant}
+	if testUnfocusedStartup {
+		// The regression runner sets WATER_TEST_UNFOCUSED=1 so every GUI it
+		// opens starts InitUnfocused: no test window steals the user's key
+		// window. This is separate from WATER_TEST_INSTANCE (which only
+		// names the window title and is also set by manual single-script
+		// runs that keep the focused startup).
+		//
+		// Must be set on the RunGameOptions itself: when options is non-nil,
+		// Ebitengine uses options.InitUnfocused, NOT the SetInitFocused
+		// atomic (see toUIRunOptions in run.go).
+		runOptions.InitUnfocused = true
+	}
+	return ebiten.RunGameWithOptions(w, runOptions)
 }
 
 func connectOrStart(socket, configPath string, cfg goconfig.AppConfig, buildVariant string) (*goclient.Session, *goserver.Server, bool, error) {

@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from PIL import Image
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/go-ui-smoke/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-parity.", dir="/tmp"))
@@ -89,7 +91,9 @@ def screenshot(name, rounded):
 try:
     initial = wait(lambda s: s.get("frame_active_terminal") not in (None, "00000000-0000-0000-0000-000000000000"), "terminal")
     scale = initial["titlebar_height"] / 36
-    if platform.system() == "Darwin":
+    if platform.system() == "Darwin" and initial.get("window_focused"):
+        # Native NSWindow layer metrics are installed from the key window.
+        # Unfocused UI tests still check the rendered framebuffer mask below.
         wait(lambda s: s["native_menu"].get("window_corner_radius") == 16 and
              s["native_menu"].get("window_masks_to_bounds") and not s["native_menu"]["window_opaque"], "native rounded layer")
     screenshot("rounded", True)
@@ -124,7 +128,8 @@ try:
     persisted = json.loads(config.read_text())
     assert persisted["theme"]["agent_colors"]["codex"] == "#abcdef"
     assert persisted["ui"]["window_corner_radius"] == 24
-    wait(lambda s: s["native_menu"].get("window_corner_radius") == 24, "live native radius")
+    if initial.get("window_focused"):
+        wait(lambda s: s["native_menu"].get("window_corner_radius") == 24, "live native radius")
     screenshot("custom-rounded", True)
     resize = hit(kind="sidebar_resize")
     x0, y0, x1, y1 = resize["rect"]
@@ -135,7 +140,8 @@ try:
     hit(label="category:UI")
     edit("UI.WindowCornerRadius", 0)
     save()
-    wait(lambda s: s["native_menu"].get("window_corner_radius") == 0, "square native layer")
+    if initial.get("window_focused"):
+        wait(lambda s: s["native_menu"].get("window_corner_radius") == 0, "square native layer")
     screenshot("square", False)
     ctl("ui", "key", "cmd-,")
     hit(label="category:UI")
@@ -146,10 +152,10 @@ try:
     ctl("ui", "key", "cmd-e")
     wait(lambda s: any(h["kind"] == "sidebar_resize" for h in s["automation_hits"]), "sidebar toggle")
     hit(kind="window_maximize")
-    wait(lambda s: s["window_maximized"] and s["native_menu"].get("window_corner_radius") == 0, "maximized square corners")
+    wait(lambda s: s["window_maximized"] and (not initial.get("window_focused") or s["native_menu"].get("window_corner_radius") == 0), "maximized square corners")
     screenshot("maximized", False)
     hit(kind="window_maximize")
-    wait(lambda s: not s["window_maximized"] and s["native_menu"].get("window_corner_radius") == 16, "restored corners")
+    wait(lambda s: not s["window_maximized"] and (not initial.get("window_focused") or s["native_menu"].get("window_corner_radius") == 16), "restored corners")
     screenshot("restored", True)
     # Spawn the scenario's real agent process through the command dispatcher;
     # clicking its row must activate the owning tab and pane.

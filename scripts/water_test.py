@@ -58,7 +58,8 @@ class WaterGUI:
         config.write_text(json.dumps(self.config))
         self.log = (self.directory / "gui.log").open("w")
         env = dict(os.environ, WATER_TEST_INSTANCE=self.directory.name,
-                   WATER_CONTROL_SOCKET=self.socket, WATER_CONFIG=str(config))
+                   WATER_TEST_UNFOCUSED="1", WATER_CONTROL_SOCKET=self.socket,
+                   WATER_CONFIG=str(config))
         env.pop("WATER_SOCKET", None)
         env.pop("WATER_GO_DAEMON_CHILD", None)
         self.gui = subprocess.Popen([self.binary, "--control-socket", self.socket, "--config", str(config)],

@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import time
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN",str(root/"target/go-app/dev/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-queries.",dir="/tmp"))
@@ -45,7 +47,12 @@ try:
     for phase in range(2):
         pane = str(state["frame_focused_pane"])
         grid = next(g for g in state["terminal_grids"] if str(g["pane_id"])==pane)
-        expected = dict(grid,screen_size_pixels=state["screen_size_pixels"],frame_size=state["frame_size"])
+        # PTY size reflects the configured terminal rows/columns. A newly
+        # launched InitUnfocused window may be partially off-screen or not
+        # yet resized to the full framebuffer geometry, so do not use the
+        # visible pane row count as the terminal-size query expectation.
+        expected = dict(grid, rows=grid["terminal_rows"], columns=grid["terminal_columns"],
+                        screen_size_pixels=state["screen_size_pixels"], frame_size=state["frame_size"])
         scale = state["display_scale"]
         expected["window_position_pixels"] = [int(p*scale+.5) for p in state["window_position"]]
         expected["text_position_pixels"] = [a+b for a,b in zip(expected["window_position_pixels"],grid["rect"][:2])]

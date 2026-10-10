@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
+import os
 """Verify GUI content pagination and absence of viewport/selection side effects."""
 from water_test import ControlError, WaterGUI
+
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
 
 with WaterGUI("water-content.") as test:
     pane = test.ctl("ui", "snapshot")["frame_focused_pane"]

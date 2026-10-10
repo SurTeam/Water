@@ -8,6 +8,8 @@ import tempfile
 import time
 from PIL import Image
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/go-app/dev/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-wide-glyph.", dir="/tmp"))

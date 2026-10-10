@@ -13,6 +13,8 @@ import tempfile
 import time
 from water_test import WaterGUI, ControlError
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 if platform.system() == "Linux" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
     raise RuntimeError("native display is required")
 root = Path(__file__).resolve().parent.parent

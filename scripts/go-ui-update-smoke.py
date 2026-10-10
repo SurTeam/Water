@@ -8,6 +8,8 @@ import subprocess
 import tempfile
 import time
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/update-smoke/water-dev"))
 directory = Path(tempfile.mkdtemp(prefix="water-update.", dir="/tmp"))

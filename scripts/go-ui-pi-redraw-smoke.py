@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 """Verify real Pi redraw/history and input following without selecting or copying."""
 import json
 import shlex
@@ -6,6 +7,8 @@ import subprocess
 import uuid
 
 from water_test import WaterGUI
+
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
 
 
 with WaterGUI("water-pi-redraw.", {"startup": {"window_columns": 90, "window_rows": 24}}) as test:

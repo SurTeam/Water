@@ -19,7 +19,7 @@ func newNativePlatform(emit func(string), canQuitServer bool) (nativePlatform, e
 }
 func (p *otherNativePlatform) Update(goconfig.AppConfig) {}
 func (p *otherNativePlatform) Hide()                     { ebiten.SetWindowVisible(false); p.hidden = true }
-func (p *otherNativePlatform) Show()                     { ebiten.SetWindowVisible(true); p.hidden = false }
+func (p *otherNativePlatform) Show(bool)                 { ebiten.SetWindowVisible(true); p.hidden = false }
 func (p *otherNativePlatform) Snapshot() map[string]any {
 	return map[string]any{"ready": true, "hidden": p.hidden}
 }

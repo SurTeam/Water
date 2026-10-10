@@ -10,6 +10,8 @@ import time
 
 from PIL import Image
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = os.environ.get("WATER_BIN", str(root / "target/go-ui-smoke/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-progress.", dir="/tmp"))

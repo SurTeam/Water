@@ -121,7 +121,16 @@ func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClie
 		if cellChanged {
 			term.snapshot = term.emu.FrameSnapshot()
 		}
+		// Keep the shared PTY's row/column grid owned by the focused window,
+		// but publish this window's measured cell pixels when the grid already
+		// matches. kitty icat reads those pixels from TIOCGWINSZ and rejects a
+		// zero-size terminal even though CSI 14 t/16 t can already reply.
+		sameGrid := cols == term.cols && rows == term.rows
+		id := term.id
 		term.mu.Unlock()
+		if cellChanged && sameGrid && c.session != nil {
+			_ = c.session.DispatchAsync(map[string]any{"type": "terminal.resize", "terminal_id": id, "columns": cols, "lines": rows, "cell_width": cw, "cell_height": lh})
+		}
 		return
 	}
 	if cols == term.cols && rows == term.rows && !cellChanged && term.resizeGeneration == c.focusGeneration {

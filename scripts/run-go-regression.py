@@ -47,7 +47,7 @@ if args.list:
 directory.mkdir(parents=True)
 env = dict(os.environ, WATER_BIN=str(binary), WATER_SERVER_BIN=str(server), WATER_SCENARIO_REQUIRE_ALL="1",
            WATER_KEEP_UI_SMOKE="1", PYTHONDONTWRITEBYTECODE="1", WATER_TEST_INSTANCE="regression-" + run_id,
-           WATER_TEST_EVIDENCE_DIR=str(directory / "gui-artifacts"))
+           WATER_TEST_EVIDENCE_DIR=str(directory / "gui-artifacts"), WATER_TEST_UNFOCUSED="1")
 if args.profile in ("terminal", "full"):
     from PIL import Image
     image = directory / "fixture.png"

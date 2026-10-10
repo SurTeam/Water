@@ -205,7 +205,17 @@ func (w *EbitengineWindow) scheduleFrames() {
 		}
 	}
 }
+
+// SetTestInstance names the owned test fixture that launched this window.
 func (w *EbitengineWindow) SetTestInstance(instance string) { w.testInstance = instance }
+
+// testUnfocused is true when WATER_TEST_UNFOCUSED=1: the window started
+// InitUnfocused and the regression runner drives all input via the control
+// API. Separate from WATER_TEST_INSTANCE (which also names the title and is
+// set by manual single-script runs that keep the focused startup).
+func (w *EbitengineWindow) testUnfocused() bool {
+	return os.Getenv("WATER_TEST_UNFOCUSED") == "1"
+}
 func (w *EbitengineWindow) windowTitle() string {
 	if w.testInstance != "" {
 		return "Water Test"
@@ -438,7 +448,12 @@ func (w *EbitengineWindow) Update() error {
 	if !ebiten.IsFocused() {
 		w.keyRepeat = nativeKeyRepeater{}
 		w.composer.Cancel()
-		return nil
+		// In the owned test fixture the window starts InitUnfocused and the
+		// control API drives input, so key events (incl. IME-confirmed native
+		// text) are still delivered without activating the app.
+		if !w.testUnfocused() {
+			return nil
+		}
 	}
 	// Deliver pending file-drop text to the active terminal.
 	if w.fileDropText != "" {
@@ -641,6 +656,9 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		}
 		state["window_maximized"] = ebiten.IsWindowMaximized()
 		state["window_minimized"] = ebiten.IsWindowMinimized()
+		// In unfocused-test mode (WATER_TEST_UNFOCUSED=1) the window starts
+		// InitUnfocused, so ebiten.IsFocused() is the real answer and no
+		// override is needed. The window is genuinely not focused.
 		state["window_focused"] = ebiten.IsFocused()
 		state["custom_titlebar"] = true
 		state["native_menu"] = w.platform.Snapshot()

@@ -8,6 +8,8 @@ import shlex
 import tempfile
 import time
 
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
 root = Path(__file__).resolve().parent.parent
 water = str(root / "target/go-ui-smoke/water")
 directory = Path(tempfile.mkdtemp(prefix="water-agents.", dir="/tmp"))

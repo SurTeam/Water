@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 """Exercise the real macOS notification authorization/delivery path via BEL."""
 import json
 import plistlib
@@ -7,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
 
 root=Path(__file__).resolve().parent.parent
 directory=Path(tempfile.mkdtemp(prefix="water-notify.",dir="/tmp"))

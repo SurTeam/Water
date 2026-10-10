@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import os
 """Exercise shared-server windows through Water's real control API."""
 import argparse
 import json
@@ -7,6 +8,11 @@ import subprocess
 import tempfile
 import time
 import uuid
+import os
+
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
+
+os.environ["WATER_TEST_UNFOCUSED"] = "1"
 
 
 def main():
@@ -75,19 +81,21 @@ def main():
         ctl("ui", "click", "--x", str((x0+x1)/2), "--y", str((y0+y1)/2), "--window", b)
         wait(lambda: ctl("ui", "state", "--window", b)["frame_active_workspace"] == shared["frame_active_workspace"], "shared terminal visible")
         ctl("ui", "menu", "show-window", "--window", a)
-        wait(lambda: ctl("ui", "state", "--window", a)["window_focused"], "first focus")
+        wait(lambda: (lambda s: not s["application_hidden"] and not s["window_minimized"] and not s["window_focused"])(ctl("ui", "state", "--window", a)), "first visible, unfocused")
         before = ctl("ui", "state", "--window", a)
         hit = next(h for h in before["automation_hits"] if h["kind"] == "window_maximize")
         x0, y0, x1, y1 = hit["rect"]
         ctl("ui", "click", "--x", str((x0+x1)/2), "--y", str((y0+y1)/2), "--window", a)
         larger = wait(lambda: matching(ctl("ui", "state", "--window", a), lambda u: u["window_size"] != before["window_size"]), "different geometry")
         large_cols = larger["terminal_grids"][0]["columns"]
-        wait(lambda: ctl("ui", "state", "--window", b)["terminal_grids"][0]["terminal_columns"] == large_cols, "background adopts focused PTY size")
+        pty_cols = before["terminal_grids"][0]["terminal_columns"]
+        # Neither window is focused, so the shared PTY keeps its size.
+        wait(lambda: ctl("ui", "state", "--window", b)["terminal_grids"][0]["terminal_columns"] == pty_cols, "background PTY size unchanged")
         ctl("ui", "menu", "show-window", "--window", b)
-        wait(lambda: ctl("ui", "state", "--window", b)["window_focused"], "second focus")
-        smaller = wait(lambda: matching(ctl("ui", "state", "--window", b), lambda u: u["terminal_grids"][0]["terminal_columns"] == u["terminal_grids"][0]["columns"] and u["terminal_grids"][0]["terminal_columns"] != large_cols), "focus resizes PTY")
+        wait(lambda: (lambda s: not s["application_hidden"] and not s["window_minimized"] and not s["window_focused"])(ctl("ui", "state", "--window", b)), "second visible, unfocused")
+        smaller = wait(lambda: matching(ctl("ui", "state", "--window", b), lambda u: u["terminal_grids"][0]["columns"] != large_cols and u["terminal_grids"][0]["terminal_columns"] == pty_cols), "second window keeps its own grid")
         small_cols = smaller["terminal_grids"][0]["columns"]
-        wait(lambda: ctl("ui", "state", "--window", a)["terminal_grids"][0]["terminal_columns"] == small_cols, "old window adopts new size")
+        assert ctl("ui", "state", "--window", a)["terminal_grids"][0]["terminal_columns"] == pty_cols
         ctl("ui", "menu", "quit-gui", "--window", a)
         wait(lambda: ctl("server", "info")["ui_sessions"] == 1, "first window released")
         assert ctl("ping") == "pong"

@@ -27,7 +27,7 @@ For setup, configuration, remote connections, control commands, tests, cross-bui
 
 ## Project status
 
-The latest release, [Water 0.4.3](docs/releases/v0.4.3.md), adds a terminal full-reset sequence and groups the Server settings Web service entry under the capability list.
+The latest release, [Water 0.4.4](docs/releases/v0.4.4.md), starts macOS UI test windows unfocused so they stay visible without taking the current application's focus.
 
 Water is an active workbench rather than a compatibility layer for an existing terminal app. The server owns sessions and bounded terminal replay; each client attaches its own emulator and UI state. That separation is what enables persistent remote sessions, reliable reconnect, bounded output memory, and deterministic control/API tests.
 
