@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.4.4](releases/v0.4.4.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.4.5](releases/v0.4.5.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 Server Web direct access, GUI/SSH QR pairing, TLS configuration and `water ctl server web` commands are documented in [Server Web access](server-web.md).
 
