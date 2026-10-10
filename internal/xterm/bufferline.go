@@ -257,14 +257,23 @@ func (bl *BufferLine) setASCIIBytes(index int, data []byte, attrs *AttributeData
 	}
 }
 
+// maxCombinedCellBytes bounds one cell's combining string. Scrollback is
+// otherwise counted in lines, so an endless join would retain the whole stream.
+const maxCombinedCellBytes = 256
+
 // AddCodepointToCell adds a combining codepoint to the cell at index.
 func (bl *BufferLine) AddCodepointToCell(index int, codePoint uint32, width int) {
-	bl.revision++
 	content := bl.data[index*cellSize+cellContent]
 	if content&ContentIsCombinedMask != 0 {
 		bl.ensureCombined()
-		bl.combined[index] += string(rune(codePoint))
+		addition := string(rune(codePoint))
+		if len(bl.combined[index])+len(addition) > maxCombinedCellBytes {
+			return
+		}
+		bl.revision++
+		bl.combined[index] += addition
 	} else {
+		bl.revision++
 		cp := content & ContentCodepointMask
 		if cp != 0 {
 			bl.ensureCombined()

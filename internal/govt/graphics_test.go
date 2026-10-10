@@ -3,9 +3,12 @@ package govt
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
+	"runtime"
 	"testing"
 )
 
@@ -47,6 +50,36 @@ func TestKittyQueryIsLiveOnly(t *testing.T) {
 	if !bytes.Contains(got,[]byte("\x1b_Gi=31;OK\x1b\\")){
 		t.Fatalf("missing Kitty query response: %q",got)
 	}
+}
+
+func TestOversizedEncodedImageIsRejectedBeforeRasterAllocation(t *testing.T) {
+	img:=image.NewRGBA(image.Rect(0,0,1,1))
+	var buf bytes.Buffer
+	if err:=png.Encode(&buf,img);err!=nil{t.Fatal(err)}
+	raw:=buf.Bytes()
+	if string(raw[12:16])!="IHDR"{t.Fatalf("png layout changed: %q",raw[12:16])}
+	binary.BigEndian.PutUint32(raw[16:20],4096)
+	binary.BigEndian.PutUint32(raw[20:24],4096)
+	binary.BigEndian.PutUint32(raw[29:33],crc32.ChecksumIEEE(raw[12:29]))
+
+	cfg,_,err:=image.DecodeConfig(bytes.NewReader(raw))
+	if err!=nil || cfg.Width!=4096 || cfg.Height!=4096{
+		t.Fatalf("crafted header was not readable: %v %+v",err,cfg)
+	}
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	decoded:=decodeEncodedImage(raw)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if decoded!=nil{t.Fatal("oversized PNG was decoded")}
+	if grew:=after.TotalAlloc-before.TotalAlloc; grew>8<<20{
+		t.Fatalf("decode allocated %d bytes; header check did not run before the raster",grew)
+	}
+
+	e:=New(20,6,100)
+	defer e.Close()
+	e.Write([]byte("\x1b_Ga=T,f=100;"+base64.StdEncoding.EncodeToString(raw)+"\x1b\\"))
+	if len(e.Snapshot().Images)!=0{t.Fatal("oversized PNG became a terminal image")}
 }
 
 func TestKittyPNGProducesImagePlacement(t *testing.T) {

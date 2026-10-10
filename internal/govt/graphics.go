@@ -596,6 +596,12 @@ func decodeEncodedImage(raw []byte) *decodedImage {
 	if len(raw) == 0 || len(raw) > maxImageBytes {
 		return nil
 	}
+	// image.Decode allocates the bitmap from the header before we can look at
+	// it. A few kilobytes of PNG/JPEG/GIF can ask for a multi-gigabyte raster.
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || !validImageSize(config.Width, config.Height, config.Width*config.Height*4) {
+		return nil
+	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil

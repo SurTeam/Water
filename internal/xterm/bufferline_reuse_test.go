@@ -2,6 +2,22 @@ package xterm
 
 import "testing"
 
+func TestCombiningCellBytesStayBounded(t *testing.T) {
+	line := NewBufferLine(1, nil, false)
+	line.SetCellFromCodepoint(0, 'A', 1, &AttributeData{})
+	for i := 0; i < 400; i++ {
+		line.AddCodepointToCell(0, 0x0301, 1)
+	}
+	got := line.combined[0]
+	if len(got) == 0 || len(got) > maxCombinedCellBytes {
+		t.Fatalf("combined len=%d, cap=%d", len(got), maxCombinedCellBytes)
+	}
+	line.AddCodepointToCell(0, 0x0301, 1)
+	if line.combined[0] != got {
+		t.Fatal("combining string grew after the cap")
+	}
+}
+
 func TestCopyFromReusesSparseMaps(t *testing.T) {
 	blank := NewBufferLine(80, nil, false)
 	dst := NewBufferLine(80, nil, false)
