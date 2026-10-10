@@ -984,20 +984,21 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	}
 	if shortcutMatches(pressed, bindings.Paste) {
 		if w.clipboardReady {
+			// Finder file copies include a TIFF icon. Check file URLs first or a
+			// copied PDF is treated as an image and only Ctrl+V is sent.
+			if paths := clipboardFileURLs(); len(paths) > 0 {
+				data := []byte(fileDropToText(paths))
+				if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
+					data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
+				}
+				term.input.emit(data)
+				return true
+			}
 			// Coding agents read images directly from the system clipboard on
 			// Ctrl+V. Preserve the clipboard and deliver that key for image paste.
 			if clipboardHasImage() {
 				term.input.emit([]byte{0x16})
 				return true
-			}
-			// File/folder paste: convert to shell-quoted absolute paths unless
-			// the foreground program has bracketed paste enabled (it handles
-			// the raw content itself).
-			if !snap.BracketedPaste || !c.currentConfig().Features.BracketedPaste {
-				if paths := clipboardFileURLs(); len(paths) > 0 {
-					term.input.emit([]byte(fileDropToText(paths)))
-					return true
-				}
 			}
 			data := clipboard.Read(clipboard.FmtText)
 			if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {

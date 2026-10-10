@@ -276,6 +276,42 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 	}
 }
 
+// deliverFileDrop inserts shell-quoted absolute paths from a file drop.
+// It must run while the window is unfocused: ebiten exposes DroppedFiles for
+// only the Update that follows the drop.
+func (w *EbitengineWindow) deliverFileDrop(c *WorkspaceClient) {
+	if paths := pathsFromDroppedFS(ebiten.DroppedFiles()); len(paths) > 0 {
+		text := fileDropToText(paths)
+		if w.fileDropText != "" {
+			text = w.fileDropText + " " + text
+		}
+		w.fileDropText = text
+	}
+	if w.fileDropText == "" {
+		return
+	}
+	text := w.fileDropText
+	w.fileDropText = ""
+	id, ok := c.activeTerminalID()
+	if !ok {
+		return
+	}
+	c.mu.RLock()
+	term := c.terminals[id]
+	c.mu.RUnlock()
+	if term == nil {
+		return
+	}
+	term.mu.RLock()
+	snap := term.snapshot
+	term.mu.RUnlock()
+	data := []byte(text)
+	if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
+		data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
+	}
+	term.input.emit(data)
+}
+
 func (w *EbitengineWindow) Update() error {
 	defer w.updateFramePacing()
 	ensureTextCommandHook()
@@ -307,18 +343,9 @@ func (w *EbitengineWindow) Update() error {
 		}
 		w.platform = platform
 		w.windowConfigured = true
-		// Register the window as a file drop target. Dropped file paths are
-		// delivered to the active terminal as shell-quoted absolute paths.
-		w.platform.RegisterFileDrop(func(paths []string) {
-			text := fileDropToText(paths)
-			select {
-			case <-w.done:
-				return
-			default:
-			}
-			w.fileDropText = text
-			w.Invalidate()
-		})
+		// Drag delivery comes from ebiten.DroppedFiles (GLFW already accepts the
+		// drop). RegisterFileDrop does not receive AppKit callbacks on macOS.
+		w.platform.RegisterFileDrop(nil)
 	}
 	c := w.active()
 	if c == nil {
@@ -447,6 +474,9 @@ func (w *EbitengineWindow) Update() error {
 	w.nativePointer(c)
 	w.updateCursor(c)
 	w.keyRepeat.observe(ebiten.IsKeyPressed, false)
+	// Drops arrive on an unfocused window too. Reading them after the focus
+	// return drops the only frame ebiten reports DroppedFiles.
+	w.deliverFileDrop(c)
 	if !ebiten.IsFocused() {
 		w.keyRepeat = nativeKeyRepeater{}
 		w.composer.Cancel()
@@ -455,26 +485,6 @@ func (w *EbitengineWindow) Update() error {
 		// text) are still delivered without activating the app.
 		if !w.testUnfocused() {
 			return nil
-		}
-	}
-	// Deliver pending file-drop text to the active terminal.
-	if w.fileDropText != "" {
-		text := w.fileDropText
-		w.fileDropText = ""
-		if id, ok := c.activeTerminalID(); ok {
-			c.mu.RLock()
-			term := c.terminals[id]
-			c.mu.RUnlock()
-			if term != nil {
-				term.mu.RLock()
-				snap := term.snapshot
-				term.mu.RUnlock()
-				data := []byte(text)
-				if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
-					data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
-				}
-				term.input.emit(data)
-			}
 		}
 	}
 	// Command chords must not be swallowed or turned into text by the IME.
