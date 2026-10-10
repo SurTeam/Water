@@ -39,6 +39,17 @@ func (w *EbitengineWindow) updateFramePacing() {
 type nativeKeyRepeater struct {
 	next     map[ebiten.Key]time.Time
 	consumed map[ebiten.Key]bool
+	initial  time.Duration
+	repeat   time.Duration
+}
+
+func (r *nativeKeyRepeater) useSystemRepeat(initial, interval time.Duration) {
+	if r.initial == 0 && initial > 0 {
+		r.initial = initial
+	}
+	if r.repeat == 0 && interval > 0 {
+		r.repeat = interval
+	}
 }
 
 // Observe releases even on ticks owned by the IME. A consumed press must not
@@ -73,13 +84,20 @@ func (r *nativeKeyRepeater) ready(k ebiten.Key, pressed bool, now time.Time) boo
 		r.next = make(map[ebiten.Key]time.Time)
 	}
 	next, held := r.next[k]
+	initial, interval := 350*time.Millisecond, 50*time.Millisecond
+	if r.initial > 0 {
+		initial = r.initial
+	}
+	if r.repeat > 0 {
+		interval = r.repeat
+	}
 	if !held {
-		r.next[k] = now.Add(350 * time.Millisecond)
+		r.next[k] = now.Add(initial)
 		return true
 	}
 	if now.Before(next) {
 		return false
 	}
-	r.next[k] = now.Add(50 * time.Millisecond)
+	r.next[k] = now.Add(interval)
 	return true
 }

@@ -1163,7 +1163,11 @@ func (w *EbitengineWindow) nativeKeys(c *WorkspaceClient) {
 		}
 		return 0
 	}) {
-		w.composer.Confirm()
+		// Confirm tears the text session down. Letters never do that, so
+		// repeating it on Backspace and arrows restarts the IME every tick.
+		if w.composition != "" {
+			w.composer.Confirm()
+		}
 		w.key(c, spec)
 	}
 }
@@ -1307,6 +1311,7 @@ func (w *EbitengineWindow) initComposer() {
 	}
 	w.composer.OnComposition = func(comp *textinput.Composition) {
 		w.composition = comp.Text()
+		imeComposing.Store(w.composition != "")
 		if c := w.active(); c != nil {
 			c.layoutMu.Lock()
 			id := c.frameActiveTerminal
@@ -1362,13 +1367,12 @@ func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
 	if !ebiten.IsFocused() {
 		return false, nil
 	}
-	// Composer captures bounds at session start. Refresh an idle session when
-	// the terminal cursor or layout moves; never cancel live marked text.
+	// The platform text session is edge-triggered. Cancelling it because the
+	// caret moved clears every keystroke queued since the previous frame.
+	// Keep the session and only slide its caret rectangle.
 	if w.composition == "" {
-		previous := w.inputCaret
-		opts := w.composer.OnNewSession()
-		if opts == nil || opts.CaretBounds != previous {
-			w.composer.Cancel()
+		if opts := w.composer.OnNewSession(); opts != nil {
+			repositionTextInput(opts.CaretBounds, w.scale)
 		}
 	}
 	handled, err := w.composer.Update()

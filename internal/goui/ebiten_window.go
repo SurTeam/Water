@@ -278,6 +278,8 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 
 func (w *EbitengineWindow) Update() error {
 	defer w.updateFramePacing()
+	ensureTextCommandHook()
+	applySystemKeyRepeat(&w.keyRepeat)
 	if end := traceNativeWork("native.update"); end != nil {
 		defer end()
 	}
@@ -489,6 +491,18 @@ func (w *EbitengineWindow) Update() error {
 	}
 	if err != nil {
 		return err
+	}
+	// Editing keys arrive as text-command events while the IME view owns the
+	// responder chain. Apply them before the physical-key fallback, and never
+	// while a composition is still marked.
+	ensureTextCommandHook()
+	if w.composition == "" {
+		for _, spec := range takeTextCommands() {
+			w.key(c, spec)
+			handled = true
+		}
+	} else {
+		takeTextCommands()
 	}
 	if handled || previousComposition != "" {
 		w.keyRepeat.observe(ebiten.IsKeyPressed, true)
