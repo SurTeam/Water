@@ -9,3 +9,20 @@
 .env.*
 !.env.example
 *.p12
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Editors and coverage
+.idea/
+.vscode/
+*.swp
+coverage.out
+*.coverprofile
