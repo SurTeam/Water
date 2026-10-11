@@ -339,7 +339,7 @@ func (e errGlyphOutOfRange) Error() string {
 
 // apply variation when needed
 func (f *Face) glyphDataFromGlyf(glyph gID) (GlyphOutline, error) {
-	if int(glyph) >= len(f.glyf) {
+	if int(glyph) >= f.glyfCount() {
 		return GlyphOutline{}, errGlyphOutOfRange(glyph)
 	}
 	points := f.getPointsForGlyph(glyph)

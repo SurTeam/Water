@@ -155,6 +155,7 @@ type graphicsParser struct {
 }
 
 func (p *graphicsParser) feed(input []byte) []graphicsEvent {
+	defer p.shrinkIdle()
 	if len(input) == 0 {
 		return nil
 	}
@@ -246,6 +247,24 @@ func (p *graphicsParser) feed(input []byte) []graphicsEvent {
 		})
 	}
 	return events
+}
+
+// shrinkIdle drops spare capacity after a graphic has been consumed. A
+// non-empty buffer is copied only when at least half of a megabyte-or-larger
+// allocation is unused, so a buffer that is still growing is left alone.
+func (p *graphicsParser) shrinkIdle() {
+	n, c := len(p.buffer), cap(p.buffer)
+	if n == 0 {
+		if c > 4096 {
+			p.buffer = nil
+		}
+		return
+	}
+	if c >= n*2 && c-n >= 1<<20 {
+		next := make([]byte, n)
+		copy(next, p.buffer)
+		p.buffer = next
+	}
 }
 
 func hasPotentialGraphicsByte(data []byte) bool {

@@ -4,6 +4,7 @@ package font
 
 import (
 	"bytes"
+	"encoding/binary"
 	"reflect"
 	"runtime"
 	"sync"
@@ -80,6 +81,26 @@ func TestLazyGlyphCacheIsBoundedAndConcurrent(t *testing.T) {
 	wg.Wait()
 	if len(lazy.cache) != lazyGlyphCacheLimit {
 		t.Fatalf("cache retained %d entries", len(lazy.cache))
+	}
+}
+
+func TestLazyGlyphHeaderDoesNotReadEmptySpan(t *testing.T) {
+	raw := make([]byte, 10)
+	binary.BigEndian.PutUint16(raw[2:], 11)
+	binary.BigEndian.PutUint16(raw[4:], 22)
+	binary.BigEndian.PutUint16(raw[6:], 33)
+	binary.BigEndian.PutUint16(raw[8:], 44)
+	headers, lazy := newLazyGlyphTable(raw, []uint32{0, 0, 10})
+	if headers != nil || lazy == nil {
+		t.Fatal("expected a lazy table and no preloaded header slice")
+	}
+	empty, ok := lazy.header(0)
+	if !ok || empty != (tables.Glyph{}) {
+		t.Fatalf("empty span read the next glyph: %+v ok=%v", empty, ok)
+	}
+	got, ok := lazy.header(1)
+	if !ok || got.XMin != 11 || got.YMin != 22 || got.XMax != 33 || got.YMax != 44 {
+		t.Fatalf("header: %+v ok=%v", got, ok)
 	}
 }
 

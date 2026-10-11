@@ -286,7 +286,7 @@ func (f *Face) GlyphVOrigin(glyph GID) (x, y float32) {
 
 	// If and only if `vmtx` is present and it's a `glyf` font,
 	// we use the top phantom point, deduced from vmtx,glyf[,gvar].
-	if !f.vmtx.IsEmpty() && f.glyf != nil {
+	if !f.vmtx.IsEmpty() && f.hasGlyf() {
 		y = f.getVOriginWithVar(gID(glyph))
 		return x, y
 	}
@@ -315,12 +315,19 @@ func (f *Face) getVOriginWithVar(gid gID) float32 {
 }
 
 func (f *Face) getExtentsFromGlyf(glyph gID) (GlyphExtents, bool) {
-	if int(glyph) >= len(f.glyf) {
+	if int(glyph) >= f.glyfCount() {
 		return GlyphExtents{}, false
 	}
 	if f.isVar() { // we have to compute the outline points and apply variations
 		extents, _ := f.getGlyfPoints(glyph, true)
 		return extents, true
+	}
+	if f.lazyGlyf != nil {
+		g, ok := f.lazyGlyf.header(tables.GlyphID(glyph))
+		if !ok {
+			return GlyphExtents{}, false
+		}
+		return getGlyphExtents(g, f.hmtx, glyph), true
 	}
 	return getGlyphExtents(f.glyf[glyph], f.hmtx, glyph), true
 }

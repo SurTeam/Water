@@ -40,28 +40,70 @@ func newLazyGlyphView(raw []byte, offsets []uint32, release func()) (tables.Glyf
 }
 
 func newLazyGlyphTable(raw []byte, offsets []uint32) (tables.Glyf, *lazyGlyphTable) {
-	if len(offsets) == 0 {
+	if !validLazyGlyphOffsets(raw, offsets) {
 		return nil, nil
+	}
+	// Glyph bytes stay unread until a metrics or outline request. The returned
+	// slice is nil on purpose: glyph count comes from the loca offsets.
+	return nil, &lazyGlyphTable{raw: raw, offsets: offsets, cache: make(map[tables.GlyphID]tables.Glyph)}
+}
+
+func validLazyGlyphOffsets(raw []byte, offsets []uint32) bool {
+	if len(offsets) == 0 {
+		return false
 	}
 	if uint64(offsets[len(offsets)-1]) > uint64(len(raw)) {
-		return nil, nil
+		return false
 	}
-	headers := make(tables.Glyf, len(offsets)-1)
-	for i := range headers {
+	for i := 0; i < len(offsets)-1; i++ {
 		start, end := offsets[i], offsets[i+1]
 		if end < start || uint64(end) > uint64(len(raw)) {
-			return nil, nil
+			return false
 		}
-		if start == end {
-			continue
+		if start != end && end-start < 10 {
+			return false
 		}
-		if end-start < 10 {
-			return nil, nil
-		}
-		h := raw[start:end]
-		headers[i] = tables.Glyph{XMin: int16(binary.BigEndian.Uint16(h[2:])), YMin: int16(binary.BigEndian.Uint16(h[4:])), XMax: int16(binary.BigEndian.Uint16(h[6:])), YMax: int16(binary.BigEndian.Uint16(h[8:]))}
 	}
-	return headers, &lazyGlyphTable{raw: raw, offsets: offsets, cache: make(map[tables.GlyphID]tables.Glyph)}
+	return true
+}
+
+// header reads the 10-byte glyf header for one glyph. An empty loca span has
+// no bytes and returns a zero glyph without touching the following record.
+func (l *lazyGlyphTable) header(gid tables.GlyphID) (tables.Glyph, bool) {
+	if l == nil || int(gid)+1 >= len(l.offsets) {
+		return tables.Glyph{}, false
+	}
+	start, end := l.offsets[gid], l.offsets[int(gid)+1]
+	if start == end {
+		return tables.Glyph{}, true
+	}
+	if end < start || int(end) > len(l.raw) || end-start < 10 {
+		return tables.Glyph{}, false
+	}
+	h := l.raw[start : start+10]
+	return tables.Glyph{
+		XMin: int16(binary.BigEndian.Uint16(h[2:])),
+		YMin: int16(binary.BigEndian.Uint16(h[4:])),
+		XMax: int16(binary.BigEndian.Uint16(h[6:])),
+		YMax: int16(binary.BigEndian.Uint16(h[8:])),
+	}, true
+}
+
+func (f *Font) glyfCount() int {
+	if f == nil {
+		return 0
+	}
+	if f.lazyGlyf != nil {
+		if n := len(f.lazyGlyf.offsets); n > 0 {
+			return n - 1
+		}
+		return 0
+	}
+	return len(f.glyf)
+}
+
+func (f *Font) hasGlyf() bool {
+	return f != nil && (f.lazyGlyf != nil || len(f.glyf) > 0)
 }
 
 func (f *Font) glyphOutline(gid tables.GlyphID) tables.Glyph {

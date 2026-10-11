@@ -22,6 +22,28 @@ func tinyPNG(t *testing.T) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
+func TestGraphicsParserDropsIdleCapacity(t *testing.T) {
+	var parser graphicsParser
+	payload := bytes.Repeat([]byte("A"), 1<<20)
+	chunk := append(append([]byte("\x1b_G"), payload...), []byte("\x1b\\")...)
+	events := parser.feed(chunk)
+	if len(events) != 1 || events[0].kind != graphicsKitty {
+		t.Fatalf("events: %#v", events)
+	}
+	if cap(parser.buffer) != 0 {
+		t.Fatalf("idle cap = %d", cap(parser.buffer))
+	}
+
+	parser.buffer = make([]byte, 10, 2<<20)
+	copy(parser.buffer, []byte("0123456789"))
+	if events = parser.feed(nil); len(events) != 0 {
+		t.Fatalf("empty feed produced events: %#v", events)
+	}
+	if string(parser.buffer) != "0123456789" || cap(parser.buffer) != 10 {
+		t.Fatalf("live prefix cap=%d body=%q", cap(parser.buffer), parser.buffer)
+	}
+}
+
 func TestGraphicsParserSurvivesSplitKittySequence(t *testing.T) {
 	var parser graphicsParser
 	if events:=parser.feed([]byte("prefix\x1b_Ga=T;"));len(events)!=0{
