@@ -17,15 +17,16 @@ import (
 )
 
 const (
-	defaultReplayBytes   = 8 * 1024 * 1024
-	readBlockBytes       = 128 * 1024
-	rawReadQueueCapacity = 64
-	idleReadCacheBlocks  = 2
-	outputBatchIdle      = time.Millisecond
-	outputBatchMaxAge    = 5 * time.Millisecond
-	replayEventOverhead  = 64
-	exitedTerminalLimit  = 32
-	exitedReplayLimit    = 8 * 1024 * 1024
+	defaultScrollbackLines = 2000
+	readBlockBytes         = 128 * 1024
+	rawReadQueueCapacity   = 64
+	idleReadCacheBlocks    = 2
+	outputBatchIdle        = time.Millisecond
+	outputBatchMaxAge      = 5 * time.Millisecond
+	replayEventOverhead    = 64
+	exitedTerminalLimit    = 32
+	exitedReplayLimit      = 8 * 1024 * 1024
+	coalesceReplayBytes    = 32 * 1024
 )
 
 type Terminal struct {
@@ -38,13 +39,18 @@ type Terminal struct {
 	shellIntegrationDir   string
 	cellWidth, cellHeight int // owned by the ordered PTY reader
 
-	mu          sync.RWMutex
-	size        goprotocol.TerminalSize
-	replay      []goprotocol.TerminalEvent
-	replayBytes int
-	replayLimit int
-	subs        map[uint64]*subscriber
-	nextSub     uint64
+	mu              sync.RWMutex
+	size            goprotocol.TerminalSize
+	replay          []goprotocol.TerminalEvent
+	replayBytes     int
+	scrollbackLines int
+	outputNewlines  int
+	altScreen       bool
+	altReplay       []byte
+	altSeq          uint64
+	scanHold        []byte
+	subs            map[uint64]*subscriber
+	nextSub         uint64
 
 	seq              atomic.Uint64
 	closed           chan struct{}
@@ -60,29 +66,32 @@ type exitedTerminal struct {
 }
 
 type Registry struct {
-	mu          sync.RWMutex
-	terms       map[uuid.UUID]*Terminal
-	replayLimit int
-	exited      map[uuid.UUID]exitedTerminal
-	exitOrder   []uuid.UUID
-	exitedBytes int
+	mu              sync.RWMutex
+	terms           map[uuid.UUID]*Terminal
+	scrollbackLines int
+	exited          map[uuid.UUID]exitedTerminal
+	exitOrder       []uuid.UUID
+	exitedBytes     int
 }
 
 func NewRegistry() *Registry {
-	return NewRegistryWithReplayLimit(defaultReplayBytes)
+	return NewRegistryWithScrollback(defaultScrollbackLines)
 }
 
-func NewRegistryWithReplayLimit(limit int) *Registry {
-	if limit < 1024*1024 {
-		limit = 1024 * 1024
+// NewRegistryWithScrollback keeps enough primary-buffer replay to rebuild the
+// GUI's scrollback. Alternate-screen redraws are stored separately and cannot
+// evict that history.
+func NewRegistryWithScrollback(lines int) *Registry {
+	if lines < 1 {
+		lines = defaultScrollbackLines
 	}
-	if limit > defaultReplayBytes {
-		limit = defaultReplayBytes
+	if lines > 10_000 {
+		lines = 10_000
 	}
 	return &Registry{
-		terms:       make(map[uuid.UUID]*Terminal),
-		exited:      make(map[uuid.UUID]exitedTerminal),
-		replayLimit: limit,
+		terms:           make(map[uuid.UUID]*Terminal),
+		exited:          make(map[uuid.UUID]exitedTerminal),
+		scrollbackLines: lines,
 	}
 }
 
@@ -129,7 +138,7 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		cmd:                 cmd,
 		ptmx:                ptmx,
 		size:                size,
-		replayLimit:         r.replayLimit,
+		scrollbackLines:     r.scrollbackLines,
 		subs:                make(map[uint64]*subscriber),
 		closed:              make(chan struct{}),
 		readerDone:          make(chan struct{}),
@@ -303,10 +312,32 @@ func (t *Terminal) ResizeWithCells(size goprotocol.TerminalSize, cellWidth, cell
 
 func (t *Terminal) Replay() []goprotocol.TerminalEvent {
 	t.mu.RLock()
+	defer t.mu.RUnlock()
 	out := make([]goprotocol.TerminalEvent, len(t.replay))
 	copy(out, t.replay)
-	t.mu.RUnlock()
-	return out
+	if !t.altScreen || len(t.altReplay) == 0 {
+		return out
+	}
+	alt := goprotocol.TerminalEvent{
+		Kind: goprotocol.OutputEvent, Seq: t.altSeq, Size: t.size,
+		Data: append([]byte(nil), t.altReplay...),
+	}
+	for i, ev := range out {
+		if ev.Seq == t.altSeq && ev.Kind == goprotocol.OutputEvent {
+			merged := make([]byte, len(ev.Data)+len(alt.Data))
+			copy(merged, ev.Data)
+			copy(merged[len(ev.Data):], alt.Data)
+			out[i].Data = merged
+			return out
+		}
+		if ev.Seq > t.altSeq {
+			out = append(out, goprotocol.TerminalEvent{})
+			copy(out[i+1:], out[i:])
+			out[i] = alt
+			return out
+		}
+	}
+	return append(out, alt)
 }
 
 type subscriber struct {
@@ -721,14 +752,8 @@ func (t *Terminal) waitLoop() {
 func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 	ev.Seq = t.seq.Add(1)
 	t.mu.Lock()
-	t.replayBytes += retainedEventBytes(ev)
-	t.replay = append(t.replay, ev)
-	for t.replayBytes > t.replayLimit && len(t.replay) > 1 {
-		old := t.replay[0]
-		t.replayBytes -= retainedEventBytes(old)
-		t.replay[0] = goprotocol.TerminalEvent{}
-		t.replay = t.replay[1:]
-	}
+	t.storeLocked(ev)
+	t.trimReplayLocked()
 	subs := make([]*subscriber, 0, len(t.subs))
 	for _, sub := range t.subs {
 		subs = append(subs, sub)

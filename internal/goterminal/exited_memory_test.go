@@ -12,7 +12,7 @@ import (
 
 // Populate real replay entries without allocating PTYs for the cache policy test.
 func cacheExitedReplay(r *Registry, data []byte) uuid.UUID {
-	t := &Terminal{ID: uuid.New(), replayLimit: defaultReplayBytes}
+	t := &Terminal{ID: uuid.New(), scrollbackLines: defaultScrollbackLines}
 	r.terms[t.ID] = t
 	t.publish(goprotocol.TerminalEvent{Kind: goprotocol.OutputEvent, Data: data})
 	code := int32(0)

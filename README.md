@@ -27,7 +27,7 @@ For setup, configuration, remote connections, control commands, tests, cross-bui
 
 ## Project status
 
-The latest release, [Water 0.4.6](docs/releases/v0.4.6.md), stops static fonts from reading every glyph header at load, releases idle graphics-parser buffers, and tracks macOS titlebar drags natively.
+The latest release, [Water 0.4.7](docs/releases/v0.4.7.md), keeps server replay to the scrollback line count, so alternate-screen redraws no longer crowd out normal terminal history.
 
 Water is an active workbench rather than a compatibility layer for an existing terminal app. The server owns sessions and bounded terminal replay; each client attaches its own emulator and UI state. That separation is what enables persistent remote sessions, reliable reconnect, bounded output memory, and deterministic control/API tests.
 

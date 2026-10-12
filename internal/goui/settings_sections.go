@@ -10,7 +10,7 @@ func settingsSection(f settingsField) string {
 		if strings.Contains(f.name, "Hyperlink") {
 			return "Links and downloads"
 		}
-		if strings.Contains(f.name, "Scrollback") || f.name == "ReplayHistoryBytes" {
+		if strings.Contains(f.name, "Scrollback") {
 			return "History and memory"
 		}
 		return "Font and text"

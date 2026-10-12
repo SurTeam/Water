@@ -270,10 +270,6 @@ func settingsLabel(name string) string {
 		return "Host row padding"
 	case "SidebarAgentPadding":
 		return "Agent list padding"
-	case "MaxTotalScrollbackBytes":
-		return "Scrollback memory limit (bytes)"
-	case "ReplayHistoryBytes":
-		return "Reconnect history (bytes)"
 	case "DefaultColumns":
 		return "New terminal columns"
 	case "DefaultLines":
@@ -302,7 +298,7 @@ func settingsApplyKind(f settingsField) string {
 	}
 	if f.group == "Terminal" {
 		switch f.name {
-		case "DefaultColumns", "DefaultLines", "ScrollbackLines", "InactiveScrollbackLines", "MaxTotalScrollbackBytes", "ReplayHistoryBytes":
+		case "DefaultColumns", "DefaultLines", "ScrollbackLines", "InactiveScrollbackLines":
 			return "Restart"
 		}
 	}

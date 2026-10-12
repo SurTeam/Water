@@ -94,7 +94,7 @@ var chineseFields = map[string]string{
 	"Detached": "后台服务", "AutoStart": "自动启动服务", "DetachOnQuit": "退出后保留服务", "SocketPath": "服务套接字路径", "Program": "Shell 程序", "Args": "Shell 参数",
 	"MouseReporting": "鼠标事件上报", "BracketedPaste": "括号粘贴模式", "Selection": "文本选择",
 	"DefaultColumns": "新终端列数", "DefaultLines": "新终端行数", "ScrollbackLines": "滚动历史行数", "InactiveScrollbackLines": "非活动终端历史行数",
-	"MaxTotalScrollbackBytes": "历史内存上限（字节）", "ReplayHistoryBytes": "重连历史容量（字节）", "FontFamily": "字体", "FontSize": "字号", "LineHeight": "行高",
+	"FontFamily": "字体", "FontSize": "字号", "LineHeight": "行高",
 	"Ligatures": "字体连字", "Hyperlinks": "超链接", "HyperlinkCommandClick": "按 Command 点击超链接", "RemoteHyperlinkAutoDownload": "自动下载远程链接文件", "HyperlinkDownloadDirectory": "链接文件下载目录",
 	"SidebarVisible": "显示侧栏", "SidebarShowAgentCount": "显示 Agent 数量", "DimInactivePanes": "调暗非活动窗格", "TabBarVerticalWheelScroll": "标签栏支持纵向滚轮",
 	"WorkspaceNavigationAcrossHosts": "跨主机切换工作区", "SidebarMinWidth": "侧栏最小宽度", "SidebarMaxWidth": "侧栏最大宽度", "SidebarResizeHandleWidth": "侧栏缩放手柄宽度",

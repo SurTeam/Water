@@ -15,10 +15,6 @@ const (
 	DefaultLines                   = 24
 	DefaultScrollbackLines         = 2000
 	DefaultInactiveScrollbackLines = 500
-	DefaultMaxTotalScrollbackBytes = 64 * 1024 * 1024
-	DefaultReplayHistoryBytes      = 8 * 1024 * 1024
-	MinReplayHistoryBytes          = 1 * 1024 * 1024
-	MaxReplayHistoryBytes          = 8 * 1024 * 1024
 	MaxScrollbackLines             = 10_000
 )
 
@@ -76,8 +72,6 @@ type TerminalConfig struct {
 	DefaultLines                int     `json:"default_lines,omitempty"`
 	ScrollbackLines             int     `json:"scrollback_lines"`
 	InactiveScrollbackLines     int     `json:"inactive_scrollback_lines"`
-	MaxTotalScrollbackBytes     int     `json:"max_total_scrollback_bytes"`
-	ReplayHistoryBytes          int     `json:"replay_history_bytes"`
 	FontFamily                  string  `json:"font_family"`
 	FontSize                    float32 `json:"font_size"`
 	LineHeight                  float32 `json:"line_height"`
@@ -260,8 +254,6 @@ func Default() AppConfig {
 			DefaultLines:               DefaultLines,
 			ScrollbackLines:            DefaultScrollbackLines,
 			InactiveScrollbackLines:    DefaultInactiveScrollbackLines,
-			MaxTotalScrollbackBytes:    DefaultMaxTotalScrollbackBytes,
-			ReplayHistoryBytes:         DefaultReplayHistoryBytes,
 			FontFamily:                 "Sarasa Term SC",
 			FontSize:                   16,
 			LineHeight:                 18,
@@ -378,7 +370,6 @@ func (c AppConfig) Normalized() AppConfig {
 	if c.Terminal.InactiveScrollbackLines > c.Terminal.ScrollbackLines {
 		c.Terminal.InactiveScrollbackLines = c.Terminal.ScrollbackLines
 	}
-	c.Terminal.ReplayHistoryBytes = clamp(c.Terminal.ReplayHistoryBytes, MinReplayHistoryBytes, MaxReplayHistoryBytes)
 	c.Terminal.CursorStyle = strings.ToLower(strings.TrimSpace(c.Terminal.CursorStyle))
 	switch c.Terminal.CursorStyle {
 	case "block", "bar", "underline":

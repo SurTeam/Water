@@ -22,7 +22,7 @@ func TestLoadKeepsDefaultsForPartialOverrides(t *testing.T) {
 	if cfg.Terminal.ScrollbackLines != 321 || cfg.Terminal.DefaultColumns != 123 {
 		t.Fatalf("terminal overrides not applied: %#v", cfg.Terminal)
 	}
-	if cfg.Terminal.DefaultLines != DefaultLines || cfg.Terminal.ReplayHistoryBytes != DefaultReplayHistoryBytes {
+	if cfg.Terminal.DefaultLines != DefaultLines || cfg.Terminal.FontSize != 16 {
 		t.Fatalf("terminal defaults were lost: %#v", cfg.Terminal)
 	}
 	if cfg.Shell.Program != "/bin/sh" || len(cfg.Shell.Args) != 1 || cfg.Shell.Args[0] != "-l" {
@@ -41,17 +41,17 @@ func TestLoadKeepsDefaultsForPartialOverrides(t *testing.T) {
 
 func TestLoadWrappedOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(path, []byte(`{"overrides":{"terminal":{"replay_history_bytes":2097152}}}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"overrides":{"terminal":{"scrollback_lines":321}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Terminal.ReplayHistoryBytes != 2*1024*1024 {
-		t.Fatalf("wrapped override not applied: %d", cfg.Terminal.ReplayHistoryBytes)
+	if cfg.Terminal.ScrollbackLines != 321 {
+		t.Fatalf("wrapped override not applied: %d", cfg.Terminal.ScrollbackLines)
 	}
-	if cfg.Terminal.ScrollbackLines != DefaultScrollbackLines {
+	if cfg.Terminal.DefaultLines != DefaultLines || cfg.Terminal.FontSize != 16 {
 		t.Fatal("wrapped override lost defaults")
 	}
 }
@@ -63,16 +63,12 @@ func TestNormalizeClampsTerminalLimits(t *testing.T) {
 	cfg.Startup.WindowMinRows = 1
 	cfg.Terminal.ScrollbackLines = 5
 	cfg.Terminal.InactiveScrollbackLines = 100
-	cfg.Terminal.ReplayHistoryBytes = 1
 	cfg = cfg.Normalized()
 	if cfg.Terminal.DefaultColumns != 512 || cfg.Terminal.DefaultLines != 1 {
 		t.Fatalf("geometry not clamped: %#v", cfg.Terminal)
 	}
 	if cfg.Terminal.InactiveScrollbackLines != 5 {
 		t.Fatalf("inactive history not bounded: %#v", cfg.Terminal)
-	}
-	if cfg.Terminal.ReplayHistoryBytes != MinReplayHistoryBytes {
-		t.Fatalf("replay limit not clamped: %d", cfg.Terminal.ReplayHistoryBytes)
 	}
 }
 

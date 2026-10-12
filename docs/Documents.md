@@ -2,7 +2,7 @@
 
 This is the operational reference for contributors and users who need commands. The product overview is in [README.md](../README.md); implementation boundaries are in [ARCHITECTURE.md](../ARCHITECTURE.md); non-negotiable editing and release rules are in [AGENTS.md](../AGENTS.md).
 
-Current release: [0.4.6](releases/v0.4.6.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
+Current release: [0.4.7](releases/v0.4.7.md). GUI performance measurements and their limits are recorded in [the CPU pipeline report](cpu-pipeline-profile-2026-10-04.md), [the memory and input report](memory-input-profile-2026-10-04.md), [the GUI memory report](gui-memory-fix-2026-10-05.md), and [the scrolling optimization report](scrolling-optimization-2026-10-05.md).
 
 Server Web direct access, GUI/SSH QR pairing, TLS configuration and `water ctl server web` commands are documented in [Server Web access](server-web.md).
 
@@ -255,7 +255,10 @@ records the idle PTY allocation fix and native Retina cursor/IME checks.
 `water ctl debug memory` reports Go heap allocated, in-use, idle and released
 bytes separately from retained PTY replay. `terminal_count` counts active PTYs;
 `exited_terminal_count` and `exited_replay_bytes` report the recent-exit cache.
-Natural exits retain complete replay for `terminal.wait_exit` and
+Active replay keeps primary-buffer history for the configured scrollback
+lines plus the current viewport. Alternate-screen redraws are not scrollback:
+they cannot evict the primary history, and leaving the alternate screen restores
+it. Natural exits retain that trimmed replay for `terminal.wait_exit` and
 `terminal.snapshot`, up to 32 terminals and 8 MiB total replay accounting. The
 oldest exits are evicted when either limit is exceeded; queries for evicted IDs
 return terminal-not-found. `retained_replay_bytes` includes active and cached

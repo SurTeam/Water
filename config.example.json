@@ -76,10 +76,8 @@
   "terminal": {
     "cursor_style": "block",
     "cursor_blink": true,
-    "replay_history_bytes": 8388608,
     "scrollback_lines": 2000,
     "inactive_scrollback_lines": 500,
-    "max_total_scrollback_bytes": 67108864,
     "font_family": "Sarasa Term SC",
     "font_size": 16.0,
     "line_height": 18.0,
