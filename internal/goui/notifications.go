@@ -15,6 +15,7 @@ type notificationRun struct {
 	name      string
 	startedAt time.Time
 	notified  bool
+	pane      uuid.UUID
 }
 
 type foregroundCommand struct {
@@ -23,7 +24,10 @@ type foregroundCommand struct {
 }
 
 // Baseline the first snapshot, then report meaningful Agent transitions and
-// long-running work only once per process run.
+// long-running work. Shell long-run notifications only fire when the shell's
+// foreground state actually changes after a command has been running long
+// enough (e.g. the prompt returns after a long command finishes), not merely
+// because a command has been running a while.
 func (w *EbitengineWindow) processNotifications(c *WorkspaceClient) {
 	w.processNotificationsAt(c, false, time.Now())
 }
@@ -171,6 +175,7 @@ func updateAgentLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 
 func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, hosts []nativeHost, agents map[uuid.UUID]nativeAgent, activeConnection uuid.UUID, windowFocused bool, now time.Time, thresholdSeconds int, notify func(string) bool) map[string]notificationRun {
 	next := make(map[string]notificationRun)
+	currentKeys := make(map[string]bool)
 	for _, host := range hosts {
 		if host.entry.Status != "" && host.entry.Status != "connected" && host.entry.Status != "online" {
 			continue
@@ -180,18 +185,59 @@ func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 				continue
 			}
 			key := host.entry.ID.String() + ":" + command.terminal.String()
+			currentKeys[key] = true
 			run := w.notificationShellRuns[key]
-			if run.startedAt.IsZero() || run.name != command.name {
-				run = notificationRun{name: command.name, startedAt: now}
+			var previous *notificationRun
+			if !run.startedAt.IsZero() && run.name != command.name {
+				// The foreground command name changed: the shell's state
+				// changed. Remember the previous run so we can check whether
+				// it had aged past the threshold before the change.
+				previous = &run
+				run = notificationRun{name: command.name, startedAt: now, pane: command.pane}
+			} else if run.startedAt.IsZero() {
+				// First observation of this terminal's foreground command:
+				// establish the baseline; no state change yet.
+				run = notificationRun{name: command.name, startedAt: now, pane: command.pane}
 			}
 			next[key] = run
-			if thresholdSeconds <= 0 || run.notified || now.Sub(run.startedAt) < time.Duration(thresholdSeconds)*time.Second || windowFocused || paneIsFocused(hosts, host.entry.ID, command.pane, activeConnection) {
+			// Notify only when the shell's foreground state actually changed
+			// (previous != nil) and the previous command had been running
+			// past the threshold before the change. A command that has simply
+			// been running for a while, with no state change, does not notify.
+			if previous == nil {
 				continue
 			}
-			if notify(c.trf("Long-running command: %s", command.name)) {
+			threshold := time.Duration(thresholdSeconds) * time.Second
+			if thresholdSeconds <= 0 || previous.notified || now.Sub(previous.startedAt) < threshold ||
+				windowFocused || paneIsFocused(hosts, host.entry.ID, command.pane, activeConnection) {
+				continue
+			}
+			if notify(c.trf("Long-running command: %s", previous.name)) {
 				run.notified = true
 				next[key] = run
 			}
+		}
+	}
+	// Detect commands that disappeared (exited back to the shell prompt or a
+	// new interactive shell took over). A long-running command finishing is
+	// itself a shell state change and should notify.
+	for key, run := range w.notificationShellRuns {
+		if currentKeys[key] {
+			continue
+		}
+		if run.notified || thresholdSeconds <= 0 || now.Sub(run.startedAt) < time.Duration(thresholdSeconds)*time.Second {
+			continue
+		}
+		connection, _, _ := strings.Cut(key, ":")
+		connectionID := nativeUUID(connection)
+		if windowFocused || paneIsFocused(hosts, connectionID, run.pane, activeConnection) {
+			continue
+		}
+		if notify(c.trf("Long-running command: %s", run.name)) {
+			// Keep the run with notified=true so we don't re-notify if the
+			// command reappears briefly.
+			run.notified = true
+			next[key] = run
 		}
 	}
 	return next

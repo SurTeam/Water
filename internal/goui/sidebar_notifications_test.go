@@ -306,9 +306,28 @@ func TestBackgroundShellCommandNotificationRequiresUnfocusedPaneAndWindow(t *tes
 	}
 	view.state.FocusedPane = &focused
 	window.processNotificationsAt(view, false, start.Add(4*time.Second))
+	// The command has been running past the threshold, but the shell's
+	// foreground state has not changed since the run started, so no
+	// notification is emitted yet.
 	window.processNotificationsAt(view, false, start.Add(5*time.Second))
+	if len(platform.messages) != 0 {
+		t.Fatalf("long-running but unchanged command notified: %v", platform.messages)
+	}
+	// The shell state changes: the long command finishes and the interactive
+	// shell prompt returns (the foreground command disappears from the list)
+	// after the run had already aged past the threshold: this is when the
+	// notification fires.
+	treePrompt, err := json.Marshal(map[string]any{
+		"type": "leaf", "pane_id": pane,
+		"terminal": map[string]any{"summary": map[string]any{"terminal_id": terminal, "process": "running", "process_name": "bash"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.state.Workspaces[0].Tabs[0].Tree = treePrompt
+	window.processNotificationsAt(view, false, start.Add(6*time.Second))
 	if len(platform.messages) != 1 || platform.messages[0] != "Water: Long-running command: sleep" {
-		t.Fatalf("background command notifications=%v", platform.messages)
+		t.Fatalf("shell state change notifications=%v", platform.messages)
 	}
 }
 
