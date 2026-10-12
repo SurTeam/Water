@@ -136,6 +136,7 @@ type EbitengineWindow struct {
 	continuousInput         atomic.Bool
 	frameWake               chan struct{}
 	frameActivity           atomic.Int64
+	visibleTerminals        atomic.Pointer[map[uuid.UUID]struct{}]
 	keyRepeat               nativeKeyRepeater
 	layoutRevision          uint64
 	drawnRevision           uint64
@@ -426,7 +427,7 @@ func (w *EbitengineWindow) Update() error {
 	if nativeHoverChanged(c.hitRegions, w.lastMouse, w.mouse) || w.size != w.lastFrameSize || w.scale != w.lastFrameScale || focused != w.lastFocus || fontGeneration != w.lastFontGeneration || windowDragNeedsFrames(w.drag) {
 		w.Invalidate()
 	}
-	if blink != w.lastBlink {
+	if blink != w.lastBlink && w.focusedCursorBlinks(c) {
 		w.frameRevision.Add(1)
 	}
 	w.lastFrameSize, w.lastFrameScale, w.lastFocus, w.lastBlink, w.lastFontGeneration = w.size, w.scale, focused, blink, fontGeneration

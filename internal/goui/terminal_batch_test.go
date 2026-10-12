@@ -161,6 +161,40 @@ func TestInputFollowsViewportWithoutWaitingForOutput(t *testing.T) {
 	}
 }
 
+func TestHiddenTerminalOutputDoesNotWakeWindow(t *testing.T) {
+	hidden := uuid.New()
+	visible := uuid.New()
+	emu := govt.New(20, 4, 100)
+	defer emu.Close()
+	term := &terminalClient{id: hidden, emu: emu}
+	wake := make(chan struct{}, 4)
+	window := &EbitengineWindow{frameWake: wake}
+	shown := map[uuid.UUID]struct{}{visible: {}}
+	window.visibleTerminals.Store(&shown)
+	c := &WorkspaceClient{terminals: map[uuid.UUID]*terminalClient{hidden: term}}
+	c.native.Store(window)
+	c.applyTerminalEvents([]goclient.TerminalPush{{TerminalID: hidden, Event: goprotocol.TerminalEvent{Seq: 1, Kind: goprotocol.OutputEvent, Data: []byte("hidden")}}})
+	select {
+	case <-wake:
+		t.Fatal("hidden terminal scheduled a frame")
+	default:
+	}
+	if !term.viewStale.Load() {
+		t.Fatal("hidden terminal did not keep a stale view")
+	}
+	shown = map[uuid.UUID]struct{}{hidden: {}}
+	window.visibleTerminals.Store(&shown)
+	c.applyTerminalEvents([]goclient.TerminalPush{{TerminalID: hidden, Event: goprotocol.TerminalEvent{Seq: 2, Kind: goprotocol.OutputEvent, Data: []byte(" shown")}}})
+	select {
+	case <-wake:
+	default:
+		t.Fatal("visible terminal did not schedule a frame")
+	}
+	if term.viewStale.Load() {
+		t.Fatal("visible publish left the view stale")
+	}
+}
+
 func TestTerminalBatchPreservesOrderAndDeduplicates(t *testing.T) {
 	id := uuid.New()
 	emu := govt.New(20, 4, 100)

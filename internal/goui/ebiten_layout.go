@@ -119,6 +119,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
 	defer w.publishDragTargets(c)
+	defer w.noteVisibleTerminals(c)
 	c.pollSettingsSave()
 	c.mu.RLock()
 	state, connectionError := c.state, c.connectionError
@@ -463,6 +464,7 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 	if syncTerminalColors(term) {
 		go c.flushVTResponses(term)
 	}
+	ensureTerminalView(term)
 	cell := measureNativeCell(w.terminalFaces(c), w.dp(float64(cfg.Terminal.LineHeight)))
 	cw, lh := cell.width, cell.height
 	// Keep the terminal grid centered within the remaining fraction of a cell.

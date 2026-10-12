@@ -3,6 +3,7 @@ package goui
 import (
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -13,6 +14,54 @@ func outputPublicationDelay(published, now time.Time) time.Duration {
 		return 0
 	}
 	return max(0, time.Second/30-now.Sub(published))
+}
+
+// noteVisibleTerminals publishes the terminals this window is actually drawing.
+// Output for anything else must not schedule a frame.
+func (w *EbitengineWindow) noteVisibleTerminals(c *WorkspaceClient) {
+	ids := make(map[uuid.UUID]struct{})
+	if v := w.views[c]; v != nil {
+		for _, pane := range v.panes {
+			if pane.term != nil {
+				ids[pane.term.id] = struct{}{}
+			}
+		}
+	}
+	w.visibleTerminals.Store(&ids)
+}
+
+func (w *EbitengineWindow) focusedCursorBlinks(c *WorkspaceClient) bool {
+	if c == nil || !ebiten.IsFocused() {
+		return false
+	}
+	v := w.views[c]
+	if v == nil {
+		return false
+	}
+	for _, pane := range v.panes {
+		if pane.term == nil {
+			continue
+		}
+		pane.term.mu.RLock()
+		blink := pane.term.snapshot.CursorBlink
+		pane.term.mu.RUnlock()
+		if blink {
+			return true
+		}
+	}
+	return false
+}
+
+func ensureTerminalView(term *terminalClient) {
+	if term == nil || !term.viewStale.Load() {
+		return
+	}
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	if term.emu == nil || !term.viewStale.Swap(false) {
+		return
+	}
+	term.snapshot = term.emu.FrameSnapshot()
 }
 
 // Active input/output follows display presentation rather than two free-running

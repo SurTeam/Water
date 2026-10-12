@@ -144,6 +144,18 @@ type pendingSessionFrame struct {
 	message goprotocol.WireMessage
 	cost    int
 	written chan error
+	staged  bool
+}
+
+// stagedTerminal is one coalesced terminal.resize or terminal.send_bytes.
+// Adjacent operations of the same kind merge, so a busy PTY cannot fill the
+// session queue and tear the GUI connection down.
+type stagedTerminal struct {
+	id                           uuid.UUID
+	kind                         string
+	data                         []byte
+	columns, lines, cellW, cellH int
+	enqueued                     bool
 }
 
 type Session struct {
@@ -154,6 +166,8 @@ type Session struct {
 	writeMu       sync.Mutex
 	outbound      chan pendingSessionFrame
 	queuedBytes   int
+	staged        []stagedTerminal
+	stagedBytes   int
 	errMu         sync.Mutex
 	terminalError error
 	nextID        atomic.Uint64
@@ -347,6 +361,9 @@ func (s *Session) failReplies() {
 }
 
 func (s *Session) DispatchAsync(command any) error {
+	if handled, err := s.stageTerminal(command); handled {
+		return err
+	}
 	requestID := s.nextID.Add(1)
 	params, err := json.Marshal(map[string]any{"command": command})
 	if err != nil {
@@ -360,6 +377,148 @@ func (s *Session) DispatchAsync(command any) error {
 		Params:          params,
 	}
 	return s.enqueue(req, false)
+}
+
+// stageTerminal merges PTY writes and resizes ahead of the socket queue.
+// One frame stays in flight; everything behind it collapses. Saturation keeps
+// the session alive and refuses only the overflow, instead of closing the GUI.
+func (s *Session) stageTerminal(command any) (bool, error) {
+	if s.Diagnostic {
+		return false, nil
+	}
+	m, ok := command.(map[string]any)
+	if !ok {
+		return false, nil
+	}
+	kind, _ := m["type"].(string)
+	if kind != "terminal.send_bytes" && kind != "terminal.resize" {
+		return false, nil
+	}
+	id, ok := commandUUID(m["terminal_id"])
+	if !ok {
+		return false, nil
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	select {
+	case <-s.done:
+		return true, errors.New("session closed")
+	default:
+	}
+	switch kind {
+	case "terminal.send_bytes":
+		data := commandBytes(m["bytes"])
+		if s.stagedBytes+len(data) > sessionSendQueueBytes {
+			return true, ErrSessionBackpressure
+		}
+		if n := len(s.staged); n > 0 && !s.staged[n-1].enqueued && s.staged[n-1].kind == "bytes" && s.staged[n-1].id == id {
+			s.staged[n-1].data = append(s.staged[n-1].data, data...)
+		} else {
+			s.staged = append(s.staged, stagedTerminal{id: id, kind: "bytes", data: append([]byte(nil), data...)})
+		}
+		s.stagedBytes += len(data)
+	case "terminal.resize":
+		op := stagedTerminal{id: id, kind: "resize", columns: commandInt(m["columns"]), lines: commandInt(m["lines"]), cellW: commandInt(m["cell_width"]), cellH: commandInt(m["cell_height"])}
+		if n := len(s.staged); n > 0 && !s.staged[n-1].enqueued && s.staged[n-1].kind == "resize" && s.staged[n-1].id == id {
+			s.staged[n-1] = op
+		} else {
+			s.staged = append(s.staged, op)
+		}
+	}
+	s.flushStagedLocked()
+	return true, nil
+}
+
+func (s *Session) flushStagedLocked() {
+	if len(s.staged) == 0 || s.staged[0].enqueued {
+		return
+	}
+	op := s.staged[0]
+	if op.kind == "bytes" && len(op.data) > 128*1024 {
+		chunk := append([]byte(nil), op.data[:128*1024]...)
+		rest := append([]byte(nil), op.data[128*1024:]...)
+		s.staged[0].data = chunk
+		inserted := make([]stagedTerminal, 0, len(s.staged)+1)
+		inserted = append(inserted, s.staged[0], stagedTerminal{id: op.id, kind: "bytes", data: rest})
+		inserted = append(inserted, s.staged[1:]...)
+		s.staged = inserted
+		op = s.staged[0]
+	}
+	params, err := json.Marshal(map[string]any{"command": stagedCommand(op)})
+	if err != nil {
+		return
+	}
+	message := goprotocol.WireMessage{BuildVariant: s.Build, ProtocolVersion: goprotocol.ProtocolVersion, RequestID: s.nextID.Add(1), Method: "command.dispatch", Params: params}
+	cost := len(message.Params) + len(message.Method) + len(message.BuildVariant) + 256
+	if cost > sessionSendQueueBytes-s.queuedBytes || len(s.outbound) == cap(s.outbound) {
+		return
+	}
+	s.staged[0].enqueued = true
+	s.outbound <- pendingSessionFrame{message: message, cost: cost, staged: true}
+	s.queuedBytes += cost
+}
+
+func stagedCommand(op stagedTerminal) map[string]any {
+	if op.kind == "resize" {
+		return map[string]any{"type": "terminal.resize", "terminal_id": op.id, "columns": op.columns, "lines": op.lines, "cell_width": op.cellW, "cell_height": op.cellH}
+	}
+	return map[string]any{"type": "terminal.send_bytes", "terminal_id": op.id, "bytes": bytesAsInts(op.data)}
+}
+
+func bytesAsInts(data []byte) []int {
+	out := make([]int, len(data))
+	for i, b := range data {
+		out[i] = int(b)
+	}
+	return out
+}
+
+func commandUUID(v any) (uuid.UUID, bool) {
+	switch id := v.(type) {
+	case uuid.UUID:
+		return id, id != uuid.Nil
+	case string:
+		parsed, err := uuid.Parse(id)
+		return parsed, err == nil && parsed != uuid.Nil
+	default:
+		return uuid.Nil, false
+	}
+}
+
+func commandInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int32:
+		return int(n)
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func commandBytes(v any) []byte {
+	switch b := v.(type) {
+	case []byte:
+		return append([]byte(nil), b...)
+	case []int:
+		out := make([]byte, len(b))
+		for i, n := range b {
+			out[i] = byte(n)
+		}
+		return out
+	case []any:
+		out := make([]byte, len(b))
+		for i, n := range b {
+			out[i] = byte(commandInt(n))
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func (s *Session) Dispatch(command any, out any) error {
@@ -514,13 +673,20 @@ func (s *Session) writeLoop() {
 		case <-s.done:
 			return
 		case frame := <-s.outbound:
-			s.writeMu.Lock()
-			s.queuedBytes -= frame.cost
-			s.writeMu.Unlock()
 			err := s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err == nil {
 				err = goprotocol.WriteJSON(s.conn, frame.message)
 			}
+			s.writeMu.Lock()
+			s.queuedBytes -= frame.cost
+			if err == nil && frame.staged && len(s.staged) > 0 && s.staged[0].enqueued {
+				if s.staged[0].kind == "bytes" {
+					s.stagedBytes -= len(s.staged[0].data)
+				}
+				s.staged = s.staged[1:]
+				s.flushStagedLocked()
+			}
+			s.writeMu.Unlock()
 			if frame.written != nil {
 				frame.written <- err
 			}

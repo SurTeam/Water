@@ -107,6 +107,67 @@ func TestSessionCloseUnblocksFullTerminalQueue(t *testing.T) {
 	}
 }
 
+func TestTerminalTrafficCoalescesWithoutClosingSession(t *testing.T) {
+	s, peer := pipeSession(t)
+	id := uuid.New()
+	for i := 0; i < 100; i++ {
+		if err := s.DispatchAsync(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": []int{i}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if err := s.DispatchAsync(map[string]any{"type": "terminal.resize", "terminal_id": id, "columns": 80 + i, "lines": 24, "cell_width": 8, "cell_height": 16}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if s.Err() != nil {
+		t.Fatalf("terminal traffic closed the session: %v", s.Err())
+	}
+	frames := 0
+	var got []int
+	var columns int
+	deadline := time.After(time.Second)
+	for frames < 3 {
+		var frame goprotocol.Frame
+		var err error
+		done := make(chan struct{})
+		go func() {
+			frame, err = goprotocol.ReadFrame(peer)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-deadline:
+			t.Fatalf("timed out after %d frames", frames)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		var message goprotocol.WireMessage
+		if err = json.Unmarshal(frame.JSON, &message); err != nil {
+			t.Fatal(err)
+		}
+		var params struct {
+			Command struct {
+				Type    string `json:"type"`
+				Bytes   []int  `json:"bytes"`
+				Columns int    `json:"columns"`
+			} `json:"command"`
+		}
+		if err = json.Unmarshal(message.Params, &params); err != nil {
+			t.Fatal(err)
+		}
+		frames++
+		got = append(got, params.Command.Bytes...)
+		if params.Command.Type == "terminal.resize" {
+			columns = params.Command.Columns
+		}
+	}
+	if frames != 3 || columns != 84 || len(got) != 100 || got[0] != 0 || got[99] != 99 {
+		t.Fatalf("frames=%d columns=%d bytes=%v", frames, columns, got)
+	}
+}
+
 func TestQueuedDispatchPreservesAcceptedOrder(t *testing.T) {
 	s, peer := pipeSession(t)
 	result := make(chan error, 1)

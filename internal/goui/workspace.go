@@ -143,6 +143,7 @@ type terminalClient struct {
 	cursorStyle             string
 	cursorBlink             bool
 	inputPending            atomic.Bool
+	viewStale               atomic.Bool
 }
 
 func (t *terminalClient) close() {
@@ -1422,7 +1423,30 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 	if end := traceNativeWork("terminal.snapshot"); end != nil {
 		defer end()
 	}
+	window := c.native.Load()
+	var shown map[uuid.UUID]struct{}
+	if window != nil {
+		if ids := window.visibleTerminals.Load(); ids != nil {
+			shown = *ids
+		}
+	}
+	paint := false
 	for term := range changed {
+		// Hidden terminals stay parsed. Snapshotting or waking the window for
+		// them redraws the visible workspace at the output rate.
+		if shown != nil {
+			if _, visible := shown[term.id]; !visible {
+				term.mu.Lock()
+				if term.emu != nil && term.inputPending.Swap(false) {
+					term.selection = Selection{}
+					term.emu.ScrollToBottom()
+				}
+				term.mu.Unlock()
+				term.viewStale.Store(true)
+				delete(changed, term)
+				continue
+			}
+		}
 		term.mu.Lock()
 		if term.emu != nil {
 			if term.inputPending.Swap(false) {
@@ -1430,11 +1454,16 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 				term.emu.ScrollToBottom()
 			}
 			term.snapshot = term.emu.FrameSnapshot()
+			term.viewStale.Store(false)
 		}
 		term.mu.Unlock()
 		delete(changed, term)
+		paint = true
 	}
-	if window := c.native.Load(); window != nil {
+	if !paint {
+		return false
+	}
+	if window != nil {
 		window.invalidateOutput()
 	} else if c.invalidate != nil {
 		c.invalidate()
