@@ -39,7 +39,7 @@ func (s *Server) agentCommand(kind string, raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		processes, err := s.registry.SampleForegroundProcesses(context.Background())
+		processes, err := s.sampleForeground(context.Background())
 		if err != nil {
 			return nil, err
 		}

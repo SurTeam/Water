@@ -4,7 +4,7 @@ Water is a native Go workbench for people who run local shells, remote build env
 
 ![Water terminal workspace](assets/screenshots/water-terminal-content.png)
 
-The UI is deliberately quiet: a connection sidebar on the left, tabs above the active surface, and a terminal that stays attached to the server session that owns it. Terminals use Sarasa Term SC by default, with a graphite-and-jade theme across the workspace.
+The UI is deliberately quiet: a connection sidebar on the left, tabs above the active surface, and a terminal that stays attached to the server session that owns it. Terminals use Sarasa Term SC by default, with a graphite theme across the workspace.
 
 ![Water split panes](assets/screenshots/water-split.png)
 
@@ -26,8 +26,6 @@ go run ./cmd/water
 For setup, configuration, remote connections, control commands, tests, cross-builds, and signing, see [docs/Documents.md](docs/Documents.md). The current module boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md), and the complete configuration schema is in [config.example.json](config.example.json).
 
 ## Project status
-
-The latest release, [Water 0.4.9](docs/releases/v0.4.9.md), makes shell `clear` erase scrollback again while Ctrl+L still keeps history. [Water 0.4.8](docs/releases/v0.4.8.md) retries busy server handshakes during GUI startup and isolates terminal output streams.
 
 Water is an active workbench rather than a compatibility layer for an existing terminal app. The server owns sessions and bounded terminal replay; each client attaches its own emulator and UI state. That separation is what enables persistent remote sessions, reliable reconnect, bounded output memory, and deterministic control/API tests.
 

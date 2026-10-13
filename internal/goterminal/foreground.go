@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -38,7 +37,7 @@ func (t *Terminal) ForegroundGroup() (int, error) {
 }
 
 // ForegroundProcesses keeps process identity and arguments intact for server
-// recognition. Call only on a worker; ps has a bounded deadline.
+// recognition. Call only on a worker; process queries have a bounded deadline.
 func (r *Registry) ForegroundProcesses(ctx context.Context) map[uuid.UUID]goagent.Process {
 	result, _ := r.SampleForegroundProcesses(ctx)
 	return result
@@ -68,7 +67,7 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 	r.mu.RUnlock()
 	groups := map[uuid.UUID]int{}
 	unique := map[int]bool{}
-	var pids []string
+	var pids []int
 	for _, t := range terms {
 		select {
 		case <-t.closed:
@@ -82,7 +81,7 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 		groups[t.ID] = group
 		if !unique[group] {
 			unique[group] = true
-			pids = append(pids, strconv.Itoa(group))
+			pids = append(pids, group)
 		}
 	}
 	result := map[uuid.UUID]goagent.Process{}
@@ -91,8 +90,7 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	output, err := exec.CommandContext(ctx, "ps", "-p", strings.Join(pids, ","), "-o", "pid=", "-o", "pgid=", "-o", "lstart=", "-o", "args=").Output()
-	processes, err := parseForegroundOutput(output, err, ctx.Err())
+	processes, err := sampleProcessGroups(ctx, pids)
 	if err != nil {
 		return result, err
 	}

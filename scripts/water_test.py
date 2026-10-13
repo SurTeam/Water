@@ -28,13 +28,15 @@ def water_processes():
 
 
 class WaterGUI:
-    def __init__(self, prefix="water-test.", config=None, binary=None, variant="dev"):
+    def __init__(self, prefix="water-test.", config=None, binary=None, variant=None, test_instance=None):
+        variant = variant or os.environ.get("WATER_TEST_VARIANT", "dev")
         self.variant = variant
         if variant not in ("dev", "release"):
             raise ValueError("test variant must be dev or release")
         self.root = Path(__file__).resolve().parent.parent
         self.binary = str(binary or os.environ.get("WATER_BIN", self.root / "target/go-ui-smoke/water"))
         self.directory = Path(tempfile.mkdtemp(prefix=prefix, dir="/tmp"))
+        self.test_instance = self.directory.name if test_instance is None else test_instance
         self.socket = str(self.directory / "water.sock")
         self.shell = next((p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).is_file()), None)
         if self.shell is None:
@@ -57,7 +59,7 @@ class WaterGUI:
         config = self.directory / "config.json"
         config.write_text(json.dumps(self.config))
         self.log = (self.directory / "gui.log").open("w")
-        env = dict(os.environ, WATER_TEST_INSTANCE=self.directory.name,
+        env = dict(os.environ, WATER_TEST_INSTANCE=self.test_instance,
                    WATER_TEST_UNFOCUSED="1", WATER_CONTROL_SOCKET=self.socket,
                    WATER_CONFIG=str(config))
         env.pop("WATER_SOCKET", None)
@@ -69,7 +71,7 @@ class WaterGUI:
         try:
             self.wait(lambda: self.ctl("ping"), "control readiness", transient=True)
             snapshot = self.wait(lambda: self.ctl("ui", "snapshot"), "GUI snapshot", transient=True)
-            if snapshot.get("test_instance") != self.directory.name:
+            if snapshot.get("test_instance") != self.test_instance:
                 raise RuntimeError("GUI identity is not the owned test instance")
             self.window = snapshot["window_id"]
             self.wait(lambda: self.ctl("ui", "snapshot").get("frame_focused_pane"), "first GUI frame")

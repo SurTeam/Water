@@ -3,6 +3,7 @@ package gobench
 import (
 	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,8 +46,28 @@ func TestTerminalPerformanceGate(t *testing.T) {
 		t.Skip("performance gate is disabled in short mode")
 	}
 
-	direct := measureDirectPerformance(t)
-	server := measureServerPerformance(t)
+	// Both producers are prepared before either starts. Sequential samples can
+	// compare a quiet direct run with a server run during other packages' peak
+	// load, making the retention ratio measure scheduling rather than transport.
+	var direct, server performanceSample
+	var workers, ready sync.WaitGroup
+	workers.Add(2)
+	ready.Add(2)
+	measure := func(name string, sample *performanceSample, run func(*testing.T, func()) performanceSample) {
+		defer workers.Done()
+		t.Run(name, func(t *testing.T) {
+			var once sync.Once
+			signal := func() { once.Do(ready.Done) }
+			defer signal() // A setup failure must also release the other sample.
+			*sample = run(t, func() { signal(); ready.Wait() })
+		})
+	}
+	go measure("direct", &direct, measureDirectPerformance)
+	go measure("server", &server, measureServerPerformance)
+	workers.Wait()
+	if t.Failed() {
+		return
+	}
 	retention := server.mbps() / direct.mbps()
 
 	t.Logf(
@@ -82,7 +103,7 @@ func TestTerminalPerformanceGate(t *testing.T) {
 	}
 }
 
-func measureDirectPerformance(t *testing.T) performanceSample {
+func measureDirectPerformance(t *testing.T, startTogether func()) performanceSample {
 	t.Helper()
 	registry := goterminal.NewRegistry()
 	defer registry.CloseAll()
@@ -103,6 +124,7 @@ func measureDirectPerformance(t *testing.T) performanceSample {
 
 	emu := govt.New(80, 24, 10_000)
 	defer emu.Close()
+	startTogether()
 	if err := term.Write([]byte("\n")); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +170,7 @@ func measureDirectPerformance(t *testing.T) performanceSample {
 	}
 }
 
-func measureServerPerformance(t *testing.T) performanceSample {
+func measureServerPerformance(t *testing.T, startTogether func()) performanceSample {
 	t.Helper()
 	socket := filepath.Join("/tmp", "water-go-perf-"+uuid.New().String()+".sock")
 	server := goserver.New(socket)
@@ -199,6 +221,7 @@ func measureServerPerformance(t *testing.T) performanceSample {
 	defer emu.Close()
 
 	lastSeq := attached.LastSeq
+	startTogether()
 	if err := session.DispatchAsync(map[string]any{
 		"type":        "terminal.send_text",
 		"terminal_id": spawned.TerminalID,

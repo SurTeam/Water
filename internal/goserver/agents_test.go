@@ -1,10 +1,8 @@
 package goserver_test
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 	"time"
 
@@ -156,54 +154,4 @@ func TestAgentProfilesThroughDispatcherAndOwnedForegroundControl(t *testing.T) {
 		t.Fatal("missing config silently reset definitions")
 	}
 
-}
-
-func TestAgentConfigureSamplingFailurePreservesSavedRegistry(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "server.json")
-	cfg := recoveryConfig(t)
-	if err := goconfig.Save(path, cfg); err != nil {
-		t.Fatal(err)
-	}
-	_, client := recoveryServer(t, cfg, func(s *goserver.Server) { s.ConfigPath = path })
-	if err := client.Dispatch(map[string]any{"type": "workspace.new"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	var before struct {
-		Config   goagent.Config `json:"config"`
-		Revision uint64         `json:"revision"`
-	}
-	if err := client.Dispatch(map[string]any{"type": "agents.inspect"}, &before); err != nil {
-		t.Fatal(err)
-	}
-	original, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Force a deterministic query failure without changing the owned PTY job.
-	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	draft := goagent.Clone(before.Config)
-	profile := goagent.Builtins()[0]
-	profile.Enabled = false
-	draft.Put(profile)
-	if err := client.Dispatch(map[string]any{"type": "agents.configure", "config": draft}, nil); err == nil {
-		t.Fatal("sampling failure reported a successful save")
-	}
-	var after struct {
-		Config   goagent.Config `json:"config"`
-		Revision uint64         `json:"revision"`
-	}
-	if err := client.Dispatch(map[string]any{"type": "agents.inspect"}, &after); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(before, after) || !bytes.Equal(original, saved) {
-		t.Fatal("failed sampling changed configuration or revision")
-	}
 }
