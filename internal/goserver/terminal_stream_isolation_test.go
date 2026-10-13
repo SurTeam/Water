@@ -1,7 +1,6 @@
 package goserver_test
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,7 +111,7 @@ func TestFloodedTUIStreamDoesNotBlockGUIControlOrSecondAttach(t *testing.T) {
 	}
 	defer gui.Detach(second.TerminalID)
 	if other.TerminalID != second.TerminalID {
-		t.Fatal(fmt.Sprintf("unexpected attached terminal %s, want %s", other.TerminalID, second.TerminalID))
+		t.Fatalf("unexpected attached terminal %s, want %s", other.TerminalID, second.TerminalID)
 	}
 
 	var info goprotocol.ServerInfo
@@ -121,5 +120,26 @@ func TestFloodedTUIStreamDoesNotBlockGUIControlOrSecondAttach(t *testing.T) {
 	}
 	if info.UISessions != 1 {
 		t.Fatalf("data-only connections counted as GUI windows: %d", info.UISessions)
+	}
+
+	// After bounded backpressure is released, all live events are still
+	// delivered in sequence instead of being silently dropped.
+	var last uint64
+	for i := 0; i < cap(gui.Events)+8; i++ {
+		select {
+		case event := <-gui.Events:
+			if event.TerminalID != busy.TerminalID {
+				t.Fatalf("unexpected terminal %s in busy stream", event.TerminalID)
+			}
+			if last != 0 && event.Event.Seq != last+1 {
+				t.Fatalf("terminal output skipped/reordered sequence: previous=%d current=%d", last, event.Event.Seq)
+			}
+			last = event.Event.Seq
+		case <-time.After(5 * time.Second):
+			t.Fatalf("backpressured stream did not resume after %d events", i)
+		}
+	}
+	if err := gui.CallTimeout("ping", nil, nil, 2*time.Second); err != nil {
+		t.Fatalf("GUI control failed after releasing backpressure: %v", err)
 	}
 }
