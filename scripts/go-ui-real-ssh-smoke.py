@@ -17,7 +17,7 @@ spec.loader.exec_module(smoke)
 
 
 def connect(test, alias):
-    assert test.ctl("ui", "key", "cmd-shift-k")["handled"]
+    assert test.ctl("ui", "key", "cmd-alt-k")["handled"]
     assert test.ctl("ui", "key", "text:" + alias)["handled"]
     assert test.ctl("ui", "key", "enter")["handled"]
     entry = test.wait(lambda: next((e for e in test.ctl("connections", "list")["connections"]

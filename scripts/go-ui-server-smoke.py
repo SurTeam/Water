@@ -185,7 +185,7 @@ def main():
     os.environ.update(keys)
     try:
         with WaterGUI("water-server-remote.") as test:
-            assert test.ctl("ui", "key", "cmd-shift-k")["handled"]
+            assert test.ctl("ui", "key", "cmd-alt-k")["handled"]
             assert test.ctl("ui", "key", "text:owned-ssh-fixture")["handled"]
             assert test.ctl("ui", "key", "enter")["handled"]
             entry = test.wait(lambda: next((e for e in test.ctl("connections", "list")["connections"] if e["kind"] == "remote" and e["status"] == "connected"), None), "owned SSH connection")

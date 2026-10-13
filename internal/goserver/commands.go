@@ -422,15 +422,28 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 		var c struct {
 			TabID uuid.UUID `json:"tab_id"`
 			Path  []bool    `json:"path"`
-			Ratio float32   `json:"ratio"`
+			Ratio *float32  `json:"ratio"`
+			Delta *float32  `json:"delta"`
 		}
 		if err := json.Unmarshal(raw, &c); err != nil {
 			return fail("INVALID_COMMAND", err)
 		}
-		if c.Ratio < 0.05 || c.Ratio > 0.95 {
-			return fail("INVALID_SPLIT", errors.New("split ratio must be between 0.05 and 0.95"))
+		if (c.Ratio == nil) == (c.Delta == nil) {
+			return fail("INVALID_SPLIT", errors.New("specify either ratio or delta"))
 		}
-		if err := s.model.ResizeSplit(c.TabID, c.Path, c.Ratio); err != nil {
+		var err error
+		if c.Delta != nil {
+			if *c.Delta < -1 || *c.Delta > 1 {
+				return fail("INVALID_SPLIT", errors.New("split delta must be between -1 and 1"))
+			}
+			err = s.model.AdjustSplit(c.TabID, c.Path, *c.Delta)
+		} else {
+			if *c.Ratio < 0.05 || *c.Ratio > 0.95 {
+				return fail("INVALID_SPLIT", errors.New("split ratio must be between 0.05 and 0.95"))
+			}
+			err = s.model.ResizeSplit(c.TabID, c.Path, *c.Ratio)
+		}
+		if err != nil {
 			return fail("PANE_RESIZE_FAILED", err)
 		}
 		return map[string]any{"type": "none"}, nil

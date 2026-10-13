@@ -769,6 +769,17 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 	if c.settings.visible {
 		return false
 	}
+	for _, resize := range []struct{ binding, direction string }{
+		{shortcuts.PaneNarrower, "narrower"}, {shortcuts.PaneWider, "wider"},
+		{shortcuts.PaneShorter, "shorter"}, {shortcuts.PaneTaller, "taller"},
+	} {
+		if shortcutMatches(pressed, resize.binding) {
+			if w := c.native.Load(); w != nil {
+				w.resizePaneStep(c, resize.direction)
+			}
+			return true
+		}
+	}
 	for _, action := range []struct{ binding, command, direction string }{
 		{shortcuts.SplitRight, "pane.split", "right"}, {shortcuts.SplitDown, "pane.split", "down"},
 		{shortcuts.NewTerminalTab, "tab.new", ""}, {shortcuts.NewWorkspace, "workspace.new", ""},

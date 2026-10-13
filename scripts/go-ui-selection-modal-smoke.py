@@ -44,7 +44,7 @@ with WaterGUI("water-selection-modal.", config=config, variant=os.environ.get("W
     test.ctl("ui", "click", "--x", x+6*cw, "--y", yy)
     assert not grid()["selection"]["Active"]
     baseline = Image.open(test.screenshot("baseline.png")).convert("RGB")
-    assert test.ctl("ui", "key", "cmd-shift-k")["handled"]
+    assert test.ctl("ui", "key", "cmd-alt-k")["handled"]
     def remote():
         s = test.ctl("ui", "snapshot")
         return s if any(h["kind"] == "remote_field" for h in s["automation_hits"]) else None

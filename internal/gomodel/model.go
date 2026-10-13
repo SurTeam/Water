@@ -427,30 +427,46 @@ func (m *Model) ActivateTab(id uuid.UUID) error {
 	return errors.New("tab not found")
 }
 
-func (m *Model) CloseTab(id uuid.UUID) ([]uuid.UUID,error) {
-	m.mu.Lock(); defer m.mu.Unlock()
-	tab:=m.tabs[id]; if tab==nil { return nil,errors.New("tab not found") }
-	var terminals []uuid.UUID
-	var paneIDs []uuid.UUID; tab.Root.LeafIDs(&paneIDs)
-	for _,pid:=range paneIDs {
-		if p:=m.panes[pid]; p!=nil && p.Terminal!=nil { terminals=append(terminals,p.Terminal.TerminalID) }
-		delete(m.panes,pid)
+func (m *Model) CloseTab(id uuid.UUID) ([]uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closeTabLocked(id)
+}
+
+func (m *Model) closeTabLocked(id uuid.UUID) ([]uuid.UUID, error) {
+	tab := m.tabs[id]
+	if tab == nil {
+		return nil, errors.New("tab not found")
 	}
-	delete(m.tabs,id)
-	for _,wid:=range m.workspaceOrder {
-		w:=m.workspaces[wid]
-		for i,tid:=range w.Tabs {
-			if tid==id {
-				w.Tabs=append(w.Tabs[:i],w.Tabs[i+1:]...)
-				if w.ActiveTab!=nil && *w.ActiveTab==id {
-					w.ActiveTab=nil
-					if len(w.Tabs)>0 { v:=w.Tabs[len(w.Tabs)-1]; w.ActiveTab=&v }
+	var terminals []uuid.UUID
+	var paneIDs []uuid.UUID
+	tab.Root.LeafIDs(&paneIDs)
+	for _, pid := range paneIDs {
+		if p := m.panes[pid]; p != nil && p.Terminal != nil {
+			terminals = append(terminals, p.Terminal.TerminalID)
+		}
+		delete(m.panes, pid)
+	}
+	delete(m.tabs, id)
+	for _, wid := range m.workspaceOrder {
+		w := m.workspaces[wid]
+		for i, tid := range w.Tabs {
+			if tid == id {
+				w.Tabs = append(w.Tabs[:i], w.Tabs[i+1:]...)
+				if w.ActiveTab != nil && *w.ActiveTab == id {
+					w.ActiveTab = nil
+					if len(w.Tabs) > 0 {
+						v := w.Tabs[len(w.Tabs)-1]
+						w.ActiveTab = &v
+					}
 				}
-				m.bump(); return terminals,nil
+				m.bump()
+				return terminals, nil
 			}
 		}
 	}
-	m.bump(); return terminals,nil
+	m.bump()
+	return terminals, nil
 }
 
 func (m *Model) MoveTab(id,target uuid.UUID) error {
@@ -508,22 +524,40 @@ func (m *Model) SplitPane(target uuid.UUID,direction string) (uuid.UUID,error) {
 	tab.ActivePane=newPane; m.bump(); return newPane,nil
 }
 
-func (m *Model) ClosePane(id uuid.UUID) ([]uuid.UUID,error) {
-	m.mu.Lock(); defer m.mu.Unlock()
+func (m *Model) ClosePane(id uuid.UUID) ([]uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var tab *Tab
-	for _,t:=range m.tabs { if t.Root.Contains(id) { tab=t; break } }
-	if tab==nil { return nil,errors.New("pane not found") }
-	var all []uuid.UUID; tab.Root.LeafIDs(&all)
-	if len(all)<=1 { return nil,errors.New("cannot close final pane") }
-	p:=m.panes[id]
-	var terms []uuid.UUID
-	if p!=nil && p.Terminal!=nil { terms=append(terms,p.Terminal.TerminalID) }
-	if !tab.Root.CloseLeaf(id) { return nil,errors.New("pane not found") }
-	delete(m.panes,id)
-	if tab.ActivePane==id {
-		all=nil; tab.Root.LeafIDs(&all); tab.ActivePane=all[0]
+	for _, t := range m.tabs {
+		if t.Root.Contains(id) {
+			tab = t
+			break
+		}
 	}
-	m.bump(); return terms,nil
+	if tab == nil {
+		return nil, errors.New("pane not found")
+	}
+	var all []uuid.UUID
+	tab.Root.LeafIDs(&all)
+	if len(all) <= 1 {
+		return m.closeTabLocked(tab.ID)
+	}
+	p := m.panes[id]
+	var terms []uuid.UUID
+	if p != nil && p.Terminal != nil {
+		terms = append(terms, p.Terminal.TerminalID)
+	}
+	if !tab.Root.CloseLeaf(id) {
+		return nil, errors.New("pane not found")
+	}
+	delete(m.panes, id)
+	if tab.ActivePane == id {
+		all = nil
+		tab.Root.LeafIDs(&all)
+		tab.ActivePane = all[0]
+	}
+	m.bump()
+	return terms, nil
 }
 
 func (m *Model) FocusPane(id uuid.UUID) error {
@@ -562,6 +596,36 @@ func (m *Model) ResizeSplit(tabID uuid.UUID,path []bool,ratio float32) error {
 	t:=m.tabs[tabID]; if t==nil { return errors.New("tab not found") }
 	if !t.Root.ResizeAtPath(path,ratio) { return errors.New("split not found") }
 	m.bump(); return nil
+}
+
+func (m *Model) AdjustSplit(tabID uuid.UUID, path []bool, delta float32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.tabs[tabID]
+	if t == nil {
+		return errors.New("tab not found")
+	}
+	node := t.Root
+	for _, second := range path {
+		if node == nil || node.Leaf != nil {
+			return errors.New("split not found")
+		}
+		if second {
+			node = node.Second
+		} else {
+			node = node.First
+		}
+	}
+	if node == nil || node.Leaf != nil {
+		return errors.New("split not found")
+	}
+	ratio := node.Ratio
+	if ratio < .05 || ratio > .95 {
+		ratio = .5
+	}
+	node.Ratio = min(float32(.95), max(float32(.05), ratio+delta))
+	m.bump()
+	return nil
 }
 
 func (m *Model) InstallTerminal(paneID uuid.UUID, meta TerminalMeta) error {

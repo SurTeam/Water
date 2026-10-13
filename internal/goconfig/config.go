@@ -188,6 +188,10 @@ type ShortcutConfig struct {
 	NewWorkspace      string `json:"new_workspace"`
 	ClosePane         string `json:"close_pane"`
 	PromotePaneToTab  string `json:"promote_pane_to_tab"`
+	PaneNarrower      string `json:"pane_narrower"`
+	PaneWider         string `json:"pane_wider"`
+	PaneShorter       string `json:"pane_shorter"`
+	PaneTaller        string `json:"pane_taller"`
 	FocusLeft         string `json:"focus_left"`
 	FocusRight        string `json:"focus_right"`
 	FocusUp           string `json:"focus_up"`
@@ -291,7 +295,7 @@ func Default() AppConfig {
 			TabMaxTitleLength:   32,
 		},
 		Shortcuts: ShortcutConfig{
-			NewWindow: "cmd-n", ConnectRemote: "cmd-shift-k", RenameWorkspace: "cmd-shift-e", RenameTab: "cmd-shift-t",
+			NewWindow: "cmd-n", ConnectRemote: "cmd-alt-k", RenameWorkspace: "cmd-shift-e", RenameTab: "cmd-shift-t",
 			HideWindow: "cmd-w", MinimizeWindow: "cmd-m", IgnoreQuit: "cmd-q",
 			SwitchTab: "cmd-#", NextWorkspace: "ctrl-tab", PreviousWorkspace: "ctrl-shift-tab",
 			OpenSettings: "cmd-,", SplitRight: "cmd-\\", SplitDown: "cmd--",
@@ -300,6 +304,10 @@ func Default() AppConfig {
 			NewWorkspace:     "cmd-shift-n",
 			ClosePane:        "cmd-shift-w",
 			PromotePaneToTab: "cmd-shift-enter",
+			PaneNarrower:     "cmd-shift-h",
+			PaneWider:        "cmd-shift-l",
+			PaneShorter:      "cmd-shift-j",
+			PaneTaller:       "cmd-shift-k",
 			FocusLeft:        "cmd-h",
 			FocusRight:       "cmd-l",
 			FocusUp:          "cmd-k",
@@ -438,6 +446,19 @@ func Load(path string) (AppConfig, error) {
 	}
 	if err := json.Unmarshal(target, &cfg); err != nil {
 		return AppConfig{}, err
+	}
+	// The former remote-connect default now belongs to pane height adjustment.
+	// Migrate legacy defaults only; explicitly configured resize bindings survive.
+	var shortcutOverride struct {
+		Shortcuts struct {
+			PaneTaller *string `json:"pane_taller"`
+		} `json:"shortcuts"`
+	}
+	if err := json.Unmarshal(target, &shortcutOverride); err != nil {
+		return AppConfig{}, err
+	}
+	if shortcutOverride.Shortcuts.PaneTaller == nil && cfg.Shortcuts.ConnectRemote == "cmd-shift-k" {
+		cfg.Shortcuts.ConnectRemote = "cmd-alt-k"
 	}
 	var sizes struct {
 		Startup struct {

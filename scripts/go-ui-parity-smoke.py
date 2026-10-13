@@ -107,7 +107,7 @@ try:
     ctl("ui", "key", "text:Development")
     ctl("ui", "key", "enter")
     wait(lambda s: not s["rename_visible"] and any(t["title"] == "Development" for w in ctl("state")["workspaces"] for t in w["tabs"]), "renamed tab")
-    ctl("ui", "key", "cmd-shift-k")
+    ctl("ui", "key", "cmd-alt-k")
     wait(lambda s: s["remote_form_visible"], "remote shortcut")
     ctl("ui", "key", "escape")
     wait(lambda s: not s["remote_form_visible"], "remote cancelled")

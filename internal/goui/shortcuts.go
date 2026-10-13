@@ -25,7 +25,7 @@ func numberedTabBindings(template string) []string {
 
 func (c *WorkspaceClient) windowShortcutBindings() []string {
 	s := c.currentConfig().Shortcuts
-	return append([]string{s.OpenSettings, s.SplitRight, s.SplitDown, s.NextTab, s.PreviousTab, s.NextWorkspace, s.PreviousWorkspace, s.ToggleSidebar, s.NewTerminalTab, s.NewWorkspace, s.ClosePane, s.PromotePaneToTab, s.FocusLeft, s.FocusRight, s.FocusUp, s.FocusDown}, numberedTabBindings(s.SwitchTab)...)
+	return append([]string{s.OpenSettings, s.SplitRight, s.SplitDown, s.NextTab, s.PreviousTab, s.NextWorkspace, s.PreviousWorkspace, s.ToggleSidebar, s.NewTerminalTab, s.NewWorkspace, s.ClosePane, s.PromotePaneToTab, s.FocusLeft, s.FocusRight, s.FocusUp, s.FocusDown, s.PaneNarrower, s.PaneWider, s.PaneShorter, s.PaneTaller}, numberedTabBindings(s.SwitchTab)...)
 }
 
 func (c *WorkspaceClient) activateTabAt(index int) bool {

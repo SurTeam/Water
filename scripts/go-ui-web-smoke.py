@@ -318,7 +318,7 @@ def main():
                     ssh.control = f"/tmp/water-go-ssh-{args.variant}-{os.geteuid()}-{value:016x}.ctl"
                     os.environ["WATER_REMOTE_SERVER_COMMAND"] = os.environ["WATER_SERVER_BIN"]
                     with WaterGUI("water-web-remote.", config={"ui": {"language": args.language}}, variant=args.variant) as test:
-                        assert test.ctl("ui", "key", "cmd-shift-k")["handled"]
+                        assert test.ctl("ui", "key", "cmd-alt-k")["handled"]
                         assert test.ctl("ui", "key", "text:" + ssh.alias)["handled"]
                         assert test.ctl("ui", "key", "enter")["handled"]
                         entry = test.wait(lambda: next((e for e in test.ctl("connections", "list")["connections"] if e["kind"] == "remote" and e["status"] == "connected"), None), "real SSH connection")

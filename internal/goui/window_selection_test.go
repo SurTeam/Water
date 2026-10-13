@@ -2,6 +2,7 @@ package goui
 
 import (
 	"github.com/SurTeam/Water/internal/gomodel"
+	"github.com/google/uuid"
 	"testing"
 )
 
@@ -34,5 +35,47 @@ func TestWindowsKeepIndependentWorkspaceTabAndPane(t *testing.T) {
 	afterA = a.project(m.Dump())
 	if *afterA.ActiveWorkspace != w2 {
 		t.Fatal("closed workspace did not fall back")
+	}
+}
+
+func TestClosedPaneRestoresWindowMRU(t *testing.T) {
+	m := gomodel.New()
+	wid := m.CreateWorkspace("test")
+	tab, first, _ := m.CreateTab(wid, "test", false)
+	second, _ := m.SplitPane(first, "right")
+	third, _ := m.SplitPane(second, "down")
+	var a, b windowSelection
+	for _, pane := range []uuid.UUID{first, second, third} {
+		a.pending = &selectionEffect{Pane: pane}
+		a.project(m.Dump())
+	}
+	for _, pane := range []uuid.UUID{second, first, third} {
+		b.pending = &selectionEffect{Pane: pane}
+		b.project(m.Dump())
+	}
+	if _, err := m.ClosePane(third); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.project(m.Dump()); got.FocusedPane == nil || *got.FocusedPane != second {
+		t.Fatal("first window did not restore second pane")
+	}
+	if got := b.project(m.Dump()); got.FocusedPane == nil || *got.FocusedPane != first {
+		t.Fatal("second window did not restore first pane")
+	}
+	if len(a.history[tab]) != 2 {
+		t.Fatal("deleted pane remained in focus history")
+	}
+	if _, err := m.ClosePane(second); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.project(m.Dump()); got.FocusedPane == nil || *got.FocusedPane != first {
+		t.Fatal("deleted MRU pane did not fall back")
+	}
+	if _, err := m.ClosePane(first); err != nil {
+		t.Fatal(err)
+	}
+	got := a.project(m.Dump())
+	if got.FocusedPane != nil || got.Workspace.ActiveTab != nil || len(a.history) != 0 {
+		t.Fatal("final pane retained stale selection")
 	}
 }

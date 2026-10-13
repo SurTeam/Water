@@ -12,6 +12,7 @@ type windowSelection struct {
 	workspace uuid.UUID
 	tabs      map[uuid.UUID]uuid.UUID
 	panes     map[uuid.UUID]uuid.UUID
+	history   map[uuid.UUID][]uuid.UUID
 	pending   *selectionEffect
 }
 
@@ -57,6 +58,9 @@ func (s *windowSelection) project(state gomodel.StateDump) gomodel.StateDump {
 		s.tabs = make(map[uuid.UUID]uuid.UUID)
 		s.panes = make(map[uuid.UUID]uuid.UUID)
 	}
+	if s.history == nil {
+		s.history = make(map[uuid.UUID][]uuid.UUID)
+	}
 	// Clone containers before projecting; frames can retain the previous state.
 	state.Workspaces = append([]gomodel.WorkspaceDump(nil), state.Workspaces...)
 	for wi := range state.Workspaces {
@@ -80,12 +84,32 @@ func (s *windowSelection) project(state gomodel.StateDump) gomodel.StateDump {
 				s.pending = nil
 			}
 			pane := s.panes[t.ID]
+			// Keep only surviving panes, most recently focused first.
+			history := s.history[t.ID][:0]
+			for _, id := range s.history[t.ID] {
+				if treeHasPane(&tree, id) {
+					history = append(history, id)
+				}
+			}
 			if !treeHasPane(&tree, pane) {
 				pane = t.ActivePane
+				if len(history) > 0 {
+					pane = history[0]
+				}
 				if !treeHasPane(&tree, pane) {
 					pane = firstTreePane(&tree)
 				}
 			}
+			if pane != uuid.Nil {
+				next := []uuid.UUID{pane}
+				for _, id := range history {
+					if id != pane {
+						next = append(next, id)
+					}
+				}
+				history = next
+			}
+			s.history[t.ID] = history
 			s.panes[t.ID], t.ActivePane = pane, pane
 		}
 		tab := s.tabs[w.ID]
@@ -105,8 +129,11 @@ func (s *windowSelection) project(state gomodel.StateDump) gomodel.StateDump {
 					found = true
 				}
 			}
-			if !found && len(w.Tabs) > 0 {
-				tab = w.Tabs[0].ID
+			if !found {
+				tab = uuid.Nil
+				if len(w.Tabs) > 0 {
+					tab = w.Tabs[0].ID
+				}
 			}
 		}
 		s.tabs[w.ID] = tab
@@ -150,6 +177,7 @@ func (s *windowSelection) project(state gomodel.StateDump) gomodel.StateDump {
 	for id := range s.panes {
 		if !validTabs[id] {
 			delete(s.panes, id)
+			delete(s.history, id)
 		}
 	}
 	state.ActiveWorkspace, state.Workspace, state.FocusedPane = nil, nil, nil

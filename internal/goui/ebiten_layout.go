@@ -420,7 +420,7 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 		}
 		w.layoutNativePane(c, dst, node.First, tab, a, append(append([]bool{}, path...), false))
 		w.layoutNativePane(c, dst, node.Second, tab, b, append(append([]bool{}, path...), true))
-		if w.mouse.In(hitDividerRect) || w.drag != nil && w.drag.hit.Label == name {
+		if ebiten.IsFocused() && (w.mouse.In(hitDividerRect) || w.drag != nil && w.drag.hit.Label == name) {
 			guide := divider
 			half := w.dp(float64(cfg.UI.PaneDividerWidth)) / 2
 			if vertical {

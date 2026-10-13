@@ -124,6 +124,7 @@ var chineseFields = map[string]string{
 	"SidebarCardRadius": "侧栏卡片圆角", "SidebarWorkspaceRadius": "工作区圆角", "SidebarWidth": "侧栏宽度", "PanePadding": "窗格内边距", "PaneMargin": "窗格间距", "PaneCornerRadius": "窗格圆角", "PaneDividerWidth": "窗格分隔线宽度", "UIFontSize": "界面字号", "UIFontFamily": "界面字体",
 	"NewWindow": "新建窗口", "ConnectRemote": "连接远程主机", "RenameWorkspace": "重命名工作区", "RenameTab": "重命名标签页", "HideWindow": "隐藏窗口", "MinimizeWindow": "最小化窗口", "IgnoreQuit": "忽略退出快捷键", "SwitchTab": "切换标签页",
 	"NextWorkspace": "下一个工作区", "PreviousWorkspace": "上一个工作区", "OpenSettings": "打开设置", "SplitRight": "向右分屏", "SplitDown": "向下分屏", "NextTab": "下一个标签页", "PreviousTab": "上一个标签页", "ToggleSidebar": "切换侧栏", "NewTerminalTab": "新建终端标签页", "NewWorkspace": "新建工作区", "ClosePane": "关闭窗格", "PromotePaneToTab": "将窗格提升为标签页",
+	"PaneNarrower": "窗格变窄一列", "PaneWider": "窗格变宽一列", "PaneShorter": "窗格变矮一行", "PaneTaller": "窗格变高一行",
 	"FocusLeft": "聚焦左侧窗格", "FocusRight": "聚焦右侧窗格", "FocusUp": "聚焦上方窗格", "FocusDown": "聚焦下方窗格", "Paste": "粘贴", "CopyOrInterrupt": "复制", "EOF": "输入结束符", "ScrollPageUp": "向上翻页", "ScrollPageDown": "向下翻页",
 	"CursorStyle": "光标形状", "CursorBlink": "光标闪烁",
 	"CursorForeground": "光标文字颜色", "SidebarConnectionActiveBorder": "活动连接边框颜色", "SidebarConnectionInactiveBorder": "非活动连接边框颜色", "SidebarConnectionOfflineColor": "离线连接文字颜色", "SidebarConnectionOfflineBorder": "离线连接边框颜色",
