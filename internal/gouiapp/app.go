@@ -3,6 +3,7 @@ package gouiapp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -251,9 +252,21 @@ func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfi
 	if session, err := client.OpenSession(); err == nil {
 		return session, nil, false, nil
 	}
-	if conn, err := net.DialTimeout("unix", socket, 250*time.Millisecond); err == nil {
-		_ = conn.Close()
-		return nil, nil, false, fmt.Errorf("control socket belongs to an incompatible server: %s", socket)
+	probe, probeErr := net.DialTimeout("unix", socket, 250*time.Millisecond)
+	if probeErr == nil {
+		_ = probe.Close()
+	}
+	var timeoutErr net.Error
+	if probeErr == nil || errors.As(probeErr, &timeoutErr) && timeoutErr.Timeout() {
+		// A listener that accepts connections (or whose backlog is temporarily
+		// full) may simply be slow to answer the first RPC. Retry the live
+		// server instead of mistaking a transport timeout for incompatibility
+		// or attempting to replace a socket it still owns.
+		if session, retryErr := waitForSession(socket, 5*time.Second); retryErr == nil {
+			return session, nil, false, nil
+		} else {
+			return nil, nil, false, fmt.Errorf("existing Water server at %s did not complete the GUI handshake (socket left untouched): %w", socket, retryErr)
+		}
 	}
 	if !cfg.Server.AutoStart {
 		return nil, nil, false, fmt.Errorf("server is not available at %s and auto_start is disabled", socket)
