@@ -218,13 +218,13 @@ func (c *Client) openSession(role string) (*Session, error) {
 	}
 	s := &Session{
 		SocketPath: c.SocketPath,
-		conn:     conn,
-		Build:    c.Build,
-		Events:   make(chan TerminalPush, eventCapacity),
-		Pushes:   make(chan goprotocol.WireMessage, 64),
-		replies:  make(map[uint64]chan goprotocol.WireMessage),
-		done:     make(chan struct{}),
-		outbound: make(chan pendingSessionFrame, sessionSendQueueCapacity),
+		conn:       conn,
+		Build:      c.Build,
+		Events:     make(chan TerminalPush, eventCapacity),
+		Pushes:     make(chan goprotocol.WireMessage, 64),
+		replies:    make(map[uint64]chan goprotocol.WireMessage),
+		done:       make(chan struct{}),
+		outbound:   make(chan pendingSessionFrame, sessionSendQueueCapacity),
 	}
 	go s.writeLoop()
 	go s.readLoop()
