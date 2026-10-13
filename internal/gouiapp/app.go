@@ -253,7 +253,15 @@ func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfi
 	}
 	if conn, err := net.DialTimeout("unix", socket, 250*time.Millisecond); err == nil {
 		_ = conn.Close()
-		return nil, nil, false, fmt.Errorf("control socket belongs to an incompatible server: %s", socket)
+		// An accepted Unix connection does not prove an incompatible server:
+		// the existing listener may be busy and have missed the first RPC
+		// deadline. Give that server another bounded chance to open a GUI
+		// session. Never overwrite a socket with an active listener.
+		if session, retryErr := waitForSession(socket, 5*time.Second); retryErr == nil {
+			return session, nil, false, nil
+		} else {
+			return nil, nil, false, fmt.Errorf("existing Water server at %s accepts connections but did not complete the GUI handshake (socket left untouched): %w", socket, retryErr)
+		}
 	}
 	if !cfg.Server.AutoStart {
 		return nil, nil, false, fmt.Errorf("server is not available at %s and auto_start is disabled", socket)
