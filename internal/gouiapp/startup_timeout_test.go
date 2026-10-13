@@ -69,10 +69,10 @@ func TestConnectOrStartRetriesLiveServerAfterHandshakeFailure(t *testing.T) {
 				var result any = info
 				if method == "session.open" {
 					result = map[string]any{
-						"window_id": uuid.NewString(),
-						"server": info,
+						"window_id":     uuid.NewString(),
+						"server":        info,
 						"compatibility": goprotocol.Assess(goclient.Descriptor(gobuild.Variant), descriptor),
-						"diagnostic": false,
+						"diagnostic":    false,
 					}
 				}
 				if err := goprotocol.WriteJSON(conn, goprotocol.Success(request.RequestID, result)); err != nil {

@@ -134,6 +134,7 @@ func (c *Client) Dispatch(command any, out any) error {
 }
 
 const terminalEventQueueCapacity = 64
+
 // Each dedicated terminal connection has its own bounded queue in addition to
 // the GUI's aggregate queue; keep per-terminal buffering small.
 const terminalStreamQueueCapacity = 8
@@ -162,7 +163,7 @@ type stagedTerminal struct {
 }
 
 type Session struct {
-	SocketPath    string
+	SocketPath string
 	// Bulk terminal output travels over separate connections (and independent
 	// SSH-forwarded channels) so a slow TUI cannot block control RPC replies.
 	terminalMu      sync.Mutex

@@ -4,7 +4,6 @@ package goui
 
 import (
 	"strings"
-	"unsafe"
 
 	"github.com/ebitengine/purego/objc"
 )
@@ -100,7 +99,7 @@ func fileSystemPath(url objc.ID) string {
 	if p := usableFilePath(macString(resolved)); p != "" {
 		return p
 	}
-	if p := usableFilePath(macCString(macSend(url, "fileSystemRepresentation"))); p != "" {
+	if p := usableFilePath(objc.Send[string](url, objc.RegisterName("fileSystemRepresentation"))); p != "" {
 		return p
 	}
 	return usableFilePath(macString(macSend(url, "path")))
@@ -111,18 +110,6 @@ func usableFilePath(path string) string {
 		return ""
 	}
 	return path
-}
-
-func macCString(ptr objc.ID) string {
-	if ptr == 0 {
-		return ""
-	}
-	p := unsafe.Pointer(uintptr(ptr))
-	var n int
-	for *(*byte)(unsafe.Add(p, n)) != 0 {
-		n++
-	}
-	return string(unsafe.Slice((*byte)(p), n))
 }
 
 // RegisterFileDrop records the callback for API compatibility. On macOS the

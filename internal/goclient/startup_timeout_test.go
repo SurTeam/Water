@@ -62,10 +62,10 @@ func TestOpenSessionAcceptsDelayedInspection(t *testing.T) {
 				err = goprotocol.WriteJSON(conn, goprotocol.Success(request.RequestID, info))
 			} else {
 				err = goprotocol.WriteJSON(conn, goprotocol.Success(request.RequestID, map[string]any{
-					"window_id": uuid.NewString(),
-					"server": info,
+					"window_id":     uuid.NewString(),
+					"server":        info,
 					"compatibility": goprotocol.Assess(Descriptor(gobuild.Variant), info.Descriptor),
-					"diagnostic": false,
+					"diagnostic":    false,
 				}))
 			}
 			if err != nil {
