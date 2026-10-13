@@ -23,6 +23,7 @@ func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image)
 		w.button(dst, c, image.Rect(x, y, x+w.dp(width), y+w.dp(28)), c.tr(title), hitSettingsControl, uuid.Nil, false)
 		c.hitRegions[len(c.hitRegions)-1].Label = "agent-rules:" + action
 	}
+	button(right-w.dp(200), 200, "Fill from current pane", "sample")
 	label("Edit recognition rules", 28, true)
 	label("Rules: any rule may match. all: every condition in that rule must match.", 24, false)
 	ruleNumber := 0
@@ -77,6 +78,6 @@ func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image)
 	label("Values are match data; they are never executed as shell commands.", 24, false)
 	w.label(dst, c, image.Rect(left, y, right, y+w.dp(30)), c.tr(e.message), 10, muted, false)
 	y = r.Max.Y - w.dp(48)
-	button(right-w.dp(230), 140, "Apply to JSON", "apply")
+	button(right-w.dp(230), 140, "Apply rules", "apply")
 	button(right-w.dp(84), 84, "Cancel", "cancel")
 }

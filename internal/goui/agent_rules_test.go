@@ -19,12 +19,8 @@ func rulePanel(t *testing.T) *settingsPanel {
 	return &c.settings
 }
 func ruleJSON(s *settingsPanel) string {
-	for _, f := range s.fields {
-		if f.group == "Agents" && f.name == "Rules" {
-			return f.editor.Text()
-		}
-	}
-	return ""
+	data, _ := json.Marshal(s.agents.rules)
+	return string(data)
 }
 func ruleValue(s *settingsPanel, value string) {
 	for i := range s.fields {
@@ -89,10 +85,7 @@ func TestAgentRuleEditorCancelAndValidation(t *testing.T) {
 
 func TestAgentRuleEditorRetainsOtherRulesAndConditions(t *testing.T) {
 	s := rulePanel(t)
-	initial, err := parseAgentRules(ruleJSON(s))
-	if err != nil {
-		t.Fatal(err)
-	}
+	initial := cloneAgentRules(s.agents.rules)
 	s.openAgentRules()
 	s.agentRuleAction("add-rule")
 	ruleValue(s, "node")
@@ -100,10 +93,7 @@ func TestAgentRuleEditorRetainsOtherRulesAndConditions(t *testing.T) {
 	ruleValue(s, "/opt/agent.js")
 	s.agentRuleAction("previous-condition")
 	s.agentRuleAction("apply")
-	got, err := parseAgentRules(ruleJSON(s))
-	if err != nil {
-		t.Fatal(err)
-	}
+	got := s.agents.rules
 	if !reflect.DeepEqual(got[:len(initial)], initial) {
 		t.Fatal("existing rules changed")
 	}
@@ -121,15 +111,29 @@ func TestAgentRuleEditorRetainsOtherRulesAndConditions(t *testing.T) {
 	}
 }
 
-func TestAgentRuleEditorRejectsLossyJSONAndInvalidGlob(t *testing.T) {
-	for _, text := range []string{
-		`[{"all":[{"field":"argument","op":"exact","value":"x","typo":true}]}]`,
-		`[] []`,
-		`[{"all":[]}]`,
-		`[{"all":[{"field":"argument","op":"glob","value":"["}]}]`,
+func TestAgentRuleEditorRejectsInvalidConditions(t *testing.T) {
+	for _, rule := range []goagent.Rule{
+		{},
+		{All: []goagent.Condition{{Field: "unknown", Op: "exact", Value: "x"}}},
+		{All: []goagent.Condition{{Field: "argument", Op: "glob", Value: "["}}},
 	} {
-		if _, err := parseAgentRules(text); err == nil {
-			t.Fatalf("invalid rules accepted: %s", text)
+		if err := validateAgentRules([]goagent.Rule{rule}); err == nil {
+			t.Fatalf("invalid rule accepted: %#v", rule)
+		}
+	}
+}
+
+func TestAgentRulesRowIsNotATextFocusTarget(t *testing.T) {
+	s := rulePanel(t)
+	s.group = 6
+	for _, row := range settingsRows(s) {
+		if row.field >= 0 && s.fields[row.field].name == "Rules" {
+			t.Fatal("rules row exposed to text focus navigation")
+		}
+	}
+	for _, f := range s.fields {
+		if f.group == "Agents" && f.name == "Rules" && f.editor.Text() != "" {
+			t.Fatal("raw JSON retained in an editor")
 		}
 	}
 }

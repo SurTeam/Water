@@ -25,16 +25,28 @@ recognition and diagnostics.
 
 ## Recognition rules
 
-The recognition field contains a JSON array of rules. **Edit…** opens a guided
-editor with explanations for `all`, `field`, `op`, and `value`. Use **Add rule**
-and **Add condition** to build alternatives and combined conditions; click the
-`field` and `op` buttons to cycle their supported choices. Type the match value
-directly, without JSON escaping. **Apply to JSON** validates the draft and uses
-standard JSON serialization to preserve quotes, backslashes and literal text.
-It fills the settings draft; **Save** still applies it to the selected server.
-Cancel or Escape closes the editor without changing the JSON. The raw JSON
-field remains available for manual edits. Rule values are compared as data and
-are never evaluated as shell commands.
+Recognition rules are edited through **Edit recognition rules…**, which opens
+a guided editor with explanations for `all`, `field`, `op`, and `value`.
+Use **Add rule** and **Add condition** to build alternatives and combined
+conditions; click the `field` and `op` buttons to cycle their supported choices.
+Type match values directly, without JSON escaping. **Apply rules** validates
+and updates the settings draft; **Save** applies it to the selected server.
+Cancel or Escape closes the editor without changing the draft. The settings
+page has no raw JSON editor. Saving uses standard JSON serialization, preserving
+quotes, backslashes and literal text. Rule values are compared as data and are
+never evaluated as shell commands.
+
+**Fill from current pane** samples the foreground process in the focused
+terminal on this connection. It replaces the selected rule, or creates the
+first rule when none exists; other rules remain unchanged. The executable name
+becomes an `executable` / `exact` condition, and each sampled argument after
+argv[0] becomes an `argument` / `exact` condition. All programs use the same
+mapping, without interpreter-specific inference. PID and start time are not
+recognition conditions. Review the filled conditions and remove parameters
+that should not constrain future runs before applying. The existing limits
+are eight conditions per rule and 512 bytes per value; samples exceeding those
+limits report an error and preserve the draft. Sampling is asynchronous, and
+results from a canceled popup or a changed focused pane are ignored.
 
 Any matching rule selects the profile; every condition in a rule's `all` array
 must match. Example for a Node-based Agent:

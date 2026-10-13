@@ -107,7 +107,7 @@ func settingsRows(s *settingsPanel) []settingsRow {
 	if s.group == 6 {
 		var rows []settingsRow
 		for i, f := range s.fields {
-			if f.group == "Agents" {
+			if f.group == "Agents" && f.name != "Rules" {
 				rows = append(rows, settingsRow{field: i, section: "Agents"})
 			}
 		}

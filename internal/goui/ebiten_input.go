@@ -605,13 +605,15 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
 	s := &c.settings
-	if s.saving || s.group == 6 && s.agents.busy {
-		return
-	}
 	if s.agents.rulesEditor != nil {
-		if strings.HasPrefix(label, "agent-rules:") {
+		if label == "agent-rules:sample" {
+			c.sampleAgentRule()
+		} else if strings.HasPrefix(label, "agent-rules:") {
 			s.agentRuleAction(strings.TrimPrefix(label, "agent-rules:"))
 		}
+		return
+	}
+	if s.saving || s.group == 6 && s.agents.busy {
 		return
 	}
 	if label == "agent:edit-rules" {
@@ -921,6 +923,9 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	if c.settings.visible && c.settings.agents.rulesEditor != nil {
 		if strings.EqualFold(spec, "escape") {
 			c.settings.closeAgentRules()
+			return true
+		}
+		if c.settings.agents.rulesEditor.sampling {
 			return true
 		}
 		if strings.EqualFold(spec, "Tab") || strings.EqualFold(spec, "shift-Tab") {

@@ -22,6 +22,8 @@ def click(test, label):
             return state
         order = ["Name", "Enabled", "Priority", "Color", "Rules", "StatusSource", "OSC", "Interrupt", "Exit", "PreserveClear", "LongRunSeconds"]
         def field_name(value):
+            if value == "agent:edit-rules":
+                return "Rules"
             for prefix in ("field:Agents.", "agent:cycle:"):
                 if value.startswith(prefix):
                     return value[len(prefix):]
@@ -83,9 +85,10 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     hostile = '  "quoted"\\path;$(touch ' + str(sentinel) + ')`echo x`  '
     test.ctl("ui", "key", "text:" + hostile)
     click(test, "agent-rules:apply")
-    click(test, "field:Agents.Rules")
-    generated = snapshot(test)["settings_editor"]["text"]
-    assert json.loads(generated)[0]["all"][0]["value"] == hostile, generated
+    generated = snapshot(test)["agent_settings"]["rules"]
+    assert generated[0]["all"][0]["value"] == hostile, generated
+    assert not any(h.get("label") == "field:Agents.Rules" for h in snapshot(test)["automation_hits"])
+    assert not any(f["name"] == "Agents.Rules" for f in snapshot(test)["settings_fields"])
     assert not sentinel.exists(), "rule text executed a command"
     click(test, "agent:edit-rules")
     test.ctl("ui", "key", "cmd-a")
@@ -93,9 +96,30 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     test.ctl("ui", "key", "Escape")
     test.wait(lambda: "agent_rules_editor" not in snapshot(test), "Escape cancels popup only")
     assert snapshot(test)["settings_visible"]
-    click(test, "field:Agents.Rules")
-    assert snapshot(test)["settings_editor"]["text"] == generated, "cancel changed JSON"
+    assert snapshot(test)["agent_settings"]["rules"] == generated, "cancel changed rules"
+    # Sample a real foreground process in this fixture's owned, focused pane.
+    test.ctl("pane", "input", "--pane", pane, "--text", "/bin/sleep 30\n")
+    test.wait(lambda: test.ctl("agent", "test", "--pane", pane)["process"]["name"] == "sleep", "owned foreground sleep")
     click(test, "agent:edit-rules")
+    click(test, "agent-rules:sample")
+    sampled = test.wait(lambda: (lambda e: e if not e["sampling"] and e["rules"][0]["all"][0]["value"] == "sleep" else None)(snapshot(test)["agent_rules_editor"]), "current-pane autofill")
+    expected = [{"all": [{"field": "executable", "op": "exact", "value": "sleep"}, {"field": "argument", "op": "exact", "value": "30"}]}]
+    assert sampled["rules"] == expected, sampled
+    assert snapshot(test)["agent_settings"]["rules"] == generated, "sample applied before confirmation"
+    click(test, "agent-rules:cancel")
+    assert snapshot(test)["agent_settings"]["rules"] == generated, "cancel applied sampled rule"
+    click(test, "agent:edit-rules")
+    click(test, "agent-rules:sample")
+    test.wait(lambda: snapshot(test)["agent_rules_editor"]["rules"] == expected, "resample current pane")
+    click(test, "agent-rules:apply")
+    save(test)
+    assert test.ctl("agent", "list")["config"]["custom"][0]["rules"] == expected
+    test.wait(lambda: any(a["pane_id"] == pane for a in agents(test)), "sampled rules recognize actual process")
+    test.ctl("pane", "input", "--pane", pane, "--text", "\x03")
+    test.wait(lambda: not agents(test), "owned sleep interrupted")
+    click(test, "agent:edit-rules")
+    click(test, "agent-rules:next-condition")
+    click(test, "agent-rules:remove-condition")
     test.ctl("ui", "key", "cmd-a")
     test.ctl("ui", "key", "text:water-fixture-agent")
     test.ctl("ui", "screenshot", "--output", str(test.directory / "rules-editor.png"))

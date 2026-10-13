@@ -1,38 +1,29 @@
 package goui
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
 	"reflect"
-	"strings"
 
 	"github.com/SurTeam/Water/internal/goagent"
 )
 
-// A private draft: only Apply writes serialized rules into the settings field.
+// A private typed draft: only Apply replaces the panel's recognition rules.
 type agentRulesEditor struct {
 	rules           []goagent.Rule
 	rule, condition int
 	message         string
 	previousFocus   int
+	sampling        bool
 }
 
-func parseAgentRules(text string) ([]goagent.Rule, error) {
-	var rules []goagent.Rule
-	decoder := json.NewDecoder(strings.NewReader(text))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&rules); err != nil {
-		return nil, err
+func cloneAgentRules(rules []goagent.Rule) []goagent.Rule {
+	if rules == nil {
+		return nil
 	}
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		return nil, fmt.Errorf("Expected one JSON rules array")
+	copy := make([]goagent.Rule, len(rules))
+	for i, rule := range rules {
+		copy[i].All = append([]goagent.Condition(nil), rule.All...)
 	}
-	if err := validateAgentRules(rules); err != nil {
-		return nil, err
-	}
-	return rules, nil
+	return copy
 }
 
 func validateAgentRules(rules []goagent.Rule) error {
@@ -42,19 +33,11 @@ func validateAgentRules(rules []goagent.Rule) error {
 }
 
 func (s *settingsPanel) openAgentRules() {
-	for _, f := range s.fields {
-		if f.group != "Agents" || f.name != "Rules" {
-			continue
-		}
-		rules, err := parseAgentRules(f.editor.Text())
-		if err != nil {
-			s.agents.message = "Recognition rules: " + err.Error()
-			return
-		}
-		s.agents.rulesEditor = &agentRulesEditor{rules: rules, previousFocus: s.focus}
-		s.loadAgentRuleValue()
+	if !s.agents.loaded || s.agents.selected == "" || s.agents.rulesEditor != nil {
 		return
 	}
+	s.agents.rulesEditor = &agentRulesEditor{rules: cloneAgentRules(s.agents.rules), previousFocus: s.focus}
+	s.loadAgentRuleValue()
 }
 
 func (s *settingsPanel) loadAgentRuleValue() {
@@ -117,6 +100,9 @@ func (s *settingsPanel) agentRuleAction(action string) {
 		s.closeAgentRules()
 		return
 	}
+	if e.sampling {
+		return
+	}
 	s.stageAgentRuleValue()
 	e.message = ""
 	switch action {
@@ -125,21 +111,7 @@ func (s *settingsPanel) agentRuleAction(action string) {
 			e.message = err.Error()
 			return
 		}
-		rules := e.rules
-		if rules == nil {
-			rules = []goagent.Rule{}
-		}
-		data, err := json.Marshal(rules)
-		if err != nil {
-			e.message = err.Error()
-			return
-		}
-		for i := range s.fields {
-			f := &s.fields[i]
-			if f.group == "Agents" && f.name == "Rules" {
-				f.editor.SetText(string(data))
-			}
-		}
+		s.agents.rules = cloneAgentRules(e.rules)
 		s.closeAgentRules()
 		s.agents.message = "Changes are not saved"
 		return

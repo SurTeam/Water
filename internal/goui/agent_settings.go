@@ -13,12 +13,14 @@ import (
 )
 
 type agentPanelResult struct {
-	revision   uint64
-	instance   uuid.UUID
-	config     *goagent.Config
-	diagnostic *goagent.Diagnostic
-	message    string
-	err        error
+	revision    uint64
+	instance    uuid.UUID
+	config      *goagent.Config
+	diagnostic  *goagent.Diagnostic
+	rulesEditor *agentRulesEditor
+	samplePane  uuid.UUID
+	message     string
+	err         error
 }
 type agentPanel struct {
 	revision        uint64
@@ -31,6 +33,7 @@ type agentPanel struct {
 	diagnostic      *goagent.Diagnostic
 	page            int
 	rulesEditor     *agentRulesEditor
+	rules           []goagent.Rule
 }
 
 func agentMetadata(raw map[string]any) (*goagent.Profile, *goagent.Process) {
@@ -63,6 +66,7 @@ func (s *settingsPanel) agentProfile() (goagent.Profile, error) {
 	if p.ID == "" {
 		return p, errors.New("select an Agent")
 	}
+	p.Rules = cloneAgentRules(s.agents.rules)
 	for _, f := range s.fields {
 		if f.group != "Agents" {
 			continue
@@ -81,10 +85,6 @@ func (s *settingsPanel) agentProfile() (goagent.Profile, error) {
 			p.Priority = n
 		case "Color":
 			p.Color = value
-		case "Rules":
-			if err := json.Unmarshal([]byte(value), &p.Rules); err != nil {
-				return p, fmt.Errorf("recognition rules: %w", err)
-			}
 		case "StatusSource":
 			p.StatusSource = value
 		case "OSC":
@@ -157,7 +157,7 @@ func (s *settingsPanel) agentFields(id goagent.Kind) {
 	if p.ID == "" {
 		return
 	}
-	rules, _ := json.Marshal(p.Rules)
+	s.agents.rules = cloneAgentRules(p.Rules)
 	values := []struct {
 		name, label, value string
 		boolean            bool
@@ -167,7 +167,7 @@ func (s *settingsPanel) agentFields(id goagent.Kind) {
 		{"Enabled", "Enabled", "", true, p.Enabled},
 		{"Priority", "Recognition priority", strconv.Itoa(p.Priority), false, false},
 		{"Color", "Color (#RRGGBB or inherit)", p.Color, false, false},
-		{"Rules", "Recognition rules (JSON)", string(rules), false, false},
+		{"Rules", "Recognition rules", "", false, false},
 		{"StatusSource", "Status source", p.StatusSource, false, false},
 		{"OSC", "OSC states 0,1,2,3,4", strings.Join(p.OSC, ","), false, false},
 		{"Interrupt", "Interrupt preset", p.Interrupt, false, false},
@@ -228,6 +228,11 @@ func (c *WorkspaceClient) pollAgentSettings() {
 	case result := <-a.result:
 		a.result = nil
 		a.busy = false
+		if result.rulesEditor != nil {
+			a.message = ""
+			c.applyAgentRuleSample(result)
+			return
+		}
 		if result.err != nil {
 			a.message = result.err.Error()
 			return
