@@ -134,6 +134,9 @@ func (c *Client) Dispatch(command any, out any) error {
 }
 
 const terminalEventQueueCapacity = 64
+// Each dedicated terminal connection has its own bounded queue in addition to
+// the GUI's aggregate queue; keep per-terminal buffering small.
+const terminalStreamQueueCapacity = 8
 
 const sessionSendQueueCapacity = 64
 const sessionSendQueueBytes = goprotocol.MaxFrameBytes
@@ -209,11 +212,15 @@ func (c *Client) openSession(role string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	eventCapacity := terminalEventQueueCapacity
+	if role == "terminal" {
+		eventCapacity = terminalStreamQueueCapacity
+	}
 	s := &Session{
 		SocketPath: c.SocketPath,
 		conn:     conn,
 		Build:    c.Build,
-		Events:   make(chan TerminalPush, terminalEventQueueCapacity),
+		Events:   make(chan TerminalPush, eventCapacity),
 		Pushes:   make(chan goprotocol.WireMessage, 64),
 		replies:  make(map[uint64]chan goprotocol.WireMessage),
 		done:     make(chan struct{}),
