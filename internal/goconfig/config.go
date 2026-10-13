@@ -345,6 +345,11 @@ func DefaultShellProgram() string {
 	if p := strings.TrimSpace(os.Getenv("WATER_SHELL")); p != "" {
 		return p
 	}
+	// SSH supplies the remote account's login shell in SHELL. Prefer it to
+	// installed-shell discovery so a server does not silently switch to zsh.
+	if p := strings.TrimSpace(os.Getenv("SHELL")); p != "" {
+		return p
+	}
 	for _, candidate := range []string{"/opt/homebrew/bin/zsh", "/usr/local/bin/zsh", "/bin/zsh"} {
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate

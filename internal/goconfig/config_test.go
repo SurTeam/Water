@@ -6,6 +6,41 @@ import (
 	"testing"
 )
 
+func TestDefaultShellRespectsUserShell(t *testing.T) {
+	for _, shell := range []string{"/bin/bash", "/usr/bin/fish", "/bin/zsh"} {
+		t.Run(filepath.Base(shell), func(t *testing.T) {
+			t.Setenv("WATER_SHELL", "")
+			t.Setenv("SHELL", shell)
+			cfg := Default()
+			if cfg.Shell.Program != shell {
+				t.Fatalf("program=%q, want %q", cfg.Shell.Program, shell)
+			}
+			if shell != "/bin/zsh" && len(cfg.Shell.Args) != 0 {
+				t.Fatalf("unexpected zsh args: %v", cfg.Shell.Args)
+			}
+		})
+	}
+}
+
+func TestExplicitShellOverridesUserShell(t *testing.T) {
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("WATER_SHELL", "/usr/bin/fish")
+	if got := DefaultShellProgram(); got != "/usr/bin/fish" {
+		t.Fatalf("WATER_SHELL override=%q", got)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"shell":{"program":"/bin/sh"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Shell.Program != "/bin/sh" || len(cfg.Shell.Args) != 0 {
+		t.Fatalf("configured shell override=%#v", cfg.Shell)
+	}
+}
+
 func TestLoadKeepsDefaultsForPartialOverrides(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := os.WriteFile(path, []byte(`{

@@ -317,7 +317,7 @@ target/go-ui-smoke/water \
 target/go-ui-smoke/water --ssh build-box
 ```
 
-The default shell is the configured real shell; on macOS, zsh resolution prefers `/opt/homebrew/bin/zsh`. New tabs and split panes create a shell terminal. `WATER_CONFIG=/path/to/config.json` is equivalent to `--config`.
+The default shell uses an explicit `shell.program` configuration first, then `WATER_SHELL`, then the current user's `$SHELL` (including the remote account when started through SSH). If none is provided, shell discovery prefers `/opt/homebrew/bin/zsh`, `/usr/local/bin/zsh`, and `/bin/zsh`, then falls back to `/bin/sh`. New tabs and split panes create a shell terminal. `WATER_CONFIG=/path/to/config.json` is equivalent to `--config`.
 
 The GUI and server are separate when `server.detached` is enabled. `--empty-workspace` and `--no-initial-terminal` are test entry points, not alternate product modes.
 
