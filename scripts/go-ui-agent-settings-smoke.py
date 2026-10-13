@@ -74,7 +74,32 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     click(test, "agent:new")
     edit(test, "Name", "Fixture Agent")
     edit(test, "Color", "#12ab34")
-    edit(test, "Rules", json.dumps([{"all": [{"field": "executable", "op": "exact", "value": "water-fixture-agent"}]}], separators=(",", ":")))
+    click(test, "agent:edit-rules")
+    test.wait(lambda: "agent_rules_editor" in snapshot(test), "rules popup")
+    assert not any(h.get("label") == "agent:save" for h in snapshot(test)["automation_hits"]), "underlying save is clickable"
+    click(test, "field:AgentRules.Value")
+    test.ctl("ui", "key", "cmd-a")
+    sentinel = test.directory / "rule-injection-sentinel"
+    hostile = '  "quoted"\\path;$(touch ' + str(sentinel) + ')`echo x`  '
+    test.ctl("ui", "key", "text:" + hostile)
+    click(test, "agent-rules:apply")
+    click(test, "field:Agents.Rules")
+    generated = snapshot(test)["settings_editor"]["text"]
+    assert json.loads(generated)[0]["all"][0]["value"] == hostile, generated
+    assert not sentinel.exists(), "rule text executed a command"
+    click(test, "agent:edit-rules")
+    test.ctl("ui", "key", "cmd-a")
+    test.ctl("ui", "key", "text:discard this")
+    test.ctl("ui", "key", "Escape")
+    test.wait(lambda: "agent_rules_editor" not in snapshot(test), "Escape cancels popup only")
+    assert snapshot(test)["settings_visible"]
+    click(test, "field:Agents.Rules")
+    assert snapshot(test)["settings_editor"]["text"] == generated, "cancel changed JSON"
+    click(test, "agent:edit-rules")
+    test.ctl("ui", "key", "cmd-a")
+    test.ctl("ui", "key", "text:water-fixture-agent")
+    test.ctl("ui", "screenshot", "--output", str(test.directory / "rules-editor.png"))
+    click(test, "agent-rules:apply")
     edit(test, "OSC", "Idle,Running,Error,Running,Running")
     edit(test, "LongRunSeconds", "1")
     click(test, "agent:cycle:Interrupt")  # Ctrl+C -> SIGINT

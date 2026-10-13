@@ -608,6 +608,16 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 	if s.saving || s.group == 6 && s.agents.busy {
 		return
 	}
+	if s.agents.rulesEditor != nil {
+		if strings.HasPrefix(label, "agent-rules:") {
+			s.agentRuleAction(strings.TrimPrefix(label, "agent-rules:"))
+		}
+		return
+	}
+	if label == "agent:edit-rules" {
+		s.openAgentRules()
+		return
+	}
 	if strings.HasPrefix(label, "agent:") {
 		action := strings.TrimPrefix(label, "agent:")
 		if action == "close" {
@@ -907,6 +917,19 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 			return true
 		}
 		return w.editEditor(&c.remoteEditor, spec)
+	}
+	if c.settings.visible && c.settings.agents.rulesEditor != nil {
+		if strings.EqualFold(spec, "escape") {
+			c.settings.closeAgentRules()
+			return true
+		}
+		if strings.EqualFold(spec, "Tab") || strings.EqualFold(spec, "shift-Tab") {
+			return true
+		}
+		if i := c.settings.focus; i >= 0 && i < len(c.settings.fields) && c.settings.fields[i].group == "AgentRules" {
+			return w.editEditor(&c.settings.fields[i].editor, spec)
+		}
+		return true
 	}
 	if c.dispatchShortcut(spec) {
 		return true

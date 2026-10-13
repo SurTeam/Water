@@ -25,9 +25,19 @@ recognition and diagnostics.
 
 ## Recognition rules
 
-The recognition field contains a JSON array of rules. Any matching rule selects
-the profile; every condition in a rule's `all` array must match. Example for a
-Node-based Agent:
+The recognition field contains a JSON array of rules. **Edit…** opens a guided
+editor with explanations for `all`, `field`, `op`, and `value`. Use **Add rule**
+and **Add condition** to build alternatives and combined conditions; click the
+`field` and `op` buttons to cycle their supported choices. Type the match value
+directly, without JSON escaping. **Apply to JSON** validates the draft and uses
+standard JSON serialization to preserve quotes, backslashes and literal text.
+It fills the settings draft; **Save** still applies it to the selected server.
+Cancel or Escape closes the editor without changing the JSON. The raw JSON
+field remains available for manual edits. Rule values are compared as data and
+are never evaluated as shell commands.
+
+Any matching rule selects the profile; every condition in a rule's `all` array
+must match. Example for a Node-based Agent:
 
 ```json
 [

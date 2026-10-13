@@ -30,6 +30,7 @@ type agentPanel struct {
 	message         string
 	diagnostic      *goagent.Diagnostic
 	page            int
+	rulesEditor     *agentRulesEditor
 }
 
 func agentMetadata(raw map[string]any) (*goagent.Profile, *goagent.Process) {

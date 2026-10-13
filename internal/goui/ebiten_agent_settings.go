@@ -14,6 +14,10 @@ import (
 func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Image, r image.Rectangle, top, footer int) {
 	s := &c.settings
 	a := &s.agents
+	if a.rulesEditor != nil {
+		w.drawAgentRules(c, dst)
+		return
+	}
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .55)
@@ -82,6 +86,13 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 		if f.kind == reflect.Bool {
 			w.drawSettingsToggle(c, dst, fr, f.toggle.Value)
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:Agents."+f.name)
+		} else if f.name == "Rules" {
+			editWidth := w.dp(76)
+			textRect := fr
+			textRect.Max.X -= editWidth + w.dp(6)
+			w.field(c, dst, textRect, f.editor.Text(), s.focus == i, &f.editor)
+			w.hit(c, textRect, hitSettingsControl, uuid.Nil, "field:Agents.Rules")
+			button(fr.Max.X-editWidth, y, editWidth, "Edit…", "edit-rules", false)
 		} else if choices := sidebarSettingChoices(*f); len(choices) > 0 {
 			// Presets are cycled by a click; the full choice is shown in the field.
 			w.button(dst, c, fr, f.editor.Text(), hitSettingsControl, uuid.Nil, false)
