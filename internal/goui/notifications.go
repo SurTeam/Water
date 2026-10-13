@@ -20,6 +20,7 @@ type notificationRun struct {
 
 type foregroundCommand struct {
 	pane, terminal uuid.UUID
+	workspace, tab uuid.UUID
 	name           string
 }
 
@@ -37,6 +38,7 @@ func (w *EbitengineWindow) processNotificationsAt(c *WorkspaceClient, windowFocu
 		w.lastBellNotification = map[uuid.UUID]time.Time{}
 	}
 	hosts := w.hosts()
+	w.updateLongRunIndicators(hosts, now)
 	agents := map[string]nativeAgent{}
 	agentsByTerminal := map[uuid.UUID]nativeAgent{}
 	connections := map[uuid.UUID]string{}
@@ -270,7 +272,12 @@ func foregroundCommands(state gomodel.StateDump) []foregroundCommand {
 		for _, tab := range workspace.Tabs {
 			var root paneTree
 			if json.Unmarshal(tab.Tree, &root) == nil {
-				collectForegroundCommands(&root, commands)
+				tabCommands := map[uuid.UUID]foregroundCommand{}
+				collectForegroundCommands(&root, tabCommands)
+				for id, command := range tabCommands {
+					command.workspace, command.tab = workspace.ID, tab.ID
+					commands[id] = command
+				}
 			}
 		}
 	}

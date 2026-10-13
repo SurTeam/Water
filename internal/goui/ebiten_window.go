@@ -116,6 +116,9 @@ type EbitengineWindow struct {
 	notificationConnections map[uuid.UUID]string
 	notificationAgentRuns   map[string]notificationRun
 	notificationShellRuns   map[string]notificationRun
+	longRunObservations     map[longRunKey]longRunObservation
+	longRunTabs             map[longRunLocation]int
+	longRunWorkspaces       map[longRunLocation]int
 	bellNotifications       chan uuid.UUID
 	lastBellNotification    map[uuid.UUID]time.Time
 	menuEvents              chan string

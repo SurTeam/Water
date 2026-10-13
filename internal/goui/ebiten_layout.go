@@ -291,6 +291,9 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 			}
 			title := boundedTabTitle(v.tabTitles[tab.ID], cfg.UI.TabMaxTitleLength)
 			w.centeredLabel(dst, c, image.Rect(r.Min.X+w.dp(float64(cfg.UI.TabPadding)), r.Min.Y, r.Max.X-w.dp(float64(cfg.UI.TabPadding)), r.Max.Y), title, float64(cfg.UI.TabFontSize), labelColor, selected)
+			if w.longRunTabs[longRunLocation{w.multi.ActiveConnectionID(), workspace.ID, tab.ID}] > 0 {
+				w.drawLongRunDot(dst, r)
+			}
 			w.hit(c, r, hitTab, tab.ID, title)
 		}
 		addX := min(x+tabOffsets[len(workspace.Tabs)]-v.tabScroll, x+available)
