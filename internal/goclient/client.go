@@ -159,6 +159,13 @@ type stagedTerminal struct {
 }
 
 type Session struct {
+	SocketPath    string
+	// Bulk terminal output travels over separate connections (and independent
+	// SSH-forwarded channels) so a slow TUI cannot block control RPC replies.
+	terminalMu      sync.Mutex
+	terminalStreams map[uuid.UUID]*terminalStream
+	terminalReaders sync.WaitGroup
+
 	Server        goprotocol.ServerInfo
 	Compatibility goprotocol.Compatibility
 	Diagnostic    bool
@@ -188,12 +195,22 @@ type TerminalPush struct {
 	Event      goprotocol.TerminalEvent
 }
 
+type terminalStream struct {
+	session *Session
+	stop    chan struct{}
+}
+
 func (c *Client) OpenSession() (*Session, error) {
+	return c.openSession("gui")
+}
+
+func (c *Client) openSession(role string) (*Session, error) {
 	conn, err := net.DialTimeout("unix", c.SocketPath, time.Second)
 	if err != nil {
 		return nil, err
 	}
 	s := &Session{
+		SocketPath: c.SocketPath,
 		conn:     conn,
 		Build:    c.Build,
 		Events:   make(chan TerminalPush, terminalEventQueueCapacity),
@@ -231,7 +248,7 @@ func (c *Client) OpenSession() (*Session, error) {
 		Compatibility goprotocol.Compatibility `json:"compatibility"`
 	}
 	if err := s.Call("session.open", map[string]any{
-		"role":              "gui",
+		"role":              role,
 		"client":            clientInfo,
 		"compact_snapshots": true,
 	}, &result); err != nil {
@@ -316,10 +333,15 @@ func (s *Session) CallTimeout(method string, params any, out any, timeout time.D
 }
 
 func (s *Session) readLoop() {
-	defer close(s.Events)
-	defer close(s.Pushes)
-	defer s.Close()
-	defer s.failReplies()
+	defer func() {
+		_ = s.Close()
+		// The terminal forwarders may still be sending into Events. Cancel and
+		// join them before closing that channel to prevent send-on-closed races.
+		s.terminalReaders.Wait()
+		close(s.Events)
+		close(s.Pushes)
+		s.failReplies()
+	}()
 
 	for {
 		frame, err := goprotocol.ReadFrame(s.conn)
@@ -586,11 +608,93 @@ func (s *Session) ReplyFailure(requestID uint64, code, message string) error {
 }
 
 func (s *Session) Attach(id uuid.UUID, out any) error {
-	return s.Call("terminal.attach", map[string]any{"terminal_id": id}, out)
+	if s.SocketPath == "" {
+		// In-memory transport fixtures retain the original single connection.
+		return s.Call("terminal.attach", map[string]any{"terminal_id": id}, out)
+	}
+
+	// A new transport for each terminal is analogous to using independent SSH
+	// channels. Backpressure can halt that PTY's delivery without preventing
+	// another terminal from attaching or blocking GUI control-plane replies.
+	client := New(s.SocketPath)
+	client.Build = s.Build
+	stream, err := client.openSession("terminal")
+	if err != nil {
+		return err
+	}
+	if err := stream.Call("terminal.attach", map[string]any{"terminal_id": id}, out); err != nil {
+		_ = stream.Close()
+		return err
+	}
+
+	next := &terminalStream{session: stream, stop: make(chan struct{})}
+	s.terminalMu.Lock()
+	select {
+	case <-s.done:
+		s.terminalMu.Unlock()
+		_ = stream.Close()
+		return errors.New("session closed")
+	default:
+	}
+	if s.terminalStreams == nil {
+		s.terminalStreams = make(map[uuid.UUID]*terminalStream)
+	}
+	previous := s.terminalStreams[id]
+	s.terminalStreams[id] = next
+	s.terminalReaders.Add(1)
+	s.terminalMu.Unlock()
+	if previous != nil {
+		close(previous.stop)
+		_ = previous.session.Close()
+	}
+	go s.forwardTerminalEvents(next)
+	return nil
+}
+
+func (s *Session) forwardTerminalEvents(stream *terminalStream) {
+	defer s.terminalReaders.Done()
+	for {
+		// Do not forward pending events from a detached/replaced stream.
+		select {
+		case <-s.done:
+			return
+		case <-stream.stop:
+			return
+		default:
+		}
+		select {
+		case <-s.done:
+			return
+		case <-stream.stop:
+			return
+		case event, ok := <-stream.session.Events:
+			if !ok {
+				return
+			}
+			select {
+			case s.Events <- event:
+			case <-s.done:
+				return
+			case <-stream.stop:
+				return
+			}
+		}
+	}
 }
 
 func (s *Session) Detach(id uuid.UUID) error {
-	return s.Call("terminal.detach", map[string]any{"terminal_id": id}, nil)
+	if s.SocketPath == "" {
+		return s.Call("terminal.detach", map[string]any{"terminal_id": id}, nil)
+	}
+	s.terminalMu.Lock()
+	stream := s.terminalStreams[id]
+	delete(s.terminalStreams, id)
+	s.terminalMu.Unlock()
+	if stream != nil {
+		close(stream.stop)
+		return stream.session.Close()
+	}
+	return nil
 }
 
 func (s *Session) Close() error {
@@ -607,6 +711,14 @@ func (s *Session) closeWithError(cause error) error {
 		close(s.done)
 		s.writeMu.Unlock()
 		err = s.conn.Close()
+		s.terminalMu.Lock()
+		streams := s.terminalStreams
+		s.terminalStreams = nil
+		s.terminalMu.Unlock()
+		for _, stream := range streams {
+			close(stream.stop)
+			_ = stream.session.Close()
+		}
 	})
 	return err
 }
