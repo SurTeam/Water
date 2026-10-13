@@ -2,6 +2,7 @@ package goui
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -155,11 +156,19 @@ func updateAgentLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 			continue
 		}
 		run := w.notificationAgentRuns[key]
-		if run.startedAt.IsZero() || run.name != agent.kind {
-			run = notificationRun{name: agent.kind, startedAt: now}
+		name := agent.kind
+		if agent.run != nil {
+			name += fmt.Sprintf(":%d:%s", agent.run.PID, agent.run.Started)
+		}
+		if run.startedAt.IsZero() || run.name != name {
+			run = notificationRun{name: name, startedAt: now}
 		}
 		next[key] = run
-		if thresholdSeconds <= 0 || run.notified || now.Sub(run.startedAt) < time.Duration(thresholdSeconds)*time.Second || windowFocused {
+		threshold := thresholdSeconds
+		if agent.profile != nil && agent.profile.LongRunSeconds > 0 {
+			threshold = agent.profile.LongRunSeconds
+		}
+		if threshold <= 0 || run.notified || now.Sub(run.startedAt) < time.Duration(threshold)*time.Second || windowFocused {
 			continue
 		}
 		connection, _, _ := strings.Cut(key, ":")

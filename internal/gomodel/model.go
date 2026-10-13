@@ -717,10 +717,12 @@ func (m *Model) Dump() StateDump {
 				}
 				out.Agents=append(out.Agents,map[string]any{
 					"kind":pane.Terminal.Agent.Kind,
-					"label":goagent.Label(pane.Terminal.Agent.Kind),
+					"label":pane.Terminal.Agent.DisplayName(),
 					"custom_label":pane.Terminal.AgentLabel,
 					"active":pane.Terminal.Agent.Active,
-					"scrollback_on_clear_screen":goagent.ScrollbackOnClearScreen(pane.Terminal.Agent.Kind),
+					"profile":pane.Terminal.Agent.Profile,
+					"run":pane.Terminal.Agent.Run,
+					"scrollback_on_clear_screen":pane.Terminal.Agent.PreserveClear(),
 					"workspace_id":wid,
 					"tab_id":tabID,
 					"pane_id":paneID,
@@ -793,6 +795,7 @@ func (m *Model) dumpNodeLocked(n *Node) any {
 				"size":p.Terminal.Size,
 				"process":process,
 				"process_name":p.Terminal.ProcessName,
+			"agent_name":p.Terminal.Agent.DisplayName(),
 				"cwd":p.Terminal.CWD,
 			}}
 		}

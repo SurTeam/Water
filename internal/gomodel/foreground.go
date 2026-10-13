@@ -1,6 +1,8 @@
 package gomodel
 
 import (
+	"reflect"
+
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/google/uuid"
 )
@@ -12,18 +14,24 @@ func (m *Model) SetTerminalForeground(id uuid.UUID, name string) bool {
 }
 
 func (m *Model) SetTerminalForegroundProcess(id uuid.UUID, name string, args []string) bool {
+	return m.SetTerminalForegroundAgent(id, name, goagent.Detect(name, args))
+}
+
+func (m *Model) SetTerminalForegroundAgent(id uuid.UUID, name string, agent *goagent.DetectedAgent) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, pane := range m.panes {
 		if term := pane.Terminal; term != nil && term.TerminalID == id && !term.Exited {
-			agent := goagent.Detect(name, args)
 			sameAgent := term.Agent == nil && agent == nil || term.Agent != nil && agent != nil && term.Agent.Kind == agent.Kind
-			if term.ProcessName == name && sameAgent {
+			if sameAgent && agent != nil {
+				agent.Active = term.Agent.Active
+			}
+			if term.ProcessName == name && sameAgent && reflect.DeepEqual(term.Agent, agent) {
 				return false
 			}
 			term.ProcessName = name
+			term.Agent = agent
 			if !sameAgent {
-				term.Agent = agent
 				term.AgentLabel = nil
 			}
 			m.bump()

@@ -21,6 +21,9 @@ func tabCommandTitle(tab gomodel.TabDump) string {
 			return ""
 		}
 		if node.PaneID == tab.ActivePane && node.Terminal != nil {
+			if name := node.Terminal.Summary.AgentName; name != "" {
+				return name
+			}
 			return node.Terminal.Summary.ProcessName
 		}
 		if name := find(node.First); name != "" {

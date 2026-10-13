@@ -1,4 +1,5 @@
 {
+  "agents": {"overrides": [], "custom": []},
   "startup": {
     "default_cwd": "~",
     "control_socket": null,

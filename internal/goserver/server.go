@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gometrics"
@@ -24,18 +25,21 @@ import (
 )
 
 type Server struct {
-	SocketPath   string
-	Build        string
-	Version      string
-	Revision     string
-	InstanceID   uuid.UUID
-	commandMu    sync.Mutex
-	recovery     *recoveryLease
-	lastRecovery uuid.UUID
-	Config       goconfig.AppConfig
-	ConfigPath   string
-	web          *webService
-	webActive    atomic.Bool
+	SocketPath    string
+	Build         string
+	Version       string
+	Revision      string
+	InstanceID    uuid.UUID
+	commandMu     sync.Mutex
+	recovery      *recoveryLease
+	lastRecovery  uuid.UUID
+	Config        goconfig.AppConfig
+	agentRevision uint64
+	agentConfig   goagent.Config
+	agentRegistry *goagent.Registry
+	ConfigPath    string
+	web           *webService
+	webActive     atomic.Bool
 
 	registry *goterminal.Registry
 	model    *gomodel.Model
@@ -98,6 +102,12 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 		sessions:        make(map[*session]struct{}),
 		sessionsChanged: make(chan struct{}, 1),
 		pendingUI:       make(map[uint64]chan goprotocol.WireMessage),
+	}
+	srv.agentRevision = 1
+	srv.agentConfig = goagent.Clone(config.Agents)
+	srv.agentRegistry, _ = goagent.Compile(srv.agentConfig)
+	if srv.agentRegistry == nil {
+		srv.agentRegistry, _ = goagent.Compile(goagent.Config{})
 	}
 	srv.web = newWebService(srv, config.Web)
 	return srv

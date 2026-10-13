@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -20,6 +21,8 @@ type nativeHost struct {
 	state gomodel.StateDump
 }
 type nativeAgent struct {
+	profile                            *goagent.Profile
+	run                                *goagent.Process
 	kind, label                        string
 	workspace, tab, pane               uuid.UUID
 	active, running                    bool
@@ -54,7 +57,8 @@ func sidebarAgents(state gomodel.StateDump) []nativeAgent {
 		kind := fmt.Sprint(a["kind"])
 		active, _ := a["active"].(bool)
 		status, running := agentNotificationStatus(a["status"])
-		agents = append(agents, nativeAgent{kind: kind, label: label, workspace: nativeUUID(a["workspace_id"]), tab: nativeUUID(a["tab_id"]), pane: nativeUUID(a["pane_id"]), terminal: nativeUUID(a["terminal_id"]), active: active, running: running, status: status, titleSource: titleSource})
+		profile, run := agentMetadata(a)
+		agents = append(agents, nativeAgent{profile: profile, run: run, kind: kind, label: label, workspace: nativeUUID(a["workspace_id"]), tab: nativeUUID(a["tab_id"]), pane: nativeUUID(a["pane_id"]), terminal: nativeUUID(a["terminal_id"]), active: active, running: running, status: status, titleSource: titleSource})
 	}
 	return agents
 }
@@ -65,6 +69,9 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 	agents := sidebarAgents(state)
 	for i := range agents {
 		a := &agents[i]
+		if a.running && a.profile != nil && a.profile.StatusSource == "osc" {
+			a.status = "Unknown"
+		}
 		for _, ws := range state.Workspaces {
 			if ws.ID == a.workspace {
 				a.workspaceName = ws.Title
@@ -79,8 +86,8 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 			var title string
 			if term.emu != nil {
 				title = term.emu.Title()
-				if state, reported := term.emu.ProgressState(); reported && a.running {
-					a.status = agentProgressStatus(state)
+				if state, reported := term.emu.ProgressState(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") {
+					a.status = agentMappedStatus(a.profile, state)
 				}
 			}
 			term.mu.RUnlock()
@@ -430,6 +437,9 @@ func (w *EbitengineWindow) drawAgentLabel(c *WorkspaceClient, dst *ebiten.Image,
 	u, t := c.currentConfig().UI, c.currentConfig().Theme
 	fg := configColor(t.UIForeground, 0xe6eaea)
 	statusColor := configColor(t.AgentColors[a.kind], 0x8eaeed)
+	if a.profile != nil && a.profile.Color != "" {
+		statusColor = configColor(a.profile.Color, 0x8eaeed)
+	}
 	status := a.status
 	if !a.running || a.status == "Idle" {
 		statusColor = mixColor(statusColor, fg, .5)

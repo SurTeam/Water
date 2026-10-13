@@ -24,8 +24,10 @@ const (
 )
 
 type DetectedAgent struct {
-	Kind   Kind `json:"kind"`
-	Active bool `json:"active"`
+	Kind    Kind     `json:"kind"`
+	Active  bool     `json:"active"`
+	Run     *Process `json:"run,omitempty"`
+	Profile *Profile `json:"profile,omitempty"`
 }
 
 type definition struct {
@@ -73,42 +75,24 @@ func ScrollbackOnClearScreen(kind Kind) bool {
 }
 
 func Detect(processName string, cmdline []string) *DetectedAgent {
-	tokens := make([]string, 0, len(cmdline)+2)
-	tokens = append(tokens, normalizeToken(processName))
-	if argv0 := shellExecArgv0(cmdline); argv0 != "" {
-		tokens = append(tokens, normalizeToken(argv0))
+	registry, _ := Compile(Config{})
+	return registry.Detect(Process{Name: processName, Args: cmdline})
+}
+
+func (a *DetectedAgent) DisplayName() string {
+	if a == nil {
+		return ""
 	}
-	for i, token := range cmdline {
-		if i == 0 || strings.Contains(token, "/") {
-			tokens = append(tokens, normalizeToken(token))
-		}
+	if a.Profile != nil {
+		return a.Profile.Name
 	}
-	for _, def := range definitions {
-		for _, token := range tokens {
-			for _, name := range def.names {
-				if token == name {
-					return &DetectedAgent{Kind: def.kind}
-				}
-			}
-		}
+	return Label(a.Kind)
+}
+func (a *DetectedAgent) PreserveClear() bool {
+	if a.Profile != nil {
+		return a.Profile.ScrollbackOnClearScreen
 	}
-	for _, def := range definitions {
-		if len(def.pathMarkers) == 0 {
-			continue
-		}
-		for _, raw := range cmdline {
-			lower := strings.ToLower(raw)
-			if !strings.Contains(lower, "/") {
-				continue
-			}
-			for _, marker := range def.pathMarkers {
-				if strings.Contains(lower, marker) {
-					return &DetectedAgent{Kind: def.kind}
-				}
-			}
-		}
-	}
-	return nil
+	return ScrollbackOnClearScreen(a.Kind)
 }
 
 func normalizeToken(token string) string {

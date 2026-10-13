@@ -32,6 +32,9 @@ func TestEveryConfigFieldHasSettingsControlAndRoundTrips(t *testing.T) {
 	config := reflect.ValueOf(cfg)
 	for i := 0; i < config.NumField(); i++ {
 		group := config.Type().Field(i).Name
+		if group == "Agents" {
+			continue
+		} // structured server-owned editor has dedicated coverage
 		value := config.Field(i)
 		for j := 0; j < value.NumField(); j++ {
 			field := value.Type().Field(j).Name

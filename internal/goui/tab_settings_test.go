@@ -59,3 +59,20 @@ func TestSettingsSectionsIncludeEveryVisibleFieldOnce(t *testing.T) {
 		t.Fatalf("missing fields: %d/%d", len(seen), len(c.settings.fields))
 	}
 }
+
+func TestTabTitleUsesProjectedAgentNameAndRetainsExplicitTitle(t *testing.T) {
+	pane := uuid.New()
+	tree, err := json.Marshal(map[string]any{"type": "leaf", "pane_id": pane, "terminal": map[string]any{"summary": map[string]any{"process_name": "node", "agent_name": "My Agent"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := gomodel.TabDump{ID: uuid.New(), ActivePane: pane, Tree: tree}
+	if got := tabCommandTitle(tab); got != "My Agent" {
+		t.Fatalf("automatic title=%q", got)
+	}
+	custom := "My task"
+	tab.TitleOverride = &custom
+	if got := tabCommandTitle(tab); got != custom {
+		t.Fatalf("custom title changed to %q", got)
+	}
+}

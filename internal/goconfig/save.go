@@ -3,6 +3,8 @@ package goconfig
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goagent"
+	"golang.org/x/sys/unix"
 	"net"
 	"os"
 	"path/filepath"
@@ -10,7 +12,33 @@ import (
 
 // Save updates known fields while retaining other versions' configuration keys.
 // Rename publishes a complete file, so readers cannot observe a partial write.
-func Save(path string, cfg AppConfig) error {
+func Save(path string, cfg AppConfig) error { return saveConfig(path, cfg, false, "") }
+
+// SavePreferences leaves server-owned Agent definitions intact.
+func SavePreferences(path string, cfg AppConfig) error { return saveConfig(path, cfg, true, "") }
+func SaveAgents(path string, agents goagent.Config) error {
+	if _, err := goagent.Compile(agents); err != nil {
+		return err
+	}
+	return saveConfig(path, AppConfig{Agents: agents}, false, "agents")
+}
+func SaveWeb(path string, web WebConfig) error {
+	return saveConfig(path, AppConfig{Web: web}, false, "web")
+}
+func saveConfig(path string, cfg AppConfig, preferencesOnly bool, sectionOnly string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+		return err
+	}
+	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -41,31 +69,50 @@ func Save(path string, cfg AppConfig) error {
 	if err = json.Unmarshal(encoded, &known); err != nil {
 		return err
 	}
+	if sectionOnly != "" {
+		known = map[string]any{sectionOnly: known[sectionOnly]}
+	}
+	if preferencesOnly {
+		delete(known, "agents")
+	}
+	if agents, ok := known["agents"]; ok {
+		target["agents"] = agents
+		delete(known, "agents")
+	}
 	mergeConfig(target, known)
-	for _, object := range []map[string]any{root, target} {
-		if web, ok := object["web"].(map[string]any); ok {
-			delete(web, "public_url")
-			if _, hasPort := web["listen_port"]; !hasPort {
-				if address, ok := web["listen_address"].(string); ok {
-					if _, _, err := net.SplitHostPort(address); err == nil {
-						delete(web, "listen_address")
+	if sectionOnly == "" {
+		for _, object := range []map[string]any{root, target} {
+			if web, ok := object["web"].(map[string]any); ok {
+				delete(web, "public_url")
+				if _, hasPort := web["listen_port"]; !hasPort {
+					if address, ok := web["listen_address"].(string); ok {
+						if _, _, err := net.SplitHostPort(address); err == nil {
+							delete(web, "listen_address")
+						}
 					}
 				}
 			}
 		}
-	}
-	if terminal, ok := target["terminal"].(map[string]any); ok {
-		delete(terminal, "default_columns")
-		delete(terminal, "default_lines")
-	}
-	if startup, ok := target["startup"].(map[string]any); ok {
-		for _, key := range []string{"window_width", "window_height", "window_min_width", "window_min_height"} {
-			delete(startup, key)
+		if terminal, ok := target["terminal"].(map[string]any); ok {
+			delete(terminal, "default_columns")
+			delete(terminal, "default_lines")
+		}
+		if startup, ok := target["startup"].(map[string]any); ok {
+			for _, key := range []string{"window_width", "window_height", "window_min_width", "window_min_height"} {
+				delete(startup, key)
+			}
+		}
+		if ui, ok := target["ui"].(map[string]any); ok {
+			if _, legacy := ui["ui_font_size"]; legacy {
+				ui["ui_font_size"] = cfg.UI.UIFontSize
+			}
 		}
 	}
-	if ui, ok := target["ui"].(map[string]any); ok {
-		if _, legacy := ui["ui_font_size"]; legacy {
-			ui["ui_font_size"] = cfg.UI.UIFontSize
+	if sectionOnly == "web" {
+		for _, object := range []map[string]any{root, target} {
+			if web, ok := object["web"].(map[string]any); ok {
+				delete(web, "public_url")
+			}
 		}
 	}
 	data, err = json.MarshalIndent(root, "", "  ")

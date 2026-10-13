@@ -101,6 +101,8 @@ func dispatchCLI(ctx cliContext, args []string) error {
 		return runSurface(ctx, args[1:])
 	case "terminal":
 		return runTerminal(ctx, args[1:])
+	case "agent":
+		return runAgent(ctx, args[1:])
 	case "operation":
 		return runOperation(ctx, args[1:])
 	case "scenario":

@@ -2,6 +2,7 @@ package goterminal
 
 import (
 	"context"
+	"errors"
 	"github.com/SurTeam/Water/internal/goagent"
 	"os/exec"
 	"testing"
@@ -68,4 +69,19 @@ func TestForegroundNameFollowsPTYJobAndReturnsToShell(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitName("sh")
+}
+
+func TestForegroundKeepsValidRecordsFromPartialPSFailure(t *testing.T) {
+	output := []byte("123 123 Tue Oct 13 00:00:00 2026 /usr/local/bin/my-agent --work\n124 123 Tue Oct 13 00:00:00 2026 sleep 30\ninvalid row\n")
+	queryErr := errors.New("one requested process disappeared")
+	processes, err := parseForegroundOutput(output, queryErr, nil)
+	if err != nil || len(processes) != 1 || processes[123].Name != "my-agent" || processes[123].Started == "" {
+		t.Fatalf("valid record lost after partial failure: %v %#v", err, processes)
+	}
+	if _, err = parseForegroundOutput(nil, queryErr, nil); err == nil {
+		t.Fatal("query failure without output was ignored")
+	}
+	if _, err = parseForegroundOutput(output, queryErr, context.DeadlineExceeded); err == nil {
+		t.Fatal("deadline failure was ignored")
+	}
 }

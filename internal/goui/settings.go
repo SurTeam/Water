@@ -38,6 +38,17 @@ func sidebarSettingChoices(f settingsField) []sidebarChoice {
 	if f.group == "Terminal" && f.name == "CursorStyle" {
 		return []sidebarChoice{{"block", "Block"}, {"bar", "Bar"}, {"underline", "Underline"}}
 	}
+	if f.group == "Agents" {
+		if f.name == "StatusSource" {
+			return []sidebarChoice{{"auto", "Automatic"}, {"osc", "OSC reports"}, {"process", "Process lifecycle"}}
+		}
+		if f.name == "Interrupt" {
+			return []sidebarChoice{{"ctrl-c", "Ctrl+C"}, {"sigint", "SIGINT"}, {"none", "Disabled"}}
+		}
+		if f.name == "Exit" {
+			return []sidebarChoice{{"sigterm", "SIGTERM"}, {"sighup", "SIGHUP"}, {"ctrl-d", "Ctrl+D"}, {"none", "Disabled"}}
+		}
+	}
 	if f.group != "UI" {
 		return nil
 	}
@@ -55,6 +66,7 @@ type settingsSave struct {
 	err error
 }
 type settingsPanel struct {
+	agents                        agentPanel
 	initial                       []string
 	confirmDiscard                bool
 	serverConfirm                 bool
@@ -64,7 +76,7 @@ type settingsPanel struct {
 	draft                         goconfig.AppConfig
 	base                          *goconfig.AppConfig
 	fields                        []settingsField
-	tabs                          [6]widget.Clickable
+	tabs                          [7]widget.Clickable
 	save, cancel, defaults, scrim widget.Clickable
 	list                          widget.List
 	result                        chan settingsSave
@@ -112,6 +124,7 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 	if c.settings.saving {
 		return
 	}
+	c.settings.agents = agentPanel{}
 	c.settings.visible = true
 	c.settings.confirmDiscard = false
 	c.settings.message = ""
@@ -193,19 +206,22 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 }
 
 func (s *settingsPanel) values() []string {
-	values := make([]string, len(s.fields))
-	for i, f := range s.fields {
+	values := make([]string, 0, len(s.fields))
+	for _, f := range s.fields {
+		if f.group == "Agents" {
+			continue
+		}
 		if f.kind == reflect.Bool {
-			values[i] = strconv.FormatBool(f.toggle.Value)
+			values = append(values, strconv.FormatBool(f.toggle.Value))
 		} else {
-			values[i] = f.editor.Text()
+			values = append(values, f.editor.Text())
 		}
 	}
 	return values
 }
 
 func (s *settingsPanel) cancelChanges() {
-	if !s.confirmDiscard && !reflect.DeepEqual(s.initial, s.values()) {
+	if !s.confirmDiscard && (!reflect.DeepEqual(s.initial, s.values()) || s.agentDirty()) {
 		s.confirmDiscard = true
 		s.message = "Unsaved changes. Click Discard changes to cancel, or continue editing."
 		return
@@ -340,6 +356,9 @@ func (s *settingsPanel) parse() (goconfig.AppConfig, error) {
 	cfg.Theme.ANSIColors = make([]string, 16)
 	for i := range s.fields {
 		f := &s.fields[i]
+		if f.group == "Agents" {
+			continue
+		}
 		label := localizedField(s.draft.UI.Language, *f)
 		text := strings.TrimSpace(f.editor.Text())
 		if f.group == "Theme" {
@@ -516,6 +535,10 @@ func (c *WorkspaceClient) layoutSettings(gtx layout.Context, th *material.Theme)
 		}
 	}
 	for s.save.Clicked(gtx) {
+		if s.agentDirty() {
+			s.message = "Save Agent changes on the Agents page first"
+			continue
+		}
 		if !s.saving {
 			cfg, err := s.parse()
 			if err != nil {
@@ -542,7 +565,7 @@ func (c *WorkspaceClient) layoutSettings(gtx layout.Context, th *material.Theme)
 			s.result = result
 			path := c.configPath
 			go func() {
-				err := goconfig.Save(path, cfg)
+				err := goconfig.SavePreferences(path, cfg)
 				if c.settingsStore != nil {
 					if err == nil {
 						c.settingsStore.value.Store(&cfg)

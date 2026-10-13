@@ -2,7 +2,7 @@ package goui
 
 import "strings"
 
-var settingsGroups = []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup", "Server"}
+var settingsGroups = []string{"Terminal", "UI", "Shortcuts", "Theme", "Startup", "Server", "Agents"}
 
 func settingsSection(f settingsField) string {
 	switch f.group {
@@ -103,6 +103,15 @@ func settingsRows(s *settingsPanel) []settingsRow {
 	groups := settingsGroups
 	if s.group < 0 || s.group >= len(groups) || s.group == 5 {
 		return nil
+	}
+	if s.group == 6 {
+		var rows []settingsRow
+		for i, f := range s.fields {
+			if f.group == "Agents" {
+				rows = append(rows, settingsRow{field: i, section: "Agents"})
+			}
+		}
+		return rows
 	}
 	bySection := map[string][]int{}
 	for i, f := range s.fields {

@@ -1,6 +1,7 @@
 package goui
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"reflect"
@@ -44,9 +45,15 @@ func (w *EbitengineWindow) updateLongRunIndicators(hosts []nativeHost, now time.
 					continue
 				}
 				name = "agent:" + agent.kind
+				if agent.run != nil {
+					name += fmt.Sprintf(":%d:%s", agent.run.PID, agent.run.Started)
+				}
 				threshold = cfg.AgentLongRunNotificationSeconds
 				if threshold <= 0 {
 					threshold = 600
+				}
+				if agent.profile != nil && agent.profile.LongRunSeconds > 0 {
+					threshold = agent.profile.LongRunSeconds
 				}
 			} else if isInteractiveShell(name) {
 				continue

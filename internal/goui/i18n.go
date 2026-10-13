@@ -8,6 +8,20 @@ import (
 // UI text is localized on the client. Model names and terminal output remain
 // user content; automation keys and protocol identifiers never depend on locale.
 var chineseText = map[string]string{
+	"Status source": "状态来源", "Automatic": "自动", "OSC reports": "OSC 状态报告", "Process lifecycle": "进程生命周期",
+	"Agent settings belong to: %s": "Agent 设置所属服务端：%s",
+	"Display name":                 "显示名称", "Enabled": "启用", "Recognition priority": "识别优先级",
+	"Color (#RRGGBB or inherit)": "颜色（留空继承）", "Recognition rules (JSON)": "识别规则（JSON）",
+	"OSC states 0,1,2,3,4": "OSC 状态 0、1、2、3、4", "Interrupt preset": "中断预设", "Exit preset": "退出预设",
+	"Keep history on clear": "清屏时保留历史", "Long-run seconds (0 = global)": "长运行秒数（0 继承全局）",
+	"Rules: OR between rules; AND within all. Higher priority wins.":        "多条规则任一命中；all 中条件全部满足。高优先级优先。",
+	"Fields: executable, name, path, argument. Ops: exact, contains, glob.": "字段：executable/name/path/argument；操作：exact/contains/glob。",
+	"Test recognition": "测试识别", "Interrupt": "中断", "Request exit": "请求退出", "Reload": "重新加载",
+	"Previous": "上一个", "Next": "下一个", "New": "新建", "Duplicate": "复制档案", "Restore defaults": "恢复默认", "Delete": "删除",
+	"Agent settings saved": "Agent 设置已保存", "Changes are not saved": "修改尚未保存",
+	"No recognized Agent in the focused pane": "当前窗格没有识别到 Agent", "Agent action completed": "Agent 操作已完成",
+	"No recognition rule matched": "没有规则命中", "Save or discard changes before reloading": "请先保存或放弃修改再重新加载",
+
 	"Upgrade this server to import local TLS files": "请升级当前服务端，以支持导入本机 TLS 文件",
 	"Choose…": "选择文件…",
 	"HTTPS needs both a PEM certificate chain (.pem/.crt) and its key.":                 "HTTPS 需同时提供 PEM 证书链（.pem/.crt）和匹配的私钥。",

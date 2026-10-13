@@ -100,6 +100,12 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 	}
 
 	switch kind {
+	case "agents.inspect", "agents.configure", "agents.test", "agent.control":
+		result, err := s.agentCommand(kind, raw)
+		if err != nil {
+			return fail("AGENT_COMMAND_FAILED", err)
+		}
+		return result, nil
 	case "recovery.restore":
 		var c struct {
 			Layout gomodel.RecoveryLayout `json:"layout"`
@@ -113,13 +119,17 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 		return map[string]any{"recovery_id": c.Layout.ID}, nil
 	case "internal.terminal.foreground":
 		var command struct {
-			TerminalID uuid.UUID `json:"terminal_id"`
-			Name       string    `json:"name"`
+			TerminalID uuid.UUID        `json:"terminal_id"`
+			Name       string           `json:"name"`
+			Process    *goagent.Process `json:"process,omitempty"`
 		}
 		if err := json.Unmarshal(raw, &command); err != nil {
 			return fail("INVALID_COMMAND", err)
 		}
-		return s.model.SetTerminalForeground(command.TerminalID, command.Name), nil
+		if command.Process != nil {
+			return s.applyForeground(command.TerminalID, *command.Process), nil
+		}
+		return s.applyForeground(command.TerminalID, goagent.Process{Name: command.Name}), nil
 	case "workspace.create":
 		id := s.model.CreateWorkspace("")
 		return map[string]any{"type": "workspace_created", "workspace_id": id}, nil
@@ -722,7 +732,7 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 	meta := gomodel.TerminalMeta{
 		TerminalID: t.ID, SessionID: uuid.New(), Program: program, Args: append([]string(nil), args...),
 		Size: t.Size(), ProcessName: processName, CWD: cwd,
-		Agent: goagent.Detect(processName, cmdline),
+		Agent: s.agentRegistry.Detect(goagent.Process{Name: processName, Args: cmdline}),
 	}
 	if err := s.model.InstallTerminal(paneID, meta); err != nil {
 		s.registry.Remove(t.ID)

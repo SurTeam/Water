@@ -54,6 +54,7 @@ type terminalSummary struct {
 	Size        goprotocol.TerminalSize `json:"size"`
 	Process     json.RawMessage         `json:"process"`
 	ProcessName string                  `json:"process_name"`
+	AgentName   string                  `json:"agent_name,omitempty"`
 	CWD         string                  `json:"cwd"`
 }
 

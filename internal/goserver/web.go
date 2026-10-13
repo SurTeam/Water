@@ -78,12 +78,7 @@ func (w *webService) configure(cfg goconfig.WebConfig) error {
 	// ConfigPath is owned by the target server. A remote command never saves the
 	// desktop's config or replaces unrelated settings from that server's file.
 	if w.server.ConfigPath != "" {
-		c, err := goconfig.Load(w.server.ConfigPath)
-		if err != nil {
-			return err
-		}
-		c.Web = cfg
-		if err := goconfig.Save(w.server.ConfigPath, c); err != nil {
+		if err := goconfig.SaveWeb(w.server.ConfigPath, cfg); err != nil {
 			return err
 		}
 	}

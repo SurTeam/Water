@@ -605,7 +605,34 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 	c.layoutMu.Lock()
 	defer c.layoutMu.Unlock()
 	s := &c.settings
-	if s.saving {
+	if s.saving || s.group == 6 && s.agents.busy {
+		return
+	}
+	if strings.HasPrefix(label, "agent:") {
+		action := strings.TrimPrefix(label, "agent:")
+		if action == "close" {
+			if !s.agents.busy {
+				s.cancelChanges()
+			}
+			return
+		}
+		if strings.HasPrefix(action, "cycle:") {
+			name := strings.TrimPrefix(action, "cycle:")
+			for i := range s.fields {
+				f := &s.fields[i]
+				if f.group == "Agents" && f.name == name {
+					choices := sidebarSettingChoices(*f)
+					for j, ch := range choices {
+						if ch.value == f.editor.Text() {
+							f.editor.SetText(choices[(j+1)%len(choices)].value)
+							break
+						}
+					}
+				}
+			}
+			return
+		}
+		c.agentSettingsAction(action)
 		return
 	}
 	if c.ServerPanelState().WebVisible && (label == "field:Web.TLSCertFile" || label == "field:Web.TLSKeyFile") {
@@ -634,6 +661,10 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 			w.view(c).remoteFocused = false
 		}
 	case "defaults":
+		if s.agentDirty() {
+			s.message = "Save or discard Agent changes before resetting preferences"
+			return
+		}
 		initial := s.initial
 		c.openSettingsConfig(goconfig.Default())
 		s.initial = initial
@@ -678,6 +709,9 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 			for i, name := range settingsGroups {
 				if label == "category:"+name {
 					s.group = i
+					if i == 6 {
+						c.loadAgentSettings()
+					}
 					s.focus = -1
 					w.view(c).settingsScroll = 0
 				}
@@ -699,6 +733,10 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 }
 func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 	s := &c.settings
+	if s.agentDirty() {
+		s.message = "Save Agent changes on the Agents page first"
+		return
+	}
 	cfg, err := s.parse()
 	if err != nil {
 		s.message = err.Error()
@@ -728,7 +766,7 @@ func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 	s.result = result
 	path := c.configPath
 	go func() {
-		err := goconfig.Save(path, cfg)
+		err := goconfig.SavePreferences(path, cfg)
 		if c.settingsStore != nil {
 			if err == nil {
 				c.settingsStore.value.Store(&cfg)
@@ -885,7 +923,7 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 			}
 			return true
 		}
-		if c.settings.saving {
+		if c.settings.saving || c.settings.group == 6 && c.settings.agents.busy {
 			return true
 		}
 		webState := c.ServerPanelState()

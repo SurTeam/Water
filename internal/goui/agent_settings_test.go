@@ -1,7 +1,11 @@
 package goui
 
 import (
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/gomodel"
+	"github.com/SurTeam/Water/internal/govt"
+	"github.com/google/uuid"
 	"reflect"
 	"testing"
 )
@@ -95,5 +99,105 @@ func TestSettingsShortcutConfirmsUnsavedChanges(t *testing.T) {
 	c.dispatchShortcut("cmd-,")
 	if c.settings.visible {
 		t.Fatal("confirmed shortcut did not close settings")
+	}
+}
+
+func TestAgentSettingsDraftRestoreAndCancel(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	defer c.Close()
+	c.openSettings()
+	c.settings.agents.loaded = true
+	c.settings.agents.config = goagent.Config{}
+	c.settings.agents.initial = goagent.Config{}
+	c.settings.agentFields(goagent.Codex)
+	if c.settings.agentDirty() {
+		t.Fatal("unchanged builtin marked dirty")
+	}
+	for i := range c.settings.fields {
+		f := &c.settings.fields[i]
+		if f.group == "Agents" && f.name == "Name" {
+			f.editor.SetText("Custom Codex")
+		}
+	}
+	c.settings.cancelChanges()
+	if !c.settings.visible || !c.settings.confirmDiscard {
+		t.Fatal("Agent draft closed without discard confirmation")
+	}
+	if err := c.settings.stageAgent(); err != nil {
+		t.Fatal(err)
+	}
+	c.agentSettingsAction("restore")
+	if c.settings.agentDirty() || len(c.settings.agents.config.Overrides) != 0 {
+		t.Fatal("builtin restore retained override")
+	}
+	c.settings.cancelChanges()
+	if c.settings.visible {
+		t.Fatal("clean restored draft failed to close")
+	}
+	c.openSettings()
+	c.settings.agents.loaded = true
+	c.settings.agentFields(goagent.Codex)
+	c.agentSettingsAction("duplicate")
+	id := c.settings.agents.selected
+	if parsed, err := uuid.Parse(string(id)); err != nil || parsed.Version() != 4 {
+		t.Fatal("custom identity is not UUIDv4")
+	}
+	if !c.settings.agentDirty() {
+		t.Fatal("new custom Agent not marked dirty")
+	}
+	c.agentSettingsAction("delete")
+	if len(c.settings.agents.config.Custom) != 0 || c.settings.agentDirty() {
+		t.Fatal("draft custom deletion did not restore baseline")
+	}
+}
+
+func TestAgentOSCMappingAndSource(t *testing.T) {
+	p := goagent.Builtins()[0]
+	p.OSC = []string{"Completed", "Running", "Error", "Running", "Running"}
+	if agentMappedStatus(&p, 4) != "Running" || agentMappedStatus(&p, 0) != "Completed" {
+		t.Fatal("profile mapping ignored")
+	}
+	if agentMappedStatus(nil, 4) != "Paused" {
+		t.Fatal("legacy default mapping changed")
+	}
+}
+
+func TestAgentStatusSourceReportsUnknownUntilOSC(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	id := uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer emu.Close()
+	c.terminals[id] = &terminalClient{id: id, emu: emu}
+	p := goagent.Builtins()[0]
+	p.StatusSource = "osc"
+	raw := map[string]any{"kind": p.ID, "label": p.Name, "terminal_id": id, "status": "running", "profile": &p}
+	state := gomodel.StateDump{Agents: []any{raw}}
+	if c.sidebarAgents(state)[0].status != "Unknown" {
+		t.Fatal("OSC-only source invented work state")
+	}
+	emu.Write([]byte("\x1b]9;4;4\x07"))
+	if c.sidebarAgents(state)[0].status != "Paused" {
+		t.Fatal("OSC report ignored")
+	}
+	p.StatusSource = "process"
+	if c.sidebarAgents(state)[0].status != "Running" {
+		t.Fatal("process source did not ignore OSC")
+	}
+	raw["status"] = map[string]any{"exited": map[string]any{"code": 0}}
+	if c.sidebarAgents(state)[0].status != "Completed" {
+		t.Fatal("exited process retained Running state")
+	}
+}
+
+func TestAgentControlRequiresSelectedProfileToOwnFocusedPane(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	defer c.Close()
+	pane := uuid.New()
+	c.state.FocusedPane = &pane
+	c.state.Agents = []any{map[string]any{"kind": "pi", "pane_id": pane, "status": "running"}}
+	c.settings.agents.selected = goagent.Codex
+	c.controlActiveAgent("interrupt")
+	if c.settings.agents.busy || c.settings.agents.message != "Select the focused terminal’s Agent before controlling it" {
+		t.Fatal("control did not refuse a mismatched profile")
 	}
 }

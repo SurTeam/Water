@@ -24,8 +24,8 @@ func (s *Server) monitorForegroundProcesses() {
 			return
 		case <-ticker.C:
 			changed := false
-			for id, name := range s.registry.ForegroundNames(ctx) {
-				command, _ := json.Marshal(map[string]any{"terminal_id": id, "name": name})
+			for id, process := range s.registry.ForegroundProcesses(ctx) {
+				command, _ := json.Marshal(map[string]any{"terminal_id": id, "process": process})
 				result, err := s.executeCommand("internal.terminal.foreground", command)
 				if err == nil && result == true {
 					changed = true

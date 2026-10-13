@@ -773,6 +773,8 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["server_status"] = c.ServerPanelState()
 		if c.settings.visible {
 			state["settings_category"] = settingsGroups[c.settings.group]
+			a := &c.settings.agents
+			state["agent_settings"] = map[string]any{"loaded": a.loaded, "busy": a.busy, "message": a.message, "selected": a.selected, "diagnostic": a.diagnostic, "dirty": c.settings.agentDirty()}
 			fields := make([]map[string]any, 0, len(c.settings.fields))
 			for group := 0; group < len(settingsGroups); group++ {
 				panel := settingsPanel{fields: c.settings.fields}

@@ -121,6 +121,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	defer w.publishDragTargets(c)
 	defer w.noteVisibleTerminals(c)
 	c.pollSettingsSave()
+	c.pollAgentSettings()
 	c.mu.RLock()
 	state, connectionError := c.state, c.connectionError
 	c.mu.RUnlock()
@@ -579,7 +580,11 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	s := &c.settings
 	v := w.view(c)
-	r := w.overlayPanel(c, dst, w.dp(680), w.dp(540), true)
+	width, height := 680., 540.
+	if s.group == 6 {
+		width, height = 820, 660
+	}
+	r := w.overlayPanel(c, dst, w.dp(width), w.dp(height), true)
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .52)
@@ -599,6 +604,10 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	listTop := top + w.dp(52)
 	footer := r.Max.Y - w.dp(72)
+	if s.group == 6 {
+		w.drawAgentSettings(c, dst, r, listTop, footer)
+		return
+	}
 	if s.group == 5 {
 		w.drawServerSettings(c, dst, r, listTop, footer)
 		return

@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/SurTeam/Water/internal/goagent"
 )
 
 const (
@@ -19,6 +21,7 @@ const (
 )
 
 type AppConfig struct {
+	Agents    goagent.Config `json:"agents"`
 	Startup   StartupConfig  `json:"startup"`
 	Server    ServerConfig   `json:"server"`
 	Web       WebConfig      `json:"web"`
@@ -464,6 +467,9 @@ func Load(path string) (AppConfig, error) {
 		if err := cfg.Web.Validate(); err != nil {
 			return AppConfig{}, err
 		}
+	}
+	if _, err := goagent.Compile(cfg.Agents); err != nil {
+		return AppConfig{}, err
 	}
 	return cfg, nil
 }
