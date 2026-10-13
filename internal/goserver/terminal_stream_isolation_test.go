@@ -55,11 +55,11 @@ func TestFloodedTUIStreamDoesNotBlockGUIControlOrSecondAttach(t *testing.T) {
 	// Deliberately produces more than 64 live events and never waits for UI
 	// painting, as an alternate-screen TUI typically would.
 	if err := gui.Dispatch(map[string]any{
-		"type": "terminal.spawn",
+		"type":    "terminal.spawn",
 		"program": "/bin/sh",
-		"args": []string{"-c", "while :; do printf '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\\n'; done"},
+		"args":    []string{"-c", "while :; do printf '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\\n'; done"},
 		"columns": 80,
-		"lines": 24,
+		"lines":   24,
 	}, &busy); err != nil {
 		t.Fatal(err)
 	}
@@ -88,15 +88,30 @@ func TestFloodedTUIStreamDoesNotBlockGUIControlOrSecondAttach(t *testing.T) {
 		t.Fatalf("busy TUI starved GUI RPC: %v", err)
 	}
 
+	// Spawn without pane_id resolves the active pane and SIGHUPs its PTY.
+	// The flooded terminal has to stay running, so the quiet one gets a new pane.
+	var split struct {
+		PaneID uuid.UUID `json:"pane_id"`
+	}
+	if err := gui.Dispatch(map[string]any{
+		"type":      "pane.split",
+		"direction": "right",
+	}, &split); err != nil {
+		t.Fatalf("busy TUI blocked splitting a pane: %v", err)
+	}
+	if split.PaneID == uuid.Nil {
+		t.Fatal("missing split pane")
+	}
 	var second struct {
 		TerminalID uuid.UUID `json:"terminal_id"`
 	}
 	if err := gui.Dispatch(map[string]any{
-		"type": "terminal.spawn",
+		"type":    "terminal.spawn",
+		"pane_id": split.PaneID,
 		"program": "/bin/sh",
-		"args": []string{"-c", "printf 'quiet-terminal\\n'"},
+		"args":    []string{"-c", "printf 'quiet-terminal\\n'"},
 		"columns": 80,
-		"lines": 24,
+		"lines":   24,
 	}, &second); err != nil {
 		t.Fatalf("busy TUI blocked another terminal spawn: %v", err)
 	}
