@@ -27,7 +27,7 @@ For setup, configuration, remote connections, control commands, tests, cross-bui
 
 ## Project status
 
-The latest release, [Water 0.4.8](docs/releases/v0.4.8.md), retries busy server handshakes during GUI startup and isolates terminal output streams to keep control requests responsive. It also adds configurable Agent profiles and floating indicators for long-running terminals.
+The latest release, [Water 0.4.9](docs/releases/v0.4.9.md), makes shell `clear` erase scrollback again while Ctrl+L still keeps history. [Water 0.4.8](docs/releases/v0.4.8.md) retries busy server handshakes during GUI startup and isolates terminal output streams.
 
 Water is an active workbench rather than a compatibility layer for an existing terminal app. The server owns sessions and bounded terminal replay; each client attaches its own emulator and UI state. That separation is what enables persistent remote sessions, reliable reconnect, bounded output memory, and deterministic control/API tests.
 

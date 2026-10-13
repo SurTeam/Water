@@ -242,8 +242,10 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 		}
 		h.dirtyRowTracker.MarkDirty(0)
 	case 3: // erase scrollback
-		if h.preserveScrollbackOnErase {
-			if !h.scrollbackOnClearScreen && buf.HasScrollback() {
+		// Shell clear sends 3 J and must drop retained history. Application
+		// redraws opt out of that and only replace lines after the protected prefix.
+		if h.preserveScrollbackOnErase && !h.scrollbackOnClearScreen {
+			if buf.HasScrollback() {
 				protected := buf.YBase
 				if marker := h.redrawHistoryStart; marker != nil {
 					protected = 0

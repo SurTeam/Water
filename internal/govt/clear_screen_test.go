@@ -69,12 +69,8 @@ func TestShellClearScreenRetainsViewportInHistory(t *testing.T) {
 		}
 		e.ScrollToBottom()
 		e.Write([]byte("\x1b[3J"))
-		if s := e.Snapshot(); s.YBase == 0 {
-			t.Fatalf("application erase cleared retained scrollback: %+v", s)
-		}
-		e.Scroll(-s.YBase)
-		if text := clearScreenText(e.Snapshot()); !strings.Contains(text, "history1") || !strings.Contains(text, "history2") {
-			t.Fatalf("application erase lost history: %q", text)
+		if s := e.Snapshot(); s.YBase != 0 || strings.Contains(clearScreenText(s), "history") {
+			t.Fatalf("shell erase did not drop scrollback: %+v", s)
 		}
 		e.Close()
 	}
