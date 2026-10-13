@@ -206,8 +206,16 @@ func (c *Client) OpenSession() (*Session, error) {
 	go s.readLoop()
 
 	var info goprotocol.ServerInfo
-	if err := s.CallTimeout("server.inspect", nil, &info, time.Second); err != nil {
-		if err := s.CallTimeout("server.info", nil, &info, time.Second); err != nil {
+	// Inspection is part of GUI startup, not a health-check ping. A busy but
+	// healthy server can take longer than one second to schedule the reply.
+	// A timeout closes this Session, so only fall back to server.info when
+	// the first request failed at the RPC level and the stream remains usable.
+	if err := s.CallTimeout("server.inspect", nil, &info, 5*time.Second); err != nil {
+		if s.Err() != nil {
+			_ = s.Close()
+			return nil, fmt.Errorf("inspect server compatibility: %w", err)
+		}
+		if err := s.CallTimeout("server.info", nil, &info, 5*time.Second); err != nil {
 			_ = s.Close()
 			return nil, fmt.Errorf("inspect server compatibility: %w", err)
 		}
