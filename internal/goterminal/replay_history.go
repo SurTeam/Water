@@ -352,59 +352,47 @@ func hasAltMode(params string) bool {
 	return false
 }
 
-type byteSpan struct{ start, end int }
-
 func capEscapeBytes(data []byte, limit int) []byte {
 	if len(data) == 0 || limit < 1 {
 		return nil
 	}
-	if len(data) <= limit {
-		spans := completeSpans(data)
-		if len(spans) > 0 && spans[len(spans)-1].end == len(data) {
-			return data
-		}
-	}
-	spans := completeSpans(data)
-	sum := 0
-	start := len(spans)
-	for i := len(spans) - 1; i >= 0; i-- {
-		n := spans[i].end - spans[i].start
-		if n > limit || sum+n > limit {
-			break
-		}
-		sum += n
-		start = i
-	}
-	if start >= len(spans) {
-		return nil
-	}
-	return append([]byte(nil), data[spans[start].start:spans[len(spans)-1].end]...)
-}
-
-// completeSpans omits a trailing incomplete escape so a cap never leaves an
-// open OSC/CSI that would swallow the scrollback following it.
-func completeSpans(data []byte) []byteSpan {
-	var spans []byteSpan
-	i := 0
-	for i < len(data) {
-		start := i
-		if data[i] != 0x1b {
-			j := i + 1
-			for j < len(data) && data[j] != 0x1b {
-				j++
-			}
-			spans = append(spans, byteSpan{start, j})
-			i = j
-			continue
-		}
-		end, complete := skipEscape(data, i)
+	// Both cursors advance by complete spans. Each span is parsed at most
+	// twice, without building a table proportional to the escape count.
+	start, end := 0, 0
+	for end < len(data) {
+		next, complete := replaySpanEnd(data, end)
 		if !complete {
 			break
 		}
-		spans = append(spans, byteSpan{start, end})
-		i = end
+		if next-end > limit {
+			// An oversized span cannot belong to any retained suffix.
+			start = next
+		}
+		end = next
+		for end-start > limit {
+			start, _ = replaySpanEnd(data, start)
+		}
 	}
-	return spans
+	if end == len(data) && len(data) <= limit {
+		return data
+	}
+	if start == end {
+		return nil
+	}
+	// Detach the capped suffix from the oversized input allocation.
+	return append([]byte(nil), data[start:end]...)
+}
+
+// replaySpanEnd matches the complete-span boundaries used by the cap:
+// a whole run of plain bytes or one complete escape sequence.
+func replaySpanEnd(data []byte, start int) (int, bool) {
+	if data[start] == 0x1b {
+		return skipEscape(data, start)
+	}
+	if i := bytes.IndexByte(data[start:], 0x1b); i >= 0 {
+		return start + i, true
+	}
+	return len(data), true
 }
 
 func skipEscape(data []byte, i int) (int, bool) {

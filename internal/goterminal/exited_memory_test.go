@@ -2,7 +2,7 @@ package goterminal
 
 import (
 	"bytes"
-	"runtime"
+	"fmt"
 	"testing"
 	"time"
 
@@ -52,32 +52,34 @@ func TestExitedReplayCacheByteLimit(t *testing.T) {
 func TestExitedReplayHeapPlateaus(t *testing.T) {
 	r := NewRegistry()
 	defer r.CloseAll()
-	heap := func() uint64 {
-		runtime.GC()
-		var m runtime.MemStats
-		runtime.ReadMemStats(&m)
-		runtime.KeepAlive(r)
-		return m.HeapAlloc
-	}
-	baseline := heap()
+	baseline := replayMemorySample(t, r, "exit-baseline")
 	cycle := func() {
 		for i := 0; i < 12; i++ {
 			cacheExitedReplay(r, bytes.Repeat([]byte{'x'}, 2*1024*1024))
 		}
 	}
-	cycle()
-	first := heap()
-	cycle()
-	second := heap()
-	if second > first+1024*1024 {
-		t.Fatalf("live heap kept growing after exit cache saturated: first=%d second=%d", first, second)
+	var first, second uint64
+	for i := 0; i < 6; i++ {
+		cycle()
+		second = replayMemorySample(t, r, fmt.Sprintf("exit-cycle-%d", i))
+		count, retained := r.ExitedRetention()
+		if count != 3 || retained > exitedReplayLimit || r.Count() != 0 {
+			t.Fatalf("cycle %d: active=%d exited=%d bytes=%d", i, r.Count(), count, retained)
+		}
+		if i == 0 {
+			first = second
+		}
+		if second > first+1024*1024 {
+			t.Fatalf("live heap kept growing after exit cache saturated: first=%d cycle_%d=%d", first, i, second)
+		}
 	}
 	r.CloseAll()
-	cleared := heap()
+	r.CloseAll()
+	cleared := replayMemorySample(t, r, "exit-cleared")
 	if second < cleared || second-cleared < 4*1024*1024 {
 		t.Fatalf("clearing exit cache did not release retained heap: retained=%d cleared=%d", second, cleared)
 	}
-	t.Logf("HeapAlloc after GC: baseline=%d after_12_exits=%d after_24_exits=%d cleared=%d", baseline, first, second, cleared)
+	t.Logf("HeapAlloc after two GCs: baseline=%d after_12_exits=%d after_72_exits=%d cleared=%d", baseline, first, second, cleared)
 }
 
 func TestExitedReplayCacheCountLimit(t *testing.T) {

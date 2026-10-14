@@ -3,7 +3,6 @@ package goterminal
 import (
 	"fmt"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -28,14 +27,7 @@ func TestDozensOfTerminalsKeepScrollbackUnderTUIPressure(t *testing.T) {
 	r := NewRegistryWithScrollback(scrollback)
 	defer r.CloseAll()
 
-	heap := func() uint64 {
-		runtime.GC()
-		var stats runtime.MemStats
-		runtime.ReadMemStats(&stats)
-		runtime.KeepAlive(r)
-		return stats.HeapAlloc
-	}
-	baseline := heap()
+	baseline := replayMemorySample(t, r, "pty-baseline")
 
 	size := goprotocol.TerminalSize{Columns: 80, Lines: 24}
 	type live struct {
@@ -113,12 +105,35 @@ func TestDozensOfTerminalsKeepScrollbackUnderTUIPressure(t *testing.T) {
 	if retained > retainedCeiling {
 		t.Fatalf("40 live terminals retained %d replay bytes, ceiling %d; flood was about %d bytes", retained, retainedCeiling, floodBytes)
 	}
-	used := heap() - baseline
+	used := replayMemorySample(t, r, "pty-live") - baseline
 	const heapCeiling = 24 * 1024 * 1024
 	if used > heapCeiling {
 		t.Fatalf("heap grew %d bytes after GC, ceiling %d (retained replay %d)", used, heapCeiling, retained)
 	}
 	t.Logf("40 live terminals: retained replay %d bytes, heap growth after GC %d bytes, raw flood about %d bytes", retained, used, floodBytes)
+
+	// Registry ownership alone is insufficient to prove cleanup: wait for every
+	// reader to finish, then release the fixture's own Terminal pointers too.
+	r.CloseAll()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for i := range modes {
+		select {
+		case <-modes[i].term.readerDone:
+		case <-deadline.C:
+			t.Fatal("closed terminal reader did not finish")
+		}
+		modes[i].term = nil
+	}
+	modes = nil
+	r.CloseAll()
+	cleared := replayMemorySample(t, r, "pty-cleared")
+	if r.Count() != 0 || r.RetainedReplayBytes() != 0 {
+		t.Fatal("CloseAll retained terminal owners or replay")
+	}
+	if cleared > baseline+4*1024*1024 {
+		t.Fatalf("closed PTYs retained heap: baseline=%d cleared=%d", baseline, cleared)
+	}
 }
 
 const pressureScript = `
