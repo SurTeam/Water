@@ -3,6 +3,8 @@ package goterminal
 import (
 	"bytes"
 	"fmt"
+	"math/rand"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -26,6 +28,71 @@ func replayText(t *Terminal) string {
 		}
 	}
 	return b.String()
+}
+
+func TestIncrementalPrimaryCompactionMatchesFullScan(t *testing.T) {
+	newTerminal := func() *Terminal {
+		return &Terminal{
+			size:            goprotocol.TerminalSize{Columns: 80, Lines: 24},
+			scrollbackLines: 20,
+		}
+	}
+	incremental, full := newTerminal(), newTerminal()
+	rng := rand.New(rand.NewSource(42))
+	inputs := []string{
+		"short\x1b[31mcolored\x1b[0m line\n",
+		strings.Repeat("plain", 15000),
+		strings.Repeat("\x1b[Hframe", 12000),
+		"\nnext\n", "\x1b[?1049h", "\x1b[?1049l",
+		"\x1b[?10", "49h", "\x1b]title\x1b\\",
+	}
+	for step := 0; step < 150; step++ {
+		if step%11 == 0 {
+			size := goprotocol.TerminalSize{Columns: 20 + rng.Intn(100), Lines: 2 + rng.Intn(30)}
+			incremental.size, full.size = size, size
+			full.primaryRedrawCheck = true
+			incremental.publish(goprotocol.TerminalEvent{Kind: goprotocol.ResizeEvent, Size: size})
+			full.publish(goprotocol.TerminalEvent{Kind: goprotocol.ResizeEvent, Size: size})
+		}
+		data := inputs[rng.Intn(len(inputs))]
+		for len(data) > 0 {
+			n := min(len(data), 1+rng.Intn(4096))
+			full.primaryRedrawCheck = true // Exercise the previous unconditional full scan.
+			publishReplay(incremental, data[:n])
+			publishReplay(full, data[:n])
+			if !reflect.DeepEqual(incremental.Replay(), full.Replay()) {
+				t.Fatalf("replay differs at step %d, chunk %d", step, n)
+			}
+			data = data[n:]
+		}
+	}
+}
+
+func BenchmarkPrimaryScrollbackAppend(b *testing.B) {
+	for _, fullScan := range []bool{true, false} {
+		name := "incremental"
+		if fullScan {
+			name = "full-scan"
+		}
+		b.Run(name, func(b *testing.B) {
+			term := &Terminal{
+				size:            goprotocol.TerminalSize{Columns: 167, Lines: 33},
+				scrollbackLines: 10000,
+			}
+			history := strings.Repeat("\x1b[32m"+strings.Repeat("x", 790)+"\x1b[0m\n", 10000)
+			publishReplay(term, history)
+			const output = "\x1b[32mshort incremental output\x1b[0m\n"
+			b.ReportAllocs()
+			b.SetBytes(int64(len(output)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if fullScan {
+					term.primaryRedrawCheck = true
+				}
+				publishReplay(term, output)
+			}
+		})
+	}
 }
 
 func TestPrimaryScrollbackSurvivesAltScreenFlood(t *testing.T) {

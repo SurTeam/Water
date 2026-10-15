@@ -83,6 +83,7 @@ func (t *Terminal) writePrimaryLocked(data []byte, size goprotocol.TerminalSize,
 	if len(data) == 0 {
 		return
 	}
+	t.notePrimarySegmentsLocked(data)
 	t.outputNewlines += bytes.Count(data, []byte{'\n'})
 	if n := len(t.replay); n > 0 {
 		last := &t.replay[n-1]
@@ -186,7 +187,61 @@ func dropReplayPrefix(data []byte, n int) []byte {
 	return next
 }
 
+// Only the trailing line and newly appended lines can become oversized. Keep
+// this check proportional to new bytes instead of repeatedly scanning retained
+// scrollback, which can contain many megabytes of short, escaped lines.
+func (t *Terminal) notePrimarySegmentsLocked(data []byte) {
+	for len(data) > 0 {
+		i := bytes.IndexByte(data, '\n')
+		segment := data
+		if i >= 0 {
+			segment = data[:i]
+		}
+		t.primarySegmentBytes += len(segment)
+		t.primarySegmentEscape = t.primarySegmentEscape || bytes.IndexByte(segment, 0x1b) >= 0
+		if t.primarySegmentBytes > t.primaryRedrawLimit && t.primarySegmentEscape {
+			t.primaryRedrawCheck = true
+		}
+		if i < 0 {
+			return
+		}
+		t.primarySegmentBytes = 0
+		t.primarySegmentEscape = false
+		data = data[i+1:]
+	}
+}
+
+// Compaction can replace the trailing segment. Rebuild just that segment's
+// metadata; a limit change also uses this after rechecking existing history.
+func (t *Terminal) resetPrimarySegmentLocked() {
+	t.primarySegmentBytes = 0
+	t.primarySegmentEscape = false
+	for i := len(t.replay) - 1; i >= 0; i-- {
+		ev := t.replay[i]
+		if ev.Kind != goprotocol.OutputEvent {
+			continue
+		}
+		data := ev.Data
+		newline := bytes.LastIndexByte(data, '\n')
+		if newline >= 0 {
+			data = data[newline+1:]
+		}
+		t.primarySegmentBytes += len(data)
+		t.primarySegmentEscape = t.primarySegmentEscape || bytes.IndexByte(data, 0x1b) >= 0
+		if newline >= 0 {
+			return
+		}
+	}
+}
+
 func (t *Terminal) shrinkPrimaryRedrawsLocked(limit int) {
+	if t.primaryRedrawLimit == limit && !t.primaryRedrawCheck {
+		return
+	}
+	t.primaryRedrawLimit = limit
+	t.primaryRedrawCheck = false
+	defer t.resetPrimarySegmentLocked()
+
 	total := 0
 	var lastSeq uint64
 	var lastSize goprotocol.TerminalSize

@@ -49,8 +49,15 @@ type Terminal struct {
 	altReplay       []byte
 	altSeq          uint64
 	scanHold        []byte
-	subs            map[uint64]*subscriber
-	nextSub         uint64
+
+	// Incremental eligibility for primary replay compaction, owned by mu.
+	primarySegmentBytes  int
+	primarySegmentEscape bool
+	primaryRedrawCheck   bool
+	primaryRedrawLimit   int
+
+	subs    map[uint64]*subscriber
+	nextSub uint64
 
 	seq              atomic.Uint64
 	closed           chan struct{}
