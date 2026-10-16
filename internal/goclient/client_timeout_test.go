@@ -114,3 +114,40 @@ func TestCallTimeoutBoundsUnresponsiveServer(t *testing.T) {
 		t.Fatalf("shutdown RPC took %v", elapsed)
 	}
 }
+
+// Delay the waiter until the real reader has processed both the shutdown ack
+// and EOF, making the reply-versus-session-close race ready before the call.
+func TestSessionShutdownReplySurvivesEOF(t *testing.T) {
+	s, peer := pipeSession(t)
+	const requestID = 42
+	replies := make(chan goprotocol.WireMessage, 1)
+	s.replyMu.Lock()
+	s.replies[requestID] = replies
+	s.replyMu.Unlock()
+	if err := goprotocol.WriteJSON(peer, goprotocol.Success(requestID, map[string]bool{"ack": true})); err != nil {
+		t.Fatal(err)
+	}
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.done:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not observe EOF")
+	}
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	reply, err := s.waitReply(replies, deadline.C, "server.shutdown", time.Second)
+	if err != nil {
+		t.Fatalf("acknowledged shutdown failed after EOF: %v", err)
+	}
+	var result struct {
+		Ack bool `json:"ack"`
+	}
+	if err := json.Unmarshal(reply.Result, &result); err != nil {
+		t.Fatal(err)
+	}
+	if reply.RequestID != requestID || reply.OK == nil || !*reply.OK || !result.Ack {
+		t.Fatalf("shutdown acknowledgement lost: %+v", reply)
+	}
+}

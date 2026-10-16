@@ -19,6 +19,16 @@ func (s *Server) pushSelection(origin *session, kind string, result any) {
 	s.sessionsMu.RUnlock()
 	if !gui {
 		origin = s.firstUISession()
+		if origin == nil {
+			s.sessionsMu.RLock()
+			for ss := range s.sessions {
+				if ss.tui && !ss.diagnostic {
+					origin = ss
+					break
+				}
+			}
+			s.sessionsMu.RUnlock()
+		}
 	}
 	if origin == nil {
 		return

@@ -196,6 +196,7 @@ type session struct {
 	diagnostic       bool
 	opened           bool
 	browser          bool
+	tui              bool
 
 	snapshotRequests chan struct{}
 	done             chan struct{}
@@ -324,7 +325,8 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 				return err
 			}
 		}
-		isGUI := p.Role == "gui" || ss.browser
+		ss.tui = p.Role == "tui"
+		isGUI := p.Role == "gui" || ss.tui || ss.browser
 		var compatibility goprotocol.Compatibility
 		if p.Client != nil {
 			compatibility = goprotocol.Assess(*p.Client, s.descriptor())
@@ -759,7 +761,7 @@ func (s *Server) uiSessionCount() int {
 	s.sessionsMu.RLock()
 	n := 0
 	for ss := range s.sessions {
-		if !ss.browser {
+		if !ss.browser && !ss.tui {
 			n++
 		}
 	}

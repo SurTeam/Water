@@ -204,6 +204,12 @@ type terminalStream struct {
 	stop    chan struct{}
 }
 
+// OpenTUISession registers an interactive client for model and selection pushes.
+// It participates in server lifetime without advertising GUI automation.
+func (c *Client) OpenTUISession() (*Session, error) {
+	return c.openSession("tui")
+}
+
 func (c *Client) OpenSession() (*Session, error) {
 	return c.openSession("gui")
 }
@@ -316,28 +322,44 @@ func (s *Session) CallTimeout(method string, params any, out any, timeout time.D
 		return err
 	}
 
-	select {
-	case resp, ok := <-ch:
-		if !ok {
-			return errors.New("session closed")
-		}
-		if resp.OK == nil || !*resp.OK {
-			if resp.Error != nil {
-				return resp.Error
-			}
-			return errors.New("request failed")
-		}
-		if out != nil && len(resp.Result) > 0 {
-			return json.Unmarshal(resp.Result, out)
-		}
-		return nil
-	case <-s.done:
-		return errors.New("session closed")
-	case <-timer.C:
-		err := fmt.Errorf("session RPC %s timed out after %s", method, timeout)
-		_ = s.closeWithError(err)
+	resp, err := s.waitReply(ch, timer.C, method, timeout)
+	if err != nil {
 		return err
 	}
+	if resp.OK == nil || !*resp.OK {
+		if resp.Error != nil {
+			return resp.Error
+		}
+		return errors.New("request failed")
+	}
+	if out != nil && len(resp.Result) > 0 {
+		return json.Unmarshal(resp.Result, out)
+	}
+	return nil
+}
+
+func (s *Session) waitReply(ch <-chan goprotocol.WireMessage, deadline <-chan time.Time, method string, timeout time.Duration) (goprotocol.WireMessage, error) {
+	select {
+	case resp, ok := <-ch:
+		if ok {
+			return resp, nil
+		}
+	case <-s.done:
+		// The reader can deliver an acknowledgement and then observe EOF before
+		// this waiter runs. Preserve that reply even when both cases are ready.
+		select {
+		case resp, ok := <-ch:
+			if ok {
+				return resp, nil
+			}
+		default:
+		}
+	case <-deadline:
+		err := fmt.Errorf("session RPC %s timed out after %s", method, timeout)
+		_ = s.closeWithError(err)
+		return goprotocol.WireMessage{}, err
+	}
+	return goprotocol.WireMessage{}, errors.New("session closed")
 }
 
 func (s *Session) readLoop() {

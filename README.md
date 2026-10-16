@@ -13,6 +13,7 @@ The UI is deliberately quiet: a connection sidebar on the left, tabs above the a
 - Local workspaces with tabs, split panes, real shells, selection/copy, scrollback, hyperlinks, and configurable keyboard shortcuts.
 - SSH connections that bring remote workspaces into the same sidebar, with reconnect/offline state and matching embedded server payloads.
 - Coding-agent detection and session labels that make active terminal sessions easier to find without creating a separate agent surface.
+- A server-backed terminal frontend: `water tui` provides workspaces, tabs, split panes, mouse input, and persistent shells in an existing terminal. See [TUI controls](docs/tui.md).
 - A versioned `water ctl` control API for automation, smoke tests, state inspection, terminal queries, and real GUI actions.
 
 ## Start here
