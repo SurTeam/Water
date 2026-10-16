@@ -414,28 +414,31 @@ func capEscapeBytes(data []byte, limit int) []byte {
 	// Both cursors advance by complete spans. Each span is parsed at most
 	// twice, without building a table proportional to the escape count.
 	start, end := 0, 0
+	var mouse replayMouseModes
 	for end < len(data) {
 		next, complete := replaySpanEnd(data, end)
 		if !complete {
 			break
 		}
-		if next-end > limit {
-			// An oversized span cannot belong to any retained suffix.
-			start = next
-		}
 		end = next
-		for end-start > limit {
-			start, _ = replaySpanEnd(data, start)
+		for end-start+mouse.size() > limit && start < end {
+			nextStart, _ := replaySpanEnd(data, start)
+			mouse.observe(data[start:nextStart])
+			start = nextStart
 		}
 	}
 	if end == len(data) && len(data) <= limit {
 		return data
 	}
-	if start == end {
+	// Preserve the last mouse settings from the discarded prefix. They are
+	// usually emitted only once at TUI startup, but control future input too.
+	prefix := mouse.prefix()
+	if len(prefix) > limit || (len(prefix) == 0 && start == end) {
 		return nil
 	}
-	// Detach the capped suffix from the oversized input allocation.
-	return append([]byte(nil), data[start:end]...)
+	out := make([]byte, 0, len(prefix)+end-start)
+	out = append(out, prefix...)
+	return append(out, data[start:end]...)
 }
 
 // replaySpanEnd matches the complete-span boundaries used by the cap:

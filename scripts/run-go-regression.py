@@ -33,7 +33,7 @@ if args.profile != "unit":
              ("gui", ["bash", "scripts/run-go-ui-smoke.sh"])]
     scripts = ["go-ui-pane-smoke.py", "go-ui-settings-visual-smoke.py", "go-ui-selection-modal-smoke.py", "go-ui-content-smoke.py", "go-ui-server-smoke.py", "go-ui-long-run-smoke.py", "go-ui-agent-settings-smoke.py"]
     if args.profile in ("terminal", "full"):
-        scripts += ["go-ui-query-smoke.py", "go-ui-graphics-history-smoke.py", "go-ui-pi-redraw-smoke.py"]
+        scripts += ["go-ui-query-smoke.py", "go-ui-graphics-history-smoke.py", "go-ui-pi-redraw-smoke.py", "go-ui-tui-reattach-scroll-smoke.py"]
     if args.profile in ("agent", "full"):
         scripts += ["go-ui-progress-smoke.py", "go-ui-agent-smoke.py"]
         if args.profile == "agent":
