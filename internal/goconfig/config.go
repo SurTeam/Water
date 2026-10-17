@@ -186,6 +186,7 @@ type ShortcutConfig struct {
 	ToggleSidebar     string `json:"toggle_sidebar"`
 	NewTerminalTab    string `json:"new_terminal_tab"`
 	NewWorkspace      string `json:"new_workspace"`
+	CloseWorkspace    string `json:"close_workspace"`
 	ClosePane         string `json:"close_pane"`
 	PromotePaneToTab  string `json:"promote_pane_to_tab"`
 	PaneNarrower      string `json:"pane_narrower"`
@@ -302,6 +303,7 @@ func Default() AppConfig {
 			NextTab: "cmd-]", PreviousTab: "cmd-[", ToggleSidebar: "cmd-e",
 			NewTerminalTab:   "cmd-t",
 			NewWorkspace:     "cmd-shift-n",
+			CloseWorkspace:   "ctrl-alt-w",
 			ClosePane:        "cmd-shift-w",
 			PromotePaneToTab: "cmd-shift-enter",
 			PaneNarrower:     "cmd-shift-h",

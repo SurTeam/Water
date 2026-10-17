@@ -105,3 +105,7 @@ Browser fixtures require Playwright plus Chromium (or explicit `WATER_BROWSER_EX
 The native macOS fixture opens the actual file panel and completes/cancels it through Water's control API, then verifies the imported credentials on the target server. Optional `WATER_TLS_CERT_FILE`, `WATER_TLS_KEY_FILE` and `WATER_TLS_CA_FILE` exercise an existing CA-issued pair and a separate HTTPS request that verifies the root chain and hostname without ignoring certificate errors. Exported evidence excludes private imported TLS directories.
 
 Vendored frontend versions: `@xterm/xterm` 5.5.0 and `@xterm/addon-fit` 0.10.0 from npm. Their license files are embedded alongside the assets; upgrades must preserve the licenses and rerun browser verification. QR image recognition uses vendored `jsqr` 1.4.0 from npm, verified against the package SHA-512 integrity and distributed with its Apache-2.0 license.
+
+Web 的 Workspace 选择器保留没有 tab 的工作区。Close workspace 对包含任意 tab 的工作区显示确认框；确认目标固定为打开确认框时的 UUID，Cancel 或 Escape 不关闭。空工作区直接关闭。
+
+Web 从已认证的 `/api/session` 响应读取服务端 `shortcuts.close_workspace`（默认 `ctrl-alt-w`）。Settings 可设置本站浏览器覆盖，支持 ctrl/alt/shift/cmd 加字母或数字；留空禁用，Use server shortcut 恢复共享配置。覆盖与字体一起保存在本站 localStorage，并在刷新后保留。Web 不写服务端配置：当前共享配置保存接口涉及整个应用配置，因此没有为浏览器开放该写权限；修改共享值请使用 Water 的配置设置并重启服务端。

@@ -15,6 +15,7 @@ from playwright.sync_api import sync_playwright, expect
 from fixtures.web_fonts import verify_web_fonts
 from fixtures.web_servers import verify_servers
 from fixtures.web_mobile_controls import verify_mobile_controls
+from fixtures.web_workspace_close import verify_workspace_close
 
 root=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location("web_gui_helpers",root/"scripts/go-ui-web-smoke.py")
@@ -33,6 +34,7 @@ def wait(predicate,description,timeout=5):
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ssh",action="store_true")
+    parser.add_argument("--workspace-close-only",action="store_true")
     args=parser.parse_args()
     binary=os.environ.get("WATER_BIN",str(root/"target/go-ui-smoke/water"))
     server_binary=os.environ.get("WATER_SERVER_BIN",str(root/"target/go-ui-smoke/water-server"))
@@ -86,7 +88,7 @@ def main():
             ctl=lambda *a: helpers.endpoint_ctl(binary,forwarded,*a)
         (directory/"ownership.json").write_text(json.dumps(ownership,indent=2))
         with sync_playwright() as p:
-            browser=p.chromium.launch(headless=True,executable_path=os.environ.get("WATER_BROWSER_EXECUTABLE"))
+            browser=p.chromium.launch(headless=True,args=['--ignore-certificate-errors'],executable_path=os.environ.get("WATER_BROWSER_EXECUTABLE"))
             context=browser.new_context(ignore_https_errors=True,viewport={"width":390,"height":844},is_mobile=True,has_touch=True)
             context.add_init_script('window.createImageBitmap = undefined;')
             page=context.new_page();errors=[];page.on("pageerror",lambda e:errors.append(str(e)))
@@ -97,6 +99,11 @@ def main():
                 expect(page.locator('#status')).to_have_text('Connected', timeout=10000)
                 assert page.url==origin+"/"
                 assert ctl("server","web","devices")
+                if args.workspace_close_only:
+                    verify_workspace_close(page,directory,ctl)
+                    assert not errors,errors
+                    print("PASS workspace close browser fixture",flush=True)
+                    return
                 page.locator(".xterm-helper-textarea").focus()
                 page.keyboard.type("printf 'BROWSER_%s\\n' ROUNDTRIP",delay=1);page.keyboard.press("Enter")
                 expect(page.locator('.xterm-accessibility-tree')).to_contain_text('BROWSER_ROUNDTRIP', timeout=5000)
@@ -128,6 +135,7 @@ def main():
                 verify_web_fonts(page,directory,"browser","BROWSER_ROUNDTRIP")
                 verify_servers(page,context,directory,binary,server_binary,origin,wait)
                 verify_mobile_controls(page,directory)
+                verify_workspace_close(page,directory,ctl)
                 count=page.locator("#panes option").count();page.locator("#split").click()
                 expect(page.locator('#panes option')).to_have_count(count+1, timeout=5000)
                 if ssh:

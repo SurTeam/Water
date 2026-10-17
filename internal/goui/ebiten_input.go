@@ -365,6 +365,15 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 		w.view(c).rename = nil
 	case hitTab:
 		_ = c.session.DispatchAsync(map[string]any{"type": "tab.activate", "tab_id": h.ID})
+	case hitCloseWorkspace:
+		if view := w.connectionView(nativeUUID(h.Label)); view != nil {
+			w.multi.ActivateConnection(nativeUUID(h.Label))
+			view.requestWorkspaceClose(h.ID)
+		}
+	case hitCloseWorkspaceConfirm:
+		c.confirmWorkspaceClose()
+	case hitCloseWorkspaceCancel:
+		c.workspaceClose = nil
 	case hitNewWorkspace:
 		_ = c.session.DispatchAsync(map[string]any{"type": "workspace.new"})
 	case hitNewTab:
@@ -440,7 +449,7 @@ func (w *EbitengineWindow) reportPointer(c *WorkspaceClient, p image.Point, acti
 	c.connectionMu.RLock()
 	remoteVisible := c.remoteFormVisible
 	c.connectionMu.RUnlock()
-	if w.updateVisible || c.settings.visible || remoteVisible || w.view(c).rename != nil {
+	if w.updateVisible || c.settings.visible || c.workspaceClose != nil || remoteVisible || w.view(c).rename != nil {
 		return
 	}
 	for _, pane := range w.view(c).panes {
@@ -835,6 +844,9 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 		return true
 	}
 	v := w.view(c)
+	if c.workspaceClose != nil {
+		return c.handleWorkspaceCloseKey(spec)
+	}
 	if ev, ok := automationInputEvent(spec); ok {
 		if pressed, isKey := ev.(key.Event); isKey {
 			bindings := c.currentConfig().Shortcuts

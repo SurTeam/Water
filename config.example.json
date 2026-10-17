@@ -175,6 +175,7 @@
     "rename_tab": "cmd-shift-t",
     "split_right": "cmd-\\",
     "split_down": "cmd--",
+    "close_workspace": "ctrl-alt-w",
     "close_pane": "cmd-shift-w",
     "pane_narrower": "cmd-shift-h",
     "pane_wider": "cmd-shift-l",

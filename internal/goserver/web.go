@@ -317,7 +317,7 @@ func (w *webService) sessionHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rw.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(rw).Encode(map[string]any{"device": device.WebDevice, "server": w.server.serverInfo()})
+	_ = json.NewEncoder(rw).Encode(map[string]any{"device": device.WebDevice, "server": w.server.serverInfo(), "shortcuts": map[string]string{"close_workspace": w.server.Config.Shortcuts.CloseWorkspace}})
 }
 func (w *webService) logoutHTTP(rw http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {

@@ -43,6 +43,7 @@ func (a *app) key(e *tcell.EventKey) bool {
 		case tcell.KeyEscape:
 			a.promptKind = ""
 			a.prompt = ""
+			a.confirmWorkspace = uuid.Nil
 		case tcell.KeyEnter:
 			a.submitPrompt()
 		case tcell.KeyBackspace, tcell.KeyBackspace2:
@@ -55,6 +56,10 @@ func (a *app) key(e *tcell.EventKey) bool {
 				a.prompt += string(e.Rune())
 			}
 		}
+		return false
+	}
+	if matchesShortcut(e, a.closeWorkspaceShortcut) {
+		a.requestCloseWorkspace()
 		return false
 	}
 	a.selectionRange = nil
@@ -232,7 +237,10 @@ func (a *app) action(r rune) bool {
 		a.promptKind = "confirm " + string(r) + " (yes)"
 		a.prompt = ""
 		return false
-	case 'x', 't', 'W':
+	case 'W':
+		a.requestCloseWorkspace()
+		return false
+	case 'x', 't':
 		a.promptKind = "confirm " + string(r) + " (yes)"
 		a.prompt = ""
 		return false
@@ -273,6 +281,8 @@ func (a *app) action(r rune) bool {
 }
 func (a *app) submitPrompt() {
 	kind, text := a.promptKind, a.prompt
+	workspace := a.confirmWorkspace
+	a.confirmWorkspace = uuid.Nil
 	a.promptKind = ""
 	a.prompt = ""
 	c := map[string]any{}
@@ -319,7 +329,7 @@ func (a *app) submitPrompt() {
 		case strings.HasPrefix(kind, "confirm t"):
 			c = map[string]any{"type": "tab.close", "tab_id": a.tab}
 		case strings.HasPrefix(kind, "confirm W"):
-			c = map[string]any{"type": "workspace.close", "workspace_id": a.workspace}
+			c = map[string]any{"type": "workspace.close", "workspace_id": workspace}
 		}
 	}
 	if len(c) > 0 {
@@ -557,5 +567,81 @@ func (a *app) activateHit(h hit) {
 		a.command(map[string]any{"type": "pane.focus", "pane_id": h.id})
 	case strings.HasPrefix(h.kind, "menu:"):
 		a.quit = a.action([]rune(strings.TrimPrefix(h.kind, "menu:"))[0])
+	}
+}
+
+// matchesShortcut normalizes control characters because terminal decoders may
+// report Ctrl-W either as KeyCtrlW or as a rune with the Ctrl modifier.
+func matchesShortcut(e *tcell.EventKey, spec string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(spec)), "-")
+	if len(parts) == 0 || parts[len(parts)-1] == "" {
+		return false
+	}
+	var want tcell.ModMask
+	for _, part := range parts[:len(parts)-1] {
+		switch part {
+		case "ctrl", "control":
+			want |= tcell.ModCtrl
+		case "alt", "option":
+			want |= tcell.ModAlt
+		case "shift":
+			want |= tcell.ModShift
+		default:
+			return false
+		}
+	}
+	name := parts[len(parts)-1]
+	if name == "space" {
+		name = " "
+	}
+	key, mods, r := e.Key(), e.Modifiers(), e.Rune()
+	if want&tcell.ModCtrl != 0 && len(name) == 1 && name[0] >= 'a' && name[0] <= 'z' && key >= tcell.KeyCtrlA && key <= tcell.KeyCtrlZ {
+		r = 'a' + rune(key-tcell.KeyCtrlA)
+		key = tcell.KeyRune
+		mods |= tcell.ModCtrl
+	}
+	if mods != want {
+		return false
+	}
+	if key == tcell.KeyRune {
+		return strings.ToLower(string(r)) == name
+	}
+	switch name {
+	case "enter", "return":
+		return key == tcell.KeyEnter
+	case "escape", "esc":
+		return key == tcell.KeyEscape
+	case "tab":
+		return key == tcell.KeyTab
+	case "left":
+		return key == tcell.KeyLeft
+	case "right":
+		return key == tcell.KeyRight
+	case "up":
+		return key == tcell.KeyUp
+	case "down":
+		return key == tcell.KeyDown
+	}
+	if key >= tcell.KeyF1 && key <= tcell.KeyF12 {
+		return name == fmt.Sprintf("f%d", key-tcell.KeyF1+1)
+	}
+	return false
+}
+
+func (a *app) requestCloseWorkspace() {
+	a.menu = false
+	a.prefix = false
+	for _, ws := range a.state.Workspaces {
+		if ws.ID != a.workspace {
+			continue
+		}
+		if len(ws.Tabs) == 0 {
+			a.command(map[string]any{"type": "workspace.close", "workspace_id": ws.ID})
+		} else {
+			a.confirmWorkspace = ws.ID
+			a.promptKind = "confirm W (yes)"
+			a.prompt = ""
+		}
+		return
 	}
 }

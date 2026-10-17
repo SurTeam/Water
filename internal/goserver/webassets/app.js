@@ -13,6 +13,33 @@
  let socket, descriptor, requestID=0, requests=new Map(), panes=[], selected='', active=null;
  let generation=0, reconnectTimer, ctrl=false, retry=0, userClosed=false;
  let keyboardHidden=true, servers=[], controlsCollapsed=false;
+ let workspaces=[],workspaceID='',closeTarget='',serverCloseShortcut='ctrl-alt-w',closeShortcutOverride=null;
+ function closeShortcut(){return closeShortcutOverride??serverCloseShortcut;}
+ function saveSettings(){try{localStorage.setItem(settingsKey,JSON.stringify({version:1,font:fontChoice.id,closeWorkspace:closeShortcutOverride}));$('settings-note').textContent='Saved in this browser for this website.';}catch{$('settings-note').textContent='Website storage is unavailable. Changes apply for this visit only.';}}
+ function updateShortcut(){ $('close-workspace-shortcut').value=closeShortcut();$('close-workspace').title=`Close workspace (${closeShortcut()||'shortcut disabled'})`; }
+ function requestCloseWorkspace(){
+  if(document.querySelector('dialog[open]'))return;
+  const workspace=workspaces.find(w=>w.id===workspaceID);if(!workspace)return;
+  if(!(workspace.tabs||[]).length){command({type:'workspace.close',workspace_id:workspace.id}).catch(fail);return;}
+  closeTarget=workspace.id;$('close-workspace-message').textContent=`Close ${workspace.title||'Workspace'} and all its tabs? Running processes will be stopped.`;$('close-workspace-dialog').showModal();
+ }
+ $('close-workspace').onclick=requestCloseWorkspace;
+ $('close-workspace-cancel').onclick=()=>$('close-workspace-dialog').close();
+ $('close-workspace-confirm').onclick=()=>{const id=closeTarget;$('close-workspace-dialog').close();if(id)command({type:'workspace.close',workspace_id:id}).catch(fail);};
+ $('close-workspace-dialog').addEventListener('close',()=>{closeTarget='';restoreKeyboardFocus();});
+ document.addEventListener('keydown',event=>{
+  if(event.repeat||event.isComposing||document.querySelector('dialog[open]'))return;
+  const parts=closeShortcut().toLowerCase().split('-'),key=parts.pop();
+  if(!key||event.key.toLowerCase()!==key)return;
+  if(event.ctrlKey!==parts.includes('ctrl')||event.altKey!==parts.includes('alt')||event.shiftKey!==parts.includes('shift')||event.metaKey!==parts.includes('cmd'))return;
+  event.preventDefault();event.stopImmediatePropagation();requestCloseWorkspace();
+ },true);
+ $('close-workspace-shortcut').onchange=()=>{
+  const value=$('close-workspace-shortcut').value.trim().toLowerCase();
+  if(value&&!/^(?:(?:ctrl|alt|shift|cmd)-)+[a-z0-9]$/.test(value)){$('settings-note').textContent='Use modifiers and a letter or number, for example ctrl-alt-w, or leave empty to disable.';return;}
+  closeShortcutOverride=value;saveSettings();updateShortcut();
+ };
+ $('close-workspace-reset').onclick=()=>{closeShortcutOverride=null;saveSettings();updateShortcut();};
  const serversKey='water.web.servers';
  const decoder=new TextDecoder(), encoder=new TextEncoder();
  function fail(error){status(error instanceof Error?error.message:String(error));}
@@ -94,21 +121,17 @@
   try{
    const saved=JSON.parse(localStorage.getItem(settingsKey)||'{}');
    fontChoice=availableFonts.find(font=>font.id===saved?.font)||fontChoices[0];
+   if(typeof saved.closeWorkspace==='string')closeShortcutOverride=saved.closeWorkspace;
   }catch{
    $('settings-note').textContent='Website storage is unavailable or invalid. Changes still apply for this visit.';
   }
-  $('font-family').value=fontChoice.id;applyFont();
+  $('font-family').value=fontChoice.id;applyFont();updateShortcut();
  }
  $('settings-open').onclick=()=>$('web-settings').showModal();
  $('font-family').onchange=()=>{
   fontChoice=availableFonts.find(font=>font.id===$('font-family').value)||fontChoices[0];
   applyFont();
-  try{
-   localStorage.setItem(settingsKey,JSON.stringify({version:1,font:fontChoice.id}));
-   $('settings-note').textContent='Font saved in this browser for this website.';
-  }catch{
-   $('settings-note').textContent='Website storage is unavailable. Changes apply for this visit only.';
-  }
+  saveSettings();
  };
  $('web-settings').addEventListener('close',()=>{if(active&&!keyboardHidden)restoreKeyboardFocus();else $('settings-open').focus();});
  $('server-add').onclick=()=>$('server-dialog').showModal();
@@ -200,7 +223,12 @@
  }
  function render(state){
   const next=[];
-  for(const workspace of state.workspaces||[])for(const tab of workspace.tabs||[])leaves(tab.tree,workspace,tab,next);
+  workspaces=state.workspaces||[];
+  if(!workspaces.some(w=>w.id===workspaceID))workspaceID=workspaces[0]?.id||'';
+  const choices=$('workspaces');choices.replaceChildren();
+  for(const workspace of workspaces){const option=document.createElement('option');option.value=workspace.id;option.textContent=workspace.title||'Workspace';choices.append(option);}
+  choices.value=workspaceID;$('close-workspace').disabled=!workspaceID;$('new-tab').disabled=!workspaceID;
+  for(const workspace of workspaces.filter(w=>w.id===workspaceID))for(const tab of workspace.tabs||[])leaves(tab.tree,workspace,tab,next);
   panes=next; const select=$('panes');select.replaceChildren();
   for(const pane of panes){const option=document.createElement('option');option.value=pane.id;option.textContent=pane.label;select.append(option);}
   if(!panes.some(p=>p.id===selected))selected=panes[0]?.id||'';
@@ -211,7 +239,7 @@
   const old=active;
   if(old){active=null;old.term.dispose();rpc('terminal.detach',{terminal_id:old.id}).catch(()=>{});}
   $('terminal').replaceChildren();
-  if(!id){status('No terminals. Create a workspace.');return;}
+  if(!id){status(workspaceID?'Empty workspace. Create a tab.':'No workspaces. Create a workspace.');return;}
   const term=new Terminal({cursorBlink:true,fontSize:14,fontFamily:fontChoice.terminal,scrollback:2000,screenReaderMode:true,theme:{background:'#1e1e20',foreground:'#e4e4e4'}});
   const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open($('terminal'));
   term.textarea.addEventListener('focus',()=>{keyboardHidden=false;updateKeyboardButton();});
@@ -315,7 +343,7 @@
   if(!info.ok)throw new Error('Server unavailable');
   const data=await info.json();if(current!==generation)return;
   paired(true);
-  descriptor=data.server;
+  descriptor=data.server;serverCloseShortcut=data.shortcuts?.close_workspace??'ctrl-alt-w';updateShortcut();
   if(descriptor.api_signature!=='water-control/v6' || descriptor.protocol_version!==5)throw new Error('This Web client and server are incompatible');
   const ws=new WebSocket(location.origin.replace(/^http/,'ws')+'/ws');ws.binaryType='arraybuffer';socket=ws;
   let buffer=new Uint8Array(),processing=Promise.resolve();
@@ -355,11 +383,12 @@
  $('scan-qr').onclick=()=>$('qr-camera').click();
  $('choose-qr').onclick=()=>$('qr-image').click();
  for(const id of ['qr-camera','qr-image'])$(id).onchange=()=>scanImage($(id));
+ $('workspaces').onchange=()=>{workspaceID=$('workspaces').value;selected='';render({workspaces});};
  $('panes').onchange=()=>{selected=$('panes').value;attach(selected).catch(fail);};
  $('reconnect').onclick=()=>connect().catch(fail);
  $('logout').onclick=async()=>{try{const response=await fetch('/api/logout',{method:'POST'});if(!response.ok)throw new Error('Could not unpair');userClosed=true;disconnect();paired(false);status('Unpaired. Scan a new QR code to reconnect.');}catch(error){fail(error);}};
  $('new-workspace').onclick=()=>command({type:'workspace.new'}).catch(fail);
- $('new-tab').onclick=()=>{const p=panes.find(p=>p.id===selected);if(p)command({type:'tab.new_in_workspace',workspace_id:p.workspace}).catch(fail);};
+ $('new-tab').onclick=()=>{if(workspaceID)command({type:'tab.new_in_workspace',workspace_id:workspaceID}).catch(fail);};
  $('split').onclick=()=>{const p=panes.find(p=>p.id===selected);if(p)command({type:'pane.split',pane_id:p.pane,direction:'right'}).catch(fail);};
  $('keyboard-toggle').onclick=()=>{
   if(!active)return;

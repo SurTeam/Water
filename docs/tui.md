@@ -23,7 +23,8 @@ Press **Ctrl-B**, release it, then press a command key:
 | `o` | Next pane, including hidden panes in narrow mode |
 | `[`, `]` | Previous or next tab |
 | `{`, `}` | Previous or next workspace |
-| `x`, `t`, `W` | Close pane, tab, or workspace; type `yes` to confirm |
+| `x`, `t` | Close pane or tab; type `yes` to confirm |
+| `W` | Close workspace; type `yes` to confirm when it contains any tabs |
 | `r`, `R` | Rename tab or workspace |
 | `i`, `e`, `k` | Interrupt, exit, or force-stop the focused foreground Agent (exit/force-stop require confirmation) |
 | `b` | Return to the bottom of terminal history |
@@ -31,6 +32,8 @@ Press **Ctrl-B**, release it, then press a command key:
 | `q` | Detach and restore the outer terminal |
 | `Q` | Exit TUI and shut down the connected server, stopping all its terminals; type `yes` to confirm |
 | Ctrl-B | Send a literal Ctrl-B to the child application |
+
+The shared `shortcuts.close_workspace` setting also closes the selected workspace directly (default **Ctrl-Alt-W**), while **Ctrl-B W** remains available. Empty workspaces close immediately; a workspace containing any tabs requires `yes`, and Escape cancels. Confirmation stays bound to the workspace selected when the prompt opened. The TUI reads this binding at startup; use terminal-supported combinations such as `ctrl-alt-w` or `alt-shift-w` (Cmd/Super combinations are unavailable in ordinary terminals).
 
 The JSON command prompt supports existing server operations beyond the shortcuts. Entity IDs are full UUID strings, available through `water ctl state`. For example:
 

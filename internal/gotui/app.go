@@ -120,6 +120,7 @@ func Run(o Options) error {
 	screen.EnablePaste()
 	screen.EnableFocus()
 	app := newApp(session, screen, cfg.Terminal.ScrollbackLines)
+	app.closeWorkspaceShortcut = cfg.Shortcuts.CloseWorkspace
 	defer app.close()
 	return app.run()
 }
@@ -228,26 +229,28 @@ type app struct {
 	quit            bool
 	shutdownPending bool
 
-	session               *goclient.Session
-	screen                tcell.Screen
-	scrollback            int
-	state                 gomodel.StateDump
-	workspace, tab, focus uuid.UUID
-	terms                 map[uuid.UUID]*terminal
-	panes                 []pane
-	dividers              []divider
-	hits                  []hit
-	prefix, menu, pasting bool
-	paste                 []byte
-	prompt, promptKind    string
-	flash                 string
-	flashUntil            time.Time
-	status                string
-	dragging              *divider
-	buttons               tcell.ButtonMask
-	commands              chan map[string]any
-	results               chan error
-	stop                  chan struct{}
+	session                *goclient.Session
+	screen                 tcell.Screen
+	scrollback             int
+	state                  gomodel.StateDump
+	workspace, tab, focus  uuid.UUID
+	terms                  map[uuid.UUID]*terminal
+	panes                  []pane
+	dividers               []divider
+	hits                   []hit
+	prefix, menu, pasting  bool
+	paste                  []byte
+	prompt, promptKind     string
+	confirmWorkspace       uuid.UUID
+	closeWorkspaceShortcut string
+	flash                  string
+	flashUntil             time.Time
+	status                 string
+	dragging               *divider
+	buttons                tcell.ButtonMask
+	commands               chan map[string]any
+	results                chan error
+	stop                   chan struct{}
 }
 
 func newApp(s *goclient.Session, screen tcell.Screen, scrollback int) *app {

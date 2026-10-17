@@ -317,14 +317,17 @@ func (w *EbitengineWindow) drawSidebar(c *WorkspaceClient, dst *ebiten.Image, r 
 				title = fmt.Sprintf("%s  · %d", title, count)
 			}
 			rowPadding := d(u.SidebarWorkspaceRowPadding)
-			w.sidebarLabel(content, c, image.Rect(row.Min.X+rowPadding, row.Min.Y, row.Max.X-rowPadding, row.Max.Y), title, u.SidebarWorkspaceFontSize, fg, selected, u.SidebarWorkspaceAlignment)
+			w.sidebarLabel(content, c, image.Rect(row.Min.X+rowPadding, row.Min.Y, row.Max.X-rowPadding-w.dp(20), row.Max.Y), title, u.SidebarWorkspaceFontSize, fg, selected, u.SidebarWorkspaceAlignment)
 			if running := w.longRunWorkspaces[longRunLocation{connection: host.entry.ID, workspace: ws.ID}]; running > 0 {
-				badge := image.Rect(row.Max.X-w.dp(26), row.Min.Y, row.Max.X-w.dp(3), row.Max.Y)
+				badge := image.Rect(row.Max.X-w.dp(46), row.Min.Y, row.Max.X-w.dp(23), row.Max.Y)
 				// Paint a small floating surface so right-aligned names cannot obscure the count.
 				w.round(content, badge.Inset(w.dp(2)), w.dp(4), rowBg)
 				w.centeredLabel(content, c, badge, fmt.Sprint(running), float64(min(u.SidebarWorkspaceFontSize, 10)), mixColor(rowBg, fg, .55), false)
 			}
 			w.hit(c, row, hitWorkspace, ws.ID, host.entry.ID.String())
+			closeRect := image.Rect(row.Max.X-w.dp(20), row.Min.Y, row.Max.X, row.Max.Y)
+			w.centeredLabel(content, c, closeRect, "×", float64(u.UIFontSize), fg, false)
+			w.hit(c, closeRect, hitCloseWorkspace, ws.ID, host.entry.ID.String())
 			y = row.Max.Y
 			var rows []nativeAgent
 			for _, a := range agents {

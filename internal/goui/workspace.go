@@ -96,6 +96,9 @@ const (
 	hitRenameField
 	hitRenameSave
 	hitRenameCancel
+	hitCloseWorkspace
+	hitCloseWorkspaceConfirm
+	hitCloseWorkspaceCancel
 )
 
 type automationHit struct {
@@ -180,6 +183,7 @@ type WorkspaceClient struct {
 	runtimeConfig        *goconfig.AppConfig // Owned by layoutMu; server settings change on restart.
 	settingsStore        *SettingsStore
 	settings             settingsPanel
+	workspaceClose       *workspaceClosePrompt
 	server               serverPanel
 	recoveryBlocked      bool
 	configPath           string
@@ -666,6 +670,12 @@ func automationHitKindName(kind automationHitKind) string {
 		return "workspace"
 	case hitTab:
 		return "tab"
+	case hitCloseWorkspace:
+		return "close_workspace"
+	case hitCloseWorkspaceConfirm:
+		return "close_workspace_confirm"
+	case hitCloseWorkspaceCancel:
+		return "close_workspace_cancel"
 	case hitNewWorkspace:
 		return "new_workspace"
 	case hitNewTab:
@@ -756,6 +766,9 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 		return false
 	}
 	shortcuts := c.currentConfig().Shortcuts
+	if c.workspaceClose != nil {
+		return c.handleWorkspaceCloseKey(spec)
+	}
 	if shortcutMatches(pressed, shortcuts.OpenSettings) {
 		if c.settings.visible {
 			if !c.settings.saving {
@@ -768,6 +781,15 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 	}
 	if c.settings.visible {
 		return false
+	}
+	if shortcutMatches(pressed, shortcuts.CloseWorkspace) {
+		c.mu.RLock()
+		id := c.state.ActiveWorkspace
+		c.mu.RUnlock()
+		if id != nil {
+			c.requestWorkspaceClose(*id)
+		}
+		return true
 	}
 	for _, resize := range []struct{ binding, direction string }{
 		{shortcuts.PaneNarrower, "narrower"}, {shortcuts.PaneWider, "wider"},

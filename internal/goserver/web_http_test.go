@@ -27,6 +27,7 @@ func TestWebHTTPPairTerminalOriginAndLogout(t *testing.T) {
 	origin := "http://" + reservation.Addr().String()
 	_ = reservation.Close()
 	cfg := goconfig.Default()
+	cfg.Shortcuts.CloseWorkspace = "ctrl-alt-q"
 	cfg.Shell.Program, cfg.Shell.Args = "/bin/sh", []string{"-i"}
 	// Existing certificate settings must not block an explicitly chosen HTTP URL.
 	cfg.Web = goconfig.WebConfig{PublicURL: origin, TLSCertFile: "/nonexistent/cert", TLSKeyFile: "/nonexistent/key"}
@@ -84,7 +85,16 @@ func TestWebHTTPPairTerminalOriginAndLogout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var session struct {
+		Shortcuts map[string]string `json:"shortcuts"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
 	response.Body.Close()
+	if session.Shortcuts["close_workspace"] != "ctrl-alt-q" || len(session.Shortcuts) != 1 {
+		t.Fatalf("unexpected browser configuration projection: %v", session.Shortcuts)
+	}
 	if response.StatusCode != 200 {
 		t.Fatal("HTTP authorization cookie not retained")
 	}

@@ -41,6 +41,8 @@ process = subprocess.Popen(
 )
 output = bytearray()
 server_pid = None
+frontend_pids = [process.pid]
+workspace_evidence = []
 
 
 def drain():
@@ -72,7 +74,11 @@ def control(*arguments):
 
 def state():
     result = control("state")
-    return json.loads(result.stdout) if result.returncode == 0 else None
+    if result.returncode != 0:
+        return None
+    current = json.loads(result.stdout)
+    current["workspaces"] = current.get("workspaces") or []
+    return current
 
 
 try:
@@ -101,6 +107,8 @@ try:
     assert b"\x1b[?1006l" in output, "mouse reporting was not disabled"
     assert has_split(), "detach lost server state"
     # Reattach to the same server and exercise the destructive exit separately.
+    with open(root + "/terminal-first-session.bin", "wb") as stream:
+        stream.write(output)
     output.clear()
     os.close(master)
     os.close(slave)
@@ -111,7 +119,67 @@ try:
         stdin=slave, stdout=slave, stderr=slave, env=env,
         preexec_fn=controlling_terminal,
     )
+    frontend_pids.append(process.pid)
     until(lambda: b"Ctrl-B" in output or b"Commands" in output)
+
+    def record_workspace(label):
+        current = state()
+        assert current is not None, label + ": state unavailable"
+        workspace_evidence.append({"label": label, "state": current,
+                                   "terminal_bytes": len(output)})
+        with open(root + "/workspace-close.json", "w") as stream:
+            json.dump(workspace_evidence, stream, indent=2)
+        return current
+
+    def workspace_count(count):
+        current = state()
+        return current and len(current["workspaces"]) == count
+
+    def close_prompt(keys):
+        start = len(output)
+        os.write(master, keys)
+        until(lambda: b"Close workspace? yes>" in output[start:])
+
+    original = record_workspace("before-workspace-close")
+    original_id = original["workspaces"][0]["id"]
+    close_prompt(b"\x02W")
+    assert state()["workspaces"][0]["id"] == original_id, "closed before confirmation"
+    # A non-yes response dismisses the prompt without escape-sequence timing
+    # ambiguity in the outer terminal's decoder.
+    os.write(master, b"no\r")
+    assert state()["workspaces"][0]["id"] == original_id, "cancel closed workspace"
+    record_workspace("cancel-preserved-workspace")
+    close_prompt(b"\x02W")
+    os.write(master, b"yes\r")
+    until(lambda: workspace_count(0))
+    record_workspace("confirmed-workspace-closed")
+    assert process.poll() is None, "last workspace close exited TUI"
+
+    # A new workspace contains a real shell tab. Closing just that tab leaves
+    # an empty workspace, which W must close without a second confirmation.
+    os.write(master, b"\x02w")
+    until(lambda: workspace_count(1))
+    start = len(output)
+    os.write(master, b"\x02t")
+    until(lambda: b"Close tab? yes>" in output[start:])
+    os.write(master, b"yes\r")
+    until(lambda: (lambda current: current and len(current["workspaces"]) == 1
+                  and not current["workspaces"][0]["tabs"])(state()))
+    record_workspace("empty-workspace-before-close")
+    os.write(master, b"\x02W")
+    until(lambda: workspace_count(0))
+    record_workspace("empty-workspace-closed-without-confirmation")
+
+    # xterm encodes Ctrl-Alt-W as Escape followed by Ctrl-W. Exercise that
+    # real tcell decoder path using the shared default binding.
+    os.write(master, b"\x02w")
+    until(lambda: workspace_count(1))
+    close_prompt(b"\x1b\x17")
+    assert workspace_count(1), "shortcut closed before confirmation"
+    os.write(master, b"yes\r")
+    until(lambda: workspace_count(0))
+    record_workspace("ctrl-alt-w-confirmed-workspace-close")
+    assert control("ping").returncode == 0, "workspace close stopped server"
     os.write(master, b"\x02Q")
     until(lambda: b"Stop server" in output)
     assert control("ping").returncode == 0, "shutdown occurred before confirmation"
@@ -122,14 +190,20 @@ try:
     assert control("ping").returncode != 0, "confirmed shutdown left server running"
     assert b"\x1b[?1049l" in output, "shutdown did not restore alternate screen"
     assert b"\x1b[?1006l" in output, "shutdown did not restore mouse reporting"
-    print(json.dumps({
+    result = {
         "result": "PASS", "evidence": root,
         "frontend_pid": process.pid, "server_pid": server_pid,
         "checks": ["auto-start", "live shell output", "server split",
                    "narrow selector", "detach persistence",
+                   "workspace close cancellation and confirmation",
+                   "empty workspace closes without confirmation",
+                   "Ctrl-Alt-W through real terminal decoder",
                    "alternate-screen and mouse restoration",
                    "confirmed server shutdown and clean TUI exit"],
-    }))
+    }
+    with open(root + "/result.json", "w") as stream:
+        json.dump(result, stream, indent=2)
+    print(json.dumps(result))
 finally:
     if process.poll() is None:
         process.terminate()
@@ -142,7 +216,8 @@ finally:
     with open(root + "/terminal-output.bin", "wb") as stream:
         stream.write(output)
     with open(root + "/ownership.json", "w") as stream:
-        json.dump({"frontend_pid": process.pid, "server_pid": server_pid,
+        json.dump({"frontend_pid": process.pid, "frontend_pids": frontend_pids,
+                   "server_pid": server_pid,
                    "socket": socket, "config": config}, stream)
     try:
         cleanup = control("server", "shutdown")
