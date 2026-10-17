@@ -14,9 +14,21 @@ import (
 	"github.com/mattn/go-runewidth"
 )
 
-var base = tcell.StyleDefault.Foreground(tcell.ColorSilver).Background(tcell.ColorBlack)
-var chrome = tcell.StyleDefault.Foreground(tcell.ColorWhite).Background(tcell.ColorDarkSlateGray)
-var selected = chrome.Background(tcell.ColorDarkBlue)
+// Interface colors are fixed RGB grays, independent of the terminal ANSI palette.
+// Default terminal colors keep the content and cleared canvas on the host background.
+var base = tcell.StyleDefault.Foreground(tcell.ColorDefault).Background(tcell.ColorDefault)
+var chrome = grayStyle(0xd4d4d4, 0x303030)
+var sidebar = grayStyle(0xc8c8c8, 0x242424)
+var paneHeader = grayStyle(0xc8c8c8, 0x383838)
+var statusBar = grayStyle(0xd4d4d4, 0x1c1c1c)
+var menuStyle = grayStyle(0xe0e0e0, 0x404040)
+var menuHint = grayStyle(0xd4d4d4, 0x484848)
+var selected = grayStyle(0xffffff, 0x606060).Bold(true)
+var boundary = grayStyle(0xa0a0a0, 0x242424)
+
+func grayStyle(fg, bg int32) tcell.Style {
+	return tcell.StyleDefault.Foreground(tcell.NewHexColor(fg)).Background(tcell.NewHexColor(bg))
+}
 
 func (a *app) text(x, y, width int, s string, style tcell.Style) {
 	for _, r := range s {
@@ -100,14 +112,14 @@ func (a *app) draw() {
 	if w >= 90 {
 		side = 22
 		for y := 0; y < h-1; y++ {
-			a.bar(rect{0, y, side, 1}, "", chrome)
+			a.bar(rect{0, y, side, 1}, "", sidebar)
 		}
-		a.text(1, 0, side-2, "Water • workspaces", chrome)
+		a.text(1, 0, side-2, "Water • workspaces", sidebar)
 		for i, ws := range a.state.Workspaces {
 			if i+2 >= h-1 {
 				break
 			}
-			style := chrome
+			style := sidebar
 			if ws.ID == a.workspace {
 				style = selected
 			}
@@ -118,7 +130,7 @@ func (a *app) draw() {
 	if side > 0 {
 		row := len(a.state.Workspaces) + 4
 		if row < h-2 {
-			a.text(1, row, side-2, "Agents", chrome)
+			a.text(1, row, side-2, "Agents", sidebar)
 			row++
 		}
 		for _, agent := range a.state.Agents {
@@ -133,12 +145,15 @@ func (a *app) draw() {
 			if json.Unmarshal(raw, &item) != nil {
 				continue
 			}
-			a.text(1, row, side-2, item.Label, chrome)
+			a.text(1, row, side-2, item.Label, sidebar)
 			a.hits = append(a.hits, hit{rect{0, row, side, 1}, "agent-pane", item.Pane})
 			row++
 		}
 	}
-	a.bar(rect{side, 0, w - side, 1}, "", chrome)
+	a.bar(rect{0, 0, w, 1}, "", chrome)
+	if side > 0 {
+		a.text(1, 0, side-2, "Water • workspaces", chrome)
+	}
 	if w < 90 {
 		a.drawNarrowBar(w)
 	} else {
@@ -152,7 +167,7 @@ func (a *app) draw() {
 				width := min(len([]rune(label)), max(0, w-x))
 				style := chrome
 				if tab.ID == a.tab {
-					style = selected
+					style = chrome.Foreground(tcell.NewHexColor(0xffffff)).Bold(true)
 				}
 				a.bar(rect{x, 0, width, 1}, label, style)
 				a.hits = append(a.hits, hit{rect{x, 0, width, 1}, "tab", tab.ID})
@@ -188,13 +203,13 @@ func (a *app) draw() {
 				if d.axis == "vertical" {
 					r = '─'
 				}
-				a.screen.SetContent(x, y, r, nil, chrome)
+				a.screen.SetContent(x, y, r, nil, boundary)
 			}
 		}
 	}
 	visible := map[uuid.UUID]bool{}
 	for _, p := range a.panes {
-		style := chrome
+		style := paneHeader
 		if p.id == a.focus {
 			style = selected
 		}
@@ -275,7 +290,7 @@ func (a *app) draw() {
 		status = promptLabel(a.promptKind) + a.prompt
 	}
 	if showBottom {
-		a.bar(rect{0, h - 1, w, 1}, status, chrome)
+		a.bar(rect{0, h - 1, w, 1}, status, statusBar)
 		if a.promptKind == "" {
 			a.hits = append(a.hits, hit{rect{0, h - 1, w, 1}, "menu:?", uuid.Nil})
 		}
@@ -345,14 +360,14 @@ func (a *app) drawMenu(w, h int) {
 	y := max(1, (h-count-1)/2)
 	for i := 0; i < count; i++ {
 		item := a.menuItems[start+i]
-		style := chrome
+		style := menuStyle
 		if start+i == a.menuIndex {
 			style = selected
 		}
 		a.bar(rect{x, y + i, width, 1}, " "+item.label, style)
 		a.hits = append(a.hits, hit{rect{x, y + i, width, 1}, item.kind, item.id})
 	}
-	a.bar(rect{x, y + count, width, 1}, " ↑↓ Enter: select | Esc: back", selected)
+	a.bar(rect{x, y + count, width, 1}, " ↑↓ Enter: select | Esc: back", menuHint)
 }
 
 // selectedLeaf resolves client selection against the complete topology. The
