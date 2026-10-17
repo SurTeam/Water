@@ -1,4 +1,4 @@
-# Reusable Water testing strategy
+# 测试与验证
 
 This is the execution guide referenced by `AGENTS.md` and the bundled
 water-control skill. Use the scripts as the shared procedure so verification
@@ -133,15 +133,7 @@ Echoed bytes exercise the GUI parser and drawing; screenshots
 and GUI content are retained. Three additional ZLE command-line cycles verify
 450 pastes using a distinct payload/digest per cycle.
 
-This fills a previous coverage gap: `text:` input bypasses native clipboard
-inspection, the image smoke sends only one Cmd+V, and repeat-clock unit tests do
-not exercise Objective-C object lifetimes. Repeated text paste exposed a native
-SIGSEGV while `clipboardHasImage` drained an `NSAutoreleasePool`. Both clipboard
-inspection helpers now pin their goroutine to one OS thread for the pool's whole
-lifetime. `TestMacAutoreleasePoolStaysOnCreatingThread` explicitly yields with
-live autoreleased text to verify that scheduling cannot move that lifetime to
-another thread. A Go race check alone cannot detect misuse of native thread-local
-pools. Short smoke runs could pass before the scheduling-dependent crash.
+Clipboard assertions must exercise the native paste path: text: input bypasses clipboard inspection. Native autorelease pools must stay on their creating OS thread for their whole lifetime; Go race checks cannot prove this. TestMacAutoreleasePoolStaysOnCreatingThread explicitly yields while native objects remain live.
 
 Control-injected repeated shortcuts exercise the shared paste handler; they do
 not simulate holding a physical key. Physical Cmd+V repeat/IME acceptance remains
@@ -161,18 +153,19 @@ unverified boundary. Do not equate a cross-build with native execution or
 control-injected input with physical keyboard/IME acceptance. After matching
 checks pass, stop; unrelated cleanup and repeated suites do not add evidence.
 
-## Version and signing handoff
+## 文档与交付时机
 
-Use root `VERSION` for a patch increment and the same version/variant for the
-GUI, server, updater and embedded payloads. Keep generated payloads and app
-bundles out of Git. Commit source, tests, rules and release notes after checks
-pass, then push the branch and matching tag when authorized.
+开发中的候选方案、调查与临时结果保留在会话上下文。用户确认代码实现并明确要求 commit 后，才依据最终代码和真实验证更新模块文档与必要的发布说明；用户单独要求修改文档时按该任务范围执行。测试通过不自动授权 commit、升版本、push、tag 或发布。完整流程见 [AGENTS.md](../AGENTS.md#文档更新时机)，签名与变体规则见 [构建与发布](build-and-release.md)。
 
-On a macOS development machine, sign locally using the same SurTeam certificate
-used by CI, explicitly setting `CODESIGN_IDENTITY` and `CODESIGN_REQUIRED=1`.
-The existing native build script signs updater/server/GUI/app with runtime and
-timestamp options and performs `codesign --verify --deep --strict`. Verify the
-archive before delivery. Do not dispatch signing CI for an already locally
-signed package. Keep signing materials and literal identities out of source,
-logs and shell tracing. CI remains a signing-only fallback, as specified in
-`AGENTS.md` and `docs/Documents.md`.
+## 多窗口验证
+
+多窗口检查必须覆盖 detached/embedded 两种 server 生命周期、独立选择、焦点 resize 和仅清理自有实例。
+
+```sh
+~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water
+~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water --embedded
+```
+
+## 现有 fixture 的剪贴板边界
+
+完整类型保全是测试原则，不代表所有旧脚本已经满足。`scripts/go-ui-query-smoke.py` 目前用 pbpaste/pbcopy 仅备份与恢复文本，会丢失原有图片/文件等类型；在需要完整保留用户剪贴板的环境不能把它当作无副作用验证。新增或修订测试应复用完整原生类型备份方案，不能只恢复文本后报告剪贴板已完整恢复。

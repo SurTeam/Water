@@ -1,4 +1,8 @@
-# Server Web access
+# 浏览器访问与配对
+
+实现入口：`internal/goserver/web.go`、`web_auth.go`、`webassets/` 和 `internal/goui/` Web Settings。必须保持浏览器权限隔离、一次性配对、Origin/Host 校验、有界流和设备撤销；不能为浏览器开放管理/recovery/shutdown 权限。
+
+本文记录当前实现与限制；开发讨论先留在上下文，用户确认实现并要求 commit 后再按最终代码更新，见 [工作约定](../AGENTS.md#文档更新时机)。
 
 Water server can expose its workspaces and terminals directly to a browser through a separate HTTP/HTTPS and WebSocket listener. Existing desktop IPC and SSH connections continue to work. Network reachability is supplied by the user, for example with Tailscale; Water does not perform NAT traversal or relay traffic.
 
@@ -50,6 +54,8 @@ water ctl --socket /path/to/control.sock server web stop
 
 Configure replaces all Web fields. HTTP uses WS and needs no certificates; HTTPS uses WSS and requires `--tls true --cert ... --key ...`. Pairing, authorization, Host/Origin checks and revocation apply to all interfaces. Legacy `public_url` configurations and the CLI `--url` option are migrated to separate listener fields; saving removes `public_url`. Status retains `public_url` as a derived access URL and `listen_address` as the actual bound socket. Configuration is persisted in the target server's `--config`/resolved config path. Pair returns a secret invitation URL; display it to the intended device instead of saving it in shared logs.
 
+CLI 的 `--cert` 和 `--key` 是**目标服务端可读取的文件路径**，即使 ctl 通过 SSH 转发 socket 调用也不自动上传桌面文件。GUI 文件选择器才使用内容导入接口。CLI configure 保存路径不等于证书已验证可用；文件读取和匹配检查发生在 Start。`web.enabled` 控制自动启动偏好，只有实际运行的 listener 才参与 server 存活判断。
+
 ## Pair and connect
 
 Start Web, then select Pair device. Open the server address on the phone and select **Scan QR code** to photograph the desktop GUI's QR, or **Choose QR image** to select an existing image. Image loading and QR recognition run locally in this browser with embedded jsQR in a bounded worker; the photo is never uploaded. The page shows a separate progress/result message, tries multiple image scales and a bounded Gaussian smoothing fallback for screen-camera texture, and reports unsupported formats, unreadable codes and timeouts. JPEG/PNG or pasting a pairing link through Add server are available fallbacks. HTTP supports this photo/file flow without requiring live camera permissions. A decoded Water invitation adds its origin to this browser's server list and opens that server's invitation URL; same-server invitations explicitly reload so the pairing fragment is processed. Non-Water QR codes and unsafe URL schemes are rejected. You can also scan the GUI's QR with the phone's system camera. The QR points directly to the target server; the desktop GUI is not a data gateway. On a headless server, open the invitation URL returned by the CLI.
@@ -72,7 +78,7 @@ The embedded Web client offers a workspace/tab/pane selector, terminal input/out
 
 The browser's **Settings → Font** dialog offers system defaults and common system monospace fonts detected on this device. A selection applies immediately to the page, preview and terminal; the terminal remeasures its grid to fit. No font files are downloaded and no font-enumeration permission is requested. The choice is stored in `localStorage` under `water.web.settings` for this website (scheme, host and port), and is restored after reload, reconnect and opening another tab. Unavailable or invalid saved fonts fall back to the system default. When website storage is blocked, changes still apply for the current visit. This preference does not change desktop or server configuration.
 
-Resize follows the existing session focus ownership rule. The server retains PTYs when a browser disconnects or Web is stopped. An enabled Web listener keeps an embedded server alive after its last desktop window closes, so a later direct browser connection remains possible. Explicit server shutdown/restart and host shutdown still stop sessions. A paired remote browser does not require the original desktop or its SSH connection to remain online.
+Resize follows the existing session focus ownership rule. The server retains PTYs when a browser disconnects or Web is stopped. A running Web listener keeps an embedded server alive after its last desktop window closes, so a later direct browser connection remains possible. Explicit server shutdown/restart and host shutdown still stop sessions. A paired remote browser does not require the original desktop or its SSH connection to remain online.
 
 The GUI's existing capability details remain available under Capabilities. A server without `web-access/v1` shows an upgrade message instead of Web management controls.
 

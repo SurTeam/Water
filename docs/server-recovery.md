@@ -1,4 +1,8 @@
-# Server compatibility and recovery
+# 服务端兼容与恢复
+
+实现入口：`internal/goprotocol/`、`internal/goserver/` recovery/session 路径、`internal/goremote/` 和 `internal/goui/` Server Settings。共享模型、身份和生命周期硬规则见 [服务与连接](remote-connections.md)。
+
+本文记录当前实现与限制；开发讨论先留在上下文，用户确认实现并要求 commit 后再按最终代码更新，见 [工作约定](../AGENTS.md#文档更新时机)。
 
 Settings → **Server** applies to the selected Local or Remote connection. It shows GUI/server versions, the server source revision, and a matrix of capabilities each side provides or requires. Refresh, Save layout, Restart server and Retry restore use that connection's transport. Restart requires a second click after the warning about ending running tasks.
 
@@ -36,7 +40,14 @@ The schema retains workspace/tab/pane identities and order, names and title over
 
 Artifacts live under `recovery/` beside the GUI config, keyed by variant and logical endpoint; files are mode 0600. Pending artifacts are retried at startup/reconnect, but never imported into an unrelated nonempty model. A failed start/import retains the artifact and exposes Retry restore. An invalid existing artifact is not silently overwritten.
 
-Legacy servers lacking advertised recovery support cannot reliably export live directories. Their established API baseline can still be reused, but Settings explicitly disables automatic recovery restart. No new GUI can retroactively add an export API to an old running server.
+Recovery availability and normal API admission are separate checks. A server
+that satisfies all current required capabilities but lacks recovery support may
+serve normal operations while automatic recovery restart is disabled. Current
+clients require agent-profiles/v1 as well as workspace, terminal-stream and
+window-selection. A legacy descriptor with no capability advertisement does not
+acquire agent-profiles/v1 through baseline normalization and remains diagnostic;
+its ordinary workspace operations are not available. A new GUI cannot add live
+directory export to an old running server.
 
 ## Verification and ownership
 

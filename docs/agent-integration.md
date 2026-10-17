@@ -1,4 +1,8 @@
-# Agent profiles
+# Agent 识别与控制
+
+实现入口：`internal/goagent/`、`internal/goconfig/config.go`、`internal/goserver/agents.go` 与 `internal/goui/` 的 Agent Settings/侧栏路径。识别基于前台进程与 argv，不读取私有会话文件或把输出文本猜成状态；控制必须重验运行身份与 PTY 前台进程组。
+
+本文记录当前实现与限制；开发讨论先留在上下文，用户确认实现并要求 commit 后再按最终代码更新，见 [工作约定](../AGENTS.md#文档更新时机)。
 
 Open **Settings → Agents** on the connection that owns the terminal. The page
 shows which local or remote server is being edited. Definitions are saved to
@@ -71,10 +75,12 @@ must match. Example for a Node-based Agent:
 
 Operators are `exact`, `contains` and `glob`. Name comparisons are insensitive to
 case; other fields preserve case. Globs use Go's filepath pattern syntax, where
-`*` does not cross path separators. Process arguments come from bounded `ps`
-sampling: shell quoting and arguments containing spaces are not reconstructed
-perfectly. Use distinctive executable/script paths when possible, and test
-against the actual process on the target host.
+`*` does not cross path separators. On macOS, foreground sampling uses sysctl
+for the PTY process-group leader, preserves NUL-delimited argv tokens, and
+rechecks process identity before accepting the result. Other platform paths use
+bounded ps sampling whose whitespace parsing cannot reconstruct all quoting or
+arguments containing spaces. Test recognition against the real target host;
+do not assume identical argument fidelity across platforms.
 
 Higher numeric priority wins when several enabled profiles match. Equal
 priorities use the stable profile ID as the tie breaker. **Test recognition**
@@ -148,7 +154,8 @@ Agent configuration. An empty object restores all builtin defaults and removes
 custom definitions. In the application config, the same object lives under
 `agents` (or `overrides.agents` for an override envelope).
 
-The server advertises `agent-profiles/v1`. Update an older server through the
-existing Server compatibility/recovery flow before using these settings.
+The server advertises `agent-profiles/v1`. A server supporting recovery can use the compatibility/recovery flow before
+these settings are used. Without recovery support, automatic recovery restart is
+unavailable; arrange an explicit upgrade that accounts for its running tasks.
 Arbitrary action scripts and custom state event transports are outside this
 first implementation.

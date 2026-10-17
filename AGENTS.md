@@ -1,55 +1,26 @@
 # Water · Agent 工作约定
 
-本文件约束代码修改、测试和发布；当前模块入口见 [ARCHITECTURE.md](ARCHITECTURE.md)，命令行和操作手册见 [docs/Documents.md](docs/Documents.md)。实现、测试和本文件冲突时，先核对当前代码与基线，不用历史文案替代验证。
+## 开始工作前
 
-## 工作边界
+- 先检查 `git status`，阅读 [设计与开发文档](docs/README.md) 及本次功能对应的模块文档，了解现有实现、限制和硬性规则，再核对相关源码与测试。操作命令随所属模块维护。
+- 文档优先用于判断功能是否已经存在、请求是否会推翻已有设计。发现文档与实现冲突，先核实并说明差异；已明确的用户指令优先，不把过时文档当作拒绝修改的理由。尚未确定的产品取舍再向用户澄清。
+- 只推进当前任务；不顺手扩展文件浏览器、图片预览或独立 Agent Surface。尊重用户限定的读取与修改范围，明确未验证结论。
+- 修改相应模块必须遵守其文档中的硬性规则；测试与进程所有权遵守 [测试策略](docs/testing.md)，构建和发布遵守 [构建与发布](docs/build-and-release.md)。
 
-- 只推进用户当前任务，不顺手扩展文件浏览器、图片预览或结构化 Agent Surface。现有 coding-agent 能力（前台进程检测、绑定、状态和侧栏交互）属于既有范围。
-- 修改前检查相关实现、测试和 `git status`；尊重用户限制的读取范围，并明确没有验证的结论。
-- Go 版本和依赖以 `go.mod`/`go.sum` 为准；产品版本由根目录 `VERSION` 管理，打包和发布可通过 `WATER_APP_VERSION` 一致覆盖。
-- 只保留一个大小写正确的 `AGENTS.md`；新增路径前检查 `git ls-files`，不要创建 `Agents.md`。
+## 文档更新时机
 
-## 从提交历史固化的必须项
+- 开发过程中允许持续头脑风暴和调整。候选设计、临时决定和未确认的实现先保留在会话上下文，不自动写入长期设计文档、新增 spark 草案或改写模块契约。
+- 只有用户确认代码实现并明确要求 **commit** 时，才对照最终代码与验证结果更新受影响的整体设计、模块说明及必要的发布说明，再执行获授权的提交。完成实现、测试通过或用户说“继续”，本身均不代表 commit 授权。
+- 用户明确要求整理或修改文档时，直接在该任务范围内更新；文档修改授权本身不等于提交授权。
+- **每次获授权的 commit 前都必须检查工作区和暂存区的实际 diff**，依据本次真实代码变动更新受影响的整体设计、模块逻辑、原则、限制、配置和操作说明，文档与实现一同提交。不能只按最初需求、计划或提交标题判断文档范围；实际无文档影响时说明依据，不为凑更新改写无关文档。
+- 提交前核对新增、修改和删除的行为、配置及限制是否准确反映在对应文档；删除过时说法，合并重复说明并修复链接。历史测量和失败不能改写成当前成功保证，尚未实现的方案不能写成事实。
+- 设计改变时直接更新对应模块的当前契约，避免不断新增阶段报告或并列的“最终方案”。历史发布记录保留在 `docs/releases/`，不承担当前设计说明的职责。
+- 审查历史修复时，同一具体问题在至少三个不同提交反复出现，应将共性原因提炼为所属模块的设计原则、硬性约束和验证要求。Git 记录用于调查核实，不把提交 hash、演进表、修复流水或事故计数写进长期设计文档。不能把无关修复拼成次数。
 
-仓库维护提交使用过 `surtsingv` 和 `Tsingv` 两个 author identity。两组提交反复确认的约束统一如下；新实现不能为了方便回退这些边界：
+## 仓库与交付
 
-- 外部模型修改必须走 command → dispatcher → model。UI、`water ctl`、scenario 和远端控制只能通过 transport/channel 调用，不能直接改模型或引入全局共享模型。
-- 服务端保留模型、PTY 元数据和有界原始 replay；客户端拥有终端模拟、窗口选择、滚动和拖拽预览。Ebitengine 帧循环不得做阻塞 I/O、ANSI 解析或重型历史处理。
-- PTY 的 `Output → Resize → Exit` 必须保持有序；attach 的有界 replay 要和 live 流完整衔接、按 sequence 去重，并在背压和关闭时有界。不得恢复逐屏服务端快照或无限输出推送。
-- 实体、connection、operation 使用 typed ID 和完整 UUIDv4 随机身份。JSON/CLI 使用 UUID 字符串，二进制保留全部 16 字节；不能用集合下标、进程计数、截断或浮点数替代。命令必须路由到对象所属 connection。
-- 控制入口是内置的 `water ctl`，不是独立 `waterctl`。GUI 验证必须走 Water 自己的 control API 和真实 action/model 路径；点击使用 control API 自己的 `ui click`，不使用 `xdotool`、`xte`、AppleScript 等系统注入。
-- dev/release 必须完全隔离：socket、配置目录、Bundle ID、进程名、server 和远端 payload 都不能互用；启动 sibling/远端 server 前校验变体和协议，不覆盖仍在监听的 socket。
-- 默认 GUI、tab、split 使用配置的真实 shell；空 workspace 入口只用于测试。配置项必须贯通默认值、override、合并/校验、Settings 读写和运行时投影。
-- 默认日志保持安静，不默认打印逐 cell/逐 frame 日志。
-
-## 验证与进程安全
-
-- 可复用测试策略见 [docs/testing-strategy.md](docs/testing-strategy.md)。优先运行已有 fixture 和 `~/.venv/bin/python scripts/run-go-regression.py --profile unit|terminal|agent|full`；`--list` 先展示执行计划。修复时先运行最小相关测试，交付前运行一次匹配范围的完整 profile；通过后不无依据重复整套测试。
-- 每个测试先明确证据来源：`pane content` 是 CLI 从 PTY replay 重建的当前屏幕，只用于普通输出检查；真实 GUI viewport、scrollback、清屏策略使用 `ui content --pane UUID [--window UUID]`。`ui content --start-row N --rows M` 只读客户端历史，按 `last_seq`、`trimmed_lines`、`alt_screen` 校验分页一致性；截图单独验证真实 Draw。
-- 普通内容断言不得通过拖选、复制、`pbpaste` 或 OCR 获取文本；这些操作只用于测试选区/剪贴板本身，并恢复副作用。新增 GUI 测试复用 `scripts/water_test.py` 的实例所有权、就绪条件、有界查询和清理，不留下选区或改变用户剪贴板。
-- Agent 渲染测试优先使用本地保存的会话/tool-output fixture，驱动真实安装的 CLI 与快捷键，不提交模型请求、不安装 hooks。等待具体输出、sequence、同步输出完成或模型状态；只在启动连接阶段容忍瞬时连接错误，运行阶段控制错误直接失败。
-- 每个验证必须有行为断言、超时和证据目录。profile runner 保存命令、PID、耗时、退出码与日志；GUI fixture 保存 GUI/server/window/socket 所有权及清理结果。遇到失败保留现场并定位最小原因，不静默跳过必需依赖、不靠重复运行取得一次 PASS。
-
-- 运行与改动匹配的 gofmt、go vet、Go 单元/集成测试、scenario 和 GUI 检查；测试应在一分钟内完成。等待用 operation、event、revision、terminal output 或 process exit 的有界条件，不用固定 `sleep` 掩盖竞态、死锁或超时。
-- GUI 交互使用 `water ctl`；headless 测试不能替代真实 GUI 验证。先检查当前机器的 display/GPU/X11/Wayland 环境，不硬编码 `DISPLAY` 或 `XAUTHORITY`。
-- scenario shell 使用检测到的 zsh，优先 `/opt/homebrew/bin/zsh`；隔离启动文件的交互测试使用 `-f`。`--no-initial-terminal` 保留 workspace，`--empty-workspace` 从空模型开始。
-- 测试实例必须使用唯一的 `WATER_CONTROL_SOCKET` 和临时 `WATER_CONFIG`/`--config`，记录本次 GUI/server PID。结束后及时关闭本次 socket 和 server，只清理已确认属于本次测试的 PID。
-- 禁止 `pkill water`、`pkill -9 water`、`killall water`；进程名只能辅助辨认，不能单独作为清理依据。已有用户 GUI、server 和承载当前会话的终端不得终止。
-
-## 构建与变体
-
-- 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 打包产物分别在 `target/go-app/<variant>` 和 `target/go-linux/<variant>`。
-- dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/Library/Application Support/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server 进程 `water-dev`/`water-srv-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/Library/Application Support/water/config.json`、Bundle ID `dev.water.terminal`、进程 `water`/`water-server`。
-- GUI 在目标平台原生构建；headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
-
-详细构建、测试、`water ctl`、scenario 和发布命令集中在 [docs/Documents.md](docs/Documents.md)。
-
-## 签名与发布规则
-
-- `.github/workflows/macos-signed.yml` 是唯一保留的 CI，为 signing-only workflow，唯一触发方式是 `workflow_dispatch`；不得把源码 checkout、编译或完整构建放回该 workflow。本地执行构建和验证。
-- workflow 必须接收 `variant`、`publication`、`tag`、`source_release`、`source_asset`。release 只接受 `v*` tag，dev 只接受 `dev-*` tag；`prerelease` 只给 dev，`release` 只给正式版，`draft`/`none` 可用于两者。
-- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供 `CODESIGN_IDENTITY`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
-- 非 macOS 开发机或本地证书不可用时，CI signing-only 路径保留为备用：本地 `CODESIGN_SKIP=1` 构建 unsigned zip → `test -s`/`unzip -t` → 上传目标 tag 的 draft release → 触发 signing workflow。本地签名失败必须报告原因，不自动降级为 ad-hoc 或触发 CI 掩盖失败。unsigned app 不提交 Git，也不能当作已交付安装包。
-- 需要真实签名时显式设置 `CODESIGN_IDENTITY` 和 `CODESIGN_REQUIRED=1`；本地 ad-hoc/unsigned 产物只能作为构建或签名交接中间物。
-- `SurTeamCode.p12` 只作为本地导入材料，放在仓库外并限制权限；`.env`、密码、p12、明文 identity 不得进入源码、workflow、日志或 shell tracing。Actions 只使用 `SURTEAM_CODE_P12_BASE64`、`SURTEAM_SIGN_PASS` 和可选的 `SURTEAM_SIGNING_IDENTITY`。
-- 本地与 Action 均必须签 nested updater/server/GUI 和 app，并执行 `codesign --verify --deep --strict`；失败不得发布。Action 使用临时 keychain，`always()` 清理 keychain 和 p12。`CODESIGN_SKIP=1` 与 `CODESIGN_REQUIRED` 互斥。
+- Go 与依赖以 `go.mod`/`go.sum` 为准，版本以 `VERSION` 为准；不因普通修改自动升版本、打 tag、push 或发布。
+- 只保留一个大小写正确的 `AGENTS.md`，新增文件前检查已有受跟踪路径。
+- 修复先运行最小相关检查，交付前按 [测试策略](docs/testing.md) 运行一次匹配范围的验证；通过后不无依据重复整套测试。纯文档变更检查事实、入口与链接，不启动无关 GUI 回归。
+- 不终止用户 GUI、server 或承载当前会话的终端。禁止 `pkill water`、`pkill -9 water`、`killall water`；清理必须证明 socket、实例和 PID 属于本次测试。
+- 交付说明实际修改、验证结果、未验证边界以及是否提交。用户未要求 commit 时保留工作区供审阅。

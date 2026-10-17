@@ -13,7 +13,7 @@ The UI is deliberately quiet: a connection sidebar on the left, tabs above the a
 - Local workspaces with tabs, split panes, real shells, selection/copy, scrollback, hyperlinks, and configurable keyboard shortcuts.
 - SSH connections that bring remote workspaces into the same sidebar, with reconnect/offline state and matching embedded server payloads.
 - Coding-agent detection and session labels that make active terminal sessions easier to find without creating a separate agent surface.
-- A server-backed terminal frontend: `water tui` provides workspaces, tabs, split panes, mouse input, and persistent shells in an existing terminal. See [TUI controls](docs/tui.md).
+- A server-backed terminal frontend: `water tui` provides workspaces, tabs, split panes, mouse input, and persistent shells in an existing terminal. See [TUI controls](docs/terminal-ui.md).
 - A versioned `water ctl` control API for automation, smoke tests, state inspection, terminal queries, and real GUI actions.
 
 ## Start here
@@ -24,7 +24,7 @@ The packaged product targets macOS first. The repository also supports Linux dev
 go run ./cmd/water
 ```
 
-For setup, configuration, remote connections, control commands, tests, cross-builds, and signing, see [docs/Documents.md](docs/Documents.md). The current module boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md), and the complete configuration schema is in [config.example.json](config.example.json).
+See the [design and development guide](docs/README.md) for module responsibilities, UI and performance rules, configuration, control commands, testing, and packaging. The full configuration schema is in [config.example.json](config.example.json).
 
 ## Project status
 

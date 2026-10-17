@@ -1,4 +1,8 @@
-# Water terminal frontend
+# TUI 终端界面
+
+实现入口：`internal/gotui/` 与 `cmd/water/`；共享模型/传输规则见 [服务与连接](remote-connections.md)，终端规则见 [终端管线](terminal-rendering.md)。
+
+本文记录当前实现与限制；开发讨论先留在上下文，用户确认实现并要求 commit 后再按最终代码更新，见 [工作约定](../AGENTS.md#文档更新时机)。
 
 Run `water tui` to connect to the same server-backed workspaces used by the GUI. The frontend uses the configured shell for new tabs and splits. A missing local server starts automatically when `server.auto_start` permits it. Closing the frontend detaches; shells and the server stay running.
 
@@ -48,6 +52,11 @@ The focused client owns the shared PTY grid. Outer-terminal focus reports update
 Click a pane to focus it. Drag split dividers to resize them. Application mouse tracking receives coordinates relative to the child terminal, excluding sidebar, tabs, and pane title. Touch terminals that translate taps into standard terminal mouse press/release reports use the same path. Wheel events go to applications that request mouse reporting; otherwise they scroll local history. Hold Shift to use local history scrolling or text selection even when an application requests mouse reporting. Dragging local text copies it through the outer terminal's clipboard protocol when supported. Paste uses bracketed paste when requested by the child application.
 
 Terminal state comes from bounded server replay followed by ordered live output. The client suppresses historical terminal query replies, discards overlapping sequence numbers, and reattaches on a gap. Scrollback and terminal emulation belong to the frontend. Only visible panes attach to terminal output; selecting a hidden pane reconstructs it from available replay. History older than the server's bounded replay is not restored after detach or hiding a pane.
+
+Gap reattach only repairs terminal sequence continuity within an existing
+connection. If the server session or SSH transport disconnects, the event loop
+returns server disconnected and exits; there is no GUI-style reconnect loop.
+Run water tui again to attach to any sessions still retained by the server.
 
 The TUI interface uses a fixed grayscale theme defined in `internal/gotui/render.go`: dark sidebar and status bar, separate gray tab and pane headers, brighter selected items, and visible split/sidebar rules. It does not read the GUI theme. The main canvas and default terminal cells use the outer terminal’s default background, matching the shell; applications retain their explicit ANSI foreground and background colors.
 
