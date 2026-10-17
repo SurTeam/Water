@@ -13,8 +13,7 @@ import (
 // public.file-url per pasteboard item (a file URL, not a property list), so
 // reading a single dataForType blob as an NSArray misses the drop.
 func clipboardFileURLs() []string {
-	pool := macSend(macClass("NSAutoreleasePool"), "new")
-	defer macSend(pool, "release")
+	defer macAutoreleasePool()()
 	pb := macSend(macClass("NSPasteboard"), "generalPasteboard")
 	if pb == 0 {
 		return nil

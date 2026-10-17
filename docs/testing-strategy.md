@@ -18,7 +18,7 @@ Before delivery, run the matching profile once against the final code:
 | Profile | Checks |
 | --- | --- |
 | `unit` | Full Go tests, vet, race checks for transport/PTY/VT/UI |
-| `terminal` | Unit profile, versioned dev GUI/server build, all scenarios, native GUI smoke, PTY queries, generated-image/history checks, real Pi redraw |
+| `terminal` | Unit profile, versioned dev GUI/server build, all scenarios, native GUI smoke, PTY queries, repeated CJK/large clipboard paste, generated-image/history checks, real Pi redraw |
 | `agent` | Unit profile, builds, all scenarios, native GUI smoke, status-icon pixel measurements, installed Agent startup/sidebar switching, real Pi redraw |
 | `full` | Union of terminal and Agent checks; each step runs once |
 
@@ -120,6 +120,33 @@ state; startup checks should wait for a frame/menu/pane rather than requiring
 focus. Tests specifically covering focus transitions should assert visibility
 and unfocused status, while the background smoke may activate its configured
 external app to exercise occlusion.
+
+### Clipboard text paste regression
+
+`go-ui-text-paste-smoke.py` belongs to `terminal` and `full`. It preserves and
+restores all native clipboard types and sends actual `ui key cmd-v` actions.
+It verifies 80 repetitions of `啊啊啊啊啊啊啊` and a single 256 KiB UTF-8
+payload with bracketed paste both disabled and enabled. Raw-mode PTY receivers
+read in a loop and report exact wire length and SHA-256, including each bracketed
+paste delimiter. A separately ordered end marker detects extra trailing bytes.
+Echoed bytes exercise the GUI parser and drawing; screenshots
+and GUI content are retained. Three additional ZLE command-line cycles verify
+450 pastes using a distinct payload/digest per cycle.
+
+This fills a previous coverage gap: `text:` input bypasses native clipboard
+inspection, the image smoke sends only one Cmd+V, and repeat-clock unit tests do
+not exercise Objective-C object lifetimes. Repeated text paste exposed a native
+SIGSEGV while `clipboardHasImage` drained an `NSAutoreleasePool`. Both clipboard
+inspection helpers now pin their goroutine to one OS thread for the pool's whole
+lifetime. `TestMacAutoreleasePoolStaysOnCreatingThread` explicitly yields with
+live autoreleased text to verify that scheduling cannot move that lifetime to
+another thread. A Go race check alone cannot detect misuse of native thread-local
+pools. Short smoke runs could pass before the scheduling-dependent crash.
+
+Control-injected repeated shortcuts exercise the shared paste handler; they do
+not simulate holding a physical key. Physical Cmd+V repeat/IME acceptance remains
+a separate manual check. The large-paste assertion covers the stated 256 KiB
+payload, not an unbounded clipboard size.
 
 ## Keep machine-readable evidence
 
