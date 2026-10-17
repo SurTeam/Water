@@ -16,7 +16,7 @@
 
 - `.github/workflows/macos-signed.yml` 是唯一保留的 CI，为 signing-only workflow，唯一触发方式是 `workflow_dispatch`；不得把源码 checkout、编译或完整构建放回该 workflow。本地执行构建和验证。
 - workflow 必须接收 `variant`、`publication`、`tag`、`source_release`、`source_asset`。release 只接受 `v*` tag，dev 只接受 `dev-*` tag；`prerelease` 只给 dev，`release` 只给正式版，`draft`/`none` 可用于两者。
-- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供 `CODESIGN_IDENTITY`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
+- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供SurTeam证书的 `CODESIGN_IDENTITY="85B37EA8D5B9719CB5F443613573AD1F4986B17B"`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
 - 本地证书不可用时，CI signing-only 路径保留为备用：由 macOS 构建机使用 `CODESIGN_SKIP=1` 原生构建 unsigned zip → `test -s`/`unzip -t` → 上传目标 tag 的 draft release → 触发 signing workflow。本地签名失败必须报告原因，不自动降级为 ad-hoc 或触发 CI 掩盖失败。unsigned app 不提交 Git，也不能当作已交付安装包。
 - 非 macOS 主机不能运行 macOS archive 构建脚本；只能接收 macOS 构建机生成的 archive 后上传交接。signing-only CI 不提供编译环境，也不能替代原生构建。
 - 需要真实签名时显式设置 `CODESIGN_IDENTITY` 和 `CODESIGN_REQUIRED=1`；本地 ad-hoc/unsigned 产物只能作为构建或签名交接中间物。
