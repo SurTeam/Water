@@ -638,3 +638,79 @@ func TestNewTabFromEmptyState(t *testing.T) {
 		})
 	}
 }
+
+func TestCopyFeedbackExpires(t *testing.T) {
+	a := newApp(nil, simulation(t, 60, 24), 100)
+	defer a.close()
+	id := uuid.New()
+	emu := govt.New(60, 22, 100)
+	emu.Write([]byte("copy me"))
+	a.terms[id] = &terminal{emu: emu}
+	a.panes = []pane{{term: id, box: rect{0, 1, 60, 22}, headerless: true}}
+	a.selectionRange = &localSelection{term: id, startRow: 0, startCol: 0, drag: true}
+	a.buttons = tcell.Button1
+	before := time.Now()
+	a.mouse(tcell.NewEventMouse(6, 1, tcell.ButtonNone, 0))
+	if a.flash != "Selection copied to terminal clipboard" || a.status != "" {
+		t.Fatalf("copy feedback: flash=%q status=%q", a.flash, a.status)
+	}
+	if a.flashUntil.Before(before.Add(1500*time.Millisecond)) || a.flashUntil.After(time.Now().Add(1500*time.Millisecond)) {
+		t.Fatalf("unexpected flash deadline: %v", a.flashUntil)
+	}
+	a.expireFlash(a.flashUntil.Add(-time.Nanosecond))
+	if a.flash == "" {
+		t.Fatal("feedback expired early")
+	}
+	a.status = "unrelated error"
+	a.expireFlash(a.flashUntil)
+	if a.flash != "" || !a.flashUntil.IsZero() || a.status != "unrelated error" {
+		t.Fatalf("expiration damaged status: flash=%q status=%q", a.flash, a.status)
+	}
+}
+
+func TestStatusLineDoesNotOpenMenu(t *testing.T) {
+	for _, width := range []int{60, 120} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			a := newApp(nil, simulation(t, width, 24), 100)
+			defer a.close()
+			a.flash = "Selection copied to terminal clipboard"
+			a.flashUntil = time.Now().Add(time.Second)
+			a.draw()
+			for x := 0; x < width; x++ {
+				a.mouse(tcell.NewEventMouse(x, 23, tcell.Button1, 0))
+				a.mouse(tcell.NewEventMouse(x, 23, tcell.ButtonNone, 0))
+				if a.menu {
+					t.Fatalf("status click opened menu at column %d", x)
+				}
+			}
+			var commands *hit
+			for i := range a.hits {
+				if a.hits[i].kind == "menu:?" {
+					if commands != nil || a.hits[i].box.y != 0 {
+						t.Fatalf("unexpected command target: %v", a.hits)
+					}
+					commands = &a.hits[i]
+				}
+			}
+			if commands == nil {
+				t.Fatal("missing Commands button")
+			}
+			a.mouse(tcell.NewEventMouse(commands.box.x, 0, tcell.Button1, 0))
+			if !a.menu {
+				t.Fatal("Commands click did not open menu")
+			}
+			a.menu = false
+			a.flashUntil = time.Now().Add(-time.Second)
+			a.draw()
+			if a.flash != "" {
+				t.Fatal("drawing did not clear expired feedback")
+			}
+			if width < 90 {
+				_, _, style, _ := a.screen.GetContent(0, 23)
+				if style != base {
+					t.Fatal("expired feedback left the bottom bar visible")
+				}
+			}
+		})
+	}
+}

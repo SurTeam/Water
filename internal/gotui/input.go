@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/gdamore/tcell/v2"
@@ -444,7 +445,8 @@ func (a *app) mouse(e *tcell.EventMouse) {
 			if buttons&tcell.Button1 == 0 {
 				sel.drag = false
 				a.screen.SetClipboard([]byte(t.emu.SelectionText(sel.startRow, sel.startCol, sel.endRow, sel.endCol)))
-				a.status = "Selection copied to terminal clipboard"
+				a.flash = "Selection copied to terminal clipboard"
+				a.flashUntil = time.Now().Add(1500 * time.Millisecond)
 			}
 			return
 		}

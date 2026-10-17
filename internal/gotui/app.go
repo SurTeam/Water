@@ -240,6 +240,8 @@ type app struct {
 	prefix, menu, pasting bool
 	paste                 []byte
 	prompt, promptKind    string
+	flash                 string
+	flashUntil            time.Time
 	status                string
 	dragging              *divider
 	buttons               tcell.ButtonMask

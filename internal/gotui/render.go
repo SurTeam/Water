@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -92,7 +93,15 @@ func (a *app) layout(n *tree, r rect, path []bool) {
 	a.layout(n.First, first, append(append([]bool{}, path...), false))
 	a.layout(n.Second, second, append(append([]bool{}, path...), true))
 }
+func (a *app) expireFlash(now time.Time) {
+	if !a.flashUntil.IsZero() && !now.Before(a.flashUntil) {
+		a.flash = ""
+		a.flashUntil = time.Time{}
+	}
+}
+
 func (a *app) draw() {
+	a.expireFlash(time.Now())
 	w, h := a.screen.Size()
 	if w < 4 || h < 4 {
 		return
@@ -103,7 +112,7 @@ func (a *app) draw() {
 	a.panes = nil
 	a.hits = nil
 	a.dividers = nil
-	showBottom := w >= 90 || a.promptKind != "" || a.status != ""
+	showBottom := w >= 90 || a.promptKind != "" || a.status != "" || a.flash != ""
 	bottom := 0
 	if showBottom {
 		bottom = 1
@@ -157,6 +166,9 @@ func (a *app) draw() {
 	if w < 90 {
 		a.drawNarrowBar(w)
 	} else {
+		const commands = "[ Commands ]"
+		commandX := w - len(commands)
+		a.drawCommandButton(commandX, commands)
 		x := side
 		for _, ws := range a.state.Workspaces {
 			if ws.ID != a.workspace {
@@ -164,7 +176,7 @@ func (a *app) draw() {
 			}
 			for i, tab := range ws.Tabs {
 				label := fmt.Sprintf(" %d:%s ", i+1, tabTitle(tab))
-				width := min(len([]rune(label)), max(0, w-x))
+				width := min(len([]rune(label)), max(0, commandX-1-x))
 				style := chrome
 				if tab.ID == a.tab {
 					style = chrome.Foreground(tcell.NewHexColor(0xffffff)).Bold(true)
@@ -283,6 +295,9 @@ func (a *app) draw() {
 	if a.prefix || a.menu {
 		status = "?: menu | q: detach"
 	}
+	if a.flash != "" {
+		status = a.flash
+	}
 	if a.status != "" {
 		status = a.status
 	}
@@ -291,9 +306,6 @@ func (a *app) draw() {
 	}
 	if showBottom {
 		a.bar(rect{0, h - 1, w, 1}, status, statusBar)
-		if a.promptKind == "" {
-			a.hits = append(a.hits, hit{rect{0, h - 1, w, 1}, "menu:?", uuid.Nil})
-		}
 	}
 	if a.menu {
 		a.drawMenu(w, h)
@@ -505,10 +517,14 @@ func (a *app) drawNarrowBar(w int) {
 		x += rw
 	}
 	a.hits = append(a.hits, hit{rect{tabX, 0, width, 1}, "menu:T", uuid.Nil})
+	a.drawCommandButton(commandX, commands)
+}
+
+func (a *app) drawCommandButton(commandX int, commands string) {
 	commandStyle := chrome
 	if a.prefix {
 		commandStyle = selected
 	}
-	a.bar(rect{commandX, 0, min(len(commands), w), 1}, commands, commandStyle)
-	a.hits = append(a.hits, hit{rect{commandX, 0, min(len(commands), w), 1}, "menu:?", uuid.Nil})
+	a.bar(rect{commandX, 0, len(commands), 1}, commands, commandStyle)
+	a.hits = append(a.hits, hit{rect{commandX, 0, len(commands), 1}, "menu:?", uuid.Nil})
 }
