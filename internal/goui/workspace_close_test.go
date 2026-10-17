@@ -128,14 +128,13 @@ func TestWorkspaceCloseSidebarAndSettings(t *testing.T) {
 	}
 	w := &EbitengineWindow{multi: manager, scale: 1, views: map[*WorkspaceClient]*nativeView{}}
 	w.drawSidebar(c, nil, image.Rect(0, 0, 240, 800), color.NRGBA{})
-	found := false
 	for _, hit := range c.hitRegions {
-		if hit.Kind == hitCloseWorkspace {
-			found = hit.ID == target && hit.Label == connection.String() && !hit.Rect.Empty()
+		if hit.Kind == hitWorkspace && hit.ID == target && hit.Rect.Empty() {
+			t.Fatal("workspace selection target is empty")
 		}
-	}
-	if !found {
-		t.Fatal("sidebar lacks owning-connection close target")
+		if automationHitKindName(hit.Kind) == "close_workspace" {
+			t.Fatal("sidebar must not expose a workspace close button")
+		}
 	}
 	if !w.key(c, "ctrl-alt-x") || c.workspaceClose == nil {
 		t.Fatal("configured native shortcut did not prompt")
@@ -145,7 +144,7 @@ func TestWorkspaceCloseSidebarAndSettings(t *testing.T) {
 		t.Fatal("native escape did not cancel")
 	}
 	c.openSettingsConfig(cfg)
-	found = false
+	found := false
 	for _, field := range c.settings.fields {
 		if field.name == "CloseWorkspace" {
 			found = true

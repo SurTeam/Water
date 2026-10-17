@@ -96,7 +96,6 @@ const (
 	hitRenameField
 	hitRenameSave
 	hitRenameCancel
-	hitCloseWorkspace
 	hitCloseWorkspaceConfirm
 	hitCloseWorkspaceCancel
 )
@@ -670,8 +669,6 @@ func automationHitKindName(kind automationHitKind) string {
 		return "workspace"
 	case hitTab:
 		return "tab"
-	case hitCloseWorkspace:
-		return "close_workspace"
 	case hitCloseWorkspaceConfirm:
 		return "close_workspace_confirm"
 	case hitCloseWorkspaceCancel:

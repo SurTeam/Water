@@ -51,10 +51,12 @@ def local(binary):
         test.wait(lambda: len(ids(test.ctl)) == 2, "second workspace")
         second = next(w for w in ids(test.ctl) if w != first)
         test.wait(lambda: test.ctl("ui", "snapshot")["frame_active_workspace"] == second, "second frame")
-        close = test.wait(lambda: hit(test, "close_workspace", first), "visible close button")
-        evidence(test, "01-sidebar-close")
-        click(test, close)
-        test.wait(lambda: prompt(test), "button confirmation")
+        assert not hit(test, "close_workspace"), "sidebar must not expose close buttons"
+        click(test, test.wait(lambda: hit(test, "workspace", first), "workspace selection"))
+        test.wait(lambda: test.ctl("ui", "snapshot")["frame_active_workspace"] == first, "first selected")
+        evidence(test, "01-sidebar")
+        key(test, "ctrl-alt-w")
+        test.wait(lambda: prompt(test), "shortcut confirmation")
         assert prompt(test)["id"] == first
         assert not any(h["kind"] in ("workspace", "pane", "new_workspace", "tab") for h in hits(test))
         # All unrelated shortcuts and text must be swallowed by the modal.
@@ -86,13 +88,13 @@ def local(binary):
         for tab in state["workspaces"][0]["tabs"]:
             test.ctl("tab", "close", "--tab", tab["id"])
         test.wait(lambda: not test.ctl("state")["workspaces"][0]["tabs"], "empty workspace")
-        test.wait(lambda: not prompt(test) and hit(test, "close_workspace", first), "empty workspace frame")
+        test.wait(lambda: not prompt(test) and hit(test, "workspace", first), "empty workspace frame")
         evidence(test, "04-empty-workspace")
-        click(test, hit(test, "close_workspace", first))
+        key(test, "ctrl-alt-w")
         test.wait(lambda: first not in ids(test.ctl), "empty workspace closes directly")
         assert not prompt(test)
         evidence(test, "05-empty-closed")
-        test.save("assertions.json", {"button_cancel": True, "shortcut_escape": True,
+        test.save("assertions.json", {"shortcut_button_cancel": True, "shortcut_escape": True,
                    "shortcut_confirm_fixed_uuid": second, "modal_blocks_actions": True,
                    "empty_direct_close": True})
         print("PASS native GUI local workspace closure; artifacts=" + str(test.directory), flush=True)
@@ -127,8 +129,10 @@ def cross_connection(binary):
             local_entry = next(e for e in connections if e["kind"] == "local")
             click(test, test.wait(lambda: hit(test, "connection", local_entry["id"]), "local connection button"))
             test.wait(lambda: test.ctl("ui", "snapshot")["frame_active_workspace"] in local_ids, "local selected")
-            # Close an inactive remote workspace from the local connection's sidebar.
-            click(test, test.wait(lambda: hit(test, "close_workspace", remote_id), "remote close button"))
+            # Select the remote workspace, then close through its configured shortcut.
+            click(test, test.wait(lambda: hit(test, "workspace", remote_id), "remote workspace"))
+            test.wait(lambda: test.ctl("ui", "snapshot")["frame_active_workspace"] == remote_id, "remote selected")
+            key(test, "ctrl-alt-w")
             test.wait(lambda: prompt(test), "remote confirmation")
             assert prompt(test)["id"] == remote_id
             assert test.ctl("ui", "snapshot")["frame_active_workspace"] == remote_id
@@ -139,7 +143,7 @@ def cross_connection(binary):
             evidence(test, "07-remote-closed")
             test.save("routing.json", {"remote_target": remote_id, "local_preserved": local_ids,
                                        "connection": entry})
-            print("PASS real SSH owning-connection sidebar closure; artifacts=" + str(test.directory), flush=True)
+            print("PASS real SSH owning-connection shortcut closure; artifacts=" + str(test.directory), flush=True)
         print("SSH artifacts=" + str(ssh.directory), flush=True)
 
 

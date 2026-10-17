@@ -365,11 +365,6 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 		w.view(c).rename = nil
 	case hitTab:
 		_ = c.session.DispatchAsync(map[string]any{"type": "tab.activate", "tab_id": h.ID})
-	case hitCloseWorkspace:
-		if view := w.connectionView(nativeUUID(h.Label)); view != nil {
-			w.multi.ActivateConnection(nativeUUID(h.Label))
-			view.requestWorkspaceClose(h.ID)
-		}
 	case hitCloseWorkspaceConfirm:
 		c.confirmWorkspaceClose()
 	case hitCloseWorkspaceCancel:
