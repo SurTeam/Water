@@ -132,6 +132,7 @@ type tree struct {
 			ID          uuid.UUID               `json:"terminal_id"`
 			Size        goprotocol.TerminalSize `json:"size"`
 			ProcessName string                  `json:"process_name"`
+			AgentName   string                  `json:"agent_name"`
 		} `json:"summary"`
 	} `json:"terminal"`
 	Axis          string  `json:"axis"`
@@ -171,10 +172,21 @@ type rect struct{ x, y, w, h int }
 func (r rect) contains(x, y int) bool { return x >= r.x && y >= r.y && x < r.x+r.w && y < r.y+r.h }
 
 type pane struct {
-	id, term uuid.UUID
-	box      rect
-	title    string
+	id, term   uuid.UUID
+	box        rect
+	title      string
+	headerless bool
 }
+
+func (p pane) contentBox() rect {
+	r := p.box
+	if !p.headerless {
+		r.y++
+		r.h--
+	}
+	return r
+}
+
 type divider struct {
 	box, parent rect
 	axis        string
@@ -428,6 +440,9 @@ func (a *app) syncState() {
 		}
 		a.workspace = ws.ID
 		a.tab = uuid.Nil
+	}
+	if ws == nil {
+		a.workspace, a.tab, a.focus = uuid.Nil, uuid.Nil, uuid.Nil
 	}
 	if ws != nil {
 		found := false

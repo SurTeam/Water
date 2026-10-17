@@ -211,7 +211,12 @@ func (a *app) action(r rune) bool {
 		a.menuIndex = 0
 		return false
 	case 'n':
-		cmd = map[string]any{"type": "tab.new", "workspace_id": a.workspace}
+		a.syncState()
+		if a.workspace == uuid.Nil {
+			cmd = map[string]any{"type": "workspace.new"}
+		} else {
+			cmd = map[string]any{"type": "tab.new", "workspace_id": a.workspace}
+		}
 	case 'w':
 		cmd = map[string]any{"type": "workspace.new"}
 	case '%', '"':
@@ -433,7 +438,8 @@ func (a *app) mouse(e *tcell.EventMouse) {
 				a.selectionRange = nil
 				return
 			}
-			sel.endRow = t.emu.FrameSnapshot().YDisp + max(0, min(p.box.h-2, y-p.box.y-1))
+			content := p.contentBox()
+			sel.endRow = t.emu.FrameSnapshot().YDisp + max(0, min(content.h-1, y-content.y))
 			sel.endCol = max(0, min(p.box.w-1, x-p.box.x))
 			if buttons&tcell.Button1 == 0 {
 				sel.drag = false
@@ -450,7 +456,8 @@ func (a *app) mouse(e *tcell.EventMouse) {
 			if p.id == cap.id {
 				candidates = append(candidates, p)
 				x = max(p.box.x, min(p.box.x+p.box.w-1, x))
-				y = max(p.box.y+1, min(p.box.y+p.box.h-1, y))
+				content := p.contentBox()
+				y = max(content.y, min(content.y+content.h-1, y))
 				break
 			}
 		}
@@ -466,14 +473,15 @@ func (a *app) mouse(e *tcell.EventMouse) {
 			a.focus = p.id
 			a.command(map[string]any{"type": "pane.focus", "pane_id": p.id})
 		}
-		if y == p.box.y {
+		content := p.contentBox()
+		if y < content.y {
 			return
 		}
 		t := a.terms[p.term]
 		if t == nil || t.emu == nil {
 			return
 		}
-		ev := govt.MouseEvent{Col: x - p.box.x + 1, Row: y - p.box.y, X: x - p.box.x + 1, Y: y - p.box.y, Button: govt.MouseLeft, Action: govt.MouseMove, Ctrl: e.Modifiers()&tcell.ModCtrl != 0, Alt: e.Modifiers()&tcell.ModAlt != 0, Shift: e.Modifiers()&tcell.ModShift != 0}
+		ev := govt.MouseEvent{Col: x - p.box.x + 1, Row: y - content.y + 1, X: x - p.box.x + 1, Y: y - content.y + 1, Button: govt.MouseLeft, Action: govt.MouseMove, Ctrl: e.Modifiers()&tcell.ModCtrl != 0, Alt: e.Modifiers()&tcell.ModAlt != 0, Shift: e.Modifiers()&tcell.ModShift != 0}
 		wheel := 0
 		if buttons&tcell.WheelUp != 0 {
 			wheel = -3

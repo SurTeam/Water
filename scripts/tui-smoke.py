@@ -76,7 +76,7 @@ def state():
 
 
 try:
-    until(lambda: b"Ctrl-B" in output)
+    until(lambda: b"Ctrl-B" in output or b"Commands" in output)
     info = control("server", "info")
     info.check_returncode()
     server_pid = json.loads(info.stdout)["server_pid"]
@@ -93,9 +93,9 @@ try:
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 20, 60, 0, 0))
     os.kill(process.pid, signal.SIGWINCH)
     os.write(master, b"\x02p")
-    until(lambda: b"Enter select" in output)
+    until(lambda: b"Enter: select" in output)
     os.write(master, b"\r\x02q")
-    until(lambda: process.poll() is not None, seconds=5)
+    until(lambda: process.poll() is not None, seconds=5, allow_exit=True)
     assert process.returncode == 0, process.returncode
     assert b"\x1b[?1049l" in output, "alternate screen was not restored"
     assert b"\x1b[?1006l" in output, "mouse reporting was not disabled"
@@ -111,12 +111,12 @@ try:
         stdin=slave, stdout=slave, stderr=slave, env=env,
         preexec_fn=controlling_terminal,
     )
-    until(lambda: b"Ctrl-B" in output)
+    until(lambda: b"Ctrl-B" in output or b"Commands" in output)
     os.write(master, b"\x02Q")
-    until(lambda: b"stop server" in output)
+    until(lambda: b"Stop server" in output)
     assert control("ping").returncode == 0, "shutdown occurred before confirmation"
     os.write(master, b"yes\r")
-    until(lambda: process.poll() is not None, seconds=5)
+    until(lambda: process.poll() is not None, seconds=5, allow_exit=True)
     assert process.returncode == 0, process.returncode
     until(lambda: not os.path.exists(socket), seconds=5, allow_exit=True)
     assert control("ping").returncode != 0, "confirmed shutdown left server running"

@@ -45,7 +45,7 @@ func TestNarrowSelectsEveryLeafBeforeSplitLayout(t *testing.T) {
 		if len(a.panes) != 1 || a.panes[0].id != leaf.Pane || a.focus != leaf.Pane {
 			t.Fatalf("narrow selection lost leaf %s: focus=%s panes=%+v", leaf.Pane, a.focus, a.panes)
 		}
-		if got, want := a.panes[0].box, (rect{0, 1, 12, 2}); got != want {
+		if got, want := a.panes[0].box, (rect{0, 1, 12, 3}); got != want {
 			t.Fatalf("leaf viewport=%+v want=%+v", got, want)
 		}
 		if len(a.dividers) != 0 {

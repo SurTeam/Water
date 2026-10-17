@@ -11,6 +11,7 @@ import (
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/gdamore/tcell/v2"
 	"github.com/google/uuid"
+	"github.com/mattn/go-runewidth"
 )
 
 var base = tcell.StyleDefault.Foreground(tcell.ColorSilver).Background(tcell.ColorBlack)
@@ -90,6 +91,11 @@ func (a *app) draw() {
 	a.panes = nil
 	a.hits = nil
 	a.dividers = nil
+	showBottom := w >= 90 || a.promptKind != "" || a.status != ""
+	bottom := 0
+	if showBottom {
+		bottom = 1
+	}
 	side := 0
 	if w >= 90 {
 		side = 22
@@ -132,21 +138,26 @@ func (a *app) draw() {
 			row++
 		}
 	}
-	x := side
-	for _, ws := range a.state.Workspaces {
-		if ws.ID != a.workspace {
-			continue
-		}
-		for i, tab := range ws.Tabs {
-			label := fmt.Sprintf(" %d:%s ", i+1, tab.Title)
-			width := min(len([]rune(label)), max(0, w-x))
-			style := chrome
-			if tab.ID == a.tab {
-				style = selected
+	a.bar(rect{side, 0, w - side, 1}, "", chrome)
+	if w < 90 {
+		a.drawNarrowBar(w)
+	} else {
+		x := side
+		for _, ws := range a.state.Workspaces {
+			if ws.ID != a.workspace {
+				continue
 			}
-			a.bar(rect{x, 0, width, 1}, label, style)
-			a.hits = append(a.hits, hit{rect{x, 0, width, 1}, "tab", tab.ID})
-			x += width
+			for i, tab := range ws.Tabs {
+				label := fmt.Sprintf(" %d:%s ", i+1, tabTitle(tab))
+				width := min(len([]rune(label)), max(0, w-x))
+				style := chrome
+				if tab.ID == a.tab {
+					style = selected
+				}
+				a.bar(rect{x, 0, width, 1}, label, style)
+				a.hits = append(a.hits, hit{rect{x, 0, width, 1}, "tab", tab.ID})
+				x += width
+			}
 		}
 	}
 	if tab := a.activeTab(); tab != nil {
@@ -156,12 +167,14 @@ func (a *app) draw() {
 			if leaf != nil {
 				a.focus = leaf.Pane
 			}
-			viewport := rect{side, 1, w - side, h - 2}
+			viewport := rect{side, 1, w - side, h - 1 - bottom}
 			if w < 90 {
 				// Narrow mode must select from the topology, before split
 				// geometry can prune deeply nested or very short leaves.
 				if leaf != nil {
-					a.panes = []pane{paneForLeaf(leaf, viewport)}
+					p := paneForLeaf(leaf, viewport)
+					p.headerless = true
+					a.panes = []pane{p}
 				}
 			} else {
 				a.layout(&root, viewport, nil)
@@ -185,7 +198,10 @@ func (a *app) draw() {
 		if p.id == a.focus {
 			style = selected
 		}
-		a.bar(rect{p.box.x, p.box.y, p.box.w, 1}, p.title, style)
+		if !p.headerless {
+			a.bar(rect{p.box.x, p.box.y, p.box.w, 1}, p.title, style)
+		}
+		content := p.contentBox()
 		if p.term == uuid.Nil {
 			continue
 		}
@@ -194,7 +210,7 @@ func (a *app) draw() {
 		if t == nil || t.emu == nil {
 			continue
 		}
-		cols, rows := max(2, p.box.w), max(1, p.box.h-1)
+		cols, rows := max(2, p.box.w), max(1, content.h)
 		a.resizeTerminal(p.term, t, cols, rows)
 		s := t.emu.FrameSnapshot()
 		for y, row := range s.RowsData {
@@ -226,11 +242,11 @@ func (a *app) draw() {
 						st = st.Reverse(true)
 					}
 				}
-				a.screen.SetContent(p.box.x+x, p.box.y+1+y, runes[0], runes[1:], st)
+				a.screen.SetContent(p.box.x+x, content.y+y, runes[0], runes[1:], st)
 			}
 		}
 		if p.id == a.focus && !s.CursorHide && s.CursorX >= 0 && s.CursorX < cols && s.CursorY >= 0 && s.CursorY < rows {
-			a.screen.ShowCursor(p.box.x+s.CursorX, p.box.y+1+s.CursorY)
+			a.screen.ShowCursor(p.box.x+s.CursorX, content.y+s.CursorY)
 		}
 	}
 	for id, t := range a.terms {
@@ -248,18 +264,22 @@ func (a *app) draw() {
 			delete(a.terms, id)
 		}
 	}
-	status := "Ctrl-B: commands  •  Ctrl-B q: detach"
+	status := "Ctrl-B: menu | q: detach"
 	if a.prefix || a.menu {
-		status = "n tab  w workspace  % / \" split  o pane  [/] tab  {/} workspace  x close  r rename  : command  q detach  Q stop server"
+		status = "?: menu | q: detach"
 	}
 	if a.status != "" {
 		status = a.status
 	}
 	if a.promptKind != "" {
-		status = a.promptKind + "> " + a.prompt
+		status = promptLabel(a.promptKind) + a.prompt
 	}
-	a.bar(rect{0, h - 1, w, 1}, status, chrome)
-	a.hits = append(a.hits, hit{rect{0, h - 1, w, 1}, "menu:?", uuid.Nil})
+	if showBottom {
+		a.bar(rect{0, h - 1, w, 1}, status, chrome)
+		if a.promptKind == "" {
+			a.hits = append(a.hits, hit{rect{0, h - 1, w, 1}, "menu:?", uuid.Nil})
+		}
+	}
 	if a.menu {
 		a.drawMenu(w, h)
 	}
@@ -304,7 +324,7 @@ func (a *app) drawMenu(w, h int) {
 		for _, ws := range a.state.Workspaces {
 			if ws.ID == a.workspace {
 				for _, tab := range ws.Tabs {
-					a.menuItems = append(a.menuItems, menuItem{tab.Title, "tab", tab.ID})
+					a.menuItems = append(a.menuItems, menuItem{tabTitle(tab), "tab", tab.ID})
 				}
 			}
 		}
@@ -332,7 +352,7 @@ func (a *app) drawMenu(w, h int) {
 		a.bar(rect{x, y + i, width, 1}, " "+item.label, style)
 		a.hits = append(a.hits, hit{rect{x, y + i, width, 1}, item.kind, item.id})
 	}
-	a.bar(rect{x, y + count, width, 1}, " ↑/↓ Enter select • Esc return", selected)
+	a.bar(rect{x, y + count, width, 1}, " ↑↓ Enter: select | Esc: back", selected)
 }
 
 // selectedLeaf resolves client selection against the complete topology. The
@@ -380,4 +400,100 @@ func (a *app) resizeTerminal(id uuid.UUID, t *terminal, cols, rows int) {
 	t.requestCols, t.requestRows = size.Columns, size.Lines
 	t.requestGeneration = a.focusGeneration
 	a.command(map[string]any{"type": "terminal.resize", "terminal_id": id, "columns": size.Columns, "lines": size.Lines})
+}
+
+// tabTitle follows the GUI naming priority for the active pane.
+func tabTitle(tab gomodel.TabDump) string {
+	if tab.TitleOverride != nil {
+		return *tab.TitleOverride
+	}
+	var root tree
+	if json.Unmarshal(tab.Tree, &root) != nil {
+		return tab.Title
+	}
+	var title string
+	walk(&root, func(n *tree) {
+		if n.Pane != tab.ActivePane || n.Terminal == nil {
+			return
+		}
+		title = n.Terminal.Summary.AgentName
+		if title == "" {
+			title = n.Terminal.Summary.ProcessName
+		}
+	})
+	if title = strings.TrimSpace(title); title != "" {
+		return title
+	}
+	return tab.Title
+}
+
+func promptLabel(kind string) string {
+	switch {
+	case strings.HasPrefix(kind, "confirm Q"):
+		return "Stop server + shells? yes> "
+	case strings.HasPrefix(kind, "confirm x"):
+		return "Close pane? yes> "
+	case strings.HasPrefix(kind, "confirm t"):
+		return "Close tab? yes> "
+	case strings.HasPrefix(kind, "confirm W"):
+		return "Close workspace? yes> "
+	case strings.HasPrefix(kind, "confirm e"):
+		return "Exit agent? yes> "
+	case strings.HasPrefix(kind, "confirm k"):
+		return "Kill agent? yes> "
+	case kind == "rename tab":
+		return "Tab name> "
+	case kind == "rename workspace":
+		return "Workspace name> "
+	case kind == "command JSON":
+		return "JSON> "
+	default:
+		return kind + "> "
+	}
+}
+
+func (a *app) drawNarrowBar(w int) {
+	workspace, commands := "[ Workspace ]", "[ Commands ]"
+	title := ""
+	if tab := a.activeTab(); tab != nil {
+		title = tabTitle(*tab)
+	}
+	// Reserve the entire command button and a gap before allocating tab text.
+	if w < len(workspace)+1+len("[ Tabs: … ]")+1+len(commands) {
+		workspace, commands = "[W]", "[C]"
+	}
+	commandX := max(0, w-len(commands))
+	workspaceWidth := min(len(workspace), commandX)
+	a.bar(rect{0, 0, workspaceWidth, 1}, workspace, chrome)
+	a.hits = append(a.hits, hit{rect{0, 0, workspaceWidth, 1}, "menu:s", uuid.Nil})
+	x := workspaceWidth
+	if workspace != "[W]" {
+		x++
+	}
+	available := max(0, commandX-1-x)
+	label := "[T]"
+	if available >= len("[ Tabs: … ]") {
+		label = "[ Tabs: " + runewidth.Truncate(title, available-len("[ Tabs:  ]"), "…") + " ]"
+	}
+	tabX := x
+	width := min(available, runewidth.StringWidth(label))
+	// text() draws one rune per cell; use display widths here for CJK titles.
+	for _, r := range label {
+		rw := runewidth.RuneWidth(r)
+		if rw <= 0 {
+			continue
+		}
+		if x+rw > tabX+width {
+			break
+		}
+		a.screen.SetContent(x, 0, r, nil, chrome)
+		x += rw
+	}
+	a.hits = append(a.hits, hit{rect{tabX, 0, width, 1}, "menu:T", uuid.Nil})
+	commandStyle := chrome
+	if a.prefix {
+		commandStyle = selected
+	}
+	a.bar(rect{commandX, 0, min(len(commands), w), 1}, commands, commandStyle)
+	a.hits = append(a.hits, hit{rect{commandX, 0, min(len(commands), w), 1}, "menu:?", uuid.Nil})
 }
