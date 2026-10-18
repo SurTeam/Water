@@ -17,8 +17,10 @@ func (e *Emulator) registerOSCMetadata() {
 		if e.progress.Load() != 0 {
 			e.progress.Store(1) // RIS withdraws a previously reported indicator.
 		}
+		e.programStatusState, e.programStatusApp = "", ""
 		return false // Preserve the terminal's normal hard-reset handler.
 	})
+	e.term.RegisterOSCHandler(7501, e.handleProgramStatus)
 	e.term.RegisterOSCHandler(9, func(data string) bool {
 		if len(data) > 64 {
 			return true

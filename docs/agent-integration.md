@@ -1,6 +1,6 @@
 # Agent 识别与控制
 
-实现入口：`internal/goagent/`、`internal/goconfig/config.go`、`internal/goserver/agents.go` 与 `internal/goui/` 的 Agent Settings/侧栏路径。识别基于前台进程与 argv，不读取私有会话文件或把输出文本猜成状态；控制必须重验运行身份与 PTY 前台进程组。
+实现入口：`internal/goagent/`、`internal/goconfig/config.go`、`internal/goserver/agents.go` 与 `internal/goui/` 的 Agent Settings/侧栏路径。识别基于前台进程与 argv，不读取私有会话文件或把输出文本猜成状态；Agent 集成只负责识别、状态显示和测试，不提供发送信号或终端输入的控制操作。
 
 本文记录当前实现与限制；开发讨论先留在上下文，用户确认实现并要求 commit 后再按最终代码更新，见 [工作约定](../AGENTS.md#文档更新时机)。
 
@@ -8,6 +8,8 @@ Open **Settings → Agents** on the connection that owns the terminal. The page
 shows which local or remote server is being edited. Definitions are saved to
 that server's configuration; appearance preferences elsewhere in Settings do
 not replace them.
+
+Builtin Agents are Claude Code, Codex, Pi Coding Agent, and OpenCode. Retired builtin overrides remain dormant in saved configuration for compatibility and do not participate in recognition. The left list uses Previous page/Next page without changing the selection; click an entry to select it.
 
 Builtin Agents are templates. Editing one saves only changed fields; **Restore
 defaults** removes its override. Builtins can be disabled. **New** creates a
@@ -30,9 +32,7 @@ recognition and diagnostics.
 ## Recognition rules
 
 Recognition rules are edited through **Edit recognition rules…**, which opens
-a guided editor with explanations for `all`, `field`, `op`, and `value`.
-Use **Add rule** and **Add condition** to build alternatives and combined
-conditions; click the `field` and `op` buttons to cycle their supported choices.
+a condition list using readable field and comparison names. Click a condition to edit it; longer lists use bounded pages so editing and Apply/Cancel remain visible. Use **Add rule** and **Add condition** to build alternatives and combined conditions; click the field and comparison buttons to cycle their choices.
 Type match values directly, without JSON escaping. **Apply rules** validates
 and updates the settings draft; **Save** applies it to the selected server.
 Cancel or Escape closes the editor without changing the draft. The settings
@@ -88,7 +88,7 @@ uses the focused terminal and the current unsaved draft, showing sampled PID,
 command and arguments, all matching profiles and the selected rule. Testing
 does not save the draft or change runtime classification.
 
-## Status and controls
+## Status reports
 
 **Status source** selects:
 
@@ -100,25 +100,21 @@ A process-only Running status indicates that the program exists. It does not
 establish that the Agent is working on a task. OSC state 4 can mean a pause or
 warning; it does not establish that approval is required.
 
+Builtin profiles default to `osc`: without a report the state is Unknown, rather than inferring work from process existence. Explicit saved status-source overrides remain in effect.
+
+Water supports OSC 7501 root program status and answers its `?` capability query before the following Device Attributes response. Reports map `idle` → Idle, `working` → Running, `blocked` → Paused, `done` → Completed and `error` → Error. The app identity must match the recognized Agent; these reports take priority over OSC 9;4. Clear and terminal reset withdraw the report. A foreground-run change invalidates prior status. Replay restores metadata without sending query replies. Messages are bounded and not displayed; job records are unsupported.
+
+OSC 9;4 is progress metadata: 0 clears progress, 1 is determinate progress, 2 error, 3 indeterminate, and 4 paused. State 0 does not prove successful completion; state 4 does not prove permission approval. Water retains the latest report until updated or cleared.
+
+Verified installed-version behavior: Claude Code 2.1.285 emits progress 3 during work and clears when resting, gated by its supported-terminal detection and `terminalProgressBarEnabled`. Codex 0.162.1 and OpenCode 1.18.34 do not emit built-in structured progress/lifecycle reports; their textual notifications are not parsed as state. Pi 1.2.0 supports negotiated OSC 7501 and separately optional OSC 9;4 (`terminal.showTerminalProgress`). Newer upstream versions may differ; do not infer installed behavior from upstream HEAD. Water does not install hooks or spoof another terminal identity.
+
 **OSC states 0,1,2,3,4** contains five comma-separated presentation states. The
 default is `Idle,Running,Error,Running,Paused`. Supported values are `Idle`,
 `Running`, `Error`, `Paused`, `Completed`, and `Unknown`. Clear the field to use
 the default mapping. No hooks are installed, and no output text is interpreted
 as an Agent state event.
 
-**Interrupt preset** offers `ctrl-c`, `sigint`, or `none`. **Exit preset** offers
-`sigterm`, `sighup`, `ctrl-d`, or `none`. The page's **Interrupt** and **Request
-exit** buttons act on the focused terminal using its saved profile. Select the profile
-that matches the focused terminal before using these buttons. Save edited
-presets before testing an action. `none` disables that action. A request does
-not automatically escalate to SIGKILL. Closing a pane continues to use terminal
-session cleanup, including its shell and descendants.
-
-Control commands carry the expected run identity. Before sending terminal input
-or a signal, the target server checks PID, process group, start information and
-sampled arguments, then rechecks that the group is this PTY's foreground group.
-A changed run, changed Agent classification, or another terminal's identity is rejected. Signals target the
-foreground group; they never use an arbitrary PID supplied by a profile.
+Agent-specific interrupt, exit and force-stop actions are unavailable in the GUI, CLI, TUI and server dispatcher. Ordinary terminal input and terminal/pane lifecycle actions retain their normal semantics. Legacy `interrupt` and `exit` profile fields remain accepted for configuration compatibility but have no Agent control effect.
 
 **Long-run seconds** overrides the Agent notification/indicator threshold;
 `0` inherits the global Agent threshold. **Keep history on clear** selects the
@@ -136,17 +132,10 @@ water ctl --socket /tmp/water-dev.sock agent export > agents.json
 water ctl --socket /tmp/water-dev.sock agent configure --file agents.json
 water ctl --socket /tmp/water-dev.sock agent test --pane PANE_UUID
 water ctl --socket /tmp/water-dev.sock agent test --pane PANE_UUID --file agents.json
-water ctl --socket /tmp/water-dev.sock agent interrupt --pane PANE_UUID
-water ctl --socket /tmp/water-dev.sock agent exit --pane PANE_UUID
-water ctl --socket /tmp/water-dev.sock agent force-stop --pane PANE_UUID
 ```
 
 `--terminal TERMINAL_UUID` can replace `--pane`. Omitting a target uses the
-server's active pane. Force-stop is an explicit CLI action using SIGKILL, with
-the same run ownership checks. Regular terminal Ctrl+C/Ctrl+D input remains
-available independently of the profile action presets.
-
-The standalone import/export file is an Agent configuration object, with
+server's active pane. The standalone import/export file is an Agent configuration object, with
 `overrides` and `custom` arrays. It is not an entire Water application config.
 Definitions are limited to 128 custom profiles/overrides and 256 KiB of compact
 configuration JSON. Unknown fields and invalid definitions are rejected. Import replaces the saved

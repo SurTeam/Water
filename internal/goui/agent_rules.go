@@ -2,6 +2,8 @@ package goui
 
 import (
 	"reflect"
+	"strconv"
+	"strings"
 
 	"github.com/SurTeam/Water/internal/goagent"
 )
@@ -13,6 +15,15 @@ type agentRulesEditor struct {
 	message         string
 	previousFocus   int
 	sampling        bool
+}
+
+// agentRuleConditionPage reserves room for the heading, paging controls,
+// condition editor, validation message, and footer. Dimensions are logical pixels.
+func agentRuleConditionPage(panelHeight, count, selected int) (start, end int) {
+	capacity := max(1, (panelHeight-416)/22)
+	selected = min(max(0, selected), max(0, count-1))
+	start = selected / capacity * capacity
+	return start, min(count, start+capacity)
 }
 
 func cloneAgentRules(rules []goagent.Rule) []goagent.Rule {
@@ -136,6 +147,14 @@ func (s *settingsPanel) agentRuleAction(action string) {
 		e.rule = min(max(0, e.rule+delta), len(e.rules)-1)
 		e.condition = 0
 	default:
+		if strings.HasPrefix(action, "condition:") {
+			index, err := strconv.Atoi(strings.TrimPrefix(action, "condition:"))
+			if err == nil && len(e.rules) > 0 && index >= 0 && index < len(e.rules[e.rule].All) {
+				e.condition = index
+				s.loadAgentRuleValue()
+			}
+			return
+		}
 		if len(e.rules) == 0 {
 			return
 		}
@@ -176,4 +195,29 @@ func (s *settingsPanel) agentRuleAction(action string) {
 		}
 	}
 	s.loadAgentRuleValue()
+}
+
+func agentRuleFieldLabel(field string) string {
+	switch field {
+	case "executable":
+		return "Program name"
+	case "name":
+		return "Process or launcher name"
+	case "path":
+		return "Program or script path"
+	case "argument":
+		return "Command argument"
+	}
+	return field
+}
+func agentRuleOpLabel(op string) string {
+	switch op {
+	case "exact":
+		return "equals"
+	case "contains":
+		return "contains text"
+	case "glob":
+		return "matches wildcard"
+	}
+	return op
 }

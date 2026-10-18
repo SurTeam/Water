@@ -42,16 +42,7 @@ var definitions = []definition{
 	{ClaudeCode, "Claude Code", []string{"claude"}, []string{"@anthropic-ai/claude-code"}, true},
 	{Codex, "Codex", []string{"codex"}, []string{"@openai/codex"}, true},
 	{OpenCode, "OpenCode", []string{"opencode"}, []string{"@sst/opencode", "opencode-ai"}, true},
-	{GeminiCLI, "Gemini CLI", []string{"gemini"}, []string{"@google/gemini-cli"}, true},
-	{Aider, "Aider", []string{"aider", "aider-chat"}, []string{"aider/chat", "aider-main"}, true},
-	{CursorAgent, "Cursor Agent", []string{"cursor-agent"}, []string{"/cursor-agent"}, true},
-	{Amp, "Amp", []string{"amp"}, []string{"@ampcode", "sourcegraph/amp"}, true},
-	{Crush, "Crush", []string{"crush"}, []string{"charmbracelet/crush"}, true},
-	{Goose, "Goose", []string{"goose"}, []string{"block/goose"}, true},
-	{QwenCode, "Qwen Code", []string{"qwen", "qwen-code"}, []string{"qwen-code"}, true},
-	{Droid, "Droid", []string{"droid"}, nil, true},
-	{Grok, "Grok", []string{"grok"}, nil, true},
-	{Pi, "Pi", []string{"pi"}, []string{"@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"}, false},
+	{Pi, "Pi Coding Agent", []string{"pi"}, []string{"@earendil-works/pi-coding-agent", "@mariozechner/pi-coding-agent"}, false},
 }
 
 func Label(kind Kind) string {

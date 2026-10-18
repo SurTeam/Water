@@ -42,12 +42,7 @@ func sidebarSettingChoices(f settingsField) []sidebarChoice {
 		if f.name == "StatusSource" {
 			return []sidebarChoice{{"auto", "Automatic"}, {"osc", "OSC reports"}, {"process", "Process lifecycle"}}
 		}
-		if f.name == "Interrupt" {
-			return []sidebarChoice{{"ctrl-c", "Ctrl+C"}, {"sigint", "SIGINT"}, {"none", "Disabled"}}
-		}
-		if f.name == "Exit" {
-			return []sidebarChoice{{"sigterm", "SIGTERM"}, {"sighup", "SIGHUP"}, {"ctrl-d", "Ctrl+D"}, {"none", "Disabled"}}
-		}
+
 	}
 	if f.group != "UI" {
 		return nil

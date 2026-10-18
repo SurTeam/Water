@@ -11,7 +11,7 @@ import (
 func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image) {
 	s := &c.settings
 	e := s.agents.rulesEditor
-	r := w.overlayPanel(c, dst, w.dp(720), w.dp(530), true)
+	r := w.overlayPanel(c, dst, w.dp(720), w.dp(680), true)
 	left, right, y := r.Min.X+w.dp(24), r.Max.X-w.dp(24), r.Min.Y+w.dp(20)
 	fg := configColor(c.currentConfig().Theme.UIForeground, 0xe6eaea)
 	muted := mixColor(configColor(c.currentConfig().Theme.ChromeBackground, 0), fg, .65)
@@ -25,7 +25,7 @@ func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image)
 	}
 	button(right-w.dp(200), 200, "Fill from current pane", "sample")
 	label("Edit recognition rules", 28, true)
-	label("Rules: any rule may match. all: every condition in that rule must match.", 24, false)
+	label("Match any rule below. Within a rule, match every condition.", 24, false)
 	ruleNumber := 0
 	if len(e.rules) > 0 {
 		ruleNumber = e.rule + 1
@@ -38,30 +38,34 @@ func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image)
 	y += w.dp(38)
 	if len(e.rules) > 0 {
 		condition := e.rules[e.rule].All[e.condition]
-		label(fmt.Sprintf(c.tr("Condition %d of %d (all)"), e.condition+1, len(e.rules[e.rule].All)), 24, true)
+		label("All of these conditions must match (click to edit):", 24, true)
+		all := e.rules[e.rule].All
+		start, end := agentRuleConditionPage(int(float64(r.Dy())/w.scale), len(all), e.condition)
+		// Page controls select the adjacent condition so keyboard and direct
+		// condition selection always keep the edited row visible.
 		button(left, 84, "Previous", "previous-condition")
 		button(left+w.dp(90), 84, "Next", "next-condition")
-		button(left+w.dp(180), 112, "Add condition", "add-condition")
-		button(left+w.dp(298), 112, "Remove condition", "remove-condition")
-		y += w.dp(38)
-		button(left, 200, "field: "+condition.Field, "field")
+		w.label(dst, c, image.Rect(left+w.dp(184), y, right, y+w.dp(28)), fmt.Sprintf("%d–%d / %d", start+1, end, len(all)), 10, fg, false)
 		y += w.dp(32)
-		descriptions := map[string]string{
-			"executable": "executable: process executable basename, e.g. node or claude.",
-			"name":       "name: normalized process/launcher name; ignores letter case.",
-			"path":       "path: any process argument containing /, e.g. a script path.",
-			"argument":   "argument: any individual process argument, including argv[0].",
+		for i := start; i < end; i++ {
+			item := all[i]
+			title := fmt.Sprintf("%d. %s %s %s", i+1, c.tr(agentRuleFieldLabel(item.Field)), c.tr(agentRuleOpLabel(item.Op)), item.Value)
+			w.button(dst, c, image.Rect(left, y, right, y+w.dp(20)), title, hitSettingsControl, uuid.Nil, i == e.condition)
+			c.hitRegions[len(c.hitRegions)-1].Label = fmt.Sprintf("agent-rules:condition:%d", i)
+			y += w.dp(22)
 		}
-		label(descriptions[condition.Field], 26, false)
-		button(left, 200, "op: "+condition.Op, "op")
+		button(left, 112, "Add condition", "add-condition")
+		button(left+w.dp(120), 112, "Remove condition", "remove-condition")
+		y += w.dp(34)
+		button(left, 200, agentRuleFieldLabel(condition.Field), "field")
+		button(left+w.dp(208), 200, agentRuleOpLabel(condition.Op), "op")
 		y += w.dp(32)
-		descriptions = map[string]string{
-			"exact":    "exact: the entire field must equal the value (case-sensitive except name).",
-			"contains": "contains: the field must contain the value as a substring.",
-			"glob":     "glob: filepath pattern; * and ? do not cross /. Use exact for literal symbols.",
+		if condition.Op == "glob" {
+			label("Wildcards: * and ? do not cross /. Name ignores letter case.", 22, false)
+		} else {
+			label("Name ignores letter case; other matches are case-sensitive.", 22, false)
 		}
-		label(descriptions[condition.Op], 26, false)
-		label("value: enter the match text directly; JSON escaping is automatic.", 24, true)
+		label("Text to match", 24, true)
 		for i := range s.fields {
 			f := &s.fields[i]
 			if f.group != "AgentRules" {
@@ -75,7 +79,7 @@ func (w *EbitengineWindow) drawAgentRules(c *WorkspaceClient, dst *ebiten.Image)
 	} else {
 		label("No rules: this profile will not match any process. Add a rule to start.", 30, false)
 	}
-	label("Values are match data; they are never executed as shell commands.", 24, false)
+
 	w.label(dst, c, image.Rect(left, y, right, y+w.dp(30)), c.tr(e.message), 10, muted, false)
 	y = r.Max.Y - w.dp(48)
 	button(right-w.dp(230), 140, "Apply rules", "apply")

@@ -11,7 +11,7 @@ import (
 
 func runAgent(ctx cliContext, args []string) error {
 	if len(args) == 0 {
-		return errors.New("agent requires list, export, configure, test, interrupt, exit or force-stop")
+		return errors.New("agent requires list, export, configure or test")
 	}
 	command := map[string]any{}
 	var configPath string
@@ -64,25 +64,6 @@ func runAgent(ctx cliContext, args []string) error {
 			}
 			command["config"] = cfg
 		}
-	case "interrupt", "exit", "force-stop":
-		if configPath != "" {
-			return errors.New("control actions use the server's saved Agent configuration")
-		}
-		sample := map[string]any{"type": "agents.test"}
-		for key, value := range command {
-			sample[key] = value
-		}
-		var diagnostic goagent.Diagnostic
-		if err := ctx.client.Dispatch(sample, &diagnostic); err != nil {
-			return err
-		}
-		if diagnostic.Selected == nil {
-			return errors.New("foreground process is not a recognized Agent")
-		}
-		command["type"] = "agent.control"
-		command["action"] = args[0]
-		command["expected"] = diagnostic.Process
-		command["expected_agent_id"] = diagnostic.Selected.ID
 	default:
 		return fmt.Errorf("unknown Agent command %q", args[0])
 	}

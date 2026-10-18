@@ -30,7 +30,6 @@ Press **Ctrl-B**, release it, then press a command key:
 | `x`, `t` | Close pane or tab; type `yes` to confirm |
 | `W` | Close workspace; type `yes` to confirm when it contains any tabs |
 | `r`, `R` | Rename tab or workspace |
-| `i`, `e`, `k` | Interrupt, exit, or force-stop the focused foreground Agent (exit/force-stop require confirmation) |
 | `b` | Return to the bottom of terminal history |
 | `:` | Dispatch a server command as JSON |
 | `q` | Detach and restore the outer terminal |

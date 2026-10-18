@@ -69,7 +69,7 @@ try:
         return next((a["status"] for a in ctl("ui", "snapshot")["sidebar_agents"]
                      if a["pane_id"] == pane), None)
 
-    wait(lambda: status() == "Running", "foreground probe detection")
+    wait(lambda: status() == "Unknown", "foreground probe detection without invented work state")
     icon_sizes = {}
     for report, expected in (("4;25", "Paused"), ("3", "Running"),
                              ("2;50", "Error"), ("0", "Idle"), ("1;75", "Running")):

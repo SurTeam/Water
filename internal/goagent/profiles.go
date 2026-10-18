@@ -81,7 +81,7 @@ func DefaultOSC() []string { return []string{"Idle", "Running", "Error", "Runnin
 func Builtins() []Profile {
 	var out []Profile
 	for _, d := range definitions {
-		p := Profile{ID: d.kind, Name: d.label, Enabled: true, ScrollbackOnClearScreen: d.scrollbackOnClearScreen, OSC: DefaultOSC(), StatusSource: "auto", Interrupt: "ctrl-c", Exit: "sigterm"}
+		p := Profile{ID: d.kind, Name: d.label, Enabled: true, ScrollbackOnClearScreen: d.scrollbackOnClearScreen, OSC: DefaultOSC(), StatusSource: "osc", Interrupt: "ctrl-c", Exit: "sigterm"}
 		for _, name := range d.names {
 			p.Rules = append(p.Rules, Rule{All: []Condition{{"name", "exact", name}}})
 		}
@@ -100,6 +100,19 @@ func IsBuiltin(id Kind) bool {
 	}
 	return false
 }
+
+// isRetiredBuiltin recognizes IDs written by earlier releases. Their overrides
+// remain dormant in Config so loading and saving settings preserves user edits
+// without restoring removed builtin profiles to recognition or Agent Settings.
+func isRetiredBuiltin(id Kind) bool {
+	switch id {
+	case GeminiCLI, Aider, CursorAgent, Amp, Crush, Goose, QwenCode, Droid, Grok:
+		return true
+	default:
+		return false
+	}
+}
+
 func Clone(c Config) Config {
 	data, _ := json.Marshal(c)
 	var out Config
@@ -245,7 +258,7 @@ func Compile(c Config) (*Registry, error) {
 	}
 	seen := map[Kind]bool{}
 	for _, o := range c.Overrides {
-		if !IsBuiltin(o.ID) || seen[o.ID] {
+		if (!IsBuiltin(o.ID) && !isRetiredBuiltin(o.ID)) || seen[o.ID] {
 			return nil, fmt.Errorf("invalid or duplicate builtin override %s", o.ID)
 		}
 		seen[o.ID] = true

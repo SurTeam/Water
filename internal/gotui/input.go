@@ -231,12 +231,6 @@ func (a *app) action(r rune) bool {
 			direction = "down"
 		}
 		cmd = map[string]any{"type": "pane.split", "pane_id": a.focus, "direction": direction}
-	case 'i':
-		cmd = map[string]any{"type": "tui.agent_control", "pane_id": a.focus, "action": "interrupt"}
-	case 'e', 'k':
-		a.promptKind = "confirm " + string(r) + " (yes)"
-		a.prompt = ""
-		return false
 	case 'W':
 		a.requestCloseWorkspace()
 		return false
@@ -318,12 +312,6 @@ func (a *app) submitPrompt() {
 				a.status = "Command queue full; retry"
 			}
 			return
-		case strings.HasPrefix(kind, "confirm e"), strings.HasPrefix(kind, "confirm k"):
-			action := "exit"
-			if strings.HasPrefix(kind, "confirm k") {
-				action = "force-stop"
-			}
-			c = map[string]any{"type": "tui.agent_control", "pane_id": a.focus, "action": action}
 		case strings.HasPrefix(kind, "confirm x"):
 			c = map[string]any{"type": "pane.close", "pane_id": a.focus}
 		case strings.HasPrefix(kind, "confirm t"):

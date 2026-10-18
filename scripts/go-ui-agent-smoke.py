@@ -11,7 +11,7 @@ import time
 os.environ["WATER_TEST_UNFOCUSED"] = "1"
 
 root = Path(__file__).resolve().parent.parent
-water = str(root / "target/go-ui-smoke/water")
+water = os.environ.get("WATER_BIN", str(root / "target/go-ui-smoke/water"))
 directory = Path(tempfile.mkdtemp(prefix="water-agents.", dir="/tmp"))
 socket = str(directory / "water.sock")
 config = directory / "config.json"
@@ -65,7 +65,7 @@ try:
         ctl("pane","input","--pane",pane,"--text",f"printf '\\033]2;{name} session\\007'; exec -a {name} /bin/sleep 30\n")
         agents=wait(lambda: [a for a in ctl("state").get("agents",[]) if a["kind"]==kind],name+" detected")
         assert agents[0]["pane_id"]==pane
-        wait(lambda: any(a["pane_id"]==pane and a["title"]==name+" session" and a["title_source"]=="osc" and a["status"]=="Running" for a in ctl("ui","snapshot")["sidebar_agents"]), "workspace OSC title and visible running state")
+        wait(lambda: any(a["pane_id"]==pane and a["title"]==name+" session" and a["title_source"]=="osc" and a["status"]=="Unknown" for a in ctl("ui","snapshot")["sidebar_agents"]), "workspace OSC title and visible unknown state without reports")
         ctl("ui","screenshot","--output",str(directory/(name+"-workspace-status.png")))
         click(kind="agent")
         assert ctl("ui","snapshot")["frame_focused_pane"]==pane
@@ -106,7 +106,7 @@ try:
         ctl("pane","input","--pane",target,"--text",f"printf '\\033]0;{name} task\\033\\\\'; exec -a {name} /bin/sleep 60\n")
         targets.append(target)
     wait(lambda: len(ctl("state").get("agents",[]))==4,"four concurrent agents")
-    shelf=wait(lambda: (lambda s: s if len(s["sidebar_agents"])==4 and all(a["title_source"]=="osc" and a["status"]=="Running" for a in s["sidebar_agents"]) else None)(ctl("ui","snapshot")), "inactive OSC titles on shelf")
+    shelf=wait(lambda: (lambda s: s if len(s["sidebar_agents"])==4 and all(a["title_source"]=="osc" and a["status"]=="Unknown" for a in s["sidebar_agents"]) else None)(ctl("ui","snapshot")), "inactive OSC titles on shelf")
     assert {a["workspace_name"] for a in shelf["sidebar_agents"]} == {"Project A","Project B"}
     footer=next(h for h in shelf["automation_hits"] if h["kind"]=="new_workspace")
     assert all(h["rect"][2]-h["rect"][0]==footer["rect"][2]-footer["rect"][0] for h in shelf["automation_hits"] if h["kind"]=="agent"), "shelf rows must ignore configured row-width scaling"

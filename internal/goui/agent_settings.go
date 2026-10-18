@@ -3,7 +3,6 @@ package goui
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -32,8 +31,27 @@ type agentPanel struct {
 	message         string
 	diagnostic      *goagent.Diagnostic
 	page            int
+	pageSize        int
 	rulesEditor     *agentRulesEditor
 	rules           []goagent.Rule
+}
+
+// agentListPage clamps the list viewport independently of the editor selection.
+func (a *agentPanel) agentListPage(rows int) (start, end int) {
+	a.pageSize = max(1, rows)
+	count := len(goagent.Profiles(a.config))
+	a.page = min(max(0, a.page), max(0, (count-1)/a.pageSize))
+	start = a.page * a.pageSize
+	return start, min(count, start+a.pageSize)
+}
+
+func (a *agentPanel) showAgentPage(id goagent.Kind) {
+	for i, p := range goagent.Profiles(a.config) {
+		if p.ID == id {
+			a.page = i / max(1, a.pageSize)
+			return
+		}
+	}
 }
 
 func agentMetadata(raw map[string]any) (*goagent.Profile, *goagent.Process) {
@@ -96,10 +114,6 @@ func (s *settingsPanel) agentProfile() (goagent.Profile, error) {
 					p.OSC[i] = strings.TrimSpace(p.OSC[i])
 				}
 			}
-		case "Interrupt":
-			p.Interrupt = value
-		case "Exit":
-			p.Exit = value
 		case "PreserveClear":
 			p.ScrollbackOnClearScreen = f.toggle.Value
 		case "LongRunSeconds":
@@ -170,8 +184,6 @@ func (s *settingsPanel) agentFields(id goagent.Kind) {
 		{"Rules", "Recognition rules", "", false, false},
 		{"StatusSource", "Status source", p.StatusSource, false, false},
 		{"OSC", "OSC states 0,1,2,3,4", strings.Join(p.OSC, ","), false, false},
-		{"Interrupt", "Interrupt preset", p.Interrupt, false, false},
-		{"Exit", "Exit preset", p.Exit, false, false},
 		{"PreserveClear", "Keep history on clear", "", true, p.ScrollbackOnClearScreen},
 		{"LongRunSeconds", "Long-run seconds (0 = global)", strconv.Itoa(p.LongRunSeconds), false, false},
 	}
@@ -270,12 +282,17 @@ func (c *WorkspaceClient) agentSettingsAction(action string) {
 		c.loadAgentSettings()
 		return
 	}
-	if action == "interrupt" || action == "exit" {
-		c.controlActiveAgent(action)
-		return
-	}
 	if !a.loaded {
 		c.loadAgentSettings()
+		return
+	}
+	if action == "previous" || action == "next" {
+		if action == "previous" {
+			a.page--
+		} else {
+			a.page++
+		}
+		a.agentListPage(a.pageSize)
 		return
 	}
 	if action == "restore" && !goagent.IsBuiltin(a.selected) {
@@ -303,21 +320,6 @@ func (c *WorkspaceClient) agentSettingsAction(action string) {
 	switch {
 	case strings.HasPrefix(action, "select:"):
 		s.agentFields(goagent.Kind(strings.TrimPrefix(action, "select:")))
-	case action == "previous" || action == "next":
-		profiles := goagent.Profiles(a.config)
-		i := 0
-		for j, p := range profiles {
-			if p.ID == a.selected {
-				i = j
-				break
-			}
-		}
-		if action == "previous" {
-			i = (i + len(profiles) - 1) % len(profiles)
-		} else {
-			i = (i + 1) % len(profiles)
-		}
-		s.agentFields(profiles[i].ID)
 	case action == "new" || action == "duplicate":
 		p := goagent.Profile{Name: "My Agent", Enabled: true, OSC: goagent.DefaultOSC(), StatusSource: "auto", Interrupt: "ctrl-c", Exit: "sigterm", ScrollbackOnClearScreen: true, Rules: []goagent.Rule{{All: []goagent.Condition{{Field: "executable", Op: "exact", Value: "my-agent"}}}}}
 		if action == "duplicate" {
@@ -332,6 +334,7 @@ func (c *WorkspaceClient) agentSettingsAction(action string) {
 		p.ID = goagent.Kind(uuid.NewString())
 		a.config.Put(p)
 		s.agentFields(p.ID)
+		a.showAgentPage(p.ID)
 		a.message = "Changes are not saved"
 	case action == "save":
 		cfg := goagent.Clone(a.config)
@@ -361,35 +364,35 @@ func (c *WorkspaceClient) agentSettingsAction(action string) {
 		})
 	}
 }
-func (c *WorkspaceClient) controlActiveAgent(action string) {
-	c.mu.RLock()
-	state := c.state
-	c.mu.RUnlock()
-	if state.FocusedPane == nil {
-		c.settings.agents.message = "No focused pane"
-		return
+
+// A status belongs to the emitting application, not another program in the pane.
+func agentProgramStatusApp(kind, app string) bool {
+	switch goagent.Kind(kind) {
+	case goagent.Pi:
+		return app == "pi"
+	case goagent.Codex:
+		return app == "codex"
+	case goagent.OpenCode:
+		return app == "opencode"
+	case goagent.ClaudeCode:
+		return app == "claude" || app == "claude-code"
+	default:
+		return app != "" && app == kind
 	}
-	for _, raw := range state.Agents {
-		a, ok := raw.(map[string]any)
-		if !ok || nativeUUID(a["pane_id"]) != *state.FocusedPane {
-			continue
-		}
-		kind := goagent.Kind(fmt.Sprint(a["kind"]))
-		if kind != c.settings.agents.selected {
-			c.settings.agents.message = "Select the focused terminal’s Agent before controlling it"
-			return
-		}
-		_, run := agentMetadata(a)
-		if run == nil {
-			c.settings.agents.message = "Waiting for foreground run identity"
-			return
-		}
-		pane := *state.FocusedPane
-		c.agentWork(func() agentPanelResult {
-			err := c.session.Dispatch(map[string]any{"type": "agent.control", "pane_id": pane, "expected": run, "action": action, "expected_agent_id": kind}, nil)
-			return agentPanelResult{message: "Agent action completed", err: err}
-		})
-		return
+}
+
+func agentProgramStatus(state string) string {
+	switch state {
+	case "idle":
+		return "Idle"
+	case "working":
+		return "Running"
+	case "blocked":
+		return "Paused"
+	case "done":
+		return "Completed"
+	case "error":
+		return "Error"
 	}
-	c.settings.agents.message = "No recognized Agent in the focused pane"
+	return "Unknown"
 }

@@ -1,6 +1,7 @@
 package goagent
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -103,5 +104,54 @@ func TestRuntimeMetadataOmitsRecognitionRules(t *testing.T) {
 	}
 	if len(registry.Diagnose(process).Selected.Rules) == 0 {
 		t.Fatal("diagnostics lost full recognition definition")
+	}
+}
+
+func TestRetiredBuiltinOverridesRemainDormantAndRoundTrip(t *testing.T) {
+	for _, id := range []Kind{GeminiCLI, Aider, CursorAgent, Amp, Crush, Goose, QwenCode, Droid, Grok} {
+		t.Run(string(id), func(t *testing.T) {
+			input := []byte(`{"overrides":[{"id":"` + string(id) + `","name":"My retired agent","enabled":false,"priority":17,"color":"#123456","rules":[{"all":[{"field":"name","op":"exact","value":"codex"}]}],"scrollback_on_clear_screen":false,"status_source":"process","osc":["Idle","Running","Error","Paused","Completed"],"interrupt":"sigint","exit":"ctrl-d","long_run_seconds":42}]}`)
+			cfg, err := ParseConfig(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(Profiles(cfg), Builtins()) {
+				t.Fatal("retired override changed active profiles")
+			}
+			registry, err := Compile(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := registry.Detect(Process{Name: "codex"}); got == nil || got.Kind != Codex {
+				t.Fatalf("dormant rule affected recognition: %#v", got)
+			}
+			if got := registry.Detect(Process{Name: string(id)}); got != nil {
+				t.Fatalf("retired builtin recognized: %#v", got)
+			}
+			// Editing a current builtin must retain the dormant definition in full.
+			edited := Builtins()[0]
+			edited.Name = "My Claude"
+			cfg.Put(edited)
+			encoded, err := json.Marshal(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			roundTrip, err := ParseConfig(encoded)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cfg, roundTrip) {
+				t.Fatal("round trip lost legacy fields")
+			}
+			if _, err := Compile(Config{Overrides: []Override{cfg.Overrides[0], cfg.Overrides[0]}}); err == nil {
+				t.Fatal("duplicate retired override accepted")
+			}
+			cfg.Remove(id)
+			for _, override := range cfg.Overrides {
+				if override.ID == id {
+					t.Fatal("retired override was not removable")
+				}
+			}
+		})
 	}
 }

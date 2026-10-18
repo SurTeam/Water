@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestAgentProfilesThroughDispatcherAndOwnedForegroundControl(t *testing.T) {
+func TestAgentProfilesThroughDispatcherAndRecognition(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "server.json")
 	desktop := filepath.Join(dir, "desktop.json")
@@ -103,32 +103,15 @@ func TestAgentProfilesThroughDispatcherAndOwnedForegroundControl(t *testing.T) {
 	if err = client.Dispatch(map[string]any{"type": "agents.test", "terminal_id": first}, &d); err != nil || d.Selected == nil {
 		t.Fatalf("real foreground diagnosis failed: %v", err)
 	}
-	if err = client.Dispatch(map[string]any{"type": "agent.control", "terminal_id": first, "expected": d.Process, "expected_agent_id": goagent.Codex, "action": "interrupt"}, nil); err == nil {
-		t.Fatal("another Agent's policy was accepted for this run")
+	for _, action := range []string{"interrupt", "exit", "force-stop"} {
+		if err = client.Dispatch(map[string]any{"type": "agent.control", "expected_agent_id": p.ID, "terminal_id": first, "expected": d.Process, "action": action}, nil); err == nil {
+			t.Fatalf("removed Agent control %q was accepted", action)
+		}
 	}
-	stale := d.Process
-	stale.Started = "other run"
-	if err = client.Dispatch(map[string]any{"type": "agent.control", "expected_agent_id": p.ID, "terminal_id": first, "expected": stale, "action": "exit"}, nil); err == nil {
-		t.Fatal("stale process identity was accepted")
-	}
-	if err = client.Dispatch(map[string]any{"type": "agent.control", "expected_agent_id": p.ID, "terminal_id": second, "expected": d.Process, "action": "interrupt"}, nil); err == nil {
-		t.Fatal("another terminal's run identity was accepted")
-	}
-	if err = client.Dispatch(map[string]any{"type": "agent.control", "expected_agent_id": p.ID, "terminal_id": first, "expected": d.Process, "action": "interrupt"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	var exited any
-	if err = client.Call("terminal.wait_exit", map[string]any{"terminal_id": first, "timeout_ms": 2000}, &exited); err != nil {
-		t.Fatal(err)
-	}
-	if err = client.Dispatch(map[string]any{"type": "agents.test", "terminal_id": second}, &d); err != nil || d.Selected == nil {
-		t.Fatal("unrelated terminal was interrupted")
-	}
-	if err = client.Dispatch(map[string]any{"type": "agent.control", "expected_agent_id": p.ID, "terminal_id": second, "expected": d.Process, "action": "exit"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err = client.Call("terminal.wait_exit", map[string]any{"terminal_id": second, "timeout_ms": 2000}, &exited); err != nil {
-		t.Fatal(err)
+	for _, id := range []uuid.UUID{first, second} {
+		if err = client.Dispatch(map[string]any{"type": "agents.test", "terminal_id": id}, &d); err != nil || d.Selected == nil {
+			t.Fatalf("recognition failed after rejected controls: %v", err)
+		}
 	}
 	// Invalid config must leave both saved and runtime definitions intact.
 	invalid := goagent.Clone(agents)

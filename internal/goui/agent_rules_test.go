@@ -3,6 +3,7 @@ package goui
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"testing"
 
 	"github.com/SurTeam/Water/internal/goagent"
@@ -134,6 +135,50 @@ func TestAgentRulesRowIsNotATextFocusTarget(t *testing.T) {
 	for _, f := range s.fields {
 		if f.group == "Agents" && f.name == "Rules" && f.editor.Text() != "" {
 			t.Fatal("raw JSON retained in an editor")
+		}
+	}
+}
+
+func TestAgentRuleConditionPagesReserveEditorAndFooter(t *testing.T) {
+	// overlayPanel leaves 96 logical pixels outside the panel.
+	for _, height := range []int{504, 584, 680} {
+		for selected := 0; selected < 8; selected++ {
+			start, end := agentRuleConditionPage(height, 8, selected)
+			if start > selected || end <= selected || start < 0 || end > 8 {
+				t.Fatalf("height %d selection %d outside [%d,%d)", height, selected, start, end)
+			}
+			// Heading and pager: 190; editor and message: 178;
+			// footer begins 48 pixels above the panel bottom.
+			if bottom := 190 + (end-start)*22 + 178; bottom > height-48 {
+				t.Fatalf("height %d: content bottom %d overlaps footer %d", height, bottom, height-48)
+			}
+		}
+	}
+}
+
+func TestAgentRuleEditorNavigatesAllEightConditions(t *testing.T) {
+	s := rulePanel(t)
+	s.openAgentRules()
+	s.agentRuleAction("add-rule")
+	for i := 1; i < 8; i++ {
+		s.agentRuleAction("add-condition")
+	}
+	for i := 7; i >= 0; i-- {
+		if s.agents.rulesEditor.condition != i {
+			t.Fatalf("previous selected %d, want %d", s.agents.rulesEditor.condition, i)
+		}
+		s.agentRuleAction("previous-condition")
+	}
+	for i := 0; i < 8; i++ {
+		if s.agents.rulesEditor.condition != i {
+			t.Fatalf("next selected %d, want %d", s.agents.rulesEditor.condition, i)
+		}
+		s.agentRuleAction("next-condition")
+	}
+	for _, i := range []int{2, 6, 0, 7} {
+		s.agentRuleAction("condition:" + strconv.Itoa(i))
+		if s.agents.rulesEditor.condition != i {
+			t.Fatalf("direct selection failed for %d", i)
 		}
 	}
 }

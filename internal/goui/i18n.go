@@ -8,6 +8,24 @@ import (
 // UI text is localized on the client. Model names and terminal output remain
 // user content; automation keys and protocol identifiers never depend on locale.
 var chineseText = map[string]string{
+	"Previous page": "上一页",
+	"Next page":     "下一页",
+	"Edit recognition rules to choose which programs match this Agent.": "在识别规则中设置哪些程序属于这个 Agent。",
+	"When several Agents match, the higher recognition priority wins.":  "多个 Agent 同时匹配时，优先选择识别优先级较高的。",
+	"Match any rule below. Within a rule, match every condition.":       "任意一条规则满足即可；同一规则中的条件需全部满足。",
+	"All of these conditions must match (click to edit):":               "以下条件需全部满足（点击即可编辑）：",
+	"Click the buttons to change what to match and how.":                "点击上方按钮，可切换匹配对象和匹配方式。",
+	"Wildcards: * and ? do not cross /. Name ignores letter case.":      "通配符 * 和 ? 不跨越 /；进程名称忽略大小写。",
+	"Name ignores letter case; other matches are case-sensitive.":       "进程名称忽略大小写；其他匹配区分大小写。",
+	"Text to match":            "匹配内容",
+	"Program name":             "程序名",
+	"Process or launcher name": "进程或启动器名称",
+	"Program or script path":   "程序或脚本路径",
+	"Command argument":         "命令参数",
+	"equals":                   "等于",
+	"contains text":            "包含",
+	"matches wildcard":         "符合通配符",
+
 	"Recognition rules":       "识别规则",
 	"Edit recognition rules…": "编辑识别规则…",
 	"Apply rules":             "应用规则",

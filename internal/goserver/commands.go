@@ -100,7 +100,7 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 	}
 
 	switch kind {
-	case "agents.inspect", "agents.configure", "agents.test", "agent.control":
+	case "agents.inspect", "agents.configure", "agents.test":
 		result, err := s.agentCommand(kind, raw)
 		if err != nil {
 			return fail("AGENT_COMMAND_FAILED", err)

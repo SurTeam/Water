@@ -189,15 +189,118 @@ func TestAgentStatusSourceReportsUnknownUntilOSC(t *testing.T) {
 	}
 }
 
-func TestAgentControlRequiresSelectedProfileToOwnFocusedPane(t *testing.T) {
+func TestAgentListPaginationPreservesInvalidDraft(t *testing.T) {
 	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
 	defer c.Close()
-	pane := uuid.New()
-	c.state.FocusedPane = &pane
-	c.state.Agents = []any{map[string]any{"kind": "pi", "pane_id": pane, "status": "running"}}
-	c.settings.agents.selected = goagent.Codex
-	c.controlActiveAgent("interrupt")
-	if c.settings.agents.busy || c.settings.agents.message != "Select the focused terminal’s Agent before controlling it" {
-		t.Fatal("control did not refuse a mismatched profile")
+	c.openSettings()
+	a := &c.settings.agents
+	a.loaded = true
+	c.settings.agentFields(goagent.Codex)
+	for i := range c.settings.fields {
+		f := &c.settings.fields[i]
+		if f.group == "Agents" && f.name == "Priority" {
+			f.editor.SetText("invalid priority")
+		}
+	}
+	before := goagent.Clone(a.config)
+	selected := a.selected
+	a.message = "draft message"
+	a.agentListPage(1)
+	c.agentSettingsAction("previous")
+	if a.page != 0 {
+		t.Fatal("previous wrapped before first page")
+	}
+	count := len(goagent.Profiles(a.config))
+	for i := 0; i < count+2; i++ {
+		c.agentSettingsAction("next")
+	}
+	if a.page != count-1 || a.selected != selected || a.message != "draft message" || !reflect.DeepEqual(a.config, before) {
+		t.Fatal("paging changed selection, draft config, message, or exceeded last page")
+	}
+	if _, err := c.settings.agentProfile(); err == nil {
+		t.Fatal("paging replaced the invalid editor draft")
+	}
+	start, end := a.agentListPage(count + 1)
+	if a.page != 0 || start != 0 || end != count || a.selected != selected {
+		t.Fatal("resize did not clamp viewport independently of selection")
+	}
+}
+
+func TestAgentListNewAndDuplicateRevealSelectedPage(t *testing.T) {
+	for _, action := range []string{"new", "duplicate"} {
+		t.Run(action, func(t *testing.T) {
+			c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+			defer c.Close()
+			c.openSettings()
+			a := &c.settings.agents
+			a.loaded = true
+			c.settings.agentFields(goagent.Codex)
+			a.agentListPage(2)
+			c.agentSettingsAction(action)
+			start, end := a.agentListPage(2)
+			for _, p := range goagent.Profiles(a.config)[start:end] {
+				if p.ID == a.selected && !goagent.IsBuiltin(p.ID) {
+					return
+				}
+			}
+			t.Fatal("created Agent is outside the visible page")
+		})
+	}
+}
+
+func TestAgentListPageNormalizesBounds(t *testing.T) {
+	a := agentPanel{}
+	count := len(goagent.Profiles(a.config))
+	a.page = count + 5
+	start, end := a.agentListPage(1)
+	if a.page != count-1 || start != count-1 || end != count {
+		t.Fatal("list page did not clamp to available profiles")
+	}
+	a.page = -2
+	start, _ = a.agentListPage(0)
+	if start != 0 || a.pageSize != 1 {
+		t.Fatal("invalid page or page size not normalized")
+	}
+}
+
+func TestAgentProgramStatusPrecedenceAndIdentity(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	id := uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer emu.Close()
+	c.terminals[id] = &terminalClient{id: id, emu: emu}
+	p := goagent.Builtins()[0]
+	p.ID, p.StatusSource = goagent.Pi, "osc"
+	raw := map[string]any{"kind": p.ID, "terminal_id": id, "status": "running", "profile": &p}
+	state := gomodel.StateDump{Agents: []any{raw}}
+	status := func() string { return c.sidebarAgents(state)[0].status }
+	if status() != "Unknown" {
+		t.Fatal(status())
+	}
+	emu.Write([]byte("\x1b]9;4;3\x07\x1b]7501;state=blocked:app=pi:kind=question\x1b\\"))
+	if status() != "Paused" {
+		t.Fatal(status())
+	}
+	emu.Write([]byte("\x1b]9;4;0\x07"))
+	if status() != "Paused" {
+		t.Fatal("generic progress replaced explicit state", status())
+	}
+	for _, step := range []struct{ state, want string }{{"working", "Running"}, {"done", "Completed"}, {"error", "Error"}, {"idle", "Idle"}} {
+		emu.Write([]byte("\x1b]7501;state=" + step.state + ":app=pi\x1b\\"))
+		if status() != step.want {
+			t.Fatal(step, status())
+		}
+	}
+	emu.Write([]byte("\x1b]7501;state=working:app=codex\x1b\\"))
+	if status() != "Idle" {
+		t.Fatal("accepted another application's report", status())
+	}
+	p.StatusSource = "process"
+	if status() != "Running" {
+		t.Fatal(status())
+	}
+	raw["status"] = map[string]any{"exited": map[string]any{"code": 0}}
+	if status() != "Completed" {
+		t.Fatal(status())
 	}
 }

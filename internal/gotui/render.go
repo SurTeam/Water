@@ -356,7 +356,7 @@ func (a *app) drawMenu(w, h int) {
 			}
 		}
 	default:
-		items := []string{"p  Select pane", "s  Select workspace", "T  Select tab", "n  New tab", "w  New workspace", "%  Split right", "\"  Split down", "o  Next pane", "[  Previous tab", "]  Next tab", "{  Previous workspace", "}  Next workspace", "x  Close pane (confirm)", "t  Close tab (confirm)", "W  Close workspace (confirm)", "r  Rename tab", "R  Rename workspace", ":  Dispatch JSON command", "i  Interrupt foreground Agent", "e  Exit foreground Agent", "k  Force-stop Agent (confirm)", "Q  Exit TUI and stop server (confirm)", "q  Detach (keep shells)"}
+		items := []string{"p  Select pane", "s  Select workspace", "T  Select tab", "n  New tab", "w  New workspace", "%  Split right", "\"  Split down", "o  Next pane", "[  Previous tab", "]  Next tab", "{  Previous workspace", "}  Next workspace", "x  Close pane (confirm)", "t  Close tab (confirm)", "W  Close workspace (confirm)", "r  Rename tab", "R  Rename workspace", ":  Dispatch JSON command", "Q  Exit TUI and stop server (confirm)", "q  Detach (keep shells)"}
 		for _, item := range items {
 			a.menuItems = append(a.menuItems, menuItem{item, "menu:" + strings.TrimSpace(item)[:1], uuid.Nil})
 		}
@@ -464,10 +464,6 @@ func promptLabel(kind string) string {
 		return "Close tab? yes> "
 	case strings.HasPrefix(kind, "confirm W"):
 		return "Close workspace? yes> "
-	case strings.HasPrefix(kind, "confirm e"):
-		return "Exit agent? yes> "
-	case strings.HasPrefix(kind, "confirm k"):
-		return "Kill agent? yes> "
 	case kind == "rename tab":
 		return "Tab name> "
 	case kind == "rename workspace":

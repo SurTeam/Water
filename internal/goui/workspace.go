@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ import (
 	"gioui.org/widget"
 	"gioui.org/widget/material"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gohyperlink"
@@ -993,6 +995,31 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 	if state.StateRevision < c.state.StateRevision {
 		c.mu.Unlock()
 		return
+	}
+	previousRuns := make(map[uuid.UUID]*goagent.Process)
+	for _, raw := range c.state.Agents {
+		if a, ok := raw.(map[string]any); ok {
+			_, run := agentMetadata(a)
+			previousRuns[nativeUUID(a["terminal_id"])] = run
+		}
+	}
+	currentRuns := make(map[uuid.UUID]*goagent.Process)
+	for _, raw := range state.Agents {
+		if a, ok := raw.(map[string]any); ok {
+			_, run := agentMetadata(a)
+			currentRuns[nativeUUID(a["terminal_id"])] = run
+		}
+	}
+	for id, previous := range previousRuns {
+		if !reflect.DeepEqual(previous, currentRuns[id]) {
+			if term := c.terminals[id]; term != nil {
+				term.mu.RLock()
+				if term.emu != nil {
+					term.emu.ResetAgentStatus()
+				}
+				term.mu.RUnlock()
+			}
+		}
 	}
 	c.state = c.selection.project(state)
 	var remove []*terminalClient

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Agent profile editing, recognition, OSC mapping and controls in Draw."""
+"""Exercise Agent profile editing, recognition, and OSC mapping in Draw."""
 import json
 import shlex
 from PIL import Image
@@ -20,7 +20,7 @@ def click(test, label):
         state = snapshot(test)
         if any(h.get("label") == label for h in state["automation_hits"]):
             return state
-        order = ["Name", "Enabled", "Priority", "Color", "Rules", "StatusSource", "OSC", "Interrupt", "Exit", "PreserveClear", "LongRunSeconds"]
+        order = ["Name", "Enabled", "Priority", "Color", "Rules", "StatusSource", "OSC", "PreserveClear", "LongRunSeconds"]
         def field_name(value):
             if value == "agent:edit-rules":
                 return "Rules"
@@ -43,10 +43,19 @@ def click(test, label):
 
 
 def select(test, agent_id):
-    for _ in range(len(test.ctl("agent", "list")["profiles"]) + 1):
-        if ready(test)["agent_settings"]["selected"] == agent_id:
+    count = len(test.ctl("agent", "list")["profiles"])
+    for _ in range(count):
+        click(test, "agent:previous")
+    for _ in range(count + 1):
+        state = ready(test)
+        label = "agent:select:" + agent_id
+        if any(h.get("label") == label for h in state["automation_hits"]):
+            click(test, label)
+            assert ready(test)["agent_settings"]["selected"] == agent_id
             return
+        selected = state["agent_settings"]["selected"]
         click(test, "agent:next")
+        assert ready(test)["agent_settings"]["selected"] == selected, "paging changed selection"
     raise AssertionError("Agent profile cannot be selected: " + agent_id)
 
 
@@ -118,7 +127,7 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     test.ctl("pane", "input", "--pane", pane, "--text", "\x03")
     test.wait(lambda: not agents(test), "owned sleep interrupted")
     click(test, "agent:edit-rules")
-    click(test, "agent-rules:next-condition")
+    click(test, "agent-rules:condition:1")
     click(test, "agent-rules:remove-condition")
     test.ctl("ui", "key", "cmd-a")
     test.ctl("ui", "key", "text:water-fixture-agent")
@@ -126,12 +135,11 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     click(test, "agent-rules:apply")
     edit(test, "OSC", "Idle,Running,Error,Running,Running")
     edit(test, "LongRunSeconds", "1")
-    click(test, "agent:cycle:Interrupt")  # Ctrl+C -> SIGINT
     save(test)
     definitions = test.ctl("agent", "list")
     profile = definitions["config"]["custom"][0]
     agent_id = profile["id"]
-    assert profile["interrupt"] == "sigint" and profile["name"] == "Fixture Agent"
+    assert profile["name"] == "Fixture Agent"
     probe = "trap 'exit 0' INT TERM; printf '\\033]9;4;4\\007'; while IFS= read -r line; do printf '\\033]9;4;%s\\007' \"$line\"; done"
     command = "exec -a water-fixture-agent " + shlex.quote(test.shell) + " -f -c " + shlex.quote(probe) + "\n"
     test.ctl("pane", "input", "--pane", pane, "--text", command)
@@ -171,10 +179,12 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     click(test, "field:Agents.Enabled")
     save(test)
     test.wait(lambda: any(a["pane_id"] == pane for a in agents(test)), "reenabled Agent")
-    click(test, "agent:interrupt")
-    state = ready(test)
-    assert state["agent_settings"]["message"] == "Agent action completed", state["agent_settings"]
-    test.wait(lambda: not any(a["pane_id"] == pane for a in agents(test)), "SIGINT ended owned fixture")
+    assert not any(h.get("label") in ("agent:interrupt", "agent:exit")
+                   for h in snapshot(test)["automation_hits"])
+    assert not any(f["name"] in ("Agents.Interrupt", "Agents.Exit")
+                   for f in snapshot(test)["settings_fields"])
+    test.ctl("pane", "input", "--pane", pane, "--text", "\x03")
+    test.wait(lambda: not any(a["pane_id"] == pane for a in agents(test)), "fixture ended through terminal input")
     # Builtin overrides and restore are edited through the same panel.
     select(test, "codex")
     edit(test, "Name", "My Codex")
@@ -210,9 +220,6 @@ with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100
     test.wait(lambda: any(a["title"] == "Fixture Agent" for a in agents(test)), "CLI probe recognized")
     checked = test.ctl("agent", "test", "--terminal", terminal, "--file", export_file)
     assert checked["selected"]["id"] == agent_id
-    stopped = test.ctl("agent", "exit", "--terminal", terminal)
-    assert stopped["preset"] == "sigterm" and stopped["terminal_id"] == terminal
-    test.wait(lambda: not agents(test), "CLI SIGTERM ended probe")
     test.save("diagnostic.json", diagnosed)
     test.save("definitions.json", test.ctl("agent", "list"))
-    print("PASS: Agent GUI CRUD/restore/discard, recognition, OSC mapping, color and SIGINT; artifacts=" + str(test.directory), flush=True)
+    print("PASS: Agent GUI CRUD/restore/discard, recognition, OSC mapping, color and absence of Agent controls; artifacts=" + str(test.directory), flush=True)

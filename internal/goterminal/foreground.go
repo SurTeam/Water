@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/SurTeam/Water/internal/goagent"
@@ -151,45 +149,4 @@ func (r *Registry) ForegroundNames(ctx context.Context) map[uuid.UUID]string {
 		result[id] = name
 	}
 	return result
-}
-
-// Recheck both process identity and this PTY's foreground group immediately
-// before delivering a control action. Never signal a cached arbitrary PID.
-func (r *Registry) ControlForeground(ctx context.Context, id uuid.UUID, expected goagent.Process, action string) error {
-	t, ok := r.Get(id)
-	if !ok {
-		return errors.New("terminal no longer exists")
-	}
-	actual, err := r.ForegroundProcess(ctx, id)
-	if err != nil {
-		return err
-	}
-	if expected.PID <= 1 || expected.Started == "" || !reflect.DeepEqual(actual, expected) {
-		return errors.New("foreground run changed; refresh and retry")
-	}
-	group, err := t.ForegroundGroup()
-	if err != nil || group != actual.PGID {
-		return errors.New("foreground group changed")
-	}
-	select {
-	case <-t.closed:
-		return errors.New("terminal has exited")
-	default:
-	}
-	switch action {
-	case "ctrl-c":
-		return t.Write([]byte{3})
-	case "ctrl-d":
-		return t.Write([]byte{4})
-	case "sigint":
-		return syscall.Kill(-group, syscall.SIGINT)
-	case "sigterm":
-		return syscall.Kill(-group, syscall.SIGTERM)
-	case "sighup":
-		return syscall.Kill(-group, syscall.SIGHUP)
-	case "sigkill":
-		return syscall.Kill(-group, syscall.SIGKILL)
-	default:
-		return errors.New("control action disabled or unavailable")
-	}
 }

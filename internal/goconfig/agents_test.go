@@ -1,6 +1,7 @@
 package goconfig
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -83,5 +84,51 @@ func TestConcurrentAgentAndPreferenceSavesPreserveBoth(t *testing.T) {
 	loaded, err := Load(path)
 	if err != nil || loaded.UI.SidebarWidth != 277 || goagent.Profiles(loaded.Agents)[0].Enabled {
 		t.Fatalf("concurrent fields lost: %v", err)
+	}
+}
+
+func TestRetiredAgentOverridesLoadAndSave(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	original := `{"overrides":{"terminal":{"font_size":23},"agents":{"overrides":[{"id":"gemini_cli","name":"My Gemini","enabled":false,"priority":9}]}}}`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Terminal.FontSize != 23 || len(loaded.Agents.Overrides) != 1 {
+		t.Fatalf("configuration lost: %#v", loaded)
+	}
+	if len(goagent.Profiles(loaded.Agents)) != 4 {
+		t.Fatal("retired override restored removed builtin")
+	}
+	saved := goagent.Clone(loaded.Agents)
+	if err := SaveAgents(path, saved); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(loaded.Agents, saved) {
+		t.Fatal("save changed dormant override")
+	}
+	if err := SaveAgents(path, loaded.Agents); err != nil {
+		t.Fatal(err)
+	}
+	second, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, second) {
+		t.Fatal("canonical save is not stable")
+	}
+	if loaded.Terminal.FontSize != 23 {
+		t.Fatal("Agent save lost preferences")
 	}
 }

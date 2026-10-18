@@ -13,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -658,17 +657,6 @@ func (a *app) executeCommand(c map[string]any) error {
 			return fmt.Errorf("%w: %v", errServerShutdownFailed, err)
 		}
 		return errServerShutdown
-	}
-	if c["type"] == "tui.agent_control" {
-		var diagnostic goagent.Diagnostic
-		sample := map[string]any{"type": "agents.test", "pane_id": c["pane_id"]}
-		if err := a.session.Dispatch(sample, &diagnostic); err != nil {
-			return err
-		}
-		if diagnostic.Selected == nil {
-			return fmt.Errorf("foreground process is not a recognized Agent")
-		}
-		c = map[string]any{"type": "agent.control", "pane_id": c["pane_id"], "action": c["action"], "expected": diagnostic.Process, "expected_agent_id": diagnostic.Selected.ID}
 	}
 	show, _ := c["tui_show_result"].(bool)
 	delete(c, "tui_show_result")

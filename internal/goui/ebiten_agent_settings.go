@@ -44,15 +44,8 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 	}
 	profiles := goagent.Profiles(a.config)
 	rows := max(1, (footer-top-w.dp(100))/w.dp(28))
-	selected := 0
-	for i, p := range profiles {
-		if p.ID == a.selected {
-			selected = i
-			break
-		}
-	}
-	offset := (selected / rows) * rows
-	for i := offset; i < len(profiles) && i < offset+rows; i++ {
+	offset, end := a.agentListPage(rows)
+	for i := offset; i < end; i++ {
 		p := profiles[i]
 		name := p.Name
 		if !p.Enabled {
@@ -61,8 +54,8 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 		button(left, top+(i-offset)*w.dp(28), listWidth, name, "select:"+string(p.ID), p.ID == a.selected)
 	}
 	bottom := footer - w.dp(88)
-	button(left, bottom, listWidth/2-w.dp(2), "Previous", "previous", false)
-	button(left+listWidth/2, bottom, listWidth/2, "Next", "next", false)
+	button(left, bottom, listWidth/2-w.dp(2), "Previous page", "previous", false)
+	button(left+listWidth/2, bottom, listWidth/2, "Next page", "next", false)
 	button(left, bottom+w.dp(32), listWidth/2-w.dp(2), "New", "new", false)
 	button(left+listWidth/2, bottom+w.dp(32), listWidth/2, "Duplicate", "duplicate", false)
 	editorLeft := left + listWidth + w.dp(20)
@@ -99,13 +92,11 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 		y += w.dp(30)
 	}
 	y = testY - w.dp(42)
-	w.label(dst, c, image.Rect(editorLeft, y, right, y+w.dp(20)), c.tr("Rules: OR between rules; AND within all. Higher priority wins."), 9, muted, false)
+	w.label(dst, c, image.Rect(editorLeft, y, right, y+w.dp(20)), c.tr("Edit recognition rules to choose which programs match this Agent."), 9, muted, false)
 	y += w.dp(20)
-	w.label(dst, c, image.Rect(editorLeft, y, right, y+w.dp(20)), c.tr("Fields: executable, name, path, argument. Ops: exact, contains, glob."), 9, muted, false)
+	w.label(dst, c, image.Rect(editorLeft, y, right, y+w.dp(20)), c.tr("When several Agents match, the higher recognition priority wins."), 9, muted, false)
 	y += w.dp(22)
 	button(editorLeft, y, w.dp(120), "Test recognition", "test", false)
-	button(editorLeft+w.dp(128), y, w.dp(84), "Interrupt", "interrupt", false)
-	button(editorLeft+w.dp(220), y, w.dp(90), "Request exit", "exit", false)
 	message := a.message
 	if s.confirmDiscard {
 		message = s.message
