@@ -4,8 +4,53 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SurTeam/Water/internal/govt"
 	"github.com/hajimehoshi/ebiten/v2"
 )
+
+func TestFrameScheduleSleepsUntilMaintenanceOrVisibleBlink(t *testing.T) {
+	for _, tc := range []struct {
+		phase time.Duration
+		blink bool
+		want  time.Duration
+	}{
+		{0, false, 250 * time.Millisecond},
+		{599 * time.Millisecond, false, 250 * time.Millisecond},
+		{0, true, 250 * time.Millisecond},
+		{500 * time.Millisecond, true, 100 * time.Millisecond},
+		{599 * time.Millisecond, true, time.Millisecond},
+		{600 * time.Millisecond, true, 250 * time.Millisecond},
+		{999 * time.Millisecond, true, time.Millisecond},
+	} {
+		now := time.Unix(10, int64(tc.phase))
+		if got := frameScheduleDelay(now, false, tc.blink); got != tc.want {
+			t.Fatalf("phase=%v blink=%v: delay=%v, want %v", tc.phase, tc.blink, got, tc.want)
+		}
+		if got := frameScheduleDelay(now, true, tc.blink); got != time.Second/60 {
+			t.Fatalf("pending input/output lost its fast retry: %v", got)
+		}
+	}
+}
+
+func TestCursorVisibilityExcludesHiddenAndScrolledOffscreen(t *testing.T) {
+	visible := govt.Snapshot{Cols: 80, Rows: 24, CursorX: 2, CursorY: 3}
+	if !terminalCursorVisible(visible) {
+		t.Fatal("visible cursor rejected")
+	}
+	for _, mutate := range []func(*govt.Snapshot){
+		func(s *govt.Snapshot) { s.CursorHide = true },
+		func(s *govt.Snapshot) { s.CursorX = -1 },
+		func(s *govt.Snapshot) { s.CursorX = s.Cols },
+		func(s *govt.Snapshot) { s.CursorY = -1 },
+		func(s *govt.Snapshot) { s.CursorY = s.Rows },
+	} {
+		snap := visible
+		mutate(&snap)
+		if terminalCursorVisible(snap) {
+			t.Fatalf("invisible cursor would drive blinking: %+v", snap)
+		}
+	}
+}
 
 func TestOutputPublicationKeepsFirstAndLatestViewBounded(t *testing.T) {
 	now := time.Unix(1, 0)

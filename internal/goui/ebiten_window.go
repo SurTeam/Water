@@ -137,6 +137,7 @@ type EbitengineWindow struct {
 	frameRevision           atomic.Uint64
 	presentedRevision       atomic.Uint64
 	continuousInput         atomic.Bool
+	cursorBlink             atomic.Bool
 	frameWake               chan struct{}
 	frameActivity           atomic.Int64
 	visibleTerminals        atomic.Pointer[map[uuid.UUID]struct{}]
@@ -193,27 +194,28 @@ func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *E
 // here at display cadence; periodic maintenance covers native menus, visibility,
 // settings completion and cursor blink without a permanent 60 Hz frame loop.
 func (w *EbitengineWindow) scheduleFrames() {
-	ticker := time.NewTicker(time.Second / 60)
-	defer ticker.Stop()
-	ticks := 0
-	blink := time.Now().UnixMilli()%1000 < 600
+	timer := time.NewTimer(0)
+	defer timer.Stop()
 	for {
 		select {
 		case <-w.done:
 			return
 		case <-w.frameWake:
-			ebiten.ScheduleFrame()
-		case <-ticker.C:
-			ticks++
-			phase := time.Now().UnixMilli()%1000 < 600
-			// Draw can run before the next simulation tick consumes a queued key.
-			// Its presented revision must not put still-pending input to sleep
-			// until the 250ms maintenance wakeup.
-			if ticks%15 == 0 || phase != blink || len(w.queue) > 0 || w.continuousInput.Load() || w.frameRevision.Load() != w.presentedRevision.Load() {
-				ebiten.ScheduleFrame()
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
 			}
-			blink = phase
+		case <-timer.C:
+			countNativeWork("count.frame_timer", 1)
 		}
+		ebiten.ScheduleFrame()
+		// Draw can precede the Update that consumes queued input, so keep
+		// retrying pending work at display cadence. Idle windows only need
+		// maintenance and transitions of an actually visible blinking cursor.
+		pending := len(w.queue) > 0 || w.continuousInput.Load() || w.frameRevision.Load() != w.presentedRevision.Load()
+		timer.Reset(frameScheduleDelay(time.Now(), pending, w.cursorBlink.Load()))
 	}
 }
 
@@ -325,6 +327,17 @@ func (w *EbitengineWindow) deliverFileDrop(c *WorkspaceClient) {
 
 func (w *EbitengineWindow) Update() error {
 	defer w.updateFramePacing()
+	defer func() {
+		blinking := w.focusedCursorBlinks(w.active())
+		if w.cursorBlink.Swap(blinking) != blinking {
+			// Re-arm the scheduler after Update publishes a focus, visibility
+			// or cursor-mode change, including when no revision is pending.
+			select {
+			case w.frameWake <- struct{}{}:
+			default:
+			}
+		}
+	}()
 	noteLiveWindow(w)
 	ensureWindowDragHook()
 	if w.consumeTitlebarZoom() {
@@ -434,8 +447,8 @@ func (w *EbitengineWindow) Update() error {
 		w.frameRevision.Add(1)
 	}
 	w.lastFrameSize, w.lastFrameScale, w.lastFocus, w.lastBlink, w.lastFontGeneration = w.size, w.scale, focused, blink, fontGeneration
-	// Keep the existing 60 Hz input/repeat clock, but don't rebuild or submit
-	// an unchanged frame. Keyboard and pointer edits can be purely local.
+	// Active keys retain the 60 Hz input/repeat clock. Keyboard and pointer
+	// edits can be purely local; idle windows need no display-rate polling.
 	if len(inpututil.AppendPressedKeys(nil)) > 0 || inpututil.IsMouseButtonJustPressed(ebiten.MouseButtonLeft) || inpututil.IsMouseButtonJustReleased(ebiten.MouseButtonLeft) {
 		w.Invalidate()
 	}

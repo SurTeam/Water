@@ -481,7 +481,7 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 	w.hit(c, content, hitPane, node.PaneID, "")
 	w.resizeTerminal(c, term, content, cw, lh)
 	if dst != nil {
-		w.drawTerminal(c, dst, term, content, cw, lh, tab.ActivePane == node.PaneID)
+		w.drawTerminal(c, dst, term, content, cw, lh, tab.ActivePane == node.PaneID && ebiten.IsFocused())
 		if cfg.UI.DimInactivePanes && tab.ActivePane != node.PaneID {
 			w.round(dst, r, radius, color.NRGBA{A: 55})
 		}

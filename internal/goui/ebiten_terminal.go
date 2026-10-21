@@ -346,7 +346,7 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 			delete(cache.images, id)
 		}
 	}
-	if !snap.CursorHide && snap.CursorX >= 0 && snap.CursorX < snap.Cols && snap.CursorY >= 0 && snap.CursorY < snap.Rows {
+	if terminalCursorVisible(snap) {
 		x, y := r.Min.X+snap.CursorX*cw, r.Min.Y+snap.CursorY*lh
 		glyph, columns, face := "", 1, faces[0]
 		if snap.CursorY < len(snap.RowsData) && snap.CursorX < len(snap.RowsData[snap.CursorY].Cells) {

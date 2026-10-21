@@ -3,6 +3,7 @@ package goui
 import (
 	"time"
 
+	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -30,24 +31,48 @@ func (w *EbitengineWindow) noteVisibleTerminals(c *WorkspaceClient) {
 	w.visibleTerminals.Store(&ids)
 }
 
+// Keep idle maintenance independent of display cadence. A visible blinking
+// cursor adds only its next phase deadline (600ms on, 400ms off).
+func frameScheduleDelay(now time.Time, pending, blinking bool) time.Duration {
+	if pending {
+		return time.Second / 60
+	}
+	delay := 250 * time.Millisecond
+	if blinking {
+		phase := time.Duration(now.UnixNano() % int64(time.Second))
+		next := time.Second
+		if phase < 600*time.Millisecond {
+			next = 600 * time.Millisecond
+		}
+		delay = min(delay, next-phase)
+	}
+	return delay
+}
+
+func terminalCursorVisible(snap govt.Snapshot) bool {
+	return !snap.CursorHide && snap.CursorX >= 0 && snap.CursorX < snap.Cols && snap.CursorY >= 0 && snap.CursorY < snap.Rows
+}
+
 func (w *EbitengineWindow) focusedCursorBlinks(c *WorkspaceClient) bool {
-	if c == nil || !ebiten.IsFocused() {
+	if c == nil || !ebiten.IsFocused() || !windowChromeVisible(w) {
 		return false
 	}
 	v := w.views[c]
 	if v == nil {
 		return false
 	}
+	id, ok := c.activeTerminalID()
+	if !ok {
+		return false
+	}
 	for _, pane := range v.panes {
-		if pane.term == nil {
+		if pane.term == nil || pane.term.id != id {
 			continue
 		}
 		pane.term.mu.RLock()
-		blink := pane.term.snapshot.CursorBlink
+		blink := pane.term.snapshot.CursorBlink && terminalCursorVisible(pane.term.snapshot)
 		pane.term.mu.RUnlock()
-		if blink {
-			return true
-		}
+		return blink
 	}
 	return false
 }
