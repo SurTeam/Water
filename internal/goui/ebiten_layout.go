@@ -7,6 +7,7 @@ import (
 	"image/color"
 	"math"
 	"reflect"
+	"strings"
 	"time"
 
 	"gioui.org/unit"
@@ -698,28 +699,81 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 }
 
+// diagnosticLines wraps every rune without eliding diagnostic output.
+func diagnosticLines(value string, fits func(string) bool) []string {
+	var lines []string
+	for _, line := range strings.Split(value, "\n") {
+		current := ""
+		for _, r := range line {
+			next := current + string(r)
+			if current != "" && !fits(next) {
+				lines = append(lines, current)
+				current = string(r)
+			} else {
+				current = next
+			}
+		}
+		lines = append(lines, current)
+	}
+	return lines
+}
+
 func (w *EbitengineWindow) drawRemote(c *WorkspaceClient, dst *ebiten.Image) {
-	r := w.overlay(c, dst, w.dp(440), w.dp(270))
+	r := w.overlay(c, dst, w.dp(640), w.dp(490))
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
-	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(24), r.Max.X-w.dp(24), r.Max.Y), c.tr("Connect to a remote"), 20, fg, true)
-	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(60), r.Max.X-w.dp(24), r.Max.Y), c.tr("SSH destination"), 11, mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .5), false)
-	fr := image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(94), r.Max.X-w.dp(24), r.Min.Y+w.dp(134))
-	value := c.remoteEditor.Text()
-	if value == "" {
-		value = "user@host"
+	c.connectionMu.Lock()
+	message, connecting, auth, scroll := c.remoteError, c.remoteConnecting, c.remoteAuthReply != nil, c.remoteDiagnosticScroll
+	prompt := c.remoteAuthPrompt
+	c.connectionMu.Unlock()
+	title := "Connect to a remote"
+	if auth {
+		title = "SSH authentication"
 	}
-	w.field(c, dst, fr, value, w.view(c).remoteFocused, &c.remoteEditor)
+	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(24), r.Max.X-w.dp(24), r.Max.Y), c.tr(title), 20, fg, true)
+	subtitle := c.tr("SSH destination")
+	if auth {
+		subtitle = prompt
+	}
+	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(60), r.Max.X-w.dp(24), r.Max.Y), subtitle, 11, fg, false)
+	fr := image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(94), r.Max.X-w.dp(24), r.Min.Y+w.dp(134))
+	if auth {
+		// Never pass the secret to field(), whose caret bookkeeping retains text.
+		value := strings.Repeat("•", len([]rune(c.remoteAuthEditor.Text())))
+		w.round(dst, fr, w.dp(5), configColor(cfg.Theme.ChromeBackground, 0x171b20))
+		w.label(dst, c, fr.Inset(w.dp(10)), value, 12, fg, false)
+	} else {
+		value := c.remoteEditor.Text()
+		if value == "" {
+			value = "user@host"
+		}
+		w.field(c, dst, fr, value, w.view(c).remoteFocused, &c.remoteEditor)
+	}
 	w.hit(c, fr, hitRemoteField, uuid.Nil, "")
-	c.connectionMu.RLock()
-	message := c.remoteError
-	connecting := c.remoteConnecting
-	c.connectionMu.RUnlock()
-	if connecting {
+	if connecting && !auth {
 		message = c.tr("Connecting…")
 	}
-	w.label(dst, c, image.Rect(fr.Min.X, fr.Max.Y+w.dp(14), fr.Max.X, r.Max.Y), c.tr(message), 10, fg, false)
-	w.button(dst, c, image.Rect(fr.Min.X, r.Max.Y-w.dp(58), fr.Min.X+w.dp(120), r.Max.Y-w.dp(24)), "Connect", hitRemoteSubmit, uuid.Nil, true)
+	area := image.Rect(fr.Min.X, fr.Max.Y+w.dp(14), fr.Max.X, r.Max.Y-w.dp(84))
+	face := w.fonts.face(cfg.UI.UIFontFamily, float64(w.dp(11)), false, false, false)
+	lines := diagnosticLines(message, func(value string) bool { width, _ := text.Measure(value, face, 0); return width <= float64(area.Dx()) })
+	height := w.dp(17)
+	visible := max(1, area.Dy()/height)
+	scroll = min(max(0, scroll), max(0, len(lines)-visible))
+	c.connectionMu.Lock()
+	c.remoteDiagnosticScroll = scroll
+	c.connectionMu.Unlock()
+	for i := scroll; i < min(len(lines), scroll+visible); i++ {
+		y := area.Min.Y + (i-scroll)*height
+		w.label(dst, c, image.Rect(area.Min.X, y, area.Max.X, y+height), lines[i], 11, fg, false)
+	}
+	if len(lines) > visible {
+		w.label(dst, c, image.Rect(area.Min.X, area.Max.Y, area.Max.X, area.Max.Y+w.dp(18)), fmt.Sprintf("%d–%d / %d · Scroll for details", scroll+1, min(len(lines), scroll+visible), len(lines)), 10, fg, false)
+	}
+	submit := "Connect"
+	if auth {
+		submit = "Continue"
+	}
+	w.button(dst, c, image.Rect(fr.Min.X, r.Max.Y-w.dp(58), fr.Min.X+w.dp(120), r.Max.Y-w.dp(24)), submit, hitRemoteSubmit, uuid.Nil, true)
 	w.button(dst, c, image.Rect(fr.Min.X+w.dp(136), r.Max.Y-w.dp(58), fr.Min.X+w.dp(240), r.Max.Y-w.dp(24)), "Cancel", hitRemoteCancel, uuid.Nil, false)
 }
 func (w *EbitengineWindow) drawHyperlink(c *WorkspaceClient, dst *ebiten.Image) {

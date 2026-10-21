@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goremote"
 	"github.com/SurTeam/Water/internal/gotui"
 	"github.com/SurTeam/Water/internal/gouiapp"
 )
@@ -13,6 +14,16 @@ import (
 func main() {
 	args := os.Args[1:]
 	var err error
+	if len(args) > 0 && args[0] == "__ssh_askpass" {
+		prompt := "SSH authentication"
+		if len(args) > 1 {
+			prompt = args[1]
+		}
+		if goremote.RunAskpass(prompt) != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) > 0 && args[0] == "tui" {
 		err = runTUI(args[1:])
 	} else if isControlInvocation(args) {

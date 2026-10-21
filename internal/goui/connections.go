@@ -21,17 +21,18 @@ type managedWorkspaceClient struct {
 }
 
 type MultiWorkspaceClient struct {
-	mu              sync.RWMutex
-	invalidate      func()
-	order           []uuid.UUID
-	connections     map[uuid.UUID]*managedWorkspaceClient
-	active          uuid.UUID
-	closed          bool
-	stop            chan struct{}
-	bootstrapped    bool
-	running         bool
-	remoteConnector func(string) (ConnectionEntry, *WorkspaceClient, func(), error)
-	serverOperator  func(ConnectionEntry, *goclient.Session, string) (ConnectionEntry, *WorkspaceClient, func(), string, error)
+	mu                   sync.RWMutex
+	invalidate           func()
+	order                []uuid.UUID
+	connections          map[uuid.UUID]*managedWorkspaceClient
+	active               uuid.UUID
+	closed               bool
+	stop                 chan struct{}
+	bootstrapped         bool
+	running              bool
+	interactiveConnector func(string) (ConnectionEntry, *WorkspaceClient, func(), error)
+	remoteConnector      func(string) (ConnectionEntry, *WorkspaceClient, func(), error)
+	serverOperator       func(ConnectionEntry, *goclient.Session, string) (ConnectionEntry, *WorkspaceClient, func(), string, error)
 }
 
 func NewMultiWorkspaceClient(invalidate func()) *MultiWorkspaceClient {
@@ -159,6 +160,22 @@ func (m *MultiWorkspaceClient) SetRemoteConnector(connector func(string) (Connec
 	}
 }
 
+func (m *MultiWorkspaceClient) SetInteractiveRemoteConnector(connector func(string) (ConnectionEntry, *WorkspaceClient, func(), error)) {
+	m.mu.Lock()
+	m.interactiveConnector = connector
+	m.mu.Unlock()
+}
+
+func (m *MultiWorkspaceClient) PromptSSH(prompt string) (string, error) {
+	m.mu.RLock()
+	connection := m.connections[m.active]
+	m.mu.RUnlock()
+	if connection == nil {
+		return "", errors.New("no active connection")
+	}
+	return connection.view.PromptSSH(prompt)
+}
+
 func (m *MultiWorkspaceClient) ConnectRemote(destination string) error {
 	m.mu.RLock()
 	for _, connection := range m.connections {
@@ -169,7 +186,10 @@ func (m *MultiWorkspaceClient) ConnectRemote(destination string) error {
 			return nil
 		}
 	}
-	connector := m.remoteConnector
+	connector := m.interactiveConnector
+	if connector == nil {
+		connector = m.remoteConnector
+	}
 	m.mu.RUnlock()
 	if connector == nil {
 		return errors.New("remote connector is unavailable")

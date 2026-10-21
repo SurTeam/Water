@@ -390,6 +390,13 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 		w.view(c).remoteFocused = true
 	case hitRemoteCancel:
 		c.connectionMu.Lock()
+		if c.remoteAuthReply != nil {
+			select {
+			case c.remoteAuthReply <- nil:
+			default:
+			}
+			c.remoteAuthEditor.SetText("")
+		}
 		if !c.remoteConnecting {
 			c.remoteFormVisible = false
 			c.remoteError = ""
@@ -542,6 +549,9 @@ func (w *EbitengineWindow) wheel(c *WorkspaceClient, p image.Point, dx, dy float
 	remoteVisible := c.remoteFormVisible
 	c.connectionMu.RUnlock()
 	if remoteVisible {
+		c.connectionMu.Lock()
+		c.remoteDiagnosticScroll = max(0, c.remoteDiagnosticScroll+remoteScrollSteps(dy))
+		c.connectionMu.Unlock()
 		return true
 	}
 	if p.In(v.tabRect) {
@@ -794,6 +804,19 @@ func (w *EbitengineWindow) saveSettings(c *WorkspaceClient) {
 }
 func (w *EbitengineWindow) connectRemote(c *WorkspaceClient) {
 	c.layoutMu.Lock()
+	c.connectionMu.Lock()
+	if c.remoteAuthReply != nil {
+		value := c.remoteAuthEditor.Text()
+		c.remoteAuthEditor.SetText("")
+		select {
+		case c.remoteAuthReply <- &value:
+		default:
+		}
+		c.connectionMu.Unlock()
+		c.layoutMu.Unlock()
+		return
+	}
+	c.connectionMu.Unlock()
 	destination := strings.TrimSpace(c.remoteEditor.Text())
 	c.layoutMu.Unlock()
 	connect, _ := c.connectionActions()
@@ -812,6 +835,7 @@ func (w *EbitengineWindow) connectRemote(c *WorkspaceClient) {
 	}
 	c.remoteConnecting = true
 	c.remoteError = ""
+	c.remoteDiagnosticScroll = 0
 	c.connectionMu.Unlock()
 	go func() {
 		err := connect(destination)
@@ -912,7 +936,30 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	c.connectionMu.RLock()
 	remote := c.remoteFormVisible
 	c.connectionMu.RUnlock()
-	if remote && v.remoteFocused {
+	if remote {
+		c.connectionMu.RLock()
+		auth := c.remoteAuthReply != nil
+		c.connectionMu.RUnlock()
+		if auth {
+			if strings.EqualFold(spec, "escape") {
+				c.connectionMu.Lock()
+				select {
+				case c.remoteAuthReply <- nil:
+				default:
+				}
+				c.remoteAuthEditor.SetText("")
+				c.connectionMu.Unlock()
+				return true
+			}
+			if strings.EqualFold(spec, "enter") || strings.EqualFold(spec, "return") {
+				go w.connectRemote(c)
+				return true
+			}
+			return w.editEditor(&c.remoteAuthEditor, spec)
+		}
+		if !v.remoteFocused {
+			return true
+		}
 		if strings.EqualFold(spec, "escape") {
 			c.connectionMu.Lock()
 			if !c.remoteConnecting {
@@ -1351,7 +1398,11 @@ func (w *EbitengineWindow) initComposer() {
 				}
 			}
 		} else if w.view(c).remoteFocused {
-			editor = &c.remoteEditor
+			if c.remoteAuthReply != nil {
+				editor = &c.remoteAuthEditor
+			} else {
+				editor = &c.remoteEditor
+			}
 			for _, hit := range c.hitRegions {
 				if hit.Kind == hitRemoteField {
 					r = hit.Rect
@@ -1461,4 +1512,15 @@ func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
 		}
 	}
 	return handled, nil
+}
+
+func remoteScrollSteps(delta float64) int {
+	steps := int(delta / 16)
+	if steps == 0 && delta != 0 {
+		if delta > 0 {
+			return 1
+		}
+		return -1
+	}
+	return steps
 }

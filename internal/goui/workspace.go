@@ -236,6 +236,10 @@ type WorkspaceClient struct {
 	remoteFormVisible          bool
 	remoteConnecting           bool
 	remoteError                string
+	remoteAuthPrompt           string
+	remoteAuthReply            chan *string
+	remoteAuthEditor           widget.Editor
+	remoteDiagnosticScroll     int
 	remoteClearEditor          bool
 
 	hyperlinkMu      sync.Mutex
@@ -268,6 +272,7 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 		connectionDisconnectClicks: make(map[uuid.UUID]*widget.Clickable),
 	}
 	c.remoteEditor.SingleLine = true
+	c.remoteAuthEditor.SingleLine = true
 	if session != nil {
 		c.server.info = session.Server
 		c.server.compatibility = session.Compatibility
@@ -636,6 +641,9 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 	remoteFormVisible := c.remoteFormVisible
 	remoteConnecting := c.remoteConnecting
 	remoteError := c.remoteError
+	remoteAuthPrompt := c.remoteAuthPrompt
+	remoteAuthPending := c.remoteAuthReply != nil
+	remoteDiagnosticScroll := c.remoteDiagnosticScroll
 	c.connectionMu.RUnlock()
 
 	return map[string]any{
@@ -662,6 +670,9 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"remote_form_visible":         remoteFormVisible,
 		"remote_connecting":           remoteConnecting,
 		"remote_error":                remoteError,
+		"remote_auth_prompt":          remoteAuthPrompt,
+		"remote_auth_pending":         remoteAuthPending,
+		"remote_diagnostic_scroll":    remoteDiagnosticScroll,
 	}
 }
 

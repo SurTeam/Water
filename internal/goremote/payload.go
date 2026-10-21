@@ -20,9 +20,10 @@ type RemoteTarget struct {
 	Arch string
 }
 
-func detectRemoteTarget(destination, control string) (RemoteTarget, error) {
+func detectRemoteTarget(destination, control string, collectors ...*sshDiagnostics) (RemoteTarget, error) {
+	d := diagnosticCollector(collectors)
 	cmd := command("ssh", "-S", control, "-o", "BatchMode=yes", destination, "uname -s; uname -m")
-	out, err := boundedSSHOutput(cmd)
+	out, err := d.output(cmd, startTimeout)
 	if err != nil {
 		return RemoteTarget{}, fmt.Errorf("detect remote target: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -55,7 +56,8 @@ func embeddedServerPayload(target RemoteTarget) ([]byte, bool) {
 	return data, err == nil && len(data) > 0
 }
 
-func deployEmbeddedServer(destination, control string, target RemoteTarget, payload []byte) (string, error) {
+func deployEmbeddedServer(destination, control string, target RemoteTarget, payload []byte, collectors ...*sshDiagnostics) (string, error) {
+	d := diagnosticCollector(collectors)
 	if len(payload) == 0 {
 		return "", errors.New("empty embedded server payload")
 	}
@@ -74,7 +76,7 @@ func deployEmbeddedServer(destination, control string, target RemoteTarget, payl
 	)
 	cmd := command("ssh", "-S", control, "-o", "BatchMode=yes", destination, script)
 	cmd.Stdin = bytes.NewReader(payload)
-	out, err := boundedSSHOutput(cmd)
+	out, err := d.output(cmd, startTimeout)
 	if err != nil {
 		return "", fmt.Errorf("deploy remote Water server: %w: %s", err, strings.TrimSpace(string(out)))
 	}

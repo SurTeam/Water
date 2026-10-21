@@ -1,6 +1,7 @@
 package goremote
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,8 @@ type Tunnel struct {
 	controlSocket string
 	remoteSocket  string
 	forwardSpec   string
+	warnings      string
+	diagnostics   *sshDiagnostics
 }
 
 type serverInfo struct {
@@ -52,7 +56,23 @@ func ValidateDestination(destination string) (string, error) {
 	return destination, nil
 }
 
-func Connect(destination string) (*Tunnel, error) {
+func Connect(destination string) (*Tunnel, error) { return connect(destination, nil) }
+
+func ConnectInteractive(destination string, prompt Prompt) (*Tunnel, error) {
+	return connect(destination, prompt)
+}
+
+func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error) {
+	diagnostics := &sshDiagnostics{}
+	defer func() {
+		if result != nil {
+			result.warnings = diagnostics.String()
+			result.diagnostics = nil
+		}
+		if resultErr != nil && diagnostics.String() != "" {
+			resultErr = fmt.Errorf("%w\n\nSSH diagnostics:\n%s", resultErr, diagnostics.String())
+		}
+	}()
 	destination, err := ValidateDestination(destination)
 	if err != nil {
 		return nil, err
@@ -65,11 +85,12 @@ func Connect(destination string) (*Tunnel, error) {
 	)
 	_ = os.Remove(local)
 
-	if err := ensureControlMaster(destination, control); err != nil {
+	_, err = ensureControlMasterInteractive(destination, control, prompt, diagnostics)
+	if err != nil {
 		return nil, err
 	}
 	spec := local + ":" + remote
-	if err := runSSH("-S", control, "-O", "forward", "-o", "ExitOnForwardFailure=yes", "-L", spec, destination); err != nil {
+	if err := diagnostics.run("-S", control, "-O", "forward", "-o", "ExitOnForwardFailure=yes", "-L", spec, destination); err != nil {
 		return nil, err
 	}
 
@@ -79,6 +100,7 @@ func Connect(destination string) (*Tunnel, error) {
 		controlSocket: control,
 		remoteSocket:  remote,
 		forwardSpec:   spec,
+		diagnostics:   diagnostics,
 	}
 	if info, err := t.Client().Inspect(time.Second); err == nil {
 		if info.BuildVariant != gobuild.Variant {
@@ -88,14 +110,17 @@ func Connect(destination string) (*Tunnel, error) {
 		return t, nil // OpenSession negotiates capabilities, including diagnostic mode.
 	}
 	if os.Getenv("WATER_REMOTE_CONTROL_SOCKET") == "" {
-		legacy, err := legacyRemoteSockets(destination, control)
+		legacy, err := legacyRemoteSockets(destination, control, diagnostics)
 		if err != nil {
 			_ = t.Close()
 			return nil, err
 		}
 		var found *Tunnel
 		for _, candidate := range legacy {
-			probe, err := forwardSocket(destination, control, candidate)
+			probe, err := forwardSocket(destination, control, candidate, diagnostics)
+			if probe != nil {
+				probe.diagnostics = diagnostics
+			}
 			if err != nil {
 				if found != nil {
 					_ = found.Close()
@@ -126,11 +151,12 @@ func Connect(destination string) (*Tunnel, error) {
 		}
 		if found != nil {
 			_ = t.Close()
+
 			return found, nil
 		}
 	}
 
-	if err := startRemoteServer(destination, control, remote); err != nil {
+	if err := startRemoteServer(destination, control, remote, diagnostics); err != nil {
 		_ = t.Close()
 		return nil, err
 	}
@@ -144,6 +170,8 @@ func Connect(destination string) (*Tunnel, error) {
 	_ = t.Close()
 	return nil, fmt.Errorf("remote Water server at %s did not become ready within %s", destination, startTimeout)
 }
+
+func (t *Tunnel) Warnings() string { return t.warnings }
 
 func (t *Tunnel) LocalSocket() string  { return t.localSocket }
 func (t *Tunnel) RemoteSocket() string { return t.remoteSocket }
@@ -161,7 +189,11 @@ func (t *Tunnel) compatible() bool {
 }
 
 func (t *Tunnel) Close() error {
-	_ = runSSH("-S", t.controlSocket, "-O", "cancel", "-L", t.forwardSpec, t.destination)
+	if t.diagnostics != nil {
+		_ = t.diagnostics.run("-S", t.controlSocket, "-O", "cancel", "-L", t.forwardSpec, t.destination)
+	} else {
+		_ = runSSH("-S", t.controlSocket, "-O", "cancel", "-L", t.forwardSpec, t.destination)
+	}
 	if err := os.Remove(t.localSocket); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -217,30 +249,69 @@ func stableID(value string) uint64 {
 }
 
 func ensureControlMaster(destination, control string) error {
-	if runSSH("-S", control, "-O", "check", destination) == nil {
-		return nil
-	}
-	_ = os.Remove(control)
-	return runSSH(
-		"-M", "-N", "-f",
-		"-o", "ControlMaster=yes",
-		"-o", "ControlPersist=600",
-		"-o", "BatchMode=yes",
-		"-o", "Compression=yes",
-		"-o", "ServerAliveInterval=15",
-		"-o", "ServerAliveCountMax=2",
-		"-o", "ConnectTimeout=10",
-		"-S", control,
-		destination,
-	)
+	_, err := ensureControlMasterInteractive(destination, control, nil)
+	return err
 }
 
-func startRemoteServer(destination, control, remoteSocket string) error {
+func ensureControlMasterInteractive(destination, control string, prompt Prompt, collectors ...*sshDiagnostics) (string, error) {
+	d := diagnosticCollector(collectors)
+	if d.run("-S", control, "-O", "check", destination) == nil {
+		return "", nil
+	}
+	_ = os.Remove(control)
+	args := []string{"-M", "-N", "-f", "-o", "ControlMaster=yes", "-o", "ControlPersist=600", "-o", "BatchMode=yes", "-o", "Compression=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", "-o", "ConnectTimeout=10", "-S", control, destination}
+	out, err := d.output(command("ssh", args...), startTimeout)
+	if err == nil {
+		return d.String(), nil
+	}
+	first := sshFailure(out, err).Error()
+	// Strip the local process status prefix before matching OpenSSH diagnostics.
+	authText := first
+	if _, detail, ok := strings.Cut(authText, ": "); ok && strings.HasPrefix(authText, "exit status ") {
+		authText = detail
+	}
+	// Only authentication rejection warrants asking for credentials. Configuration,
+	// host-key and network failures retain their complete original diagnostics.
+	var exit *exec.ExitError
+	if prompt == nil || !errors.As(err, &exit) || exit.ExitCode() != 255 || !authenticationRejected(authText) {
+		return "", sshFailure(out, err)
+	}
+	env, cleanup, setupErr := newAskpass(prompt)
+	if setupErr != nil {
+		return "", setupErr
+	}
+	defer cleanup()
+	for i := range args {
+		if args[i] == "BatchMode=yes" {
+			args[i] = "BatchMode=no"
+		}
+	}
+	args = append([]string{"-o", "PreferredAuthentications=keyboard-interactive,password", "-o", "NumberOfPasswordPrompts=3"}, args...)
+	cmd := command("ssh", args...)
+	cmd.Env = env
+	out, err = d.output(cmd, 3*time.Minute)
+	if err != nil {
+		return "", fmt.Errorf("%s\n\nPassword authentication: %w", first, sshFailure(out, err))
+	}
+	return d.String(), nil
+}
+
+func sshFailure(out []byte, err error) error {
+	if msg := strings.TrimSpace(string(out)); msg != "" {
+		return fmt.Errorf("%s: %w", msg, err)
+	}
+	return err
+}
+
+func interactiveSSHOutput(cmd *exec.Cmd) ([]byte, error) { return sshOutput(cmd, 3*time.Minute) }
+
+func startRemoteServer(destination, control, remoteSocket string, collectors ...*sshDiagnostics) error {
+	d := diagnosticCollector(collectors)
 	program := os.Getenv("WATER_REMOTE_SERVER_COMMAND")
 	embedded := false
 
 	if program == "" {
-		target, err := detectRemoteTarget(destination, control)
+		target, err := detectRemoteTarget(destination, control, d)
 		if err != nil {
 			return err
 		}
@@ -252,7 +323,7 @@ func startRemoteServer(destination, control, remoteSocket string) error {
 				target.Arch,
 			)
 		}
-		program, err = deployEmbeddedServer(destination, control, target, payload)
+		program, err = deployEmbeddedServer(destination, control, target, payload, d)
 		if err != nil {
 			return err
 		}
@@ -263,7 +334,7 @@ func startRemoteServer(destination, control, remoteSocket string) error {
 		return errors.New("WATER_REMOTE_SERVER_COMMAND must be a simple remote executable path")
 	}
 
-	probe, err := boundedSSHOutput(command("ssh", "-S", control, "-o", "BatchMode=yes", destination, program+" --server-info"))
+	probe, err := d.output(command("ssh", "-S", control, "-o", "BatchMode=yes", destination, program+" --server-info"), startTimeout)
 	if err != nil {
 		return fmt.Errorf("inspect remote server executable: %w", err)
 	}
@@ -294,7 +365,7 @@ func startRemoteServer(destination, control, remoteSocket string) error {
 			buildIdentityToken(),
 		)
 	}
-	return runSSH("-S", control, "-o", "BatchMode=yes", destination, commandText)
+	return d.run("-S", control, "-o", "BatchMode=yes", destination, commandText)
 }
 
 func runSSH(args ...string) error {
@@ -311,7 +382,11 @@ func runSSH(args ...string) error {
 }
 
 func boundedSSHOutput(cmd *exec.Cmd) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), startTimeout)
+	return sshOutput(cmd, startTimeout)
+}
+
+func sshOutput(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	bounded := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	bounded.Stdin, bounded.Env, bounded.Dir = cmd.Stdin, cmd.Env, cmd.Dir
@@ -343,3 +418,46 @@ func DebugPaths(destination string) (string, string, error) {
 }
 
 func UserIDString() string { return strconv.Itoa(os.Geteuid()) }
+
+// sshDiagnostics belongs to one connection attempt; stdout remains parseable.
+type sshDiagnostics struct{ warnings []string }
+
+func diagnosticCollector(values []*sshDiagnostics) *sshDiagnostics {
+	if len(values) > 0 && values[0] != nil {
+		return values[0]
+	}
+	return &sshDiagnostics{}
+}
+func (d *sshDiagnostics) String() string { return strings.Join(d.warnings, "\n") }
+func (d *sshDiagnostics) output(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	bounded := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
+	bounded.Stdin, bounded.Env, bounded.Dir = cmd.Stdin, cmd.Env, cmd.Dir
+	var stdout, stderr bytes.Buffer
+	bounded.Stdout = &stdout
+	bounded.Stderr = &stderr
+	err := bounded.Run()
+	detail := strings.TrimSpace(stderr.String())
+	if err != nil {
+		if detail != "" {
+			err = fmt.Errorf("%w: %s", err, detail)
+		}
+		return stdout.Bytes(), err
+	}
+	if detail != "" {
+		d.warnings = append(d.warnings, detail)
+	}
+	return stdout.Bytes(), nil
+}
+func (d *sshDiagnostics) run(args ...string) error {
+	out, err := d.output(command("ssh", args...), startTimeout)
+	if err != nil {
+		return sshFailure(out, err)
+	}
+	return nil
+}
+
+var authRejection = regexp.MustCompile(`(?m)^(?:[^\s:]+: )?Permission denied \((?:publickey|password|keyboard-interactive|gssapi-with-mic|gssapi-keyex|hostbased|none)(?:,(?:publickey|password|keyboard-interactive|gssapi-with-mic|gssapi-keyex|hostbased|none))*\)\.\r?$`)
+
+func authenticationRejected(message string) bool { return authRejection.MatchString(message) }

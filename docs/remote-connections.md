@@ -21,6 +21,16 @@
 
 GUI 多窗口按 focus 决定自动 PTY resize。TUI 也声明焦点；浏览器使用受限 session，不具备恢复、管理或 GUI 自动化权限。Go 桌面/TUI 正常 socket 路径的终端流独立于控制 RPC；浏览器复用 WebSocket。具体背压与已知缺口见 [性能与资源管理](performance.md)。原始 replay 的行预算与单帧 attach 边界见 [终端输出与渲染](terminal-rendering.md)。
 
+## SSH 认证与诊断
+
+GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 OpenSSH 返回认证拒绝时通过私有 askpass helper 请求密码或 keyboard-interactive 输入；网络、主机密钥、配置和部署错误直接展示诊断，不误报为密码问题。密码输入遮蔽，凭据通过当前尝试的私有 Unix socket 传递，不放入命令参数或环境变量。认证支持取消并有超时。后台自动重连以及 GUI 启动前处理的 `--ssh` 保持非交互，不反复弹出认证框。
+
+连接尝试独立收集 SSH stderr，机器可读探测仅解析 stdout；成功命令的 warning 不得丢弃或污染平台、socket 和 descriptor 解析。连接失败保留此前收集的诊断，成功后在新 connection 的远程面板显示 warning。完整错误的换行与滚动交互见 [界面布局与交互](ui-design.md)。
+
+远端部署需要缓存所在文件系统有可写空间；满盘会阻止 payload 部署。此类环境错误必须明确呈现，不能靠密码重试掩盖，也不能自动删除远端用户文件。
+
 ## 验证
+
+SSH 认证和诊断变化须覆盖密钥拒绝后的 GUI 密码输入、取消、非认证错误不触发密码回退、完整长错误滚动，以及成功连接时的 warning；使用独立 config/socket 的 GUI 和拥有明确进程归属的 SSH fixture，保留现有用户实例。机器输出与 stderr 分离另做解析回归。
 
 协议/dispatcher/model/session 改动先运行相关包的单元与 race 检查；远端、焦点和生命周期变化另用真实多窗口/SSH fixture。恢复不能只断言进程重启，必须验证拓扑、目录、选择、失败后 artifact 保留及用户实例未被操作。可复用入口见 [测试策略](testing.md)。

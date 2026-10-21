@@ -150,18 +150,26 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	// terminal attachments are closed before an embedded/detached server stops.
 	defer multi.Close()
 
-	remoteFactory := func(rawDestination string) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), error) {
+	makeRemote := func(rawDestination string, interactive bool) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), error) {
 		destination, err := goremote.ValidateDestination(rawDestination)
 		if err != nil {
 			return goui.ConnectionEntry{}, nil, nil, err
 		}
-		tunnel, err := goremote.Connect(destination)
+		var tunnel *goremote.Tunnel
+		if interactive {
+			tunnel, err = goremote.ConnectInteractive(destination, multi.PromptSSH)
+		} else {
+			tunnel, err = goremote.Connect(destination)
+		}
 		if err != nil {
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("connect remote Water server %s: %w", destination, err)
 		}
 		session, err := tunnel.Client().OpenSession()
 		if err != nil {
 			_ = tunnel.Close()
+			if warnings := tunnel.Warnings(); warnings != "" {
+				err = fmt.Errorf("%w\n\nSSH diagnostics:\n%s", err, warnings)
+			}
 			return goui.ConnectionEntry{}, nil, nil, fmt.Errorf("open remote Water session %s: %w", destination, err)
 		}
 		entry := goui.ConnectionEntry{
@@ -174,13 +182,20 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			Destination:      destination,
 		}
 		view := operations.newView(session, entry)
+		view.ShowSSHWarnings(tunnel.Warnings())
 		closeRemote := func() {
 			_ = session.Close()
 			_ = tunnel.Close()
 		}
 		return entry, view, closeRemote, nil
 	}
+	remoteFactory := func(destination string) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), error) {
+		return makeRemote(destination, false)
+	}
 	multi.SetRemoteConnector(remoteFactory)
+	multi.SetInteractiveRemoteConnector(func(destination string) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), error) {
+		return makeRemote(destination, true)
+	})
 
 	for _, rawDestination := range sshDestinations {
 		entry, view, closeRemote, err := remoteFactory(rawDestination)

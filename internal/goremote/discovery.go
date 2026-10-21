@@ -13,20 +13,22 @@ import (
 	"github.com/google/uuid"
 )
 
-func forwardSocket(destination, control, remote string) (*Tunnel, error) {
+func forwardSocket(destination, control, remote string, collectors ...*sshDiagnostics) (*Tunnel, error) {
+	d := diagnosticCollector(collectors)
 	local := filepath.Join(sshSocketDirectory(), "water-go-forward-"+uuid.NewString()+".sock")
 	spec := local + ":" + remote
-	if err := runSSH("-S", control, "-O", "forward", "-o", "ExitOnForwardFailure=yes", "-L", spec, destination); err != nil {
+	if err := d.run("-S", control, "-O", "forward", "-o", "ExitOnForwardFailure=yes", "-L", spec, destination); err != nil {
 		return nil, err
 	}
 	return &Tunnel{destination: destination, localSocket: local, controlSocket: control, remoteSocket: remote, forwardSpec: spec}, nil
 }
 
-func legacyRemoteSockets(destination, control string) ([]string, error) {
+func legacyRemoteSockets(destination, control string, collectors ...*sshDiagnostics) ([]string, error) {
+	d := diagnosticCollector(collectors)
 	prefix := fmt.Sprintf("/tmp/water-go-%s-p", buildIdentityToken())
 	suffix := fmt.Sprintf("-%016x.sock", stableID(destination))
 	pattern := prefix + "*-*" + suffix
-	out, err := boundedSSHOutput(command("ssh", "-S", control, "-o", "BatchMode=yes", destination, "for s in "+pattern+"; do if test -S \"$s\"; then printf '%s\\n' \"$s\"; fi; done"))
+	out, err := d.output(command("ssh", "-S", control, "-o", "BatchMode=yes", destination, "for s in "+pattern+"; do if test -S \"$s\"; then printf '%s\\n' \"$s\"; fi; done"), startTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("discover existing remote servers: %w", err)
 	}
