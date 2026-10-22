@@ -38,11 +38,11 @@ type Terminal struct {
 	cmd        *exec.Cmd
 	ptmx       *os.File
 	supervised *gosupervisor.Client
-	pid        int
-	program    string
-	// retiring marks a terminal that an explicit replacement is about to close.
-	// Its Exit must not close the pane the replacement is taking over.
-	retiring              atomic.Bool
+	// supervisorKey is the pane id the supervisor holds the PTY under. It survives
+	// server restarts, while ID identifies this terminal instance to clients.
+	supervisorKey         string
+	pid                   int
+	program               string
 	shellIntegrationDir   string
 	cellWidth, cellHeight int        // owned by the ordered PTY reader
 	executeMu             sync.Mutex // one foreground execution per pane
@@ -305,12 +305,6 @@ func (t *Terminal) processID() int {
 	}
 	return 0
 }
-
-// MarkRetiring tells lifecycle observers that this terminal is being replaced.
-func (t *Terminal) MarkRetiring() { t.retiring.Store(true) }
-
-// Retiring reports whether an explicit replacement superseded this terminal.
-func (t *Terminal) Retiring() bool { return t.retiring.Load() }
 
 func (t *Terminal) isExited() bool {
 	t.mu.RLock()

@@ -197,8 +197,13 @@ func (s *Server) serve(conn net.Conn) {
 				_ = reply(kindFailure, failureResponse{Error: err.Error()})
 				continue
 			}
-			resp := s.spawn(req)
+			resp, retired := s.spawn(req)
 			_ = reply(kindSpawned, resp)
+			if retired != nil {
+				// The successor is registered and the client knows it, so the retired
+				// program can be terminated without closing the pane it shared.
+				retired.close()
+			}
 		case kindAttach:
 			var req attachRequest
 			if err := unmarshal(payload, &req); err != nil {
@@ -252,22 +257,24 @@ func (s *Server) serve(conn net.Conn) {
 	}
 }
 
-func (s *Server) spawn(req spawnRequest) spawnedResponse {
+func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 	if req.ID == "" || req.Program == "" {
-		return spawnedResponse{ID: req.ID, Error: "id and program are required"}
+		return spawnedResponse{ID: req.ID, Error: "id and program are required"}, nil
 	}
 	s.mu.Lock()
 	existing := s.terms[req.ID]
 	s.mu.Unlock()
+	replaced := (*terminal)(nil)
 	if existing != nil && req.Replace {
-		// An explicit replacement must not inherit the old program; close it and
-		// spawn a new one under the same id.
-		s.closeTerminal(req.ID)
+		// An explicit replacement must not inherit the old program. Retire it only
+		// after the successor is registered and the reply is on the wire, so the
+		// server can install the new terminal before the old Exit arrives.
+		replaced = existing
 		existing = nil
 	}
 	if existing != nil && !existing.isExited() {
 		// Reuse a live terminal instead of restarting the program.
-		return spawnedResponse{ID: req.ID, PID: existing.pid, Generation: existing.generation, Resumed: true}
+		return spawnedResponse{ID: req.ID, PID: existing.pid, Generation: existing.generation, Resumed: true}, nil
 	}
 
 	cmd := exec.Command(req.Program, req.Args...)
@@ -277,14 +284,14 @@ func (s *Server) spawn(req spawnRequest) spawnedResponse {
 	cmd.Env = append(append([]string{}, req.Env...), "TERM=xterm-256color", "COLORTERM=truecolor")
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: req.Lines, Cols: req.Columns})
 	if err != nil {
-		return spawnedResponse{ID: req.ID, Error: err.Error()}
+		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
 	}
 	pollable, err := makePollablePTY(ptmx)
 	if err != nil {
 		_ = ptmx.Close()
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
 		_ = cmd.Wait()
-		return spawnedResponse{ID: req.ID, Error: err.Error()}
+		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
 	}
 	ptmx = pollable
 	s.mu.Lock()
@@ -306,7 +313,7 @@ func (s *Server) spawn(req spawnRequest) spawnedResponse {
 	s.mu.Unlock()
 	go t.readLoop(s)
 	go t.waitLoop(s)
-	return spawnedResponse{ID: req.ID, PID: t.pid, Generation: t.generation}
+	return spawnedResponse{ID: req.ID, PID: t.pid, Generation: t.generation}, replaced
 }
 
 func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, []byte) {

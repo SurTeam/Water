@@ -37,14 +37,11 @@ func (s *Server) EnableSupervisor() error {
 	return s.UseSupervisor(socket)
 }
 
-// EnableSupervisorFromEnv enables the supervisor when WATER_PTY_SUPERVISOR is
-// "on". Both the standalone server and the server a GUI embeds call this, so a
+// EnableSupervisorFromEnv enables the supervisor unless WATER_PTY_SUPERVISOR is
+// "off". Both the standalone server and the server a GUI embeds call this, so a
 // local restart resumes panes the same way a remote upgrade does.
-//
-// It stays opt-in while one GUI smoke path (OSC window title -> sidebar agent
-// label) is still being brought onto the supervised stream.
 func (s *Server) EnableSupervisorFromEnv() error {
-	if os.Getenv("WATER_PTY_SUPERVISOR") != "on" {
+	if os.Getenv("WATER_PTY_SUPERVISOR") == "off" {
 		return nil
 	}
 	return s.EnableSupervisor()

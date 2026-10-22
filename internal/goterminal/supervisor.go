@@ -64,19 +64,43 @@ func (r *Registry) SupervisorSocket() string {
 // running instead of replacing it. An ordinary spawn always replaces the pane's
 // terminal, even though the supervisor key stays the same.
 func (r *Registry) SpawnSupervisedPane(pane uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
-	// An ordinary spawn replaces the pane's terminal through the supervisor's
-	// Replace flag. Removing the registry entry first would publish the old
-	// program's Exit while the model still points at it, which closes the pane.
+	// The supervisor keeps the PTY under the pane id so a later server can resume
+	// it, but each terminal instance gets its own id. Clients attach by instance
+	// id, so a replacement is visible to them instead of silently reusing a
+	// subscription to the retired stream.
+	if !resume {
+		// Retire the previous instance first: dropping it from the registry makes
+		// its late Exit a no-op instead of a pane close.
+		r.mu.RLock()
+		var previous uuid.UUID
+		for id, candidate := range r.terms {
+			if candidate.supervisorKey == pane.String() {
+				previous = id
+				break
+			}
+		}
+		r.mu.RUnlock()
+		if previous != uuid.Nil {
+			r.Remove(previous)
+		}
+	}
 	return r.SpawnSupervised(pane, program, args, size, cwd, resume)
 }
 
-// SpawnSupervised starts a terminal in the supervisor and mirrors its output into
-// this registry's replay. Resuming an existing id re-attaches instead of
-// restarting the program.
-func (r *Registry) SpawnSupervised(id uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
+// SpawnSupervised starts a terminal in the supervisor under key and mirrors its
+// output into this registry's replay. The returned Terminal has its own instance
+// id; only the supervisor key survives a restart.
+func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
+	keyString := key.String()
 	r.mu.RLock()
 	supervisor := r.supervisor
-	existing := r.terms[id]
+	var existing *Terminal
+	for _, candidate := range r.terms {
+		if candidate.supervisorKey == keyString {
+			existing = candidate
+			break
+		}
+	}
 	r.mu.RUnlock()
 	if supervisor == nil {
 		return nil, false, errors.New("terminal registry has no supervisor")
@@ -88,8 +112,8 @@ func (r *Registry) SpawnSupervised(id uuid.UUID, program string, args []string, 
 		return existing, true, nil
 	}
 	size = size.Normalized()
-	pid, resumed, err := supervisor.client.Spawn(gosupervisor.SpawnSpec{
-		ID:      id,
+	_, resumed, err := supervisor.client.Spawn(gosupervisor.SpawnSpec{
+		ID:      key,
 		Program: program,
 		Args:    args,
 		Cwd:     cwd,
@@ -100,11 +124,12 @@ func (r *Registry) SpawnSupervised(id uuid.UUID, program string, args []string, 
 	if err != nil {
 		return nil, false, err
 	}
-	_ = pid
 
+	id := uuid.New()
 	t := &Terminal{
 		registry:        r,
 		ID:              id,
+		supervisorKey:   keyString,
 		size:            size,
 		scrollbackLines: r.scrollbackLines,
 		subs:            make(map[uint64]*subscriber),
@@ -114,7 +139,7 @@ func (r *Registry) SpawnSupervised(id uuid.UUID, program string, args []string, 
 		supervised:      supervisor.client,
 		program:         program,
 	}
-	attach, events, err := supervisor.client.Attach(id, 0)
+	attach, events, err := supervisor.client.Attach(key, 0)
 	if err != nil {
 		return nil, false, err
 	}
@@ -163,13 +188,22 @@ func (t *Terminal) supervisedLoop(events <-chan gosupervisor.Event, exited bool,
 
 // Write forwards input to the supervisor.
 func (t *Terminal) supervisedWrite(data []byte) error {
-	return t.supervised.Write(t.ID, data)
+	return t.supervised.Write(t.supervisedKeyUUID(), data)
+}
+
+// supervisedKeyUUID is the supervisor's handle for this terminal's PTY.
+func (t *Terminal) supervisedKeyUUID() uuid.UUID {
+	id, err := uuid.Parse(t.supervisorKey)
+	if err != nil {
+		return uuid.Nil
+	}
+	return id
 }
 
 // Resize forwards geometry to the supervisor, which orders it against output.
 func (t *Terminal) supervisedResize(size goprotocol.TerminalSize, cellWidth, cellHeight int) error {
 	size = size.Normalized()
-	if err := t.supervised.Resize(t.ID, uint16(size.Lines), uint16(size.Columns), uint16(cellWidth), uint16(cellHeight)); err != nil {
+	if err := t.supervised.Resize(t.supervisedKeyUUID(), uint16(size.Lines), uint16(size.Columns), uint16(cellWidth), uint16(cellHeight)); err != nil {
 		return err
 	}
 	t.mu.Lock()
@@ -179,5 +213,5 @@ func (t *Terminal) supervisedResize(size goprotocol.TerminalSize, cellWidth, cel
 }
 
 func (t *Terminal) supervisedClose() error {
-	return t.supervised.CloseTerminal(t.ID)
+	return t.supervised.CloseTerminal(t.supervisedKeyUUID())
 }

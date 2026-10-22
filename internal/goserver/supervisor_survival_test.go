@@ -2,6 +2,7 @@ package goserver_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,20 @@ type replayPayload struct {
 		Type  string `json:"type"`
 		Bytes string `json:"bytes"`
 	} `json:"events"`
+}
+
+// readState returns the raw state dump for structural assertions.
+func readState(t *testing.T, socket string) string {
+	t.Helper()
+	var raw map[string]any
+	if err := goclient.New(socket).CallTimeout("state.dump", map[string]any{}, &raw, 3*time.Second); err != nil {
+		t.Fatalf("state.dump: %v", err)
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(encoded)
 }
 
 func waitSocket(t *testing.T, socket string) {
@@ -70,6 +85,37 @@ func waitText(t *testing.T, socket string, id uuid.UUID, want string) string {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return text
+}
+
+// serverTerminal returns the terminal id the model points at for the first pane.
+func serverTerminal(t *testing.T, socket string) uuid.UUID {
+	t.Helper()
+	var state struct {
+		Workspaces []struct {
+			Tabs []struct {
+				ActivePane string `json:"active_pane"`
+				Tree       struct {
+					SurfaceState struct {
+						Terminal struct {
+							TerminalID string `json:"terminal_id"`
+						} `json:"Terminal"`
+					} `json:"surface_state"`
+				} `json:"tree"`
+			} `json:"tabs"`
+		} `json:"workspaces"`
+	}
+	if err := goclient.New(socket).CallTimeout("state.dump", map[string]any{}, &state, 3*time.Second); err != nil {
+		t.Fatalf("state.dump: %v", err)
+	}
+	for _, ws := range state.Workspaces {
+		for _, tab := range ws.Tabs {
+			if id, err := uuid.Parse(tab.Tree.SurfaceState.Terminal.TerminalID); err == nil {
+				return id
+			}
+		}
+	}
+	t.Fatal("no pane terminal in state")
+	return uuid.Nil
 }
 
 // supervisedTerminal returns the only terminal the supervisor owns for this test.
@@ -144,8 +190,9 @@ func TestSupervisedPaneSurvivesServerRestart(t *testing.T) {
 	go func() { done <- first.ListenAndServe() }()
 	waitSocket(t, socket)
 
-	terminal := supervisedTerminal(t, supervisorSocket)
-	pid := supervisorPID(t, supervisorSocket, terminal)
+	key := supervisedTerminal(t, supervisorSocket)
+	terminal := serverTerminal(t, socket)
+	pid := supervisorPID(t, supervisorSocket, key)
 	if pid <= 0 {
 		t.Fatalf("supervisor has no pid for %s", terminal)
 	}
@@ -195,29 +242,32 @@ func TestSupervisedPaneSurvivesServerRestart(t *testing.T) {
 		t.Fatalf("restore recovery: %v", err)
 	}
 
-	resumedPID := supervisorPID(t, supervisorSocket, terminal)
+	resumedPID := supervisorPID(t, supervisorSocket, key)
 	if resumedPID != pid {
 		t.Fatalf("program restarted across upgrade: pid %d -> %d", pid, resumedPID)
 	}
 	// The counter must keep climbing: a restarted shell would emit a low count
 	// again, while the same process continues past where it was.
-	text := waitText(t, socket, terminal, "tick-")
+	// The resumed pane is a new terminal instance; the program behind it is the
+	// same supervisor terminal.
+	resumed := serverTerminal(t, socket)
+	text := waitText(t, socket, resumed, "tick-")
 	if !strings.Contains(text, "tick-") {
 		t.Fatalf("replayed output missing after upgrade: %q", text)
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for strings.Count(text, "tick-") <= beforeTicks && time.Now().Before(deadline) {
 		time.Sleep(100 * time.Millisecond)
-		text = terminalText(t, socket, terminal)
+		text = terminalText(t, socket, resumed)
 	}
 	if got := strings.Count(text, "tick-"); got <= beforeTicks {
 		t.Fatalf("program did not keep running: %d ticks, previously %d", got, beforeTicks)
 	}
 }
 
-// TestReplacingSupervisedTerminalKeepsThePane guards the replacement ordering: a
-// supervised terminal keeps its pane id, so the retired program's Exit arrives
-// while the model already points at the successor and must not close the pane.
+// TestReplacingSupervisedTerminalKeepsThePane guards the replacement ordering: the
+// supervisor keeps the PTY under the pane id, so the retired program's Exit must
+// not close the pane that its successor now owns.
 func TestReplacingSupervisedTerminalKeepsThePane(t *testing.T) {
 	socket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
 	supervisorSocket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
@@ -255,12 +305,27 @@ func TestReplacingSupervisedTerminalKeepsThePane(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replace failed: %v", err)
 	}
-	if got, _ := out["terminal_id"].(string); got != pane {
-		t.Fatalf("terminal id %v, want pane id %s", out["terminal_id"], pane)
+	replacement, _ := out["terminal_id"].(string)
+	if replacement == "" {
+		t.Fatalf("replacement has no terminal id: %v", out)
+	}
+	// The supervisor keeps the PTY under the pane id, but the terminal instance is
+	// new: clients must be able to tell the replacement from the retired stream.
+	if replacement == pane {
+		t.Fatal("replacement reused the retired terminal id")
 	}
 	// The pane must still exist and show the replacement program's output.
-	text := waitText(t, socket, terminal, "REPLACED")
+	id, err := uuid.Parse(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := waitText(t, socket, id, "REPLACED")
 	if !strings.Contains(text, "REPLACED") {
 		t.Fatalf("replacement output missing: %q", text)
+	}
+	// And the pane still points at the replacement, not at a closed pane.
+	state := readState(t, socket)
+	if !strings.Contains(state, replacement) {
+		t.Fatalf("pane does not reference the replacement terminal: %s", state)
 	}
 }

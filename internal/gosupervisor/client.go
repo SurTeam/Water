@@ -330,8 +330,8 @@ func (c *Client) publish(header outputHeader, data []byte) {
 	current := c.generations[key]
 	c.eventsMu.Unlock()
 	if ch == nil || header.generation != current {
-		// A replaced terminal keeps its id; frames from the previous generation
-		// must not leak into the successor's stream.
+		// A replacement reuses the supervisor key, so frames from the retired
+		// generation must not leak into the successor's stream.
 		return
 	}
 	copied := append([]byte(nil), data...)

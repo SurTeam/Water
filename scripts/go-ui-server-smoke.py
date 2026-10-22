@@ -130,15 +130,12 @@ def exercise(test, control, kind):
     restored_tab = next(t for w in after["workspaces"] for t in w["tabs"] if t["id"] == tab)
     assert abs(restored_tab["tree"]["ratio"] - .31) < 1e-9, "ratio lost"
     assert after_ui["frame_focused_pane"] == ui_before["frame_focused_pane"], "window selection changed"
-    # A supervised server keeps the pane's PTY (and the program inside it) across
-    # the restart, so the terminal identity is intentionally stable. Without a
-    # supervisor the restart must produce a new PTY.
+    # Every restart produces a new terminal instance, so clients re-attach instead
+    # of keeping a subscription to the retired stream. What a supervised server
+    # preserves is the program behind the pane, which the shell-variable probe
+    # below verifies.
     restored_terminal = next_terminal(after, pane)
-    supervised = os.environ.get("WATER_PTY_SUPERVISOR") == "on"
-    if supervised:
-        assert restored_terminal == terminal, "supervised PTY identity changed"
-    else:
-        assert restored_terminal != terminal, "old PTY identity reused"
+    assert restored_terminal != terminal, "old terminal instance reused"
     restored_cwd = next_leaf(after, pane)["surface_state"]["Terminal"]["cwd"]
     assert Path(restored_cwd).resolve() == changed.resolve(), "current directory lost"
     assert not json.loads(artifact.read_text())["pending"], "recovery still pending"
@@ -163,11 +160,11 @@ def exercise(test, control, kind):
         return current if "RESTORED_SHELL_READY" in text and (
             str(changed) in text or str(changed.resolve()) in text) else None
     test.save(kind + "-content.json", test.wait(content_ready, "restored GUI shell output"))
-    if supervised:
+    if os.environ.get("WATER_PTY_SUPERVISOR") != "off":
         # The same shell process must still hold the variable exported before the
         # restart; a re-spawned shell would report an empty value.
         control("pane", "input", "--pane", pane, "--text", "printf 'MARK_%s\\n' \"${WATER_SMOKE_MARK:-lost}\"\n")
-        control("terminal", "contains", "--terminal", terminal, "MARK_alive", "--timeout-ms", "3000")
+        control("terminal", "contains", "--terminal", restored_terminal, "MARK_alive", "--timeout-ms", "3000")
     print("PASS " + kind + " server capability/backup/restart/live-CWD; artifacts=" + str(test.directory), flush=True)
 
 def next_leaf(state, pane):

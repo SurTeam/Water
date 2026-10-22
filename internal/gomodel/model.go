@@ -787,25 +787,6 @@ func (m *Model) SetTerminalSize(termID uuid.UUID, size goprotocol.TerminalSize) 
 	}
 }
 
-// AutoCloseExitedTerminalForSession closes the pane only when the model still
-// points at this exact terminal session. A supervised pane keeps its id across a
-// replacement, so the id alone cannot tell the retired worker from its successor.
-func (m *Model) AutoCloseExitedTerminalForSession(termID, sessionID uuid.UUID) bool {
-	m.mu.RLock()
-	current := uuid.Nil
-	for _, pane := range m.panes {
-		if pane.Terminal != nil && pane.Terminal.TerminalID == termID {
-			current = pane.Terminal.SessionID
-			break
-		}
-	}
-	m.mu.RUnlock()
-	if current != uuid.Nil && sessionID != uuid.Nil && current != sessionID {
-		return false
-	}
-	return m.AutoCloseExitedTerminal(termID)
-}
-
 func (m *Model) AutoCloseExitedTerminal(termID uuid.UUID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -736,14 +736,6 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 		args = append([]string(nil), s.Config.Shell.Args...)
 	}
 	oldID, hadOld := s.model.TerminalForPane(paneID)
-	if hadOld {
-		// The replacement takes over the pane, so the retired terminal's Exit must
-		// not auto-close it. A supervised terminal keeps the pane id, which makes
-		// this ordering observable.
-		if old, ok := s.registry.Get(oldID); ok {
-			old.MarkRetiring()
-		}
-	}
 	var t *goterminal.Terminal
 	var err error
 	if s.supervisorSocket != "" {
@@ -834,8 +826,9 @@ func (s *Server) handleTerminalLifecycleEvent(term *goterminal.Terminal, paneID 
 			"columns": ev.Size.Columns, "lines": ev.Size.Lines,
 		})
 	case goprotocol.ExitEvent:
-		if term.Retiring() {
-			// An explicit replacement owns this pane now; keep it open.
+		if _, live := s.registry.Get(terminalID); !live {
+			// A terminal removed from the registry was retired by an explicit
+			// replacement; its Exit must not close the pane that owns the successor.
 			return true
 		}
 		s.model.SetTerminalExit(terminalID, ev.Code)
@@ -852,7 +845,7 @@ func (s *Server) handleTerminalLifecycleEvent(term *goterminal.Terminal, paneID 
 				"pane_id": paneID, "kind": meta.Agent.Kind,
 			})
 		}
-		s.model.AutoCloseExitedTerminalForSession(terminalID, meta.SessionID)
+		s.model.AutoCloseExitedTerminal(terminalID)
 		s.broadcastSnapshot()
 		return true
 	}
