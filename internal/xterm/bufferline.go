@@ -257,6 +257,33 @@ func (bl *BufferLine) setASCIIBytes(index int, data []byte, attrs *AttributeData
 	}
 }
 
+func (bl *BufferLine) setASCIICodepoints(index int, data []uint32, attrs *AttributeData) {
+	bl.revision++
+	if len(data) == 0 || index < 0 || index >= bl.Len {
+		return
+	}
+	if max := bl.Len - index; len(data) > max {
+		data = data[:max]
+	}
+	if bl.combined != nil {
+		for offset := range data {
+			delete(bl.combined, index+offset)
+		}
+	}
+	if bl.extendedAttrs != nil {
+		for offset := range data {
+			delete(bl.extendedAttrs, index+offset)
+		}
+	}
+	fg, bg := attrs.Fg, attrs.Bg
+	for offset, b := range data {
+		si := (index + offset) * cellSize
+		bl.data[si+cellContent] = uint32(b) | (1 << ContentWidthShift)
+		bl.data[si+cellFg] = fg
+		bl.data[si+cellBg] = bg
+	}
+}
+
 // maxCombinedCellBytes bounds one cell's combining string. Scrollback is
 // otherwise counted in lines, so an endless join would retain the whole stream.
 const maxCombinedCellBytes = 256

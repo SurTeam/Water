@@ -30,45 +30,50 @@ func (t *Terminal) ingestOutputLocked(data []byte, size goprotocol.TerminalSize,
 		t.scanHold = nil
 		data = combined
 	}
-	for len(data) > 0 {
-		esc := bytes.IndexByte(data, 0x1b)
+	// Ordinary escapes do not change the replay destination. Classify them
+	// while retaining one contiguous span, instead of appending every text and
+	// escape fragment separately. Only screen switches and scanHold split spans.
+	span, cursor := 0, 0
+	for cursor < len(data) {
+		esc := bytes.IndexByte(data[cursor:], 0x1b)
 		if esc < 0 {
-			t.writeStreamLocked(data, size, seq)
-			return
+			break
 		}
-		if esc > 0 {
-			t.writeStreamLocked(data[:esc], size, seq)
-			data = data[esc:]
-		}
-		n, kind, complete := classifyEscape(data)
+		cursor += esc
+		n, kind, complete := classifyEscape(data[cursor:])
 		if !complete {
-			if len(data) > 64 {
-				t.writeStreamLocked(data[:1], size, seq)
-				data = data[1:]
+			if len(data)-cursor > 64 {
+				// Keep the original oversized-incomplete escape fallback: treat
+				// its ESC byte as raw output and resume scanning after it.
+				cursor++
 				continue
 			}
-			t.scanHold = append([]byte(nil), data...)
+			t.writeStreamLocked(data[span:cursor], size, seq)
+			t.scanHold = append([]byte(nil), data[cursor:]...)
 			return
 		}
-		switch kind {
-		case escapeAltEnter:
-			if !t.altScreen {
-				t.altScreen = true
-				t.writePrimaryLocked(data[:n], size, seq)
-			} else {
-				t.writeAltLocked(data[:n], seq)
+		if kind == escapeAltEnter || kind == escapeAltLeave {
+			t.writeStreamLocked(data[span:cursor], size, seq)
+			switch kind {
+			case escapeAltEnter:
+				if !t.altScreen {
+					t.altScreen = true
+					t.writePrimaryLocked(data[cursor:cursor+n], size, seq)
+				} else {
+					t.writeAltLocked(data[cursor:cursor+n], seq)
+				}
+			case escapeAltLeave:
+				if t.altScreen {
+					t.altReplay = nil
+					t.altScreen = false
+				}
+				t.writePrimaryLocked(data[cursor:cursor+n], size, seq)
 			}
-		case escapeAltLeave:
-			if t.altScreen {
-				t.altReplay = nil
-				t.altScreen = false
-			}
-			t.writePrimaryLocked(data[:n], size, seq)
-		default:
-			t.writeStreamLocked(data[:n], size, seq)
+			span = cursor + n
 		}
-		data = data[n:]
+		cursor += n
 	}
+	t.writeStreamLocked(data[span:], size, seq)
 }
 
 func (t *Terminal) writeStreamLocked(data []byte, size goprotocol.TerminalSize, seq uint64) {

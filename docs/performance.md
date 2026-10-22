@@ -23,11 +23,13 @@ Go 桌面/TUI 客户端的正常 socket 路径将终端 bulk output 放在独立
 
 ## 内存与历史逻辑
 
-字体按需解析并有界缓存，emoji 按字号选择 bitmap strike；可见行和 PTY 读取块复用不得改变历史可访问范围。PTY 使用 128 KiB 读取块，最多缓存两个备用块；暂无数据时使用带期限的就绪等待。
+字体按需解析并有界缓存，emoji 按字号选择 bitmap strike；可见行和 PTY 读取块复用不得改变历史可访问范围。进程内 PTY 与 supervisor 均在 reader 内将内核碎片聚合进 128 KiB 块，最多缓存两个备用块；暂无数据时交给 runtime poller 等待，部分块按 1 ms 空闲 / 5 ms 最大窗口刷出。supervisor 消费端将块复制到 pending 后才归还，发布数据不能引用已复用的读取块。
+
+supervisor 的原始历史使用最大 2 MiB 的环形缓冲，满后仅覆盖新字节对应的区域；attach 时按绝对 offset 复制为独立、有序的 replay。历史快照与订阅登记在同一锁区间建立边界。
 
 GUI Go 堆软预算至少 192 MiB，并给存活数据保留 64 MiB 余量；显式 `GOMEMLIMIT` 优先。server/CLI 不套用 GUI 预算，native/GPU 分配不在其中。
 
-主屏压缩资格判断使用增量片段元数据，escape 裁剪使用单调游标，减少重复扫描原始字节；每次 publish 仍遍历保留事件重算 replay accounting。超限副本不得持有超大输入；原样返回切片可能 alias，其所有权不能被假设为独立。主屏按行保留与单帧传输限制见 [终端输出与渲染](terminal-rendering.md)。
+server replay 扫描 escape 以识别主副屏边界与不完整序列，普通 escape 和相邻文本按连续原始 span 写入，避免逐 escape 重复统计与追加；跨块未完成序列仍保留到下一块或事件屏障。主屏压缩资格判断使用增量片段元数据，escape 裁剪使用单调游标，减少重复扫描原始字节；每次 publish 仍遍历保留事件重算 replay accounting。超限副本不得持有超大输入；原样返回切片可能 alias，其所有权不能被假设为独立。主屏按行保留与单帧传输限制见 [终端输出与渲染](terminal-rendering.md)。
 
 ## 静态审查确认的边界
 

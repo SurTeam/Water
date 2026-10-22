@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -55,13 +56,14 @@ type terminal struct {
 	cmd        *exec.Cmd
 	pid        int
 
-	mu       sync.Mutex
-	history  []byte
-	start    uint64 // absolute offset of history[0]
-	produced uint64 // absolute offset of the next byte
-	exited   bool
-	exitCode int32
-	subs     map[*subscriber]struct{}
+	mu          sync.Mutex
+	history     []byte
+	historyHead int    // physical index of the oldest retained byte
+	start       uint64 // absolute offset of the oldest retained byte
+	produced    uint64 // absolute offset of the next byte
+	exited      bool
+	exitCode    int32
+	subs        map[*subscriber]struct{}
 
 	resize chan resizeRequest
 	closed chan struct{}
@@ -331,10 +333,10 @@ func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, [
 	if truncated {
 		offset = start
 	}
-	replay := append([]byte(nil), t.history[offset-start:]...)
-	t.mu.Unlock()
-
-	t.mu.Lock()
+	if offset > produced {
+		offset = produced
+	}
+	replay := t.copyHistoryLocked(offset)
 	t.subs[sub] = struct{}{}
 	t.mu.Unlock()
 	return attachedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Exited: exited, Code: code}, replay
@@ -440,25 +442,11 @@ func (t *terminal) isExited() bool {
 func (t *terminal) readLoop(s *Server) {
 	raw := make(chan []byte, 64)
 	done := make(chan struct{})
-	go func() {
-		defer close(raw)
-		buffer := make([]byte, readBlock)
-		for {
-			n, err := t.ptmx.Read(buffer)
-			if n > 0 {
-				chunk := make([]byte, n)
-				copy(chunk, buffer[:n])
-				select {
-				case raw <- chunk:
-				case <-done:
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+	defer close(done)
+	// Retain only two spare blocks after a burst. The raw queue owns its
+	// blocks until this loop has copied them into immutable pending output.
+	free := make(chan []byte, 2)
+	go t.rawReadLoop(raw, free, done)
 
 	idle := time.NewTimer(time.Hour)
 	maxAge := time.NewTimer(time.Hour)
@@ -500,6 +488,10 @@ func (t *terminal) readLoop(s *Server) {
 				return
 			}
 			pending = append(pending, chunk...)
+			select {
+			case free <- chunk[:readBlock]:
+			default:
+			}
 			if len(pending) >= readBlock {
 				stop(idle, &idleC)
 				stop(maxAge, &maxC)
@@ -545,6 +537,86 @@ func (t *terminal) readLoop(s *Server) {
 	}
 }
 
+// rawReadLoop drains small kernel fragments into reader-owned blocks before
+// handing them off. Runtime-poller waits yield the thread and a partial block
+// waits at most batchIdle since its last read or batchMaxAge since its first.
+func (t *terminal) rawReadLoop(out chan<- []byte, free <-chan []byte, done <-chan struct{}) {
+	defer close(out)
+	raw, err := t.ptmx.SyscallConn()
+	if err != nil {
+		return
+	}
+	for {
+		var buffer []byte
+		select {
+		case <-done:
+			return
+		case buffer = <-free:
+		default:
+			buffer = make([]byte, readBlock)
+		}
+		buffer = buffer[:readBlock]
+		n := 0
+		var readErr error
+		var started time.Time
+		waiting := false
+		err := raw.Read(func(fd uintptr) bool {
+			for n < len(buffer) {
+				count, callErr := syscall.Read(int(fd), buffer[n:])
+				if count > 0 {
+					n += count
+					if started.IsZero() {
+						started = time.Now()
+					}
+				}
+				if errors.Is(callErr, syscall.EINTR) {
+					continue
+				}
+				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
+					if n == 0 {
+						return false
+					}
+					deadline := time.Now().Add(batchIdle)
+					if maximum := started.Add(batchMaxAge); maximum.Before(deadline) {
+						deadline = maximum
+					}
+					_ = t.ptmx.SetReadDeadline(deadline)
+					waiting = true
+					return false
+				}
+				if callErr != nil {
+					readErr = callErr
+					return true
+				}
+				if count == 0 {
+					readErr = io.EOF
+					return true
+				}
+				if time.Since(started) >= batchMaxAge {
+					return true
+				}
+			}
+			return true
+		})
+		if waiting {
+			_ = t.ptmx.SetReadDeadline(time.Time{})
+		}
+		if n > 0 {
+			select {
+			case out <- buffer[:n]:
+			case <-done:
+				return
+			}
+		}
+		if err != nil || readErr != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			return
+		}
+	}
+}
+
 // announceResize publishes the geometry change in stream order.
 func (t *terminal) announceResize(req resizeRequest) {
 	t.mu.Lock()
@@ -569,12 +641,7 @@ func (t *terminal) publish(data []byte) {
 	t.mu.Lock()
 	offset := t.produced
 	t.produced += uint64(len(data))
-	t.history = append(t.history, data...)
-	if over := len(t.history) - historyLimit; over > 0 {
-		copy(t.history, t.history[over:])
-		t.history = t.history[:len(t.history)-over]
-		t.start += uint64(over)
-	}
+	t.appendHistoryLocked(data)
 	subs := make([]*subscriber, 0, len(t.subs))
 	for sub := range t.subs {
 		subs = append(subs, sub)

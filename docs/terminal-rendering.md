@@ -25,6 +25,8 @@ PTY reader 发布有序事件，waitLoop 等待读取完成后发布 Exit。atta
 
 ## 网格、字形与选择规则
 
+ANSI parser 的普通 ASCII run 批量写入 cells，保留前景/背景、宽字符边界清理、延迟换行与滚动区语义。charset、insert mode、关闭 wraparound、screen-reader 和 extended attrs 使用通用路径；非 ASCII 继续逐字符处理。批量路径须与通用路径对照验证全部保留历史、cell 属性、wrapped 标记与光标状态，不能只比较当前可见文本。
+
 选择端点使用字符格中线和插入边界，正反向一致；Shift 点击保留锚点，双击词选不被松开位置覆盖。宽字符高亮与复制覆盖完整字符，历史裁剪使选区失效时清除，不能复制另一行。
 
 模拟器列宽是布局依据。普通 Unicode 保留字体原点、左右留白与共同基线；emoji/私用图标按专用规则适配，不能将全部双宽字符按墨迹居中。私用图标可借同背景后续空格绘制，但不额外占逻辑列。框线、块、盲文和 sextant 依物理 cell 几何绘制。

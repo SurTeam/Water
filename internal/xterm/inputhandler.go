@@ -503,6 +503,70 @@ func (h *InputHandler) printASCIIBytes(data []byte) {
 	h.dirtyRowTracker.MarkDirty(buf.Y)
 }
 
+func (h *InputHandler) printASCIICodepoints(data []uint32) {
+	if len(data) == 0 {
+		return
+	}
+	buf := h.activeBuffer()
+	cols := h.bufferService.Cols
+	curAttr := &h.curAttrData
+	bufferRow := buf.Lines.Get(buf.YBase + buf.Y)
+	if bufferRow == nil {
+		return
+	}
+
+	h.dirtyRowTracker.MarkDirty(buf.Y)
+	if buf.X > 0 && bufferRow.GetWidth(buf.X-1) == 2 {
+		bufferRow.SetCellFromCodepoint(buf.X-1, 0, 1, curAttr)
+	}
+
+	wrote := false
+	for len(data) > 0 {
+		if buf.X >= cols {
+			buf.X = 0
+			buf.Y++
+			if buf.Y == buf.ScrollBottom+1 {
+				buf.Y--
+				h.bufferService.Scroll(h.eraseAttrData(), true)
+			} else {
+				if buf.Y >= h.bufferService.Rows {
+					buf.Y = h.bufferService.Rows - 1
+				}
+				line := buf.Lines.Get(buf.YBase + buf.Y)
+				if line != nil {
+					line.IsWrapped = true
+				}
+			}
+			bufferRow = buf.Lines.Get(buf.YBase + buf.Y)
+			if bufferRow == nil {
+				break
+			}
+		}
+
+		room := cols - buf.X
+		if room <= 0 {
+			continue
+		}
+		count := len(data)
+		if count > room {
+			count = room
+		}
+		bufferRow.setASCIICodepoints(buf.X, data[:count], curAttr)
+		buf.X += count
+		data = data[count:]
+		wrote = true
+	}
+
+	if wrote {
+		h.parser.precedingJoinState = CreatePropertyValue(0, 1, false)
+	}
+	if bufferRow != nil && buf.X < cols &&
+		bufferRow.GetWidth(buf.X) == 0 && bufferRow.HasContent(buf.X) == 0 {
+		bufferRow.SetCellFromCodepoint(buf.X, 0, 1, curAttr)
+	}
+	h.dirtyRowTracker.MarkDirty(buf.Y)
+}
+
 // ParseString is a convenience method that accepts a string.
 func (h *InputHandler) ParseString(data string) {
 	h.Parse([]byte(data))
@@ -510,6 +574,19 @@ func (h *InputHandler) ParseString(data string) {
 
 // Print handles printable characters — writes them to the buffer.
 func (h *InputHandler) Print(data []uint32, start, end int) {
+	if h.charsetService.Charset == nil && !h.coreService.Modes.InsertMode && h.coreService.DecPrivateModes.Wraparound && !h.optionsService.Options.ScreenReaderMode && h.curAttrData.Extended == nil {
+		ascii := true
+		for _, code := range data[start:end] {
+			if code < 0x20 || code > 0x7e {
+				ascii = false
+				break
+			}
+		}
+		if ascii {
+			h.printASCIICodepoints(data[start:end])
+			return
+		}
+	}
 	var code uint32
 	var chWidth int
 	charset := h.charsetService.Charset
