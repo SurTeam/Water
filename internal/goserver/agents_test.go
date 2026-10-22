@@ -1,6 +1,8 @@
 package goserver_test
 
 import (
+	"fmt"
+	"github.com/SurTeam/Water/internal/gosupervisor"
 	"os"
 	"path/filepath"
 	"testing"
@@ -137,4 +139,102 @@ func TestAgentProfilesThroughDispatcherAndRecognition(t *testing.T) {
 		t.Fatal("missing config silently reset definitions")
 	}
 
+}
+
+func TestSupervisorAgentSamplingConcurrentWithMonitor(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "water-agent-chain-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	supervisor := gosupervisor.NewServer()
+	socket := filepath.Join(dir, "pty.sock")
+	if err := supervisor.Listen(socket); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	cfg := recoveryConfig(t)
+	profile := goagent.Profile{ID: goagent.Kind(uuid.NewString()), Name: "Owned supervisor Agent", Interrupt: "none", Exit: "none", Enabled: true, Priority: 50, Rules: []goagent.Rule{{All: []goagent.Condition{{Field: "executable", Op: "exact", Value: "water-chain-agent"}}}}}
+	cfg.Agents.Put(profile)
+	if _, err := goagent.Compile(cfg.Agents); err != nil {
+		t.Fatal(err)
+	}
+	server, client := recoveryServer(t, cfg, func(s *goserver.Server) {
+		if err := s.UseSupervisor(socket); err != nil {
+			t.Fatal(err)
+		}
+	})
+	program := filepath.Join(dir, "water-chain-agent")
+	if err := os.Symlink("/bin/sleep", program); err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]uuid.UUID, 3)
+	for i := range ids {
+		if err := client.Dispatch(map[string]any{"type": "workspace.new"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		var spawned struct {
+			TerminalID uuid.UUID `json:"terminal_id"`
+		}
+		if err := client.Dispatch(map[string]any{"type": "terminal.spawn", "program": program, "args": []string{"30"}}, &spawned); err != nil {
+			t.Fatal(err)
+		}
+		ids[i] = spawned.TerminalID
+	}
+
+	// Classification traverses supervisor -> sampler -> dispatcher -> model.
+	// Concurrent samples below span multiple background monitor ticks.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		dump := stateDump(t, client)
+		ready := len(dump.Agents) == len(ids)
+		for _, raw := range dump.Agents {
+			agent := raw.(map[string]any)
+			run, ok := agent["run"].(map[string]any)
+			if !ok || run["pid"] == nil || run["started"] == "" || agent["label"] != profile.Name {
+				ready = false
+			}
+		}
+		if ready {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("monitor did not classify owned supervisor Agents: %#v", dump.Agents)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	start := make(chan struct{})
+	failures := make(chan error, len(ids))
+	for _, id := range ids {
+		go func(id uuid.UUID) {
+			<-start
+			ticker := time.NewTicker(20 * time.Millisecond)
+			defer ticker.Stop()
+			for i := 0; i < 40; i++ {
+				<-ticker.C
+				var diagnostic goagent.Diagnostic
+				if err := client.Dispatch(map[string]any{"type": "agents.test", "terminal_id": id}, &diagnostic); err != nil {
+					failures <- err
+					return
+				}
+				if diagnostic.Process.Name != "water-chain-agent" || diagnostic.Selected == nil || diagnostic.Selected.ID != profile.ID {
+					failures <- fmt.Errorf("wrong foreground reply: %#v", diagnostic)
+					return
+				}
+			}
+			failures <- nil
+		}(id)
+	}
+	close(start)
+	for range ids {
+		select {
+		case err := <-failures:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(8 * time.Second):
+			t.Fatal("concurrent supervised sampling stalled")
+		}
+	}
+	t.Logf("isolated supervisor=%s server=%s; 120 concurrent target samples passed with monitor active", socket, server.InstanceID)
 }

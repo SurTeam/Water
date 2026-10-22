@@ -1,6 +1,7 @@
 package gomodel
 
 import (
+	"encoding/json"
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/google/uuid"
 	"testing"
@@ -69,5 +70,42 @@ func TestForegroundMetadataIgnoresExitedTerminalsAndKeepsTitles(t *testing.T) {
 	revision = m.Revision()
 	if m.SetTerminalForeground(terminal, "zsh") || m.SetTerminalForeground(uuid.New(), "zsh") || m.Revision() != revision {
 		t.Fatal("stale/unknown foreground changed model")
+	}
+}
+
+func TestForegroundIdentityUpdatesSameNameAndProjects(t *testing.T) {
+	m := New()
+	workspace := m.CreateWorkspace("identity")
+	_, pane, err := m.CreateTab(workspace, "shell", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := uuid.New()
+	if err := m.InstallTerminal(pane, TerminalMeta{TerminalID: terminal}); err != nil {
+		t.Fatal(err)
+	}
+	for _, process := range []goagent.Process{{Name: "sleep", PID: 42, Started: "first"}, {Name: "sleep", PID: 43, Started: "first"}, {Name: "sleep", PID: 43, Started: "second"}} {
+		revision := m.Revision()
+		if !m.SetTerminalForegroundIdentity(terminal, process, nil) || m.Revision() != revision+1 {
+			t.Fatal("new identity did not update model")
+		}
+		if m.SetTerminalForegroundIdentity(terminal, process, nil) {
+			t.Fatal("identical observation updated model")
+		}
+		var tree struct {
+			Terminal struct {
+				Summary struct {
+					Name    string `json:"process_name"`
+					PID     int    `json:"process_pid"`
+					Started string `json:"process_started"`
+				} `json:"summary"`
+			} `json:"terminal"`
+		}
+		if err := json.Unmarshal(m.Dump().Workspaces[0].Tabs[0].Tree, &tree); err != nil {
+			t.Fatal(err)
+		}
+		if tree.Terminal.Summary.Name != process.Name || tree.Terminal.Summary.PID != process.PID || tree.Terminal.Summary.Started != process.Started {
+			t.Fatalf("identity lost in summary: %+v", tree)
+		}
 	}
 }

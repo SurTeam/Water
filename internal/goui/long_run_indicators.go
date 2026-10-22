@@ -15,7 +15,7 @@ import (
 type longRunKey struct{ connection, terminal uuid.UUID }
 type longRunLocation struct{ connection, workspace, tab uuid.UUID }
 type longRunObservation struct {
-	name      string
+	identity  foregroundIdentity
 	startedAt time.Time
 }
 
@@ -36,6 +36,7 @@ func (w *EbitengineWindow) updateLongRunIndicators(hosts []nativeHost, now time.
 		cfg := host.view.currentConfig().UI
 		for _, command := range foregroundCommands(host.state) {
 			name := command.name
+			identity := command.identity
 			threshold := cfg.ShellLongRunNotificationSeconds
 			if threshold <= 0 {
 				threshold = 300
@@ -48,6 +49,7 @@ func (w *EbitengineWindow) updateLongRunIndicators(hosts []nativeHost, now time.
 				if agent.run != nil {
 					name += fmt.Sprintf(":%d:%s", agent.run.PID, agent.run.Started)
 				}
+				identity = foregroundIdentity{name: name}
 				threshold = cfg.AgentLongRunNotificationSeconds
 				if threshold <= 0 {
 					threshold = 600
@@ -60,8 +62,8 @@ func (w *EbitengineWindow) updateLongRunIndicators(hosts []nativeHost, now time.
 			}
 			key := longRunKey{host.entry.ID, command.terminal}
 			run := w.longRunObservations[key]
-			if run.startedAt.IsZero() || run.name != name {
-				run = longRunObservation{name, now}
+			if run.startedAt.IsZero() || run.identity != identity {
+				run = longRunObservation{identity, now}
 			}
 			next[key] = run
 			if now.Sub(run.startedAt) < time.Duration(threshold)*time.Second {

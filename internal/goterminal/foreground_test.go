@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/SurTeam/Water/internal/goagent"
+	"github.com/google/uuid"
 	"os/exec"
 	"testing"
 	"time"
@@ -83,5 +84,50 @@ func TestForegroundKeepsValidRecordsFromPartialPSFailure(t *testing.T) {
 	}
 	if _, err = parseForegroundOutput(output, queryErr, context.DeadlineExceeded); err == nil {
 		t.Fatal("deadline failure was ignored")
+	}
+}
+
+func TestForegroundProcessSamplesOnlyTarget(t *testing.T) {
+	r := NewRegistry()
+	defer r.CloseAll()
+	target, err := r.Spawn("/bin/sleep", []string{"30"}, goprotocol.TerminalSize{Columns: 80, Lines: 24})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live unrelated terminal with no PTY would panic if queried. It must not
+	// participate in a targeted sample, regardless of map iteration order.
+	unrelated := uuid.New()
+	r.mu.Lock()
+	r.terms[unrelated] = &Terminal{ID: unrelated, closed: make(chan struct{})}
+	r.mu.Unlock()
+	defer func() { r.mu.Lock(); delete(r.terms, unrelated); r.mu.Unlock() }()
+	p, err := r.ForegroundProcess(context.Background(), target.ID)
+	if err != nil || p.PID == 0 {
+		t.Fatalf("target sample: %#v %v", p, err)
+	}
+}
+
+func TestForegroundSamplingDeadlineIncludesGroupQuery(t *testing.T) {
+	term := &Terminal{closed: make(chan struct{})}
+	start := time.Now()
+	_, err := sampleTerminalsWithQuery(context.Background(), []*Terminal{term}, func(_ *Terminal, ctx context.Context) (int, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > time.Second {
+			t.Error("group query has no sampling budget")
+		}
+		<-ctx.Done()
+		return 0, ctx.Err()
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline lost: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("sampling took %s", elapsed)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = sampleTerminalsWithQuery(ctx, nil, func(*Terminal, context.Context) (int, error) { t.Fatal("canceled query ran"); return 0, nil })
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation lost: %v", err)
 	}
 }

@@ -52,12 +52,14 @@ type terminalProjection struct {
 }
 
 type terminalSummary struct {
-	TerminalID  uuid.UUID               `json:"terminal_id"`
-	Size        goprotocol.TerminalSize `json:"size"`
-	Process     json.RawMessage         `json:"process"`
-	ProcessName string                  `json:"process_name"`
-	AgentName   string                  `json:"agent_name,omitempty"`
-	CWD         string                  `json:"cwd"`
+	TerminalID     uuid.UUID               `json:"terminal_id"`
+	Size           goprotocol.TerminalSize `json:"size"`
+	Process        json.RawMessage         `json:"process"`
+	ProcessName    string                  `json:"process_name"`
+	ProcessPID     int                     `json:"process_pid"`
+	ProcessStarted string                  `json:"process_started"`
+	AgentName      string                  `json:"agent_name,omitempty"`
+	CWD            string                  `json:"cwd"`
 }
 
 type terminalAttach struct {

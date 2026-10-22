@@ -15,9 +15,18 @@ import (
 )
 
 func (t *Terminal) ForegroundGroup() (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	return t.ForegroundGroupContext(ctx)
+}
+
+func (t *Terminal) ForegroundGroupContext(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if t.supervised != nil {
 		// The supervisor owns the PTY master, so only it can read TIOCGPGRP.
-		return t.supervised.Foreground(t.supervisedKeyUUID())
+		return t.supervised.ForegroundContext(ctx, t.supervisedKeyUUID())
 	}
 	var group int
 	raw, err := t.ptmx.SyscallConn()
@@ -51,12 +60,18 @@ func (r *Registry) SampleForegroundProcesses(ctx context.Context) (map[uuid.UUID
 	return r.foregroundProcesses(ctx)
 }
 func (r *Registry) ForegroundProcess(ctx context.Context, id uuid.UUID) (goagent.Process, error) {
-	processes, err := r.foregroundProcesses(ctx)
-	if process, ok := processes[id]; ok {
-		return process, nil
+	r.mu.RLock()
+	t := r.terms[id]
+	r.mu.RUnlock()
+	if t == nil {
+		return goagent.Process{}, errors.New("terminal not found")
 	}
+	processes, err := sampleTerminals(ctx, []*Terminal{t})
 	if err != nil {
 		return goagent.Process{}, err
+	}
+	if process, ok := processes[id]; ok {
+		return process, nil
 	}
 	return goagent.Process{}, errors.New("no live foreground process could be sampled for this terminal")
 }
@@ -67,6 +82,18 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 		terms = append(terms, t)
 	}
 	r.mu.RUnlock()
+	return sampleTerminals(ctx, terms)
+}
+func sampleTerminals(ctx context.Context, terms []*Terminal) (map[uuid.UUID]goagent.Process, error) {
+	return sampleTerminalsWithQuery(ctx, terms, (*Terminal).ForegroundGroupContext)
+}
+
+func sampleTerminalsWithQuery(ctx context.Context, terms []*Terminal, query func(*Terminal, context.Context) (int, error)) (map[uuid.UUID]goagent.Process, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("foreground sampling failed: %w", err)
+	}
 	groups := map[uuid.UUID]int{}
 	unique := map[int]bool{}
 	var pids []int
@@ -76,8 +103,11 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 			continue
 		default:
 		}
-		group, err := t.ForegroundGroup()
+		group, err := query(t, ctx)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("foreground group sampling failed: %w", ctx.Err())
+			}
 			continue
 		}
 		groups[t.ID] = group
@@ -87,11 +117,12 @@ func (r *Registry) foregroundProcesses(ctx context.Context) (map[uuid.UUID]goage
 		}
 	}
 	result := map[uuid.UUID]goagent.Process{}
+	if err := ctx.Err(); err != nil {
+		return result, fmt.Errorf("foreground sampling failed: %w", err)
+	}
 	if len(pids) == 0 {
 		return result, nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, time.Second)
-	defer cancel()
 	processes, err := sampleProcessGroups(ctx, pids)
 	if err != nil {
 		return result, err

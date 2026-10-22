@@ -386,3 +386,67 @@ func TestBellNotificationCoalescesPerTerminal(t *testing.T) {
 		t.Fatalf("bell burst emitted %d notifications", len(platform.messages))
 	}
 }
+
+func TestShellRunIdentitySuccessiveCompletionsAndDisconnect(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.ShellLongRunNotificationSeconds = 1
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	defer view.Close()
+	connection, workspace, tab, pane, terminal := uuid.New(), uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	window := &EbitengineWindow{}
+	start := time.Unix(100, 0)
+	messages := []string{}
+	notify := func(s string) bool { messages = append(messages, s); return true }
+	set := func(name string, pid int, started string) {
+		tree, err := json.Marshal(map[string]any{"type": "leaf", "pane_id": pane, "terminal": map[string]any{"summary": map[string]any{"terminal_id": terminal, "process": "running", "process_name": name, "process_pid": pid, "process_started": started}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		view.state.Workspaces = []gomodel.WorkspaceDump{{ID: workspace, Tabs: []gomodel.TabDump{{ID: tab, Tree: tree}}}}
+	}
+	tick := func(seconds int, status string, missing bool) {
+		hosts := []nativeHost{{entry: ConnectionEntry{ID: connection, Status: status}, view: view, state: view.state}}
+		if missing {
+			hosts = nil
+		}
+		now := start.Add(time.Duration(seconds) * time.Second)
+		window.updateLongRunIndicators(hosts, now)
+		window.notificationShellRuns = updateShellLongRunNotifications(window, view, hosts, nil, uuid.Nil, false, now, 1, notify)
+	}
+	set("sleep", 42, "first")
+	tick(0, "connected", false)
+	tick(2, "connected", false)
+	if len(window.longRunTabs) != 1 || len(messages) != 0 {
+		t.Fatal("unchanged command handling")
+	}
+	set("sleep", 43, "second")
+	tick(3, "connected", false)
+	if len(messages) != 1 || len(window.longRunTabs) != 0 {
+		t.Fatalf("same-name PID replacement: messages=%v indicators=%v", messages, window.longRunTabs)
+	}
+	set("sleep", 43, "third")
+	tick(5, "connected", false)
+	if len(messages) != 2 {
+		t.Fatalf("replacement run suppressed: %v", messages)
+	}
+	set("bash", 1, "shell")
+	tick(7, "connected", false)
+	tick(9, "connected", false)
+	tick(11, "connected", false)
+	if len(messages) != 3 || len(window.notificationShellRuns) != 0 {
+		t.Fatalf("completion repeated or retained: %v", messages)
+	}
+	for _, missing := range []bool{false, true} {
+		set("sleep", 44, "disconnect")
+		tick(12, "connected", false)
+		tick(15, "disconnected", missing)
+		if len(messages) != 3 || len(window.notificationShellRuns) != 0 {
+			t.Fatalf("disconnect completed command: %v", messages)
+		}
+	}
+	for _, message := range messages {
+		if message != "Long-running command: sleep" {
+			t.Fatalf("identity leaked into label: %q", message)
+		}
+	}
+}

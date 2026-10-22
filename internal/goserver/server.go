@@ -26,22 +26,23 @@ import (
 )
 
 type Server struct {
-	SocketPath       string
-	Build            string
-	Version          string
-	Revision         string
-	InstanceID       uuid.UUID
-	commandMu        sync.Mutex
-	recovery         *recoveryLease
-	lastRecovery     uuid.UUID
-	Config           goconfig.AppConfig
-	agentRevision    uint64
-	agentConfig      goagent.Config
-	agentRegistry    *goagent.Registry
-	sampleForeground func(context.Context) (map[uuid.UUID]goagent.Process, error)
-	ConfigPath       string
-	web              *webService
-	webActive        atomic.Bool
+	SocketPath              string
+	Build                   string
+	Version                 string
+	Revision                string
+	InstanceID              uuid.UUID
+	commandMu               sync.Mutex
+	recovery                *recoveryLease
+	lastRecovery            uuid.UUID
+	Config                  goconfig.AppConfig
+	agentRevision           uint64
+	agentConfig             goagent.Config
+	agentRegistry           *goagent.Registry
+	sampleForeground        func(context.Context) (map[uuid.UUID]goagent.Process, error)
+	sampleForegroundProcess func(context.Context, uuid.UUID) (goagent.Process, error)
+	ConfigPath              string
+	web                     *webService
+	webActive               atomic.Bool
 
 	registry         *goterminal.Registry
 	supervisorSocket string
@@ -107,6 +108,7 @@ func NewWithConfig(socketPath string, config goconfig.AppConfig) *Server {
 		pendingUI:       make(map[uint64]chan goprotocol.WireMessage),
 	}
 	srv.sampleForeground = srv.registry.SampleForegroundProcesses
+	srv.sampleForegroundProcess = srv.registry.ForegroundProcess
 	srv.agentRevision = 1
 	srv.agentConfig = goagent.Clone(config.Agents)
 	srv.agentRegistry, _ = goagent.Compile(srv.agentConfig)

@@ -1,6 +1,7 @@
 package gosupervisor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -13,11 +14,12 @@ import (
 // Client is one server's connection to the supervisor. A server may drop this
 // connection and reconnect; terminals and their programs keep running.
 type Client struct {
-	conn net.Conn
-	mu   sync.Mutex // serializes frame writes
+	conn      net.Conn
+	writeOnce sync.Once
+	writeGate chan struct{} // serializes waiter registration and frame writes
 
 	pendingMu sync.Mutex
-	pending   [slotCount][]chan any
+	pending   [slotCount][]*pendingReply
 
 	eventsMu    sync.Mutex
 	events      map[string]chan Event
@@ -99,15 +101,113 @@ func (c *Client) shutdown() {
 	})
 }
 
-func (c *Client) send(kind byte, value any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+const requestTimeout = 10 * time.Second
+
+type pendingReply struct {
+	id string
+	ch chan any
+}
+
+// request registers the waiter while holding the same gate as frame writes.
+// Queue order therefore always agrees with wire order, even for immediate replies.
+func (c *Client) request(ctx context.Context, kind byte, value any, slot int, id string) (any, error) {
+	ch, err := c.sendRequest(ctx, kind, value, slot, id)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case value := <-ch:
+		return value, nil
+	case <-ctx.Done():
+		// Keep this FIFO entry as a tombstone: the old protocol has no request IDs,
+		// so removing it would let a late reply satisfy the next request.
+		return nil, ctx.Err()
+	case <-c.closed:
+		return nil, c.connectionError()
+	}
+}
+
+func (c *Client) connectionError() error {
+	c.pendingMu.Lock()
+	defer c.pendingMu.Unlock()
+	if c.failure != nil {
+		return c.failure
+	}
+	return errors.New("supervisor connection closed")
+}
+
+func (c *Client) fail(err error) {
+	c.pendingMu.Lock()
+	if c.failure == nil {
+		c.failure = err
+	}
+	c.pendingMu.Unlock()
+	c.shutdown()
+}
+
+func (c *Client) sendRequest(ctx context.Context, kind byte, value any, slot int, id string) (chan any, error) {
+	c.writeOnce.Do(func() { c.writeGate = make(chan struct{}, 1) })
+	select {
+	case c.writeGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.closed:
+		return nil, c.connectionError()
+	}
+	defer func() { <-c.writeGate }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	select {
 	case <-c.closed:
-		return errors.New("supervisor connection closed")
+		return nil, c.connectionError()
 	default:
 	}
-	return writeJSON(c.conn, kind, value)
+	deadline, _ := ctx.Deadline()
+	if err := c.conn.SetWriteDeadline(deadline); err != nil {
+		c.fail(err)
+		return nil, err
+	}
+	// Interrupt an in-flight write on cancellation. Stop and join the callback
+	// before clearing the deadline, so it cannot affect the next writer.
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = c.conn.SetWriteDeadline(time.Now()); close(interrupted) })
+	var ch chan any
+	if slot >= 0 {
+		ch = make(chan any, 1)
+		c.pendingMu.Lock()
+		c.pending[slot] = append(c.pending[slot], &pendingReply{id: id, ch: ch})
+		c.pendingMu.Unlock()
+	}
+	err := writeJSON(c.conn, kind, value)
+	if !stop() {
+		<-interrupted
+	}
+	_ = c.conn.SetWriteDeadline(time.Time{})
+	if err != nil {
+		// A partial frame makes this stream unusable; closing also releases waiters.
+		c.fail(err)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return nil, context.DeadlineExceeded
+		}
+	}
+	return ch, err
+}
+
+func (c *Client) send(kind byte, value any) error {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	_, err := c.sendRequest(ctx, kind, value, -1, "")
+	return err
+}
+
+func (c *Client) call(kind byte, value any, slot int, id string) (any, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	return c.request(ctx, kind, value, slot, id)
 }
 
 // Spawn creates or resumes a terminal. Resumed is true when a live terminal with
@@ -125,10 +225,8 @@ func (c *Client) Spawn(spec SpawnSpec) (pid int, resumed bool, err error) {
 		CellH:   spec.Cell.Height,
 		Replace: spec.Replace,
 	}
-	if err := c.send(kindSpawn, req); err != nil {
-		return 0, false, err
-	}
-	resp, err := c.awaitSpawn()
+	value, err := c.call(kindSpawn, req, spawnedSlot, req.ID)
+	resp, _ := value.(spawnedResponse)
 	if err != nil {
 		return 0, false, err
 	}
@@ -145,11 +243,8 @@ func (c *Client) Attach(id uuid.UUID, offset uint64) (Attach, <-chan Event, erro
 	c.eventsMu.Lock()
 	c.events[key] = events
 	c.eventsMu.Unlock()
-	if err := c.send(kindAttach, attachRequest{ID: key, Offset: offset}); err != nil {
-		c.dropEvents(key)
-		return Attach{}, nil, err
-	}
-	resp, err := c.awaitAttached()
+	value, err := c.call(kindAttach, attachRequest{ID: key, Offset: offset}, attachedSlot, key)
+	resp, _ := value.(attachedResponse)
 	if err != nil {
 		c.dropEvents(key)
 		return Attach{}, nil, err
@@ -181,18 +276,18 @@ func (c *Client) CloseTerminal(id uuid.UUID) error {
 
 // Foreground reports the PTY's foreground process group for a terminal.
 func (c *Client) Foreground(id uuid.UUID) (int, error) {
-	if err := c.send(kindForeground, terminalRef{ID: id.String()}); err != nil {
-		return 0, err
-	}
-	ch := c.expect(foregroundSlot)
-	value, err := c.await(foregroundSlot, ch)
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	return c.ForegroundContext(ctx, id)
+}
+
+// ForegroundContext bounds both writing the query and waiting for its reply.
+func (c *Client) ForegroundContext(ctx context.Context, id uuid.UUID) (int, error) {
+	value, err := c.request(ctx, kindForeground, terminalRef{ID: id.String()}, foregroundSlot, id.String())
 	if err != nil {
 		return 0, err
 	}
-	resp, ok := value.(foregroundResponse)
-	if !ok {
-		return 0, fmt.Errorf("unexpected supervisor reply %T", value)
-	}
+	resp := value.(foregroundResponse)
 	if resp.Error != "" {
 		return 0, errors.New(resp.Error)
 	}
@@ -201,10 +296,8 @@ func (c *Client) Foreground(id uuid.UUID) (int, error) {
 
 // List reports terminals the supervisor still owns.
 func (c *Client) List() ([]ListedTerminal, error) {
-	if err := c.send(kindList, struct{}{}); err != nil {
-		return nil, err
-	}
-	resp, err := c.awaitListed()
+	value, err := c.call(kindList, struct{}{}, listedSlot, "")
+	resp, _ := value.(listedResponse)
 	if err != nil {
 		return nil, err
 	}
@@ -251,9 +344,9 @@ func (c *Client) readLoop() {
 	for {
 		kind, payload, err := readFrame(c.conn)
 		if err != nil {
-			c.eventsMu.Lock()
+			c.pendingMu.Lock()
 			c.failure = err
-			c.eventsMu.Unlock()
+			c.pendingMu.Unlock()
 			return
 		}
 		switch kind {
@@ -268,13 +361,6 @@ func (c *Client) readLoop() {
 			if err := unmarshal(payload, &resp); err != nil {
 				return
 			}
-			// Record the generation before the replay frames that follow this
-			// reply, otherwise the first replay batch is filtered as stale.
-			c.eventsMu.Lock()
-			if _, ok := c.events[resp.ID]; ok {
-				c.generations[resp.ID] = resp.Generation
-			}
-			c.eventsMu.Unlock()
 			c.deliver(attachedSlot, resp)
 		case kindListed:
 			var resp listedResponse
@@ -378,75 +464,30 @@ func (c *Client) deliver(slot int, value any) {
 		c.pendingMu.Unlock()
 		return
 	}
-	ch := c.pending[slot][0]
+	waiter := c.pending[slot][0]
+	c.pending[slot][0] = nil
 	c.pending[slot] = c.pending[slot][1:]
 	c.pendingMu.Unlock()
-	select {
-	case ch <- value:
-	default:
+	var id string
+	switch resp := value.(type) {
+	case spawnedResponse:
+		id = resp.ID
+	case attachedResponse:
+		id = resp.ID
+	case foregroundResponse:
+		id = resp.ID
 	}
-}
-
-func (c *Client) expect(slot int) chan any {
-	ch := make(chan any, 1)
-	c.pendingMu.Lock()
-	c.pending[slot] = append(c.pending[slot], ch)
-	c.pendingMu.Unlock()
-	return ch
-}
-
-func (c *Client) await(slot int, ch chan any) (any, error) {
-	select {
-	case value := <-ch:
-		return value, nil
-	case <-c.closed:
-		c.pendingMu.Lock()
-		failure := c.failure
-		c.pendingMu.Unlock()
-		if failure == nil {
-			failure = errors.New("supervisor connection closed")
+	if waiter.id != id {
+		c.fail(fmt.Errorf("supervisor reply terminal %q, want %q", id, waiter.id))
+		return
+	}
+	if resp, ok := value.(attachedResponse); ok {
+		// Set the generation before processing the replay frames following this reply.
+		c.eventsMu.Lock()
+		if _, ok := c.events[resp.ID]; ok {
+			c.generations[resp.ID] = resp.Generation
 		}
-		return nil, failure
-	case <-time.After(10 * time.Second):
-		return nil, errors.New("supervisor did not answer")
+		c.eventsMu.Unlock()
 	}
-}
-
-func (c *Client) awaitSpawn() (spawnedResponse, error) {
-	ch := c.expect(spawnedSlot)
-	value, err := c.await(spawnedSlot, ch)
-	if err != nil {
-		return spawnedResponse{}, err
-	}
-	resp, ok := value.(spawnedResponse)
-	if !ok {
-		return spawnedResponse{}, fmt.Errorf("unexpected supervisor reply %T", value)
-	}
-	return resp, nil
-}
-
-func (c *Client) awaitAttached() (attachedResponse, error) {
-	ch := c.expect(attachedSlot)
-	value, err := c.await(attachedSlot, ch)
-	if err != nil {
-		return attachedResponse{}, err
-	}
-	resp, ok := value.(attachedResponse)
-	if !ok {
-		return attachedResponse{}, fmt.Errorf("unexpected supervisor reply %T", value)
-	}
-	return resp, nil
-}
-
-func (c *Client) awaitListed() (listedResponse, error) {
-	ch := c.expect(listedSlot)
-	value, err := c.await(listedSlot, ch)
-	if err != nil {
-		return listedResponse{}, err
-	}
-	resp, ok := value.(listedResponse)
-	if !ok {
-		return listedResponse{}, fmt.Errorf("unexpected supervisor reply %T", value)
-	}
-	return resp, nil
+	waiter.ch <- value
 }

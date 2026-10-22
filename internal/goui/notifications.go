@@ -12,7 +12,14 @@ import (
 	"github.com/google/uuid"
 )
 
+type foregroundIdentity struct {
+	name    string
+	pid     int
+	started string
+}
+
 type notificationRun struct {
+	identity  foregroundIdentity
 	name      string
 	startedAt time.Time
 	notified  bool
@@ -23,6 +30,7 @@ type foregroundCommand struct {
 	pane, terminal uuid.UUID
 	workspace, tab uuid.UUID
 	name           string
+	identity       foregroundIdentity
 }
 
 // Baseline the first snapshot, then report meaningful Agent transitions and
@@ -199,16 +207,15 @@ func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 			currentKeys[key] = true
 			run := w.notificationShellRuns[key]
 			var previous *notificationRun
-			if !run.startedAt.IsZero() && run.name != command.name {
-				// The foreground command name changed: the shell's state
-				// changed. Remember the previous run so we can check whether
-				// it had aged past the threshold before the change.
-				previous = &run
-				run = notificationRun{name: command.name, startedAt: now, pane: command.pane}
+			if !run.startedAt.IsZero() && run.identity != command.identity {
+				// Preserve the completed run before replacing the current record.
+				completed := run
+				previous = &completed
+				run = notificationRun{name: command.name, identity: command.identity, startedAt: now, pane: command.pane}
 			} else if run.startedAt.IsZero() {
 				// First observation of this terminal's foreground command:
 				// establish the baseline; no state change yet.
-				run = notificationRun{name: command.name, startedAt: now, pane: command.pane}
+				run = notificationRun{name: command.name, identity: command.identity, startedAt: now, pane: command.pane}
 			}
 			next[key] = run
 			// Notify only when the shell's foreground state actually changed
@@ -223,10 +230,7 @@ func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 				windowFocused || paneIsFocused(hosts, host.entry.ID, command.pane, activeConnection) {
 				continue
 			}
-			if notify(c.trf("Long-running command: %s", previous.name)) {
-				run.notified = true
-				next[key] = run
-			}
+			notify(c.trf("Long-running command: %s", previous.name))
 		}
 	}
 	// Detect commands that disappeared (exited back to the shell prompt or a
@@ -241,15 +245,10 @@ func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 		}
 		connection, _, _ := strings.Cut(key, ":")
 		connectionID := nativeUUID(connection)
-		if windowFocused || paneIsFocused(hosts, connectionID, run.pane, activeConnection) {
+		if !agentConnectionConnected(hosts, connectionID) || windowFocused || paneIsFocused(hosts, connectionID, run.pane, activeConnection) {
 			continue
 		}
-		if notify(c.trf("Long-running command: %s", run.name)) {
-			// Keep the run with notified=true so we don't re-notify if the
-			// command reappears briefly.
-			run.notified = true
-			next[key] = run
-		}
+		notify(c.trf("Long-running command: %s", run.name))
 	}
 	return next
 }
@@ -308,7 +307,7 @@ func collectForegroundCommands(node *paneTree, commands map[uuid.UUID]foreground
 		}
 		name := strings.TrimSpace(node.Terminal.Summary.ProcessName)
 		if name != "" {
-			commands[node.Terminal.Summary.TerminalID] = foregroundCommand{pane: node.PaneID, terminal: node.Terminal.Summary.TerminalID, name: name}
+			commands[node.Terminal.Summary.TerminalID] = foregroundCommand{pane: node.PaneID, terminal: node.Terminal.Summary.TerminalID, name: name, identity: foregroundIdentity{name, node.Terminal.Summary.ProcessPID, node.Terminal.Summary.ProcessStarted}}
 		}
 		return
 	}

@@ -20,18 +20,20 @@ const (
 )
 
 type TerminalMeta struct {
-	TerminalID  uuid.UUID
-	SessionID   uuid.UUID
-	Program     string
-	Args        []string
-	Size        goprotocol.TerminalSize
-	ProcessName string
-	CWD         string
-	Exited      bool
-	ExitCode    *int32
-	Title       *string
-	Agent       *goagent.DetectedAgent
-	AgentLabel  *string
+	TerminalID     uuid.UUID
+	SessionID      uuid.UUID
+	Program        string
+	Args           []string
+	Size           goprotocol.TerminalSize
+	ProcessName    string
+	ProcessPID     int
+	ProcessStarted string
+	CWD            string
+	Exited         bool
+	ExitCode       *int32
+	Title          *string
+	Agent          *goagent.DetectedAgent
+	AgentLabel     *string
 }
 
 type Pane struct {
@@ -996,27 +998,31 @@ func (m *Model) dumpNodeLocked(n *Node) any {
 				process = map[string]any{"exited": map[string]any{"code": p.Terminal.ExitCode}}
 			}
 			tstate := map[string]any{
-				"terminal_id":  p.Terminal.TerminalID,
-				"session_id":   p.Terminal.SessionID,
-				"program":      p.Terminal.Program,
-				"title":        p.Terminal.Title,
-				"process_name": p.Terminal.ProcessName,
-				"cwd":          p.Terminal.CWD,
-				"args":         p.Terminal.Args,
-				"status":       status,
-				"columns":      p.Terminal.Size.Columns,
-				"lines":        p.Terminal.Size.Lines,
-				"agent":        p.Terminal.Agent,
-				"agent_label":  p.Terminal.AgentLabel,
+				"terminal_id":     p.Terminal.TerminalID,
+				"session_id":      p.Terminal.SessionID,
+				"program":         p.Terminal.Program,
+				"title":           p.Terminal.Title,
+				"process_name":    p.Terminal.ProcessName,
+				"process_pid":     p.Terminal.ProcessPID,
+				"process_started": p.Terminal.ProcessStarted,
+				"cwd":             p.Terminal.CWD,
+				"args":            p.Terminal.Args,
+				"status":          status,
+				"columns":         p.Terminal.Size.Columns,
+				"lines":           p.Terminal.Size.Lines,
+				"agent":           p.Terminal.Agent,
+				"agent_label":     p.Terminal.AgentLabel,
 			}
 			surfaceState = map[string]any{"Terminal": tstate}
 			terminal = map[string]any{"summary": map[string]any{
-				"terminal_id":  p.Terminal.TerminalID,
-				"size":         p.Terminal.Size,
-				"process":      process,
-				"process_name": p.Terminal.ProcessName,
-				"agent_name":   p.Terminal.Agent.DisplayName(),
-				"cwd":          p.Terminal.CWD,
+				"terminal_id":     p.Terminal.TerminalID,
+				"size":            p.Terminal.Size,
+				"process":         process,
+				"process_name":    p.Terminal.ProcessName,
+				"process_pid":     p.Terminal.ProcessPID,
+				"process_started": p.Terminal.ProcessStarted,
+				"agent_name":      p.Terminal.Agent.DisplayName(),
+				"cwd":             p.Terminal.CWD,
 			}}
 		}
 		return map[string]any{

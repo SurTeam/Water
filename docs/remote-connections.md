@@ -55,6 +55,8 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - server 退出时 detach（不杀程序）；仅当 server 拥有 PTY（未启用 supervisor）时才 `CloseAll` 终止进程组。
 - 显式替换 pane 的 terminal 走 supervisor 的 `Replace`：先注册新 terminal 并把回复写到线上，再关闭旧程序，server 因此能在旧 Exit 到达前完成安装。
 - supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
+- 客户端须在发送请求前登记响应等待项，登记顺序与帧写入顺序共用同一个可取消的门；带终端身份的响应还须校验目标，避免后台采样与手动诊断并发时丢失或错配回复。请求写入与等待均受截止时间约束。
+- 当前 supervisor 协议没有请求关联 ID；已发送请求取消后保留 FIFO 占位，迟到响应只消费原请求的位置。不能直接删除等待项而让旧响应满足新请求。永不返回的响应占位保留至连接关闭；协议字段保持兼容已有 supervisor。
 
 性能边界：多一跳 unix socket，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
 
@@ -64,6 +66,6 @@ SSH 认证和诊断变化须覆盖密钥拒绝后的 GUI 密码输入、取消�
 
 远端版本差异须在真实主机上验证：兼容旧版本弹窗并可重启（布局保留）、不可兼容时新实例与旧实例并存且旧实例仍在应答、稍后路径不触发重启。以 `WATER_TEST_INSTANCE`、独立 config/socket 的隔离实例执行，结束后只清理自己创建的进程、socket 与 ControlMaster。
 
-supervisor 改动须覆盖：程序跨 server 重启存活（PID 不变、输出计数继续增长）、从 offset 重放不丢字节、resize/exit 与输出有序、历史有界但保留尾部、并发 spawn 各自拿到自己的回复、慢消费者不阻塞控制流量也不杀死程序。真实升级另需在远端主机上验证。
+supervisor 改动须覆盖：程序跨 server 重启存活（PID 不变、输出计数继续增长）、从 offset 重放不丢字节、resize/exit 与输出有序、历史有界但保留尾部、并发 spawn 各自拿到自己的回复、慢消费者不阻塞控制流量也不杀死程序。即时回复不得丢失，并发前台查询须返回各自终端的结果；取消后迟到回复不得污染后续查询，阻塞写入必须可取消。真实升级另需在远端主机上验证。
 
 协议/dispatcher/model/session 改动先运行相关包的单元与 race 检查；远端、焦点和生命周期变化另用真实多窗口/SSH fixture。恢复不能只断言进程重启，必须验证拓扑、目录、选择、失败后 artifact 保留及用户实例未被操作。可复用入口见 [测试策略](testing.md)。

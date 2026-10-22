@@ -87,10 +87,23 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 
 func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
 	s.commandMu.Lock()
-	defer s.commandMu.Unlock()
 	if s.recovery != nil && time.Now().Before(s.recovery.expires) {
+		s.commandMu.Unlock()
 		return nil, &goprotocol.RPCError{Code: "RECOVERY_IN_PROGRESS", Message: "server restart is being prepared; retry after completion"}
 	}
+	if kind == "agents.test" {
+		sample, err := s.prepareAgentTest(raw)
+		s.commandMu.Unlock()
+		if err != nil {
+			return nil, &goprotocol.RPCError{Code: "AGENT_COMMAND_FAILED", Message: err.Error()}
+		}
+		result, err := sample()
+		if err != nil {
+			return nil, &goprotocol.RPCError{Code: "AGENT_COMMAND_FAILED", Message: err.Error()}
+		}
+		return result, nil
+	}
+	defer s.commandMu.Unlock()
 	return s.executeCommandUnlocked(kind, raw)
 }
 
@@ -100,7 +113,7 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 	}
 
 	switch kind {
-	case "agents.inspect", "agents.configure", "agents.test":
+	case "agents.inspect", "agents.configure":
 		result, err := s.agentCommand(kind, raw)
 		if err != nil {
 			return fail("AGENT_COMMAND_FAILED", err)

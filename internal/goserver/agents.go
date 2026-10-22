@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goconfig"
@@ -11,7 +12,7 @@ import (
 )
 
 func (s *Server) applyForeground(id uuid.UUID, p goagent.Process) bool {
-	return s.model.SetTerminalForegroundAgent(id, p.Name, s.agentRegistry.Detect(p))
+	return s.model.SetTerminalForegroundIdentity(id, p, s.agentRegistry.Detect(p))
 }
 
 func (s *Server) agentCommand(kind string, raw json.RawMessage) (any, error) {
@@ -38,7 +39,9 @@ func (s *Server) agentCommand(kind string, raw json.RawMessage) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		processes, err := s.sampleForeground(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		processes, err := s.sampleForeground(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -54,33 +57,40 @@ func (s *Server) agentCommand(kind string, raw json.RawMessage) (any, error) {
 			s.applyForeground(id, p)
 		}
 		return map[string]any{"config": s.agentConfig, "profiles": goagent.Profiles(s.agentConfig), "revision": s.agentRevision, "instance_id": s.InstanceID}, nil
-	case "agents.test":
-		var c struct {
-			Config     *goagent.Config `json:"config,omitempty"`
-			PaneID     *uuid.UUID      `json:"pane_id,omitempty"`
-			TerminalID *uuid.UUID      `json:"terminal_id,omitempty"`
-		}
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return nil, err
-		}
-		registry := s.agentRegistry
-		if c.Config != nil {
-			var err error
-			registry, err = goagent.Compile(*c.Config)
-			if err != nil {
-				return nil, err
-			}
-		}
-		id, err := s.resolveTerminal(c.TerminalID, c.PaneID)
+	}
+	return nil, errors.New("unknown Agent command")
+}
+
+// prepareAgentTest runs under commandMu; the returned diagnostic only reads
+// the captured registry and samples the resolved terminal outside that lock.
+func (s *Server) prepareAgentTest(raw json.RawMessage) (func() (any, error), error) {
+	var c struct {
+		Config     *goagent.Config `json:"config,omitempty"`
+		PaneID     *uuid.UUID      `json:"pane_id,omitempty"`
+		TerminalID *uuid.UUID      `json:"terminal_id,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, err
+	}
+	registry := s.agentRegistry
+	if c.Config != nil {
+		var err error
+		registry, err = goagent.Compile(*c.Config)
 		if err != nil {
 			return nil, err
 		}
-		p, err := s.registry.ForegroundProcess(context.Background(), id)
+	}
+	id, err := s.resolveTerminal(c.TerminalID, c.PaneID)
+	if err != nil {
+		return nil, err
+	}
+	return func() (any, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		p, err := s.sampleForegroundProcess(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		return registry.Diagnose(p), nil
-
-	}
-	return nil, errors.New("unknown Agent command")
+	}, nil
 }

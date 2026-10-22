@@ -27,7 +27,11 @@ background every 500 ms. Recognition is independent of OSC titles and output
 text. Existing custom pane names and OSC titles retain their normal display
 precedence over the profile's default name. Automatic tab titles use the
 profile name while the real foreground process name remains available for
-recognition and diagnostics.
+recognition and diagnostics. Each sampling pass has a one-second budget covering
+both supervisor foreground-group queries and process metadata reads. Diagnostics
+and **Fill from current pane** sample only the resolved terminal and perform the
+slow query outside the global command lock, so unrelated panes and commands do
+not wait for that diagnostic.
 
 ## Recognition rules
 
@@ -118,7 +122,11 @@ Agent-specific interrupt, exit and force-stop actions are unavailable in the GUI
 
 **Long-run seconds** overrides the Agent notification/indicator threshold;
 `0` inherits the global Agent threshold. **Keep history on clear** selects the
-existing client-side clear-screen policy. Profile color overrides the legacy
+existing client-side clear-screen policy. Shell long-run tracking distinguishes
+runs by command name, PID and start identity; replacing a command with another
+instance of the same name resets its timer. Completing one run does not mark its
+successor as notified, and disconnecting a host is not a command-completion event.
+Profile color overrides the legacy
 Theme Agent color; an empty color inherits that theme preference.
 
 ## CLI and import/export

@@ -18,6 +18,12 @@ func (m *Model) SetTerminalForegroundProcess(id uuid.UUID, name string, args []s
 }
 
 func (m *Model) SetTerminalForegroundAgent(id uuid.UUID, name string, agent *goagent.DetectedAgent) bool {
+	return m.SetTerminalForegroundIdentity(id, goagent.Process{Name: name}, agent)
+}
+
+// SetTerminalForegroundIdentity records the observed run as well as its display name.
+func (m *Model) SetTerminalForegroundIdentity(id uuid.UUID, process goagent.Process, agent *goagent.DetectedAgent) bool {
+	name := process.Name
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, pane := range m.panes {
@@ -26,10 +32,12 @@ func (m *Model) SetTerminalForegroundAgent(id uuid.UUID, name string, agent *goa
 			if sameAgent && agent != nil {
 				agent.Active = term.Agent.Active
 			}
-			if term.ProcessName == name && sameAgent && reflect.DeepEqual(term.Agent, agent) {
+			if term.ProcessName == name && term.ProcessPID == process.PID && term.ProcessStarted == process.Started && sameAgent && reflect.DeepEqual(term.Agent, agent) {
 				return false
 			}
 			term.ProcessName = name
+			term.ProcessPID = process.PID
+			term.ProcessStarted = process.Started
 			term.Agent = agent
 			if !sameAgent {
 				term.AgentLabel = nil
