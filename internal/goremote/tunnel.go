@@ -34,6 +34,16 @@ type Tunnel struct {
 	forwardSpec   string
 	warnings      string
 	diagnostics   *sshDiagnostics
+	sidelined     *SidelinedServer
+}
+
+// SidelinedServer describes a server this build cannot talk to. It stays running
+// on its own endpoint while a compatible server is started beside it.
+type SidelinedServer struct {
+	Socket   string `json:"socket"`
+	Version  string `json:"version,omitempty"`
+	Revision string `json:"revision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 type serverInfo struct {
@@ -102,12 +112,19 @@ func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error
 		forwardSpec:   spec,
 		diagnostics:   diagnostics,
 	}
-	if info, err := t.Client().Inspect(time.Second); err == nil {
-		if info.BuildVariant != gobuild.Variant {
-			_ = t.Close()
-			return nil, errors.New("remote server variant mismatch")
+	info, inspectErr := t.Client().Inspect(time.Second)
+	if inspectErr == nil && info.BuildVariant != gobuild.Variant {
+		_ = t.Close()
+		return nil, errors.New("remote server variant mismatch")
+	}
+	if inspectErr == nil {
+		if goprotocol.Assess(goclient.Descriptor(gobuild.Variant), info.Descriptor).Compatible {
+			return t, nil // OpenSession negotiates capabilities, including diagnostic mode.
 		}
-		return t, nil // OpenSession negotiates capabilities, including diagnostic mode.
+		// The stable endpoint holds a server this build cannot use. Keep it
+		// running untouched and start this build on its own endpoint.
+		_ = t.Close()
+		return connectBeside(destination, control, remote, &info, diagnostics)
 	}
 	if os.Getenv("WATER_REMOTE_CONTROL_SOCKET") == "" {
 		legacy, err := legacyRemoteSockets(destination, control, diagnostics)
@@ -156,6 +173,19 @@ func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error
 		}
 	}
 
+	if os.Getenv("WATER_REMOTE_CONTROL_SOCKET") == "" {
+		occupied, err := remoteSocketOccupied(destination, control, remote, diagnostics)
+		if err != nil {
+			_ = t.Close()
+			return nil, err
+		}
+		if occupied {
+			// Something owns the stable endpoint but cannot be inspected: an
+			// older or foreign build. Leave it alone and run beside it.
+			_ = t.Close()
+			return connectBeside(destination, control, remote, nil, diagnostics)
+		}
+	}
 	if err := startRemoteServer(destination, control, remote, diagnostics); err != nil {
 		_ = t.Close()
 		return nil, err
@@ -172,6 +202,9 @@ func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error
 }
 
 func (t *Tunnel) Warnings() string { return t.warnings }
+
+// Sidelined reports a preserved server this build could not use, if any.
+func (t *Tunnel) Sidelined() *SidelinedServer { return t.sidelined }
 
 func (t *Tunnel) LocalSocket() string  { return t.localSocket }
 func (t *Tunnel) RemoteSocket() string { return t.remoteSocket }
@@ -445,10 +478,20 @@ func (d *sshDiagnostics) output(cmd *exec.Cmd, timeout time.Duration) ([]byte, e
 		}
 		return stdout.Bytes(), err
 	}
-	if detail != "" {
+	if detail = stripControlMasterStatus(detail); detail != "" {
 		d.warnings = append(d.warnings, detail)
 	}
 	return stdout.Bytes(), nil
+}
+
+// OpenSSH's mux client reports control command results on stderr; a successful
+// "-O check" prints "Master running (pid=N)" and exits 0. Such a line describes
+// the requested control operation, not the connection, so it must not surface as
+// an SSH warning. Other stderr from a successful command stays a warning.
+var controlMasterStatus = regexp.MustCompile(`(?m)^Master running \(pid=\d+\)\r?$`)
+
+func stripControlMasterStatus(detail string) string {
+	return strings.TrimSpace(controlMasterStatus.ReplaceAllString(detail, ""))
 }
 func (d *sshDiagnostics) run(args ...string) error {
 	out, err := d.output(command("ssh", args...), startTimeout)

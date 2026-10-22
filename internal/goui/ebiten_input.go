@@ -413,6 +413,10 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 		}
 	case hitHyperlinkConfirm:
 		c.confirmHyperlink()
+	case hitServerRestartConfirm:
+		c.confirmServerRestart()
+	case hitServerRestartCancel:
+		c.dismissServerRestart()
 	case hitHyperlinkCancel:
 		c.hyperlinkMu.Lock()
 		if c.hyperlinkPrompt != nil && !c.hyperlinkPrompt.Working {
@@ -865,6 +869,9 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	v := w.view(c)
 	if c.workspaceClose != nil {
 		return c.handleWorkspaceCloseKey(spec)
+	}
+	if c.serverRestart != nil {
+		return c.handleServerRestartKey(spec)
 	}
 	if ev, ok := automationInputEvent(spec); ok {
 		if pressed, isKey := ev.(key.Event); isKey {

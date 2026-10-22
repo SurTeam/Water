@@ -93,6 +93,17 @@ var chineseText = map[string]string{
 	"HTTP example: http://server-ip:8080. The saved port stays fixed.": "HTTP 示例：http://服务端IP:8080，保存后端口保持固定。",
 	"Web server": "Web 服务", "Start Web": "启动 Web", "Stop Web": "停止 Web", "Web settings": "Web 设置", "Apply Web settings": "应用 Web 设置", "Pair device": "配对设备", "Cancel pairing": "取消配对", "Devices": "设备", "Paired browsers": "已配对浏览器", "No paired browsers": "没有已配对浏览器", "Revoke": "撤销", "Back": "返回", "Capabilities": "能力详情", "Capability · GUI / Server": "能力 · GUI / 服务端", "Expires at %s": "有效期至 %s", "Scan to connect directly to this server.": "扫码后直连此服务端。", "Pairing expired. Create a new invitation.": "配对已过期，请创建新邀请。", "Pairing invitation is no longer active": "配对邀请已使用或失效", "Web settings belong to this server. Stop Web before applying.": "这些设置属于当前服务端，应用前请先停止 Web。", "This server does not support Web access. Upgrade the server to enable it.": "当前服务端不支持 Web 接入，请升级服务端。", "Applies when Web service starts": "启动 Web 服务时生效",
 	"Server": "服务", "Connection: %s": "连接：%s", "Server revision: %s": "服务构建：%s",
+
+	"Remote server is out of date":                                                      "远端服务版本较旧",
+	"Remote Water server %s is older than this GUI %s.":                                 "远端 Water 服务为 %s，比当前 GUI %s 更旧。",
+	"Restart it with the latest server now? Running tasks will end.":                    "现在用最新版本重启该服务？正在运行的任务将结束。",
+	"Stop the old server on the remote host, then reconnect to use the latest version.": "请在远端主机停止旧服务后重新连接，以使用最新版本。",
+	"Restart with latest": "用最新版本重启",
+	"Later":               "稍后",
+
+	"Incompatible server kept running": "不兼容的旧服务已保留运行",
+	"Water server %s is incompatible with this GUI %s. It keeps running at %s; a new server was started beside it with an empty workspace.": "Water 服务 %s 与当前 GUI %s 不兼容。它仍在 %s 运行；已在其旁边启动新的服务，工作区为空。",
+
 	"Capability": "能力", "Provided": "提供", "Required": "需要", "Unknown": "未知",
 	"Refresh": "刷新", "Save layout": "保存布局", "Restart server": "重启服务", "Retry restore": "重试恢复",
 	"Save layout and restart": "保存布局并重启", "Working…": "正在处理…",

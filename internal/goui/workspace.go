@@ -100,6 +100,8 @@ const (
 	hitRenameCancel
 	hitCloseWorkspaceConfirm
 	hitCloseWorkspaceCancel
+	hitServerRestartConfirm
+	hitServerRestartCancel
 )
 
 type automationHit struct {
@@ -185,6 +187,7 @@ type WorkspaceClient struct {
 	settingsStore        *SettingsStore
 	settings             settingsPanel
 	workspaceClose       *workspaceClosePrompt
+	serverRestart        *serverRestartPrompt
 	server               serverPanel
 	recoveryBlocked      bool
 	configPath           string
@@ -276,7 +279,9 @@ func NewWorkspaceClientWithConnection(session *goclient.Session, invalidate func
 	if session != nil {
 		c.server.info = session.Server
 		c.server.compatibility = session.Compatibility
-		if session.Server.ProtocolVersion != 0 && (session.Diagnostic || session.Compatibility.RestartRecommended) {
+		// Remote connections prompt before replacing an outdated server; only
+		// local servers open the Server panel for the same recommendation.
+		if session.Server.ProtocolVersion != 0 && (session.Diagnostic || session.Compatibility.RestartRecommended) && c.remoteDestination == "" {
 			c.openSettingsConfig(c.config)
 			c.settings.group = 5
 			c.settings.focus = -1
@@ -673,6 +678,7 @@ func (c *WorkspaceClient) uiSnapshot() map[string]any {
 		"remote_auth_prompt":          remoteAuthPrompt,
 		"remote_auth_pending":         remoteAuthPending,
 		"remote_diagnostic_scroll":    remoteDiagnosticScroll,
+		"server_restart_prompt":       serverRestartPromptState(c.serverRestart),
 	}
 }
 
@@ -686,6 +692,10 @@ func automationHitKindName(kind automationHitKind) string {
 		return "close_workspace_confirm"
 	case hitCloseWorkspaceCancel:
 		return "close_workspace_cancel"
+	case hitServerRestartConfirm:
+		return "server_restart_confirm"
+	case hitServerRestartCancel:
+		return "server_restart_cancel"
 	case hitNewWorkspace:
 		return "new_workspace"
 	case hitNewTab:
@@ -778,6 +788,9 @@ func (c *WorkspaceClient) dispatchShortcut(spec string) bool {
 	shortcuts := c.currentConfig().Shortcuts
 	if c.workspaceClose != nil {
 		return c.handleWorkspaceCloseKey(spec)
+	}
+	if c.serverRestart != nil {
+		return c.handleServerRestartKey(spec)
 	}
 	if shortcutMatches(pressed, shortcuts.OpenSettings) {
 		if c.settings.visible {

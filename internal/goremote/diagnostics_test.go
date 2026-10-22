@@ -51,6 +51,35 @@ esac
 	}
 }
 
+func TestControlMasterStatusIsNotDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	control := filepath.Join(dir, "master")
+	for _, tt := range []struct {
+		name, stderr, want string
+	}{
+		{"alive check status only", "Master running (pid=4242)\r\n", ""},
+		{"status plus real warning", "Master running (pid=4242)\r\nWarning: known host added\n", "Warning: known host added"},
+		{"real warning only", "Warning: known host added\n", "Warning: known host added"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			script := filepath.Join(dir, "ssh")
+			content := "#!/bin/sh\ncase \"$*\" in *'-O check'*) printf '%s' \"$WATER_CHECK_STDERR\" >&2; exit 0;; esac\nexit 1\n"
+			if err := os.WriteFile(script, []byte(content), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("WATER_SSH_PROGRAM", script)
+			t.Setenv("WATER_CHECK_STDERR", tt.stderr)
+			d := &sshDiagnostics{}
+			if _, err := ensureControlMasterInteractive("host", control, nil, d); err != nil {
+				t.Fatal(err)
+			}
+			if got := d.String(); got != tt.want {
+				t.Fatalf("diagnostics %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestConnectRetainsEarlierWarningsOnFailure(t *testing.T) {
 	script := filepath.Join(t.TempDir(), "ssh")
 	content := "#!/bin/sh\ncase \"$*\" in *'-O check'*) echo 'existing master warning' >&2;exit 0;; *'-O forward'*) echo 'forward denied' >&2;exit 255;; esac\nexit 1\n"

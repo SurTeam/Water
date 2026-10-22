@@ -344,6 +344,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 		w.drawRename(c, dst)
 	}
 	w.drawHyperlink(c, dst)
+	w.drawServerRestart(c, dst)
 	w.drawWorkspaceClose(c, dst)
 	if w.updateVisible {
 		w.drawUpdate(c, dst)

@@ -104,6 +104,12 @@ func (c *WorkspaceClient) serverAction(action string) {
 		return
 	}
 	c.settings.serverConfirm = false
+	c.performServerAction(action)
+}
+
+// performServerAction runs a server operation off the frame loop. Callers own the
+// confirmation decision; the modal restart prompt has already asked the user.
+func (c *WorkspaceClient) performServerAction(action string) {
 	c.server.mu.Lock()
 	if c.server.busy {
 		c.server.mu.Unlock()

@@ -183,6 +183,14 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 		}
 		view := operations.newView(session, entry)
 		view.ShowSSHWarnings(tunnel.Warnings())
+		// A remote server outlives this GUI, so an outdated one must be offered a
+		// restart with the bundled build instead of being reused silently.
+		if sidelined := tunnel.Sidelined(); sidelined != nil {
+			// An incompatible server keeps its endpoint; this build runs beside it.
+			view.ShowSidelinedServer(sidelined.Socket, sidelined.Version, gobuild.Version)
+		} else {
+			view.PromptServerRestartIfOutdated()
+		}
 		closeRemote := func() {
 			_ = session.Close()
 			_ = tunnel.Close()
