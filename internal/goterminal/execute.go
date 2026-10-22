@@ -69,7 +69,7 @@ func (t *Terminal) Execute(ctx context.Context, opts ExecuteOptions) (ExecuteRes
 	if !t.interactivePOSIXShell() {
 		return result, errors.New("execution requires an interactive POSIX shell (sh, bash, dash, ksh, or zsh)")
 	}
-	shellPID := t.cmd.Process.Pid
+	shellPID := t.processID()
 	if fg, err := t.ForegroundGroup(); err != nil || fg != shellPID {
 		return result, errors.New("terminal shell is not idle in the foreground")
 	}
@@ -371,10 +371,14 @@ func (t *Terminal) Execute(ctx context.Context, opts ExecuteOptions) (ExecuteRes
 }
 
 func (t *Terminal) interactivePOSIXShell() bool {
-	if t.cmd == nil || t.cmd.Process == nil {
+	program := t.program
+	if program == "" && t.cmd != nil {
+		program = t.cmd.Path
+	}
+	if program == "" || t.processID() <= 0 {
 		return false
 	}
-	switch filepath.Base(t.cmd.Path) {
+	switch filepath.Base(program) {
 	case "sh", "bash", "dash", "ksh", "zsh":
 	default:
 		return false
@@ -472,6 +476,11 @@ func (p *executeMarkerParser) flush() {
 // PTYs are made nonblocking and registered with the runtime poller at spawn.
 // A write deadline bounds queue pressure without spawning an uncancellable writer.
 func (t *Terminal) executeWrite(data []byte) error {
+	if t.ptmx == nil {
+		// Supervised terminals write through the supervisor; its socket is not
+		// pollable here, so bound the call with the request timeout instead.
+		return t.Write(data)
+	}
 	if err := t.ptmx.SetWriteDeadline(time.Now().Add(200 * time.Millisecond)); err != nil {
 		return err
 	}

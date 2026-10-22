@@ -16,14 +16,19 @@ import (
 // CurrentDirectory is queried on the server command worker when creating a
 // terminal, never on the GUI thread. Prefer the foreground job, then its shell.
 func (t *Terminal) CurrentDirectory() string {
-	pid := t.cmd.Process.Pid
+	pid := t.processID()
+	if pid <= 0 {
+		return ""
+	}
 	foreground := pid
-	if raw, err := t.ptmx.SyscallConn(); err == nil {
-		_ = raw.Control(func(fd uintptr) {
-			if group, err := unix.IoctlGetInt(int(fd), unix.TIOCGPGRP); err == nil && group > 0 {
-				foreground = group
-			}
-		})
+	if t.ptmx != nil {
+		if raw, err := t.ptmx.SyscallConn(); err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				if group, err := unix.IoctlGetInt(int(fd), unix.TIOCGPGRP); err == nil && group > 0 {
+					foreground = group
+				}
+			})
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

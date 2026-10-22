@@ -12,6 +12,7 @@ import (
 
 	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/goprotocol"
+	"github.com/SurTeam/Water/internal/gosupervisor"
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
@@ -36,6 +37,9 @@ type Terminal struct {
 
 	cmd                   *exec.Cmd
 	ptmx                  *os.File
+	supervised            *gosupervisor.Client
+	pid                   int
+	program               string
 	shellIntegrationDir   string
 	cellWidth, cellHeight int        // owned by the ordered PTY reader
 	executeMu             sync.Mutex // one foreground execution per pane
@@ -76,6 +80,7 @@ type exitedTerminal struct {
 type Registry struct {
 	mu              sync.RWMutex
 	terms           map[uuid.UUID]*Terminal
+	supervisor      *Supervisor
 	scrollbackLines int
 	exited          map[uuid.UUID]exitedTerminal
 	exitOrder       []uuid.UUID
@@ -145,6 +150,8 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		ID:                  uuid.New(),
 		cmd:                 cmd,
 		ptmx:                ptmx,
+		pid:                 cmd.Process.Pid,
+		program:             program,
 		size:                size,
 		scrollbackLines:     r.scrollbackLines,
 		subs:                make(map[uint64]*subscriber),
@@ -272,6 +279,28 @@ func (r *Registry) RetainedReplayBytes() int {
 	return total
 }
 
+// processID is the pane's process, owned locally or by the supervisor.
+func (t *Terminal) processID() int {
+	if t.pid > 0 {
+		return t.pid
+	}
+	if t.cmd != nil && t.cmd.Process != nil {
+		return t.cmd.Process.Pid
+	}
+	return 0
+}
+
+func (t *Terminal) isExited() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	for _, ev := range t.replay {
+		if ev.Kind == goprotocol.ExitEvent {
+			return true
+		}
+	}
+	return false
+}
+
 func (t *Terminal) Size() goprotocol.TerminalSize {
 	t.mu.RLock()
 	s := t.size
@@ -280,6 +309,9 @@ func (t *Terminal) Size() goprotocol.TerminalSize {
 }
 
 func (t *Terminal) Write(data []byte) error {
+	if t.supervised != nil {
+		return t.supervisedWrite(data)
+	}
 	_, err := t.ptmx.Write(data)
 	return err
 }
@@ -300,6 +332,9 @@ func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
 }
 
 func (t *Terminal) ResizeWithCells(size goprotocol.TerminalSize, cellWidth, cellHeight int) error {
+	if t.supervised != nil {
+		return t.supervisedResize(size, cellWidth, cellHeight)
+	}
 	req := resizeRequest{size: size.Normalized(), cellWidth: cellWidth, cellHeight: cellHeight, done: make(chan error, 1)}
 	select {
 	case t.resizeRequests <- req:
@@ -377,6 +412,14 @@ func (t *Terminal) Subscribe() (<-chan goprotocol.TerminalEvent, <-chan struct{}
 }
 
 func (t *Terminal) Close() error {
+	if t.supervised != nil {
+		var err error
+		t.once.Do(func() {
+			close(t.closed)
+			err = t.supervisedClose()
+		})
+		return err
+	}
 	var err error
 	t.once.Do(func() {
 		close(t.closed)

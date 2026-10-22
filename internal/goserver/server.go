@@ -43,11 +43,12 @@ type Server struct {
 	web              *webService
 	webActive        atomic.Bool
 
-	registry *goterminal.Registry
-	model    *gomodel.Model
-	listener net.Listener
-	closing  chan struct{}
-	once     sync.Once
+	registry         *goterminal.Registry
+	supervisorSocket string
+	model            *gomodel.Model
+	listener         net.Listener
+	closing          chan struct{}
+	once             sync.Once
 
 	opsMu   sync.RWMutex
 	ops     map[uuid.UUID]OperationSnapshot
@@ -174,7 +175,13 @@ func (s *Server) Close() error {
 	s.once.Do(func() {
 		close(s.closing)
 		s.web.stop()
-		s.registry.CloseAll()
+		if s.supervisorSocket != "" {
+			// Supervised programs belong to the supervisor, not this server:
+			// detaching keeps panes alive for the next server instance.
+			s.detachSupervisor()
+		} else {
+			s.registry.CloseAll()
+		}
 		if s.listener != nil {
 			err = s.listener.Close()
 		}

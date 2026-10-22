@@ -128,7 +128,14 @@ def exercise(test, control, kind):
     restored_tab = next(t for w in after["workspaces"] for t in w["tabs"] if t["id"] == tab)
     assert abs(restored_tab["tree"]["ratio"] - .31) < 1e-9, "ratio lost"
     assert after_ui["frame_focused_pane"] == ui_before["frame_focused_pane"], "window selection changed"
-    assert next_terminal(after, pane) != terminal, "old PTY identity reused"
+    # A supervised server keeps the pane's PTY (and the program inside it) across
+    # the restart, so the terminal identity is intentionally stable. Without a
+    # supervisor the restart must produce a new PTY.
+    restored_terminal = next_terminal(after, pane)
+    if os.environ.get("WATER_PTY_SUPERVISOR") == "on":
+        assert restored_terminal == terminal, "supervised PTY identity changed"
+    else:
+        assert restored_terminal != terminal, "old PTY identity reused"
     restored_cwd = next_leaf(after, pane)["surface_state"]["Terminal"]["cwd"]
     assert Path(restored_cwd).resolve() == changed.resolve(), "current directory lost"
     assert not json.loads(artifact.read_text())["pending"], "recovery still pending"

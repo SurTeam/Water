@@ -170,10 +170,19 @@ func (s *Server) restoreLayout(d gomodel.RecoveryLayout) error {
 		}
 		program := s.Config.Shell.Program
 		args := append([]string(nil), s.Config.Shell.Args...)
-		t, err := s.registry.SpawnWithDir(program, args, n.Size, n.CWD)
-		if err != nil {
-			return fmt.Errorf("restore pane %s: %w", pane.ID, err)
+		var terminal *goterminal.Terminal
+		var spawnErr error
+		if s.supervisorSocket != "" {
+			// A supervised pane may still be running from the previous server:
+			// resume it instead of restarting the program inside it.
+			terminal, _, spawnErr = s.registry.SpawnSupervisedPane(pane.ID, program, args, n.Size, n.CWD, true)
+		} else {
+			terminal, spawnErr = s.registry.SpawnWithDir(program, args, n.Size, n.CWD)
 		}
+		if spawnErr != nil {
+			return fmt.Errorf("restore pane %s: %w", pane.ID, spawnErr)
+		}
+		t := terminal
 		meta := gomodel.TerminalMeta{TerminalID: t.ID, SessionID: uuid.New(), Program: program, Args: args, Size: t.Size(), ProcessName: strings.TrimLeft(filepath.Base(program), "-"), CWD: n.CWD, AgentLabel: n.AgentLabel}
 		terms = append(terms, spawned{t, pane.ID, meta})
 		if err := prepared.InstallTerminal(pane.ID, meta); err != nil {

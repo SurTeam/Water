@@ -5,7 +5,7 @@
 ## 必须保持的边界
 
 - 外部模型修改必须走 command → dispatcher → model。UI、`water ctl`、scenario 和远端控制通过 transport/channel 调用，不能直接改模型或引入全局共享模型。
-- 服务端拥有模型、PTY 元数据和按保留策略管理的原始 replay；客户端拥有模拟、选择、滚动与预览。禁止恢复逐屏服务端快照。终端流契约见 [终端管线](terminal-rendering.md)。
+- 服务端拥有模型、PTY 元数据和按保留策略管理的原始 replay；PTY 本身与其中的程序由 supervisor 持有，服务端只是它的客户端（见下文 PTY 所有权）。客户端拥有模拟、选择、滚动与预览。禁止恢复逐屏服务端快照。终端流契约见 [终端管线](terminal-rendering.md)。
 - 实体、connection、operation 使用 typed ID 与完整 UUIDv4；JSON/CLI 使用 UUID 字符串，二进制保留全部 16 字节。禁止集合下标、计数器、截断和浮点身份。命令路由到目标对象所属 connection。
 - 协议版本、API signature、能力与构建 revision 以 `internal/goprotocol`、`internal/gobuild` 为准。产品版本不是兼容性判断条件。不兼容时保留诊断入口并阻止普通操作。
 - 每个窗口独立保留 workspace/tab/pane 选择。共享快照不得覆盖其他窗口选择；仅焦点 session 自动修改共享 PTY 网格。获得焦点时重新提交当前几何，客户端像素度量不能因未聚焦而停止更新。
@@ -40,10 +40,26 @@ GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 Open
 
 远端部署需要缓存所在文件系统有可写空间；满盘会阻止 payload 部署。此类环境错误必须明确呈现，不能靠密码重试掩盖，也不能自动删除远端用户文件。
 
+## PTY 所有权与升级不断行
+
+PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervisor`），server 通过 unix socket 成为它的客户端。升级、重启或崩溃只影响 server，程序继续运行；新 server 按 pane id 重新 attach，并用 supervisor 保留的输出历史重建 replay。
+
+- supervisor 与 server 同一二进制，`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server；`WATER_PTY_SUPERVISOR=off` 时退回进程内模式。
+- terminal 在 supervisor 中以 pane id 为键。普通 spawn 总是替换该 pane 的 terminal；只有 recovery 导入时传 `resume`，才会接回上一个 server 留下的程序。
+- supervisor 按终端保留有界原始输出（上限 2 MiB，超出后保留最近的尾部）；重新 attach 时从指定 offset 继续，截断时明确标记，server 用自己的 replay 逻辑重建，不使用逐屏快照。
+- 输出在 supervisor 内按 1 ms 空闲 / 5 ms 最大窗口合并后再转发，避免把每次 read 变成一个事件。
+- resize 由 supervisor 的读循环串行处理：先 flush 已观察输出，再应用几何并发布 resize 事件，保证 server 不会先看到新几何。
+- 每个连接一个写协程串行化所有帧（控制回复与终端输出共用 socket，不串行会交叉破坏帧）；订阅者队列满时只丢弃该订阅，不阻塞 PTY 读循环，也不关闭承载控制流量的连接。
+- server 退出时 detach（不杀程序）；仅当 server 拥有 PTY（未启用 supervisor）时才 `CloseAll` 终止进程组。
+
+性能边界：多一跳 unix socket，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
+
 ## 验证
 
 SSH 认证和诊断变化须覆盖密钥拒绝后的 GUI 密码输入、取消、非认证错误不触发密码回退、完整长错误滚动，以及成功连接时的 warning；使用独立 config/socket 的 GUI 和拥有明确进程归属的 SSH fixture，保留现有用户实例。机器输出与 stderr 分离另做解析回归。
 
 远端版本差异须在真实主机上验证：兼容旧版本弹窗并可重启（布局保留）、不可兼容时新实例与旧实例并存且旧实例仍在应答、稍后路径不触发重启。以 `WATER_TEST_INSTANCE`、独立 config/socket 的隔离实例执行，结束后只清理自己创建的进程、socket 与 ControlMaster。
+
+supervisor 改动须覆盖：程序跨 server 重启存活（PID 不变、输出计数继续增长）、从 offset 重放不丢字节、resize/exit 与输出有序、历史有界但保留尾部、并发 spawn 各自拿到自己的回复、慢消费者不阻塞控制流量也不杀死程序。真实升级另需在远端主机上验证。
 
 协议/dispatcher/model/session 改动先运行相关包的单元与 race 检查；远端、焦点和生命周期变化另用真实多窗口/SSH fixture。恢复不能只断言进程重启，必须验证拓扑、目录、选择、失败后 artifact 保留及用户实例未被操作。可复用入口见 [测试策略](testing.md)。

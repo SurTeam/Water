@@ -736,7 +736,15 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 		args = append([]string(nil), s.Config.Shell.Args...)
 	}
 	oldID, hadOld := s.model.TerminalForPane(paneID)
-	t, err := s.registry.SpawnWithDir(program, args, size, cwd)
+	var t *goterminal.Terminal
+	var err error
+	if s.supervisorSocket != "" {
+		// The supervisor keys terminals by pane id, so a server restarted after an
+		// upgrade resumes the program instead of starting a new shell.
+		t, _, err = s.registry.SpawnSupervisedPane(paneID, program, args, size, cwd, false)
+	} else {
+		t, err = s.registry.SpawnWithDir(program, args, size, cwd)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -754,8 +762,9 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 
 	// Replace transaction order matters: once the model points at the new
 	// terminal, an Exit from the retired worker can no longer auto-close this
-	// pane out from under the replacement.
-	if hadOld {
+	// pane out from under the replacement. A supervised terminal is keyed by pane
+	// id, so a resumed terminal is the same object and must not be removed.
+	if hadOld && oldID != t.ID {
 		s.registry.Remove(oldID)
 	}
 

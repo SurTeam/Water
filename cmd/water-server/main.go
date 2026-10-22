@@ -14,6 +14,7 @@ import (
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goserver"
+	"github.com/SurTeam/Water/internal/gosupervisor"
 )
 
 var (
@@ -30,6 +31,7 @@ func main() {
 	var printVariant bool
 	var printVersion bool
 	var printServerInfo bool
+	var ptySupervisor bool
 
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flags.StringVar(&socket, "socket", "", "Unix control socket (compatibility alias)")
@@ -43,6 +45,7 @@ func main() {
 	flags.BoolVar(&printVersion, "version", false, "print version and exit")
 	flags.BoolVar(&printServerInfo, "server-info", false, "print server compatibility descriptor and exit")
 	flags.BoolVar(&printVersion, "V", false, "print version and exit")
+	flags.BoolVar(&ptySupervisor, "pty-supervisor", false, "own PTYs for a Water server (internal)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "water-server [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [--daemonize]")
 		flags.PrintDefaults()
@@ -72,6 +75,21 @@ func main() {
 		return
 	}
 
+	if ptySupervisor {
+		// Internal role: hold PTYs so a restarted server can resume programs.
+		supervisor := gosupervisor.NewServer()
+		defer func() { _ = supervisor.Close() }()
+		sig := make(chan os.Signal, 2)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		go func() { <-sig; _ = supervisor.Close() }()
+		if err := supervisor.Listen(socket); err != nil {
+			fmt.Fprintln(os.Stderr, "water-server: pty supervisor:", err)
+			os.Exit(1)
+		}
+		<-make(chan struct{})
+		return
+	}
+
 	cfg, err := goconfig.Load(configPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "water-server: config:", err)
@@ -83,6 +101,16 @@ func main() {
 
 	srv := goserver.NewWithConfig(socket, cfg)
 	srv.ConfigPath = configPath
+	// Own panes through a PTY supervisor so a later server instance can resume the
+	// programs instead of restarting them. Failure to start it is reported but
+	// must not prevent the server from serving terminals itself.
+	// Opt-in until the local GUI restart path resumes panes the same way the
+	// remote upgrade path does; enabling it changes pane identity semantics.
+	if os.Getenv("WATER_PTY_SUPERVISOR") == "on" {
+		if err := srv.EnableSupervisor(); err != nil {
+			fmt.Fprintln(os.Stderr, "water-server: pty supervisor unavailable, terminals run in-process:", err)
+		}
+	}
 	srv.Build = buildVariant
 	srv.Version = serverVersion
 	if err := srv.Initialize(initialWorkspace, initialTerminal); err != nil {
