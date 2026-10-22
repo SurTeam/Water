@@ -615,6 +615,44 @@ func runPane(ctx cliContext, args []string) error {
 			return errors.New("pane input requires --text")
 		}
 		return dispatchAndPrint(ctx, map[string]any{"type": "terminal.send_text", "pane_id": pid, "text": text})
+	case "execute":
+		pid, err := requiredIDOrBare(args, "--pane", 1)
+		if err != nil {
+			return err
+		}
+		command, ok := option(args, "--command")
+		if !ok || command == "" {
+			return errors.New("pane execute requires --command")
+		}
+		timeout, err := optionIntDefault(args, "--timeout-ms", 30000)
+		if err != nil {
+			return err
+		}
+		if timeout < 1 || timeout > 600000 {
+			return errors.New("timeout-ms must be between 1 and 600000")
+		}
+		rows, err := optionIntDefault(args, "--max-rows", 256)
+		if err != nil {
+			return err
+		}
+		bytes, err := optionIntDefault(args, "--max-bytes", 1048576)
+		if err != nil {
+			return err
+		}
+		var result map[string]any
+		if err := ctx.client.CallTimeout("pane.execute", map[string]any{
+			"pane_id": pid, "command": command, "timeout_ms": timeout,
+			"max_rows": rows, "max_bytes": bytes,
+		}, &result, time.Duration(timeout)*time.Millisecond+5*time.Second); err != nil {
+			return err
+		}
+		if err := printJSON(result); err != nil {
+			return err
+		}
+		if result["status"] == "failed" {
+			return fmt.Errorf("pane execute failed: %v", result["error"])
+		}
+		return nil
 	case "content":
 		return printPaneContent(ctx, args)
 	default:
@@ -1275,6 +1313,14 @@ Workspace/tab/pane:
   water ctl pane resize --ratio 0.6
   water ctl pane promote-to-tab
   water ctl pane content --pane UUID --row 0 --rows 4
+  water ctl pane execute --pane UUID --command 'printf "hello\\n"' --timeout-ms 30000
+    Returns rendered terminal text, exit_code, timed_out, signals, truncated and alt_screen.
+    Requires an idle POSIX shell and an empty input line. Runs in a child shell;
+    cd/variables do not persist. Timeout sends TERM then KILL after 250 ms.
+    The wrapper stays alive through that grace period to clean up descendants;
+    KILL in the response does not imply that the command itself ignored TERM.
+    Detached/background jobs are not guaranteed to stop. Redraw/resize/history
+    limits may truncate the screen range; output is bounded to 256 rows / 1 MiB.
 
 Terminal:
   water ctl terminal spawn --program /bin/sh --columns 80 --lines 24

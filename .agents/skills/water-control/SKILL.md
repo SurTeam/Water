@@ -118,7 +118,7 @@ Remote mechanics (needed for debugging):
   connection. Save layout and explicit confirmed restart use live directory
   export and a persisted recovery artifact. Restart ends running jobs and
   recreates shells; legacy servers without recovery support are not stopped
-  automatically. See 'docs/server-compatibility.md'.
+  automatically. See 'docs/server-recovery.md'.
 - Override knobs: 'WATER_REMOTE_CONTROL_SOCKET' (remote socket path),
   'WATER_SSH_PROGRAM', 'WATER_SSH_CONFIG' (ssh -F config file).
 
@@ -176,7 +176,43 @@ actual rendering. Use the object's owning connection socket for remote panes.
 Do not drag-select/copy or use OCR merely to read content. Reserve those paths
 for selection/clipboard tests and restore their side effects. Reusable owned
 GUI fixtures are in 'scripts/water_test.py'; regression profiles and evidence
-rules are documented in 'docs/testing-strategy.md'.
+rules are documented in 'docs/testing.md'.
+
+## Execute a command and collect its screen output
+
+Prefer this interface for a complete command on an idle shell. Discover the pane
+and inspect its content first. Require an empty input line and an idle foreground
+POSIX shell; do not execute into an editor, running job, or partially typed line.
+Check the owning connection's `server info` for `pane-execute/v1`. A retained older
+server may not support it; report that rather than restarting a user instance.
+
+~~~sh
+water ctl pane execute --pane <PANE_ID> \
+  --command 'printf "WATER_EXEC_OK\n"' --timeout-ms 5000
+~~~
+
+This synchronous call returns its result directly, without an operation ID.
+Inspect `status`, `timed_out`, and `exit_code` as well as CLI success: `completed`
+can have a nonzero command exit code, and both `completed` and `timed_out` return
+CLI status 0. `failed` reports execution/cleanup errors and preserves collected
+content where possible. Never run `operation wait` on an execute result.
+
+`text`/`lines` are rendered terminal rows between execution markers, not a raw
+stdout/stderr log or GUI viewport. Check `truncated` and `alt_screen`; overwritten
+or trimmed text is unrecoverable, while resize/cursor motion/alternate screens
+can return a bounded viewport fallback containing pre-existing content/input echo. Defaults and maxima are 256 rows and
+1 MiB (`--max-rows`, `--max-bytes`); 0 selects defaults. Oversized emulator
+cell-text reads can fail without text before byte truncation. Commands are limited to 16 KiB without NUL;
+timeout defaults to 30000 ms and accepts 1–600000 ms.
+
+Execution uses a child `/bin/sh` in the pane's current directory with exported
+environment, requires system `base64 -d`, and does not persist `cd`/variables or
+promise parent-shell aliases/functions. Avoid concurrent input. Timeout checks
+execution process identity, sends TERM, then KILL after 250 ms. The wrapper stays
+alive through the grace period for descendant cleanup, so both signals are
+expected and do not prove the command ignored TERM. Cleanup may add about 2s.
+Detached/background descendants and remote SSH jobs are not guaranteed to stop;
+caller disconnect does not cancel execution. See `docs/control-api.md`.
 
 ## Terminal round-trip
 
@@ -238,7 +274,7 @@ native desktop automation.
 | Connection/state | 'ping', 'state' |
 | UI | 'ui state', 'ui content', 'ui key', 'ui wheel', 'ui screenshot', 'ui click' |
 | Workspace/tab | 'workspace list/new/activate/rename/reorder/close', 'tab activate/new/rename/close' |
-| Pane | 'pane content/input/focus/split/resize/resize-split/close', 'pane rename-agent', 'pane move-to-workspace' |
+| Pane | 'pane execute/content/input/focus/split/resize/resize-split/close', 'pane rename-agent', 'pane move-to-workspace' |
 | Terminal | 'terminal send/send-bytes/spawn/contains/snapshot/wait-exit/resize/scroll' |
 | Async operations | 'operation get', 'operation wait' |
 | Repeatable tests | 'scenario run <PATH>' |

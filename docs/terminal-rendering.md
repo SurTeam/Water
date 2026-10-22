@@ -103,3 +103,7 @@ model request. Kitty protocol details are defined in its [graphics specification
 ## 验证要求
 
 使用 [测试与验证](testing.md) 的 terminal profile。流变更验证 replay/live、Resize/Exit、慢消费者与关闭；清屏验证 live 与服务端裁剪后重连，不能仅向 emulator 输入未裁剪 fixture。真实 GUI 内容用 ui content，Draw 用截图；TUI/Web 按各自能力验收。
+
+## Agent 命令执行的屏幕范围
+
+`pane.execute` 复用原始 replay 和订阅流临时重建模拟器，不持久化服务端逐屏快照，也不读取或修改 GUI viewport。唯一 OSC 生命周期标记确定执行边界，输出按 sequence 去重；范围使用保留行与裁剪计数定位。resize/reflow、备用屏幕切换及部分光标定位使范围失效时，返回有界活动屏幕并标记 `truncated`；重绘覆盖的文字不能作为日志恢复。具体参数、子 shell 和超时进程组保护见 [控制 API](control-api.md#在指定-pane-执行命令)。修改此路径须覆盖真实 PTY 的范围隔离、重绘、裁剪/上限、resize、备用屏幕、TERM/KILL、后代清理与 pane shell 存活。

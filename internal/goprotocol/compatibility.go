@@ -35,7 +35,7 @@ type Compatibility struct {
 }
 
 func ServerCapabilities() []string {
-	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1", "agent-profiles/v1", WebCapability, WebTLSImportCapability}
+	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1", "agent-profiles/v1", "pane-execute/v1", WebCapability, WebTLSImportCapability}
 }
 func ClientCapabilities() []string {
 	return []string{"terminal-stream/v1", "window-selection/v1", "ui-control/v1"}

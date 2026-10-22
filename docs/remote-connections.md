@@ -15,7 +15,7 @@
 
 ## 当前命令与连接逻辑
 
-客户端按对象 connection 建立 session，session.open 双向判断协议、API signature 和能力，不兼容则只开放诊断。普通变更通过 dispatcher 更新模型，再用 operation/revision 与客户端投影同步；GUI 的本地导航、选择和 preview 不代替共享模型变更。
+客户端按对象 connection 建立 session，session.open 双向判断协议、API signature 和能力，不兼容则只开放诊断。普通变更通过 dispatcher 更新模型，再用 operation/revision 与客户端投影同步；`pane.execute` 是直接返回结果的有界终端 RPC，解析目标时短暂持有命令锁，执行等待不持有全局锁，且不创建 operation；GUI 的本地导航、选择和 preview 不代替共享模型变更。
 
 启动探测发现正在监听的 socket 时，不因暂时超时就 unlink 或替换；listener 持锁并按 inode 清理自己的路径。SSH 先发现稳定 endpoint，复用可诊断旧实例，避免产品升级新建一套空工作区；缓存 payload 与 endpoint 身份分开管理。
 

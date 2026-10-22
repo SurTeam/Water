@@ -37,7 +37,8 @@ type Terminal struct {
 	cmd                   *exec.Cmd
 	ptmx                  *os.File
 	shellIntegrationDir   string
-	cellWidth, cellHeight int // owned by the ordered PTY reader
+	cellWidth, cellHeight int        // owned by the ordered PTY reader
+	executeMu             sync.Mutex // one foreground execution per pane
 
 	mu              sync.RWMutex
 	size            goprotocol.TerminalSize

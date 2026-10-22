@@ -452,6 +452,8 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 		}))
 	case "ui.keystroke", "ui.snapshot", "ui.content", "ui.click", "ui.drag", "ui.screenshot", "ui.wheel", "ui.menu":
 		return s.forwardUI(ss, msg)
+	case "pane.execute":
+		return s.paneExecute(ss, msg)
 	case "terminal.replay", "terminal.snapshot":
 		var p struct {
 			TerminalID uuid.UUID `json:"terminal_id"`
