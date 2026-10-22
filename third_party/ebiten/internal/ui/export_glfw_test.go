@@ -25,6 +25,10 @@ func NewMonitorForTest(boundsInGLFWPixels image.Rectangle, deviceScaleFactor flo
 	}
 }
 
+func MonitorScaleIsStaleForTest(windowScale, monitorScale float64) bool {
+	return monitorScaleIsStale(windowScale, monitorScale)
+}
+
 func OutsideSizeInDIPForTest(windowWidth, windowHeight int, requestedWidthInDIP, requestedHeightInDIP int, fullscreen bool, deviceScaleFactor float64) (float64, float64) {
 	return outsideSizeInDIP(windowWidth, windowHeight, requestedWidthInDIP, requestedHeightInDIP, fullscreen, deviceScaleFactor)
 }

@@ -17,6 +17,8 @@ Cmd+N 启动同变体的独立 GUI 进程，复用 socket 和配置。各窗口�
 
 Ebitengine 的 Water 维护副本位于 `third_party/ebiten`，具体差异见其 [WATER_CHANGES](../third_party/ebiten/WATER_CHANGES.md)。事件处理完成后才采样可见性；不可见帧继续允许 offscreen 绘制与截图，但不排入最终屏幕命令。Metal 缓存 drawable 显式持有跨 readback autorelease pool 的引用，并在呈现完成调用后释放，避免截图后复用失效对象。原生生命周期通过真实 macOS 读回回归验证。
 
+显示器模式或缩放变化不产生 monitor connect/disconnect 事件，而显示器快照的 `contentScale` 与 bounds 在建立时读取一次。窗口实际 content scale 与缓存 monitor 不一致时必须重新枚举，否则长运行进程会按旧缩放绘制：framebuffer 小于窗口 backing store，被系统放大后整屏发虚，且只有重启才恢复。该判定只在两者不一致时触发，窗口 scale 未知时不视为不一致。
+
 macOS 最小化恢复调用返回不代表动画及事件处理完成；AppKit/Dock 可在后续事件读取中暂时阻塞主线程。原生对照也可复现，不能把恢复期查询延迟等同于 CPU 开销或保证固定恢复时长。
 
 圆角由透明窗口、缓存 shader 和 macOS layer clipping 实现；最大化/全屏使用方角。UI 尺寸、标题栏和 tabs 按配置及字体度量计算，布局和弹窗原则见 [界面布局与交互](ui-design.md)。

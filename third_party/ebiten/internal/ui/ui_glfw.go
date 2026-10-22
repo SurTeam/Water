@@ -1823,6 +1823,13 @@ func (u *glfwBackend) minimumWindowWidth() (int, error) {
 	return 1, nil
 }
 
+// monitorScaleIsStale reports whether the window's actual content scale disagrees with a monitor's
+// cached device scale factor. A non-positive window scale means the value is unknown, and must not
+// be treated as a disagreement.
+func monitorScaleIsStale(windowScale, monitorScale float64) bool {
+	return windowScale > 0 && math.Abs(windowScale-monitorScale) > 1e-6
+}
+
 // currentMonitor returns the current active monitor.
 //
 // currentMonitor must be called on the main thread.
@@ -1835,8 +1842,40 @@ func (u *glfwBackend) currentMonitor() (*Monitor, error) {
 	if err != nil {
 		return nil, err
 	}
+	m, err = u.refreshStaleMonitor(m)
+	if err != nil {
+		return nil, err
+	}
 	u.cachedCurrentMonitor = m
 	u.cachedCurrentMonitorTime = u.Tick()
+	return m, nil
+}
+
+// refreshStaleMonitor re-enumerates the monitors when the window's actual content scale disagrees
+// with the cached monitor, and then resolves the window's monitor again.
+//
+// A monitor snapshot keeps the device scale factor and the bounds that were read when the monitor
+// was first seen. Display mode changes (resolution and backing scale) are reported by the OS
+// without a monitor connect or disconnect event, and monitor events are only emitted for monitors
+// that appear or disappear. Without this check a long-running process would keep rendering at the
+// resolution of the previous mode until it restarts. theMonitors.update re-reads GLFW, which queries
+// the current mode and content scale, so the refreshed snapshot describes the current display.
+//
+// refreshStaleMonitor must be called on the main thread.
+func (u *glfwBackend) refreshStaleMonitor(m *Monitor) (*Monitor, error) {
+	if u.window == nil || m == nil {
+		return m, nil
+	}
+	windowScale, _, err := u.window.GetContentScale()
+	if err != nil || !monitorScaleIsStale(float64(windowScale), m.DeviceScaleFactor()) {
+		return m, nil
+	}
+	if err := theMonitors.update(); err != nil {
+		return nil, err
+	}
+	if updated, err := u.currentMonitorImpl(); err == nil && updated != nil {
+		return updated, nil
+	}
 	return m, nil
 }
 

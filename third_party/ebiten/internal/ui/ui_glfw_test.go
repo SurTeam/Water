@@ -225,3 +225,29 @@ func TestWindowPositionInGLFWPixelsIsNearestPosition(t *testing.T) {
 		}
 	}
 }
+
+// TestMonitorScaleIsStale tests the check that makes a long-running process re-enumerate the
+// monitors after a display mode change. A monitor snapshot keeps the device scale factor that was
+// read when the monitor was first seen, and display mode changes are not reported as monitor
+// connect/disconnect events, so the cached scale can disagree with the window's actual scale.
+func TestMonitorScaleIsStale(t *testing.T) {
+	tests := []struct {
+		windowScale  float64
+		monitorScale float64
+		want         bool
+	}{
+		{windowScale: 2, monitorScale: 2, want: false},
+		{windowScale: 1, monitorScale: 1, want: false},
+		{windowScale: 2, monitorScale: 1, want: true},
+		{windowScale: 1, monitorScale: 2, want: true},
+		{windowScale: 1.5, monitorScale: 1, want: true},
+		{windowScale: 0, monitorScale: 2, want: false},
+		{windowScale: -1, monitorScale: 2, want: false},
+		{windowScale: 2.0000001, monitorScale: 2, want: false},
+	}
+	for _, tc := range tests {
+		if got := ui.MonitorScaleIsStaleForTest(tc.windowScale, tc.monitorScale); got != tc.want {
+			t.Errorf("monitorScaleIsStale(%v, %v) = %v; want %v", tc.windowScale, tc.monitorScale, got, tc.want)
+		}
+	}
+}
