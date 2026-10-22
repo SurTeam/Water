@@ -35,11 +35,14 @@ type Terminal struct {
 
 	registry *Registry
 
-	cmd                   *exec.Cmd
-	ptmx                  *os.File
-	supervised            *gosupervisor.Client
-	pid                   int
-	program               string
+	cmd        *exec.Cmd
+	ptmx       *os.File
+	supervised *gosupervisor.Client
+	pid        int
+	program    string
+	// retiring marks a terminal that an explicit replacement is about to close.
+	// Its Exit must not close the pane the replacement is taking over.
+	retiring              atomic.Bool
 	shellIntegrationDir   string
 	cellWidth, cellHeight int        // owned by the ordered PTY reader
 	executeMu             sync.Mutex // one foreground execution per pane
@@ -180,6 +183,19 @@ func (r *Registry) Get(id uuid.UUID) (*Terminal, bool) {
 	return t, ok
 }
 
+// retireIf removes a terminal only when it is still the registered one. A
+// supervised pane reuses its pane id for the replacement terminal, so a late
+// Exit from the retired worker must not evict its successor.
+func (r *Registry) retireIf(id uuid.UUID, t *Terminal) {
+	r.mu.RLock()
+	current := r.terms[id]
+	r.mu.RUnlock()
+	if current != t {
+		return
+	}
+	r.retire(id)
+}
+
 // retire runs after the authoritative Exit has been published and the PTY has
 // closed. Preserve recent replay for wait_exit/snapshot, but never keep an
 // unbounded history of Terminal objects. Explicit removal must not resurrect one.
@@ -289,6 +305,12 @@ func (t *Terminal) processID() int {
 	}
 	return 0
 }
+
+// MarkRetiring tells lifecycle observers that this terminal is being replaced.
+func (t *Terminal) MarkRetiring() { t.retiring.Store(true) }
+
+// Retiring reports whether an explicit replacement superseded this terminal.
+func (t *Terminal) Retiring() bool { return t.retiring.Load() }
 
 func (t *Terminal) isExited() bool {
 	t.mu.RLock()

@@ -16,6 +16,9 @@ import (
 // supervisorSocketPath keeps one supervisor per user and build variant, so a
 // restarted server finds the terminals its predecessor created.
 func supervisorSocketPath() string {
+	if explicit := os.Getenv("WATER_PTY_SUPERVISOR_SOCKET"); explicit != "" {
+		return explicit
+	}
 	dir := os.TempDir()
 	if len(dir) > 24 {
 		dir = "/tmp"
@@ -34,6 +37,19 @@ func (s *Server) EnableSupervisor() error {
 	return s.UseSupervisor(socket)
 }
 
+// EnableSupervisorFromEnv enables the supervisor when WATER_PTY_SUPERVISOR is
+// "on". Both the standalone server and the server a GUI embeds call this, so a
+// local restart resumes panes the same way a remote upgrade does.
+//
+// It stays opt-in while one GUI smoke path (OSC window title -> sidebar agent
+// label) is still being brought onto the supervised stream.
+func (s *Server) EnableSupervisorFromEnv() error {
+	if os.Getenv("WATER_PTY_SUPERVISOR") != "on" {
+		return nil
+	}
+	return s.EnableSupervisor()
+}
+
 // UseSupervisor attaches to an already running supervisor socket. Tests start the
 // supervisor in-process because the test binary is not water-server.
 func (s *Server) UseSupervisor(socket string) error {
@@ -50,7 +66,7 @@ func ensureSupervisor(socket string) error {
 		_ = client.Close()
 		return nil
 	}
-	executable, err := os.Executable()
+	executable, err := supervisorExecutable()
 	if err != nil {
 		return err
 	}
@@ -88,3 +104,28 @@ func (s *Server) detachSupervisor() {
 
 // SupervisorSocketForTest reports the socket a supervised server uses.
 func SupervisorSocketForTest() string { return supervisorSocketPath() }
+
+// supervisorExecutable finds a binary that serves the supervisor role. A GUI
+// embeds the server in its own process, so its own executable may not accept
+// --pty-supervisor; the standalone server next to it does.
+func supervisorExecutable() (string, error) {
+	if explicit := os.Getenv("WATER_SUPERVISOR_EXECUTABLE"); explicit != "" {
+		return explicit, nil
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	names := []string{"water-server"}
+	if gobuild.Variant == "dev" {
+		names = []string{"water-srv-dev", "water-server"}
+	}
+	for _, name := range names {
+		candidate := filepath.Join(filepath.Dir(self), name)
+		info, statErr := os.Stat(candidate)
+		if statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return self, nil
+}

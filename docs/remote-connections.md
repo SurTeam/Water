@@ -44,13 +44,16 @@ GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 Open
 
 PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervisor`），server 通过 unix socket 成为它的客户端。升级、重启或崩溃只影响 server，程序继续运行；新 server 按 pane id 重新 attach，并用 supervisor 保留的输出历史重建 replay。
 
-- supervisor 与 server 同一二进制，`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server；`WATER_PTY_SUPERVISOR=off` 时退回进程内模式。
+- supervisor 与 server 同一二进制，`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server。`WATER_PTY_SUPERVISOR=on` 启用，默认仍为进程内模式：还有一条 GUI 路径（OSC 窗口标题 → 侧栏 Agent 标签）尚未在受管流上验证通过，默认开启前必须补齐。
+- GUI 内嵌 server 与独立 server 都必须调用同一个启用入口；否则本地重启会重新 spawn pane，而远端升级却能接回。
 - terminal 在 supervisor 中以 pane id 为键。普通 spawn 总是替换该 pane 的 terminal；只有 recovery 导入时传 `resume`，才会接回上一个 server 留下的程序。
 - supervisor 按终端保留有界原始输出（上限 2 MiB，超出后保留最近的尾部）；重新 attach 时从指定 offset 继续，截断时明确标记，server 用自己的 replay 逻辑重建，不使用逐屏快照。
 - 输出在 supervisor 内按 1 ms 空闲 / 5 ms 最大窗口合并后再转发，避免把每次 read 变成一个事件。
 - resize 由 supervisor 的读循环串行处理：先 flush 已观察输出，再应用几何并发布 resize 事件，保证 server 不会先看到新几何。
 - 每个连接一个写协程串行化所有帧（控制回复与终端输出共用 socket，不串行会交叉破坏帧）；订阅者队列满时只丢弃该订阅，不阻塞 PTY 读循环，也不关闭承载控制流量的连接。
 - server 退出时 detach（不杀程序）；仅当 server 拥有 PTY（未启用 supervisor）时才 `CloseAll` 终止进程组。
+- 显式替换 pane 的 terminal 走 supervisor 的 `Replace`：先关旧程序再起新的，并给每个 terminal 一个 generation。同一个 pane id 会被继承，因此必须按 generation 丢弃旧代的事件，且被替换的 terminal 的 Exit 不得自动关闭该 pane。
+- supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
 
 性能边界：多一跳 unix socket，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
 

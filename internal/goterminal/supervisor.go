@@ -64,14 +64,9 @@ func (r *Registry) SupervisorSocket() string {
 // running instead of replacing it. An ordinary spawn always replaces the pane's
 // terminal, even though the supervisor key stays the same.
 func (r *Registry) SpawnSupervisedPane(pane uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
-	if !resume {
-		r.mu.RLock()
-		existing := r.terms[pane]
-		r.mu.RUnlock()
-		if existing != nil {
-			r.Remove(pane)
-		}
-	}
+	// An ordinary spawn replaces the pane's terminal through the supervisor's
+	// Replace flag. Removing the registry entry first would publish the old
+	// program's Exit while the model still points at it, which closes the pane.
 	return r.SpawnSupervised(pane, program, args, size, cwd, resume)
 }
 
@@ -100,6 +95,7 @@ func (r *Registry) SpawnSupervised(id uuid.UUID, program string, args []string, 
 		Cwd:     cwd,
 		Env:     append(os.Environ(), "TERM=xterm-256color", "COLORTERM=truecolor"),
 		Size:    struct{ Lines, Columns uint16 }{uint16(size.Lines), uint16(size.Columns)},
+		Replace: !resume,
 	})
 	if err != nil {
 		return nil, false, err
@@ -152,7 +148,7 @@ func (t *Terminal) supervisedLoop(events <-chan gosupervisor.Event, exited bool,
 		case gosupervisor.EventExit:
 			exit := ev.ExitCode
 			t.publish(goprotocol.TerminalEvent{Kind: goprotocol.ExitEvent, Code: &exit})
-			t.registry.retire(t.ID)
+			t.registry.retireIf(t.ID, t)
 			return
 		}
 	}
@@ -161,7 +157,7 @@ func (t *Terminal) supervisedLoop(events <-chan gosupervisor.Event, exited bool,
 	if exited {
 		exit := code
 		t.publish(goprotocol.TerminalEvent{Kind: goprotocol.ExitEvent, Code: &exit})
-		t.registry.retire(t.ID)
+		t.registry.retireIf(t.ID, t)
 	}
 }
 

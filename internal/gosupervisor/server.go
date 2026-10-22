@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
@@ -38,18 +40,20 @@ const (
 // Water server: the server connects, creates or resumes terminals, and may
 // disconnect and reconnect without the programs noticing.
 type Server struct {
-	mu    sync.Mutex
-	terms map[string]*terminal
-	ln    net.Listener
-	done  chan struct{}
-	once  sync.Once
+	mu         sync.Mutex
+	generation map[string]uint64
+	terms      map[string]*terminal
+	ln         net.Listener
+	done       chan struct{}
+	once       sync.Once
 }
 
 type terminal struct {
-	id   string
-	ptmx *os.File
-	cmd  *exec.Cmd
-	pid  int
+	id         string
+	generation uint64
+	ptmx       *os.File
+	cmd        *exec.Cmd
+	pid        int
 
 	mu       sync.Mutex
 	history  []byte
@@ -105,7 +109,7 @@ func (s *subscriber) writeLoop() {
 }
 
 func NewServer() *Server {
-	return &Server{terms: make(map[string]*terminal), done: make(chan struct{})}
+	return &Server{terms: make(map[string]*terminal), generation: make(map[string]uint64), done: make(chan struct{})}
 }
 
 // Listen serves the supervisor protocol on a unix socket. The socket is owned by
@@ -233,6 +237,12 @@ func (s *Server) serve(conn net.Conn) {
 				continue
 			}
 			s.closeTerminal(req.ID)
+		case kindForeground:
+			var req terminalRef
+			if err := unmarshal(payload, &req); err != nil {
+				continue
+			}
+			_ = reply(kindForegrounded, s.foreground(req.ID))
 		case kindList:
 			_ = reply(kindListed, s.list())
 		case kindShutdown:
@@ -249,9 +259,15 @@ func (s *Server) spawn(req spawnRequest) spawnedResponse {
 	s.mu.Lock()
 	existing := s.terms[req.ID]
 	s.mu.Unlock()
+	if existing != nil && req.Replace {
+		// An explicit replacement must not inherit the old program; close it and
+		// spawn a new one under the same id.
+		s.closeTerminal(req.ID)
+		existing = nil
+	}
 	if existing != nil && !existing.isExited() {
 		// Reuse a live terminal instead of restarting the program.
-		return spawnedResponse{ID: req.ID, PID: existing.pid, Resumed: true}
+		return spawnedResponse{ID: req.ID, PID: existing.pid, Generation: existing.generation, Resumed: true}
 	}
 
 	cmd := exec.Command(req.Program, req.Args...)
@@ -263,21 +279,34 @@ func (s *Server) spawn(req spawnRequest) spawnedResponse {
 	if err != nil {
 		return spawnedResponse{ID: req.ID, Error: err.Error()}
 	}
+	pollable, err := makePollablePTY(ptmx)
+	if err != nil {
+		_ = ptmx.Close()
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
+		_ = cmd.Wait()
+		return spawnedResponse{ID: req.ID, Error: err.Error()}
+	}
+	ptmx = pollable
+	s.mu.Lock()
+	s.generation[req.ID]++
+	generation := s.generation[req.ID]
+	s.mu.Unlock()
 	t := &terminal{
-		id:     req.ID,
-		ptmx:   ptmx,
-		cmd:    cmd,
-		pid:    cmd.Process.Pid,
-		subs:   make(map[*subscriber]struct{}),
-		resize: make(chan resizeRequest, 8),
-		closed: make(chan struct{}),
+		id:         req.ID,
+		generation: generation,
+		ptmx:       ptmx,
+		cmd:        cmd,
+		pid:        cmd.Process.Pid,
+		subs:       make(map[*subscriber]struct{}),
+		resize:     make(chan resizeRequest, 8),
+		closed:     make(chan struct{}),
 	}
 	s.mu.Lock()
 	s.terms[req.ID] = t
 	s.mu.Unlock()
 	go t.readLoop(s)
 	go t.waitLoop(s)
-	return spawnedResponse{ID: req.ID, PID: t.pid}
+	return spawnedResponse{ID: req.ID, PID: t.pid, Generation: t.generation}
 }
 
 func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, []byte) {
@@ -301,7 +330,7 @@ func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, [
 	t.mu.Lock()
 	t.subs[sub] = struct{}{}
 	t.mu.Unlock()
-	return attachedResponse{ID: req.ID, PID: t.pid, Offset: offset, Available: produced, Truncated: truncated, Exited: exited, Code: code}, replay
+	return attachedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Exited: exited, Code: code}, replay
 }
 
 func (s *Server) detach(sub *subscriber) {
@@ -352,6 +381,35 @@ func (s *Server) closeTerminal(id string) {
 	if t != nil {
 		t.close()
 	}
+}
+
+// foreground reports the PTY's foreground process group. The supervisor owns the
+// master fd, so only it can answer; agent detection on the server depends on it.
+func (s *Server) foreground(id string) foregroundResponse {
+	s.mu.Lock()
+	t := s.terms[id]
+	s.mu.Unlock()
+	if t == nil {
+		return foregroundResponse{ID: id, Error: "unknown terminal"}
+	}
+	var group int
+	var queryErr error
+	raw, err := t.ptmx.SyscallConn()
+	if err != nil {
+		return foregroundResponse{ID: id, Error: err.Error()}
+	}
+	if err := raw.Control(func(fd uintptr) {
+		group, queryErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP)
+	}); err != nil {
+		return foregroundResponse{ID: id, Error: err.Error()}
+	}
+	if queryErr != nil {
+		return foregroundResponse{ID: id, Error: queryErr.Error()}
+	}
+	if group <= 1 {
+		return foregroundResponse{ID: id, Error: "no live foreground group"}
+	}
+	return foregroundResponse{ID: id, Group: group}
 }
 
 func (s *Server) list() listedResponse {
@@ -488,7 +546,7 @@ func (t *terminal) announceResize(req resizeRequest) {
 		subs = append(subs, sub)
 	}
 	t.mu.Unlock()
-	payload, err := json.Marshal(resizedEvent{ID: t.id, Lines: req.Lines, Columns: req.Columns})
+	payload, err := json.Marshal(resizedEvent{ID: t.id, Generation: t.generation, Lines: req.Lines, Columns: req.Columns})
 	if err != nil {
 		return
 	}
@@ -520,7 +578,7 @@ func (t *terminal) publish(data []byte) {
 		copy(id[:], parsed[:])
 	}
 	for _, sub := range subs {
-		if !sub.writeOutput(id, offset, data) {
+		if !sub.writeOutput(id, t.generation, offset, data) {
 			// Drop only this output subscription: the connection also carries
 			// control traffic and other terminals, so closing it would be far
 			// more disruptive than a re-attach.
@@ -549,7 +607,7 @@ func (t *terminal) waitLoop(s *Server) {
 		subs = append(subs, sub)
 	}
 	t.mu.Unlock()
-	payload, err := json.Marshal(exitedEvent{ID: t.id, Code: code})
+	payload, err := json.Marshal(exitedEvent{ID: t.id, Generation: t.generation, Code: code})
 	if err == nil {
 		for _, sub := range subs {
 			sub.enqueueJSON(kindExited, payload)
@@ -605,12 +663,13 @@ func (s *subscriber) enqueue(frame []byte) bool {
 	}
 }
 
-func (s *subscriber) writeOutput(id [16]byte, offset uint64, data []byte) bool {
+func (s *subscriber) writeOutput(id [16]byte, generation, offset uint64, data []byte) bool {
 	frame := make([]byte, 5+outputHeaderBytes+len(data))
 	frame[0] = kindOutput
 	binary.BigEndian.PutUint32(frame[1:], uint32(outputHeaderBytes+len(data)))
 	copy(frame[5:], id[:])
-	binary.BigEndian.PutUint64(frame[5+16:], offset)
+	binary.BigEndian.PutUint64(frame[5+16:], generation)
+	binary.BigEndian.PutUint64(frame[5+24:], offset)
 	copy(frame[5+outputHeaderBytes:], data)
 	return s.enqueue(frame)
 }
@@ -625,7 +684,7 @@ func (s *subscriber) writeReplay(resp attachedResponse, replay []byte) {
 	const chunk = 64 * 1024
 	for offset := 0; offset < len(replay); offset += chunk {
 		end := minInt(offset+chunk, len(replay))
-		if !s.writeOutput(id, resp.Offset+uint64(offset), replay[offset:end]) {
+		if !s.writeOutput(id, resp.Generation, resp.Offset+uint64(offset), replay[offset:end]) {
 			return
 		}
 	}

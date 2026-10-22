@@ -63,7 +63,9 @@ def exercise(test, control, kind):
     control("workspace", "new")
     changed = test.directory / (kind + "-after-cd")
     changed.mkdir()
-    control("pane", "input", "--pane", pane, "--text", "cd " + shlex.quote(str(changed)) + "; printf 'SERVER_%s\\n' CWD_READY\n")
+    # A variable exported in the shell only survives if the program itself
+    # survives the restart, which is what the PTY supervisor exists for.
+    control("pane", "input", "--pane", pane, "--text", "cd " + shlex.quote(str(changed)) + "; export WATER_SMOKE_MARK=alive; printf 'SERVER_%s\\n' CWD_READY\n")
     terminal = next_terminal(control("state"), pane)
     control("terminal", "contains", "--terminal", terminal, "SERVER_CWD_READY", "--timeout-ms", "3000")
     before = control("state")
@@ -132,7 +134,8 @@ def exercise(test, control, kind):
     # the restart, so the terminal identity is intentionally stable. Without a
     # supervisor the restart must produce a new PTY.
     restored_terminal = next_terminal(after, pane)
-    if os.environ.get("WATER_PTY_SUPERVISOR") == "on":
+    supervised = os.environ.get("WATER_PTY_SUPERVISOR") == "on"
+    if supervised:
         assert restored_terminal == terminal, "supervised PTY identity changed"
     else:
         assert restored_terminal != terminal, "old PTY identity reused"
@@ -155,8 +158,16 @@ def exercise(test, control, kind):
         current = control("ui", "content", "--pane", pane, "--window", test.window)
         text = "".join(line.rstrip() for line in current["lines"])
         test.save(kind + "-content-latest.json", current)
-        return current if "RESTORED_SHELL_READY" in text and str(changed.resolve()) in text else None
+        # macOS resolves /tmp to /private/tmp; the shell prints the logical path,
+        # so accept either spelling of the expected directory.
+        return current if "RESTORED_SHELL_READY" in text and (
+            str(changed) in text or str(changed.resolve()) in text) else None
     test.save(kind + "-content.json", test.wait(content_ready, "restored GUI shell output"))
+    if supervised:
+        # The same shell process must still hold the variable exported before the
+        # restart; a re-spawned shell would report an empty value.
+        control("pane", "input", "--pane", pane, "--text", "printf 'MARK_%s\\n' \"${WATER_SMOKE_MARK:-lost}\"\n")
+        control("terminal", "contains", "--terminal", terminal, "MARK_alive", "--timeout-ms", "3000")
     print("PASS " + kind + " server capability/backup/restart/live-CWD; artifacts=" + str(test.directory), flush=True)
 
 def next_leaf(state, pane):

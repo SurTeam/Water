@@ -358,3 +358,83 @@ func TestSlowConsumerDoesNotStallTheProgram(t *testing.T) {
 		t.Fatal("supervisor stopped answering while the consumer was slow")
 	}
 }
+
+func TestForegroundGroupIsReportedForOwnedPTY(t *testing.T) {
+	_, socket := startSupervisor(t)
+	id := uuid.New()
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if _, _, err := client.Spawn(SpawnSpec{
+		ID: id, Program: "/bin/sh", Args: []string{"-c", "sleep 30"},
+		Env: os.Environ(), Size: struct{ Lines, Columns uint16 }{24, 80},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if group, err := client.Foreground(id); err == nil && group > 1 {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	group, err := client.Foreground(id)
+	t.Fatalf("no foreground group: %d %v", group, err)
+}
+
+func TestReplaceStartsANewProgramAndDropsStaleEvents(t *testing.T) {
+	_, socket := startSupervisor(t)
+	id := uuid.New()
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if _, _, err := client.Spawn(SpawnSpec{
+		ID: id, Program: "/bin/sh", Args: []string{"-c", "echo FIRST; sleep 20"},
+		Env: os.Environ(), Size: struct{ Lines, Columns uint16 }{24, 80},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, events, err := client.Attach(id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := collect(t, events, "FIRST", 5*time.Second); !strings.Contains(got, "FIRST") {
+		t.Fatalf("first program missing: %q", got)
+	}
+
+	// An explicit replacement must start a new program under the same id.
+	pid, resumed, err := client.Spawn(SpawnSpec{
+		ID: id, Program: "/bin/sh", Args: []string{"-c", "echo SECOND; sleep 20"},
+		Env: os.Environ(), Size: struct{ Lines, Columns uint16 }{24, 80}, Replace: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resumed {
+		t.Fatal("replace resumed the old program")
+	}
+	_, events2, err := client.Attach(id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := collect(t, events2, "SECOND", 5*time.Second)
+	if !strings.Contains(got, "SECOND") {
+		t.Fatalf("replacement program missing: %q", got)
+	}
+	if strings.Contains(got, "FIRST") {
+		t.Fatalf("stale output from the replaced program leaked in: %q", got)
+	}
+	// The old program is gone, so only one terminal remains under this id.
+	listed, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].PID != pid {
+		t.Fatalf("unexpected terminals %v, want pid %d", listed, pid)
+	}
+}

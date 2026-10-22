@@ -214,3 +214,53 @@ func TestSupervisedPaneSurvivesServerRestart(t *testing.T) {
 		t.Fatalf("program did not keep running: %d ticks, previously %d", got, beforeTicks)
 	}
 }
+
+// TestReplacingSupervisedTerminalKeepsThePane guards the replacement ordering: a
+// supervised terminal keeps its pane id, so the retired program's Exit arrives
+// while the model already points at the successor and must not close the pane.
+func TestReplacingSupervisedTerminalKeepsThePane(t *testing.T) {
+	socket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
+	supervisorSocket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
+	supervisor := gosupervisor.NewServer()
+	if err := supervisor.Listen(supervisorSocket); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = supervisor.Close() }()
+
+	cfg := goconfig.Default()
+	cfg.Startup.InitialWorkspace = true
+	cfg.Startup.InitialTerminal = true
+	cfg.Shell.Program = "/bin/sh"
+	cfg.Shell.Args = []string{"-c", "sleep 30"}
+
+	server := goserver.NewWithConfig(socket, cfg)
+	if err := server.UseSupervisor(supervisorSocket); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Initialize(true, true); err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.ListenAndServe() }()
+	waitSocket(t, socket)
+	defer func() { _ = server.Close() }()
+
+	terminal := supervisedTerminal(t, supervisorSocket)
+	pane := terminal.String()
+
+	var out map[string]any
+	err := goclient.New(socket).Dispatch(map[string]any{
+		"type": "terminal.spawn", "pane_id": pane, "columns": 80, "lines": 24,
+		"program": "/bin/sh", "args": []string{"-c", "echo REPLACED; sleep 30"},
+	}, &out)
+	if err != nil {
+		t.Fatalf("replace failed: %v", err)
+	}
+	if got, _ := out["terminal_id"].(string); got != pane {
+		t.Fatalf("terminal id %v, want pane id %s", out["terminal_id"], pane)
+	}
+	// The pane must still exist and show the replacement program's output.
+	text := waitText(t, socket, terminal, "REPLACED")
+	if !strings.Contains(text, "REPLACED") {
+		t.Fatalf("replacement output missing: %q", text)
+	}
+}

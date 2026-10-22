@@ -129,8 +129,13 @@ class WaterGUI:
         config = self.directory / "config.json"
         config.write_text(json.dumps(self.config))
         self.log = (self.directory / "gui.log").open("w")
+        # The PTY supervisor outlives its server by design, so each owned instance
+        # gets its own socket and stops it during cleanup instead of leaking a
+        # long-lived process into later runs.
+        self.supervisor_socket = str(self.directory / "pty-supervisor.sock")
         env = dict(os.environ, WATER_TEST_INSTANCE=self.test_instance,
                    WATER_TEST_UNFOCUSED="1", WATER_CONTROL_SOCKET=self.socket,
+                   WATER_PTY_SUPERVISOR_SOCKET=self.supervisor_socket,
                    WATER_CONFIG=str(config))
         env.pop("WATER_SOCKET", None)
         env.pop("WATER_GO_DAEMON_CHILD", None)
@@ -278,6 +283,39 @@ class WaterGUI:
         self.ownership["owned_server_instances"] = self.server_instances
         self.save("ownership.json", self.ownership)
 
+    def stop_supervisor(self):
+        """Stop the PTY supervisor this instance started.
+
+        The supervisor outlives its server by design, so a test that leaves it
+        running would leak a long-lived process into later runs. Only the socket
+        this instance owns is touched.
+        """
+        socket = getattr(self, "supervisor_socket", None)
+        if not socket:
+            return True
+        stopped = True
+        for pid, command in water_processes().items():
+            if f"--pty-supervisor" in command and socket in command:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    continue
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline and pid in water_processes():
+                    time.sleep(.025)
+                if pid in water_processes():
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    stopped = False
+        for leftover in Path(socket).parent.glob(Path(socket).name + "*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        return stopped
+
     def close(self):
         if self.previous_sigterm is not None:
             signal.signal(signal.SIGTERM, self.previous_sigterm)
@@ -311,6 +349,7 @@ class WaterGUI:
             self.gui.wait(timeout=5)
         if self.log:
             self.log.close()
+        supervisor_stopped = self.stop_supervisor()
         current = water_processes()
         deadline = time.monotonic() + 5
         while any(pid in current for pid in self.server_instances.values()) and time.monotonic() < deadline:
@@ -319,10 +358,11 @@ class WaterGUI:
         preserved = all(current.get(pid) == command for pid, command in self.existing_water.items())
         servers_exited = not any(pid in current for pid in self.server_instances.values())
         socket_removed = not Path(self.socket).exists()
-        passed = preserved and servers_exited and socket_removed
+        passed = preserved and servers_exited and socket_removed and supervisor_stopped
         self.save("cleanup.json", {"gui_exited": self.gui.poll() is not None,
                                    "socket_removed": socket_removed, "owned_servers_exited": servers_exited,
                                    "existing_water_preserved": preserved,
+                                   "pty_supervisor_stopped": supervisor_stopped,
                                    "existing_water_before": self.existing_water,
                                    "existing_water_after": {pid: current.get(pid) for pid in self.existing_water},
                                    "guard_error": str(cleanup_error) if cleanup_error else None})

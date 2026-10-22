@@ -78,15 +78,14 @@ func main() {
 	if ptySupervisor {
 		// Internal role: hold PTYs so a restarted server can resume programs.
 		supervisor := gosupervisor.NewServer()
-		defer func() { _ = supervisor.Close() }()
 		sig := make(chan os.Signal, 2)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		go func() { <-sig; _ = supervisor.Close() }()
 		if err := supervisor.Listen(socket); err != nil {
 			fmt.Fprintln(os.Stderr, "water-server: pty supervisor:", err)
 			os.Exit(1)
 		}
-		<-make(chan struct{})
+		<-sig
+		_ = supervisor.Close()
 		return
 	}
 
@@ -104,12 +103,10 @@ func main() {
 	// Own panes through a PTY supervisor so a later server instance can resume the
 	// programs instead of restarting them. Failure to start it is reported but
 	// must not prevent the server from serving terminals itself.
-	// Opt-in until the local GUI restart path resumes panes the same way the
-	// remote upgrade path does; enabling it changes pane identity semantics.
-	if os.Getenv("WATER_PTY_SUPERVISOR") == "on" {
-		if err := srv.EnableSupervisor(); err != nil {
-			fmt.Fprintln(os.Stderr, "water-server: pty supervisor unavailable, terminals run in-process:", err)
-		}
+	// The supervisor keeps panes alive across server replacement. It is opt-in
+	// until the GUI restart path is verified on every platform.
+	if err := srv.EnableSupervisorFromEnv(); err != nil {
+		fmt.Fprintln(os.Stderr, "water-server: pty supervisor unavailable, terminals run in-process:", err)
 	}
 	srv.Build = buildVariant
 	srv.Version = serverVersion

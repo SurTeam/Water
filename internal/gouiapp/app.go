@@ -298,6 +298,11 @@ func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfi
 	if !cfg.Server.Detached {
 		srv := goserver.NewWithConfig(socket, cfg)
 		srv.ConfigPath = configPath
+		// An embedded server owns the same panes as a standalone one, so it must
+		// use the supervisor too; otherwise a GUI restart re-spawns the panes.
+		if err := srv.EnableSupervisorFromEnv(); err != nil {
+			fmt.Fprintln(os.Stderr, "water: pty supervisor unavailable, terminals run in-process:", err)
+		}
 		if err := srv.Initialize(cfg.Startup.InitialWorkspace && !empty, cfg.Startup.InitialTerminal && cfg.Startup.InitialWorkspace && !empty); err != nil {
 			return nil, nil, false, err
 		}

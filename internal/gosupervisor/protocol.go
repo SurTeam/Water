@@ -15,21 +15,23 @@ import (
 // Control payloads are JSON; output payloads carry raw terminal bytes so the
 // hot path never encodes text.
 const (
-	kindSpawn    byte = 1
-	kindAttach   byte = 2
-	kindWrite    byte = 3
-	kindResize   byte = 4
-	kindClose    byte = 5
-	kindList     byte = 6
-	kindShutdown byte = 7
+	kindSpawn      byte = 1
+	kindAttach     byte = 2
+	kindWrite      byte = 3
+	kindResize     byte = 4
+	kindClose      byte = 5
+	kindList       byte = 6
+	kindShutdown   byte = 7
+	kindForeground byte = 8
 
-	kindSpawned  byte = 101
-	kindOutput   byte = 102
-	kindResized  byte = 103
-	kindExited   byte = 104
-	kindListed   byte = 105
-	kindFailure  byte = 106
-	kindAttached byte = 107
+	kindSpawned      byte = 101
+	kindOutput       byte = 102
+	kindResized      byte = 103
+	kindExited       byte = 104
+	kindListed       byte = 105
+	kindFailure      byte = 106
+	kindAttached     byte = 107
+	kindForegrounded byte = 108
 )
 
 // maxFrameBytes bounds a single frame so a corrupt length cannot exhaust memory.
@@ -45,6 +47,9 @@ type spawnRequest struct {
 	Columns uint16   `json:"columns"`
 	CellW   uint16   `json:"cell_w"`
 	CellH   uint16   `json:"cell_h"`
+	// Replace closes a live terminal with the same id first. Resume, used by
+	// recovery, keeps it instead.
+	Replace bool `json:"replace,omitempty"`
 }
 
 type terminalRef struct {
@@ -70,34 +75,38 @@ type resizeRequest struct {
 }
 
 type spawnedResponse struct {
-	ID      string `json:"id"`
-	PID     int    `json:"pid"`
-	Resumed bool   `json:"resumed"`
-	Error   string `json:"error,omitempty"`
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	PID        int    `json:"pid"`
+	Resumed    bool   `json:"resumed"`
+	Error      string `json:"error,omitempty"`
 }
 
 // attachedResponse reports how much history the supervisor still holds for the
 // terminal. A resumed terminal keeps running across server restarts.
 type attachedResponse struct {
-	ID        string `json:"id"`
-	PID       int    `json:"pid"`
-	Offset    uint64 `json:"offset"`
-	Available uint64 `json:"available"`
-	Truncated bool   `json:"truncated"`
-	Exited    bool   `json:"exited"`
-	Code      int32  `json:"code"`
-	Error     string `json:"error,omitempty"`
+	ID         string `json:"id"`
+	PID        int    `json:"pid"`
+	Offset     uint64 `json:"offset"`
+	Available  uint64 `json:"available"`
+	Truncated  bool   `json:"truncated"`
+	Generation uint64 `json:"generation"`
+	Exited     bool   `json:"exited"`
+	Code       int32  `json:"code"`
+	Error      string `json:"error,omitempty"`
 }
 
 type resizedEvent struct {
-	ID      string `json:"id"`
-	Lines   uint16 `json:"lines"`
-	Columns uint16 `json:"columns"`
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	Lines      uint16 `json:"lines"`
+	Columns    uint16 `json:"columns"`
 }
 
 type exitedEvent struct {
-	ID   string `json:"id"`
-	Code int32  `json:"code"`
+	ID         string `json:"id"`
+	Generation uint64 `json:"generation"`
+	Code       int32  `json:"code"`
 }
 
 type listedResponse struct {
@@ -110,6 +119,12 @@ type listedTerminal struct {
 	Exited bool   `json:"exited"`
 }
 
+type foregroundResponse struct {
+	ID    string `json:"id"`
+	Group int    `json:"group"`
+	Error string `json:"error,omitempty"`
+}
+
 type failureResponse struct {
 	Error string `json:"error"`
 }
@@ -117,8 +132,9 @@ type failureResponse struct {
 // outputPayload is the header of an output frame: the terminal id followed by the
 // raw bytes. Keeping it binary avoids copying the payload through JSON.
 type outputHeader struct {
-	id     [16]byte
-	offset uint64
+	id         [16]byte
+	offset     uint64
+	generation uint64
 }
 
 func writeFrame(w io.Writer, kind byte, payload []byte) error {
@@ -167,12 +183,13 @@ func writeJSON(w io.Writer, kind byte, value any) error {
 	return writeFrame(w, kind, payload)
 }
 
-const outputHeaderBytes = 24
+const outputHeaderBytes = 32
 
-func writeOutput(w io.Writer, id [16]byte, offset uint64, data []byte) error {
+func writeOutput(w io.Writer, id [16]byte, generation, offset uint64, data []byte) error {
 	payload := make([]byte, outputHeaderBytes+len(data))
 	copy(payload, id[:])
-	binary.BigEndian.PutUint64(payload[16:], offset)
+	binary.BigEndian.PutUint64(payload[16:], generation)
+	binary.BigEndian.PutUint64(payload[24:], offset)
 	copy(payload[outputHeaderBytes:], data)
 	return writeFrame(w, kindOutput, payload)
 }
@@ -183,6 +200,7 @@ func parseOutput(payload []byte) (outputHeader, []byte, error) {
 	}
 	var header outputHeader
 	copy(header.id[:], payload[:16])
-	header.offset = binary.BigEndian.Uint64(payload[16:])
+	header.generation = binary.BigEndian.Uint64(payload[16:])
+	header.offset = binary.BigEndian.Uint64(payload[24:])
 	return header, payload[outputHeaderBytes:], nil
 }

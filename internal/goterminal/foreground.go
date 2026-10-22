@@ -15,6 +15,10 @@ import (
 )
 
 func (t *Terminal) ForegroundGroup() (int, error) {
+	if t.supervised != nil {
+		// The supervisor owns the PTY master, so only it can read TIOCGPGRP.
+		return t.supervised.Foreground(t.ID)
+	}
 	var group int
 	raw, err := t.ptmx.SyscallConn()
 	if err != nil {

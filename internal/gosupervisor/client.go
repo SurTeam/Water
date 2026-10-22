@@ -19,11 +19,12 @@ type Client struct {
 	pendingMu sync.Mutex
 	pending   [slotCount][]chan any
 
-	eventsMu sync.Mutex
-	events   map[string]chan Event
-	closed   chan struct{}
-	once     sync.Once
-	failure  error
+	eventsMu    sync.Mutex
+	events      map[string]chan Event
+	generations map[string]uint64
+	closed      chan struct{}
+	once        sync.Once
+	failure     error
 }
 
 // Event is one supervisor event for a terminal.
@@ -53,6 +54,7 @@ type SpawnSpec struct {
 	Env     []string
 	Size    struct{ Lines, Columns uint16 }
 	Cell    struct{ Width, Height uint16 }
+	Replace bool
 }
 
 // Attach describes retained history for a resumed terminal.
@@ -77,7 +79,7 @@ func Dial(socket string) (*Client, error) {
 		_ = unix.SetReadBuffer(1 << 20)
 		_ = unix.SetWriteBuffer(1 << 20)
 	}
-	c := &Client{conn: conn, events: make(map[string]chan Event), closed: make(chan struct{})}
+	c := &Client{conn: conn, events: make(map[string]chan Event), generations: make(map[string]uint64), closed: make(chan struct{})}
 	go c.readLoop()
 	return c, nil
 }
@@ -121,6 +123,7 @@ func (c *Client) Spawn(spec SpawnSpec) (pid int, resumed bool, err error) {
 		Columns: spec.Size.Columns,
 		CellW:   spec.Cell.Width,
 		CellH:   spec.Cell.Height,
+		Replace: spec.Replace,
 	}
 	if err := c.send(kindSpawn, req); err != nil {
 		return 0, false, err
@@ -176,6 +179,26 @@ func (c *Client) CloseTerminal(id uuid.UUID) error {
 	return c.send(kindClose, terminalRef{ID: id.String()})
 }
 
+// Foreground reports the PTY's foreground process group for a terminal.
+func (c *Client) Foreground(id uuid.UUID) (int, error) {
+	if err := c.send(kindForeground, terminalRef{ID: id.String()}); err != nil {
+		return 0, err
+	}
+	ch := c.expect(foregroundSlot)
+	value, err := c.await(foregroundSlot, ch)
+	if err != nil {
+		return 0, err
+	}
+	resp, ok := value.(foregroundResponse)
+	if !ok {
+		return 0, fmt.Errorf("unexpected supervisor reply %T", value)
+	}
+	if resp.Error != "" {
+		return 0, errors.New(resp.Error)
+	}
+	return resp.Group, nil
+}
+
 // List reports terminals the supervisor still owns.
 func (c *Client) List() ([]ListedTerminal, error) {
 	if err := c.send(kindList, struct{}{}); err != nil {
@@ -203,6 +226,7 @@ type ListedTerminal struct {
 func (c *Client) closeEventsLocked(key string) {
 	if ch, ok := c.events[key]; ok {
 		delete(c.events, key)
+		delete(c.generations, key)
 		close(ch)
 	}
 }
@@ -244,6 +268,13 @@ func (c *Client) readLoop() {
 			if err := unmarshal(payload, &resp); err != nil {
 				return
 			}
+			// Record the generation before the replay frames that follow this
+			// reply, otherwise the first replay batch is filtered as stale.
+			c.eventsMu.Lock()
+			if _, ok := c.events[resp.ID]; ok {
+				c.generations[resp.ID] = resp.Generation
+			}
+			c.eventsMu.Unlock()
 			c.deliver(attachedSlot, resp)
 		case kindListed:
 			var resp listedResponse
@@ -251,6 +282,12 @@ func (c *Client) readLoop() {
 				return
 			}
 			c.deliver(listedSlot, resp)
+		case kindForegrounded:
+			var resp foregroundResponse
+			if err := unmarshal(payload, &resp); err != nil {
+				return
+			}
+			c.deliver(foregroundSlot, resp)
 		case kindFailure:
 			var resp failureResponse
 			if err := unmarshal(payload, &resp); err != nil {
@@ -268,13 +305,13 @@ func (c *Client) readLoop() {
 			if err := unmarshal(payload, &ev); err != nil {
 				return
 			}
-			c.publishEvent(ev.ID, Event{Kind: EventResize, Lines: ev.Lines, Columns: ev.Columns})
+			c.publishEvent(ev.ID, ev.Generation, Event{Kind: EventResize, Lines: ev.Lines, Columns: ev.Columns})
 		case kindExited:
 			var ev exitedEvent
 			if err := unmarshal(payload, &ev); err != nil {
 				return
 			}
-			c.publishEvent(ev.ID, Event{Kind: EventExit, ExitCode: ev.Code})
+			c.publishEvent(ev.ID, ev.Generation, Event{Kind: EventExit, ExitCode: ev.Code})
 		}
 	}
 }
@@ -290,8 +327,11 @@ func (c *Client) publish(header outputHeader, data []byte) {
 	key := id.String()
 	c.eventsMu.Lock()
 	ch := c.events[key]
+	current := c.generations[key]
 	c.eventsMu.Unlock()
-	if ch == nil {
+	if ch == nil || header.generation != current {
+		// A replaced terminal keeps its id; frames from the previous generation
+		// must not leak into the successor's stream.
 		return
 	}
 	copied := append([]byte(nil), data...)
@@ -306,11 +346,12 @@ func (c *Client) publish(header outputHeader, data []byte) {
 	}
 }
 
-func (c *Client) publishEvent(id string, event Event) {
+func (c *Client) publishEvent(id string, generation uint64, event Event) {
 	c.eventsMu.Lock()
 	ch := c.events[id]
+	current := c.generations[id]
 	c.eventsMu.Unlock()
-	if ch == nil {
+	if ch == nil || generation != current {
 		return
 	}
 	select {
@@ -323,6 +364,7 @@ const (
 	spawnedSlot = iota
 	attachedSlot
 	listedSlot
+	foregroundSlot
 	failureSlot
 	slotCount
 )

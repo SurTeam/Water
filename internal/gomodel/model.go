@@ -201,23 +201,23 @@ type Workspace struct {
 type Model struct {
 	mu sync.RWMutex
 
-	revision uint64
-	workspaces map[uuid.UUID]*Workspace
-	workspaceOrder []uuid.UUID
-	activeWorkspace *uuid.UUID
-	tabs map[uuid.UUID]*Tab
-	panes map[uuid.UUID]*Pane
+	revision            uint64
+	workspaces          map[uuid.UUID]*Workspace
+	workspaceOrder      []uuid.UUID
+	activeWorkspace     *uuid.UUID
+	tabs                map[uuid.UUID]*Tab
+	panes               map[uuid.UUID]*Pane
 	nextWorkspaceNumber int
-	nextTabNumber int
+	nextTabNumber       int
 }
 
 func New() *Model {
 	return &Model{
-		workspaces: make(map[uuid.UUID]*Workspace),
-		tabs: make(map[uuid.UUID]*Tab),
-		panes: make(map[uuid.UUID]*Pane),
+		workspaces:          make(map[uuid.UUID]*Workspace),
+		tabs:                make(map[uuid.UUID]*Tab),
+		panes:               make(map[uuid.UUID]*Pane),
 		nextWorkspaceNumber: 1,
-		nextTabNumber: 1,
+		nextTabNumber:       1,
 	}
 }
 
@@ -240,7 +240,7 @@ func (m *Model) CreateWorkspace(title string) uuid.UUID {
 		m.nextWorkspaceNumber++
 	}
 	id := uuid.New()
-	m.workspaces[id] = &Workspace{ID:id, Title:title}
+	m.workspaces[id] = &Workspace{ID: id, Title: title}
 	m.workspaceOrder = append(m.workspaceOrder, id)
 	m.activeWorkspace = ptr(id)
 	m.bump()
@@ -256,7 +256,7 @@ func (m *Model) EnsureWorkspace() uuid.UUID {
 	id := uuid.New()
 	title := fmt.Sprintf("Workspace %d", m.nextWorkspaceNumber)
 	m.nextWorkspaceNumber++
-	m.workspaces[id] = &Workspace{ID:id, Title:title}
+	m.workspaces[id] = &Workspace{ID: id, Title: title}
 	m.workspaceOrder = append(m.workspaceOrder, id)
 	m.activeWorkspace = ptr(id)
 	m.bump()
@@ -316,12 +316,23 @@ func (m *Model) ReorderWorkspace(id uuid.UUID, index int) error {
 	}
 	old := -1
 	for i, candidate := range m.workspaceOrder {
-		if candidate == id { old = i; break }
+		if candidate == id {
+			old = i
+			break
+		}
 	}
-	if old < 0 { return errors.New("workspace order is missing workspace") }
-	if index < 0 { index = 0 }
-	if index >= len(m.workspaceOrder) { index = len(m.workspaceOrder)-1 }
-	if index == old { return nil }
+	if old < 0 {
+		return errors.New("workspace order is missing workspace")
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(m.workspaceOrder) {
+		index = len(m.workspaceOrder) - 1
+	}
+	if index == old {
+		return nil
+	}
 	m.workspaceOrder = append(m.workspaceOrder[:old], m.workspaceOrder[old+1:]...)
 	m.workspaceOrder = append(m.workspaceOrder, uuid.Nil)
 	copy(m.workspaceOrder[index+1:], m.workspaceOrder[index:])
@@ -334,11 +345,15 @@ func (m *Model) CloseWorkspace(id uuid.UUID) ([]uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w, ok := m.workspaces[id]
-	if !ok { return nil, errors.New("workspace not found") }
+	if !ok {
+		return nil, errors.New("workspace not found")
+	}
 	var terminals []uuid.UUID
 	for _, tid := range w.Tabs {
 		tab := m.tabs[tid]
-		if tab == nil { continue }
+		if tab == nil {
+			continue
+		}
 		var paneIDs []uuid.UUID
 		tab.Root.LeafIDs(&paneIDs)
 		for _, pid := range paneIDs {
@@ -358,69 +373,96 @@ func (m *Model) CloseWorkspace(id uuid.UUID) ([]uuid.UUID, error) {
 	}
 	if m.activeWorkspace != nil && *m.activeWorkspace == id {
 		m.activeWorkspace = nil
-		if len(m.workspaceOrder)>0 {
+		if len(m.workspaceOrder) > 0 {
 			v := m.workspaceOrder[len(m.workspaceOrder)-1]
 			m.activeWorkspace = &v
 		}
 	}
 	m.bump()
-	return terminals,nil
+	return terminals, nil
 }
 
 func (m *Model) CreateTab(workspaceID uuid.UUID, title string, pinned bool) (uuid.UUID, uuid.UUID, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	w, ok := m.workspaces[workspaceID]
-	if !ok { return uuid.Nil,uuid.Nil,errors.New("workspace not found") }
+	if !ok {
+		return uuid.Nil, uuid.Nil, errors.New("workspace not found")
+	}
 	tabID := uuid.New()
 	paneID := uuid.New()
 	surfaceID := uuid.New()
-	if title=="" {
-		title = fmt.Sprintf("Terminal %d",m.nextTabNumber)
+	if title == "" {
+		title = fmt.Sprintf("Terminal %d", m.nextTabNumber)
 		m.nextTabNumber++
 	}
 	var override *string
-	if pinned { override=ptr(title) }
-	m.panes[paneID]=&Pane{ID:paneID,SurfaceID:surfaceID}
-	m.tabs[tabID]=&Tab{ID:tabID,Title:title,TitleOverride:override,Root:Leaf(paneID),ActivePane:paneID}
-	w.Tabs=append(w.Tabs,tabID)
-	w.ActiveTab=ptr(tabID)
+	if pinned {
+		override = ptr(title)
+	}
+	m.panes[paneID] = &Pane{ID: paneID, SurfaceID: surfaceID}
+	m.tabs[tabID] = &Tab{ID: tabID, Title: title, TitleOverride: override, Root: Leaf(paneID), ActivePane: paneID}
+	w.Tabs = append(w.Tabs, tabID)
+	w.ActiveTab = ptr(tabID)
 	m.bump()
-	return tabID,paneID,nil
+	return tabID, paneID, nil
 }
 
-func (m *Model) ResolveTab(id *uuid.UUID, index *int) (uuid.UUID,error) {
+func (m *Model) ResolveTab(id *uuid.UUID, index *int) (uuid.UUID, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if id!=nil {
-		if _,ok:=m.tabs[*id]; ok { return *id,nil }
-		return uuid.Nil,errors.New("tab not found")
+	if id != nil {
+		if _, ok := m.tabs[*id]; ok {
+			return *id, nil
+		}
+		return uuid.Nil, errors.New("tab not found")
 	}
-	if m.activeWorkspace==nil { return uuid.Nil,errors.New("workspace not found") }
-	w:=m.workspaces[*m.activeWorkspace]
-	if index!=nil {
-		if *index<0 || *index>=len(w.Tabs) { return uuid.Nil,errors.New("tab index out of range") }
-		return w.Tabs[*index],nil
+	if m.activeWorkspace == nil {
+		return uuid.Nil, errors.New("workspace not found")
 	}
-	if w.ActiveTab==nil { return uuid.Nil,errors.New("there is no active tab") }
-	return *w.ActiveTab,nil
+	w := m.workspaces[*m.activeWorkspace]
+	if index != nil {
+		if *index < 0 || *index >= len(w.Tabs) {
+			return uuid.Nil, errors.New("tab index out of range")
+		}
+		return w.Tabs[*index], nil
+	}
+	if w.ActiveTab == nil {
+		return uuid.Nil, errors.New("there is no active tab")
+	}
+	return *w.ActiveTab, nil
 }
 
-func (m *Model) RenameTab(id uuid.UUID,title string) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	t:=m.tabs[id]; if t==nil { return errors.New("tab not found") }
-	if title=="" { return errors.New("tab title cannot be empty") }
-	t.Title=title; t.TitleOverride=ptr(title); m.bump(); return nil
+func (m *Model) RenameTab(id uuid.UUID, title string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.tabs[id]
+	if t == nil {
+		return errors.New("tab not found")
+	}
+	if title == "" {
+		return errors.New("tab title cannot be empty")
+	}
+	t.Title = title
+	t.TitleOverride = ptr(title)
+	m.bump()
+	return nil
 }
 
 func (m *Model) ActivateTab(id uuid.UUID) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	if m.tabs[id]==nil { return errors.New("tab not found") }
-	for _,wid:=range m.workspaceOrder {
-		w:=m.workspaces[wid]
-		for _,tid:=range w.Tabs {
-			if tid==id {
-				w.ActiveTab=ptr(id); m.activeWorkspace=ptr(wid); m.bump(); return nil
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tabs[id] == nil {
+		return errors.New("tab not found")
+	}
+	for _, wid := range m.workspaceOrder {
+		w := m.workspaces[wid]
+		for _, tid := range w.Tabs {
+			if tid == id {
+				w.ActiveTab = ptr(id)
+				m.activeWorkspace = ptr(wid)
+				m.bump()
+				return nil
 			}
 		}
 	}
@@ -469,59 +511,118 @@ func (m *Model) closeTabLocked(id uuid.UUID) ([]uuid.UUID, error) {
 	return terminals, nil
 }
 
-func (m *Model) MoveTab(id,target uuid.UUID) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	if m.tabs[id]==nil { return errors.New("tab not found") }
-	dst:=m.workspaces[target]; if dst==nil { return errors.New("workspace not found") }
+func (m *Model) MoveTab(id, target uuid.UUID) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.tabs[id] == nil {
+		return errors.New("tab not found")
+	}
+	dst := m.workspaces[target]
+	if dst == nil {
+		return errors.New("workspace not found")
+	}
 	var src *Workspace
-	for _,wid:=range m.workspaceOrder {
-		w:=m.workspaces[wid]
-		for _,tid:=range w.Tabs { if tid==id { src=w; break } }
-		if src!=nil { break }
+	for _, wid := range m.workspaceOrder {
+		w := m.workspaces[wid]
+		for _, tid := range w.Tabs {
+			if tid == id {
+				src = w
+				break
+			}
+		}
+		if src != nil {
+			break
+		}
 	}
-	if src==nil { return errors.New("tab not found") }
-	if src.ID==target { return nil }
-	for i,tid:=range src.Tabs {
-		if tid==id { src.Tabs=append(src.Tabs[:i],src.Tabs[i+1:]...); break }
+	if src == nil {
+		return errors.New("tab not found")
 	}
-	if src.ActiveTab!=nil && *src.ActiveTab==id {
-		src.ActiveTab=nil
-		if len(src.Tabs)>0 { v:=src.Tabs[len(src.Tabs)-1]; src.ActiveTab=&v }
+	if src.ID == target {
+		return nil
 	}
-	dst.Tabs=append(dst.Tabs,id); dst.ActiveTab=ptr(id); m.bump(); return nil
+	for i, tid := range src.Tabs {
+		if tid == id {
+			src.Tabs = append(src.Tabs[:i], src.Tabs[i+1:]...)
+			break
+		}
+	}
+	if src.ActiveTab != nil && *src.ActiveTab == id {
+		src.ActiveTab = nil
+		if len(src.Tabs) > 0 {
+			v := src.Tabs[len(src.Tabs)-1]
+			src.ActiveTab = &v
+		}
+	}
+	dst.Tabs = append(dst.Tabs, id)
+	dst.ActiveTab = ptr(id)
+	m.bump()
+	return nil
 }
 
-func (m *Model) ResolvePane(id *uuid.UUID) (uuid.UUID,uuid.UUID,error) {
-	m.mu.RLock(); defer m.mu.RUnlock()
-	if id!=nil {
-		if m.panes[*id]==nil { return uuid.Nil,uuid.Nil,errors.New("pane not found") }
-		for tid,t:=range m.tabs { if t.Root.Contains(*id) { return tid,*id,nil } }
-		return uuid.Nil,uuid.Nil,errors.New("pane not found")
+func (m *Model) ResolvePane(id *uuid.UUID) (uuid.UUID, uuid.UUID, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if id != nil {
+		if m.panes[*id] == nil {
+			return uuid.Nil, uuid.Nil, errors.New("pane not found")
+		}
+		for tid, t := range m.tabs {
+			if t.Root.Contains(*id) {
+				return tid, *id, nil
+			}
+		}
+		return uuid.Nil, uuid.Nil, errors.New("pane not found")
 	}
-	if m.activeWorkspace==nil { return uuid.Nil,uuid.Nil,errors.New("workspace not found") }
-	w:=m.workspaces[*m.activeWorkspace]; if w.ActiveTab==nil { return uuid.Nil,uuid.Nil,errors.New("tab not found") }
-	t:=m.tabs[*w.ActiveTab]; return t.ID,t.ActivePane,nil
+	if m.activeWorkspace == nil {
+		return uuid.Nil, uuid.Nil, errors.New("workspace not found")
+	}
+	w := m.workspaces[*m.activeWorkspace]
+	if w.ActiveTab == nil {
+		return uuid.Nil, uuid.Nil, errors.New("tab not found")
+	}
+	t := m.tabs[*w.ActiveTab]
+	return t.ID, t.ActivePane, nil
 }
 
-func (m *Model) SplitPane(target uuid.UUID,direction string) (uuid.UUID,error) {
-	m.mu.Lock(); defer m.mu.Unlock()
+func (m *Model) SplitPane(target uuid.UUID, direction string) (uuid.UUID, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var tab *Tab
-	for _,t:=range m.tabs { if t.Root.Contains(target) { tab=t; break } }
-	if tab==nil { return uuid.Nil,errors.New("pane not found") }
-	newPane:=uuid.New()
-	m.panes[newPane]=&Pane{ID:newPane,SurfaceID:uuid.New()}
-	axis:="horizontal"; newFirst:=false
+	for _, t := range m.tabs {
+		if t.Root.Contains(target) {
+			tab = t
+			break
+		}
+	}
+	if tab == nil {
+		return uuid.Nil, errors.New("pane not found")
+	}
+	newPane := uuid.New()
+	m.panes[newPane] = &Pane{ID: newPane, SurfaceID: uuid.New()}
+	axis := "horizontal"
+	newFirst := false
 	switch direction {
-	case "left": axis="horizontal"; newFirst=true
-	case "right": axis="horizontal"
-	case "up": axis="vertical"; newFirst=true
-	case "down": axis="vertical"
-	default: delete(m.panes,newPane); return uuid.Nil,errors.New("invalid split direction")
+	case "left":
+		axis = "horizontal"
+		newFirst = true
+	case "right":
+		axis = "horizontal"
+	case "up":
+		axis = "vertical"
+		newFirst = true
+	case "down":
+		axis = "vertical"
+	default:
+		delete(m.panes, newPane)
+		return uuid.Nil, errors.New("invalid split direction")
 	}
-	if !tab.Root.SplitLeaf(target,axis,0.5,newPane,newFirst) {
-		delete(m.panes,newPane); return uuid.Nil,errors.New("pane not found")
+	if !tab.Root.SplitLeaf(target, axis, 0.5, newPane, newFirst) {
+		delete(m.panes, newPane)
+		return uuid.Nil, errors.New("pane not found")
 	}
-	tab.ActivePane=newPane; m.bump(); return newPane,nil
+	tab.ActivePane = newPane
+	m.bump()
+	return newPane, nil
 }
 
 func (m *Model) ClosePane(id uuid.UUID) ([]uuid.UUID, error) {
@@ -580,22 +681,33 @@ func (m *Model) FocusPane(id uuid.UUID) error {
 	return errors.New("pane not found")
 }
 
-func (m *Model) ResizePane(id uuid.UUID,ratio float32) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	for _,t:=range m.tabs {
+func (m *Model) ResizePane(id uuid.UUID, ratio float32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, t := range m.tabs {
 		if t.Root.Contains(id) {
-			if !t.Root.ResizeNearest(id,ratio) { return errors.New("pane has no split") }
-			m.bump(); return nil
+			if !t.Root.ResizeNearest(id, ratio) {
+				return errors.New("pane has no split")
+			}
+			m.bump()
+			return nil
 		}
 	}
 	return errors.New("pane not found")
 }
 
-func (m *Model) ResizeSplit(tabID uuid.UUID,path []bool,ratio float32) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	t:=m.tabs[tabID]; if t==nil { return errors.New("tab not found") }
-	if !t.Root.ResizeAtPath(path,ratio) { return errors.New("split not found") }
-	m.bump(); return nil
+func (m *Model) ResizeSplit(tabID uuid.UUID, path []bool, ratio float32) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.tabs[tabID]
+	if t == nil {
+		return errors.New("tab not found")
+	}
+	if !t.Root.ResizeAtPath(path, ratio) {
+		return errors.New("split not found")
+	}
+	m.bump()
+	return nil
 }
 
 func (m *Model) AdjustSplit(tabID uuid.UUID, path []bool, delta float32) error {
@@ -629,32 +741,69 @@ func (m *Model) AdjustSplit(tabID uuid.UUID, path []bool, delta float32) error {
 }
 
 func (m *Model) InstallTerminal(paneID uuid.UUID, meta TerminalMeta) error {
-	m.mu.Lock(); defer m.mu.Unlock()
-	p:=m.panes[paneID]; if p==nil { return errors.New("pane not found") }
-	p.SurfaceID=uuid.New(); copyMeta:=meta; p.Terminal=&copyMeta; m.bump(); return nil
-}
-
-func (m *Model) TerminalForPane(paneID uuid.UUID) (uuid.UUID,bool) {
-	m.mu.RLock(); defer m.mu.RUnlock()
-	p:=m.panes[paneID]; if p==nil || p.Terminal==nil { return uuid.Nil,false }
-	return p.Terminal.TerminalID,true
-}
-
-func (m *Model) PaneForTerminal(termID uuid.UUID) (uuid.UUID,bool) {
-	m.mu.RLock(); defer m.mu.RUnlock()
-	for pid,p:=range m.panes {
-		if p.Terminal!=nil && p.Terminal.TerminalID==termID { return pid,true }
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.panes[paneID]
+	if p == nil {
+		return errors.New("pane not found")
 	}
-	return uuid.Nil,false
+	p.SurfaceID = uuid.New()
+	copyMeta := meta
+	p.Terminal = &copyMeta
+	m.bump()
+	return nil
 }
 
-func (m *Model) SetTerminalSize(termID uuid.UUID,size goprotocol.TerminalSize) {
-	m.mu.Lock(); defer m.mu.Unlock()
-	for _,p:=range m.panes {
-		if p.Terminal!=nil && p.Terminal.TerminalID==termID {
-			p.Terminal.Size=size.Normalized(); m.bump(); return
+func (m *Model) TerminalForPane(paneID uuid.UUID) (uuid.UUID, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p := m.panes[paneID]
+	if p == nil || p.Terminal == nil {
+		return uuid.Nil, false
+	}
+	return p.Terminal.TerminalID, true
+}
+
+func (m *Model) PaneForTerminal(termID uuid.UUID) (uuid.UUID, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for pid, p := range m.panes {
+		if p.Terminal != nil && p.Terminal.TerminalID == termID {
+			return pid, true
 		}
 	}
+	return uuid.Nil, false
+}
+
+func (m *Model) SetTerminalSize(termID uuid.UUID, size goprotocol.TerminalSize) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.panes {
+		if p.Terminal != nil && p.Terminal.TerminalID == termID {
+			p.Terminal.Size = size.Normalized()
+			m.bump()
+			return
+		}
+	}
+}
+
+// AutoCloseExitedTerminalForSession closes the pane only when the model still
+// points at this exact terminal session. A supervised pane keeps its id across a
+// replacement, so the id alone cannot tell the retired worker from its successor.
+func (m *Model) AutoCloseExitedTerminalForSession(termID, sessionID uuid.UUID) bool {
+	m.mu.RLock()
+	current := uuid.Nil
+	for _, pane := range m.panes {
+		if pane.Terminal != nil && pane.Terminal.TerminalID == termID {
+			current = pane.Terminal.SessionID
+			break
+		}
+	}
+	m.mu.RUnlock()
+	if current != uuid.Nil && sessionID != uuid.Nil && current != sessionID {
+		return false
+	}
+	return m.AutoCloseExitedTerminal(termID)
 }
 
 func (m *Model) AutoCloseExitedTerminal(termID uuid.UUID) bool {
@@ -726,11 +875,15 @@ func (m *Model) AutoCloseExitedTerminal(termID uuid.UUID) bool {
 	return true
 }
 
-func (m *Model) SetTerminalExit(termID uuid.UUID,code *int32) {
-	m.mu.Lock(); defer m.mu.Unlock()
-	for _,p:=range m.panes {
-		if p.Terminal!=nil && p.Terminal.TerminalID==termID {
-			p.Terminal.Exited=true; p.Terminal.ExitCode=code; m.bump(); return
+func (m *Model) SetTerminalExit(termID uuid.UUID, code *int32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, p := range m.panes {
+		if p.Terminal != nil && p.Terminal.TerminalID == termID {
+			p.Terminal.Exited = true
+			p.Terminal.ExitCode = code
+			m.bump()
+			return
 		}
 	}
 }
@@ -760,117 +913,139 @@ type TabDump struct {
 }
 
 func (m *Model) Dump() StateDump {
-	m.mu.RLock(); defer m.mu.RUnlock()
-	out:=StateDump{StateRevision:m.revision,Agents:[]any{}}
-	if m.activeWorkspace!=nil { v:=*m.activeWorkspace; out.ActiveWorkspace=&v }
-	for _,wid:=range m.workspaceOrder {
-		w:=m.workspaces[wid]
-		if w==nil { continue }
-		out.Workspaces=append(out.Workspaces,m.dumpWorkspaceLocked(w))
-		for _,tabID:=range w.Tabs {
-			tab:=m.tabs[tabID]
-			if tab==nil { continue }
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := StateDump{StateRevision: m.revision, Agents: []any{}}
+	if m.activeWorkspace != nil {
+		v := *m.activeWorkspace
+		out.ActiveWorkspace = &v
+	}
+	for _, wid := range m.workspaceOrder {
+		w := m.workspaces[wid]
+		if w == nil {
+			continue
+		}
+		out.Workspaces = append(out.Workspaces, m.dumpWorkspaceLocked(w))
+		for _, tabID := range w.Tabs {
+			tab := m.tabs[tabID]
+			if tab == nil {
+				continue
+			}
 			var paneIDs []uuid.UUID
 			tab.Root.LeafIDs(&paneIDs)
-			for _,paneID:=range paneIDs {
-				pane:=m.panes[paneID]
-				if pane==nil || pane.Terminal==nil || pane.Terminal.Agent==nil { continue }
-				status:=any("running")
-				if pane.Terminal.Exited {
-					status=map[string]any{"exited":map[string]any{"code":pane.Terminal.ExitCode}}
+			for _, paneID := range paneIDs {
+				pane := m.panes[paneID]
+				if pane == nil || pane.Terminal == nil || pane.Terminal.Agent == nil {
+					continue
 				}
-				out.Agents=append(out.Agents,map[string]any{
-					"kind":pane.Terminal.Agent.Kind,
-					"label":pane.Terminal.Agent.DisplayName(),
-					"custom_label":pane.Terminal.AgentLabel,
-					"active":pane.Terminal.Agent.Active,
-					"profile":pane.Terminal.Agent.Profile,
-					"run":pane.Terminal.Agent.Run,
-					"scrollback_on_clear_screen":pane.Terminal.Agent.PreserveClear(),
-					"workspace_id":wid,
-					"tab_id":tabID,
-					"pane_id":paneID,
-					"terminal_id":pane.Terminal.TerminalID,
-					"cwd":pane.Terminal.CWD,
-					"status":status,
+				status := any("running")
+				if pane.Terminal.Exited {
+					status = map[string]any{"exited": map[string]any{"code": pane.Terminal.ExitCode}}
+				}
+				out.Agents = append(out.Agents, map[string]any{
+					"kind":                       pane.Terminal.Agent.Kind,
+					"label":                      pane.Terminal.Agent.DisplayName(),
+					"custom_label":               pane.Terminal.AgentLabel,
+					"active":                     pane.Terminal.Agent.Active,
+					"profile":                    pane.Terminal.Agent.Profile,
+					"run":                        pane.Terminal.Agent.Run,
+					"scrollback_on_clear_screen": pane.Terminal.Agent.PreserveClear(),
+					"workspace_id":               wid,
+					"tab_id":                     tabID,
+					"pane_id":                    paneID,
+					"terminal_id":                pane.Terminal.TerminalID,
+					"cwd":                        pane.Terminal.CWD,
+					"status":                     status,
 				})
 			}
 		}
 	}
-	if out.ActiveWorkspace!=nil {
-		for i:=range out.Workspaces {
-			if out.Workspaces[i].ID==*out.ActiveWorkspace {
-				w:=out.Workspaces[i]; out.Workspace=&w; break
+	if out.ActiveWorkspace != nil {
+		for i := range out.Workspaces {
+			if out.Workspaces[i].ID == *out.ActiveWorkspace {
+				w := out.Workspaces[i]
+				out.Workspace = &w
+				break
 			}
 		}
 	}
-	if out.Workspace!=nil && out.Workspace.ActiveTab!=nil {
-		for _,t:=range out.Workspace.Tabs {
-			if t.ID==*out.Workspace.ActiveTab { v:=t.ActivePane; out.FocusedPane=&v; break }
+	if out.Workspace != nil && out.Workspace.ActiveTab != nil {
+		for _, t := range out.Workspace.Tabs {
+			if t.ID == *out.Workspace.ActiveTab {
+				v := t.ActivePane
+				out.FocusedPane = &v
+				break
+			}
 		}
 	}
 	return out
 }
 
 func (m *Model) dumpWorkspaceLocked(w *Workspace) WorkspaceDump {
-	out:=WorkspaceDump{ID:w.ID,Title:w.Title}
-	if w.ActiveTab!=nil { v:=*w.ActiveTab; out.ActiveTab=&v }
-	for _,tid:=range w.Tabs {
-		t:=m.tabs[tid]; if t==nil { continue }
-		tree,_:=json.Marshal(m.dumpNodeLocked(t.Root))
-		out.Tabs=append(out.Tabs,TabDump{
-			ID:t.ID,Title:t.Title,TitleOverride:t.TitleOverride,ActivePane:t.ActivePane,Tree:tree,
+	out := WorkspaceDump{ID: w.ID, Title: w.Title}
+	if w.ActiveTab != nil {
+		v := *w.ActiveTab
+		out.ActiveTab = &v
+	}
+	for _, tid := range w.Tabs {
+		t := m.tabs[tid]
+		if t == nil {
+			continue
+		}
+		tree, _ := json.Marshal(m.dumpNodeLocked(t.Root))
+		out.Tabs = append(out.Tabs, TabDump{
+			ID: t.ID, Title: t.Title, TitleOverride: t.TitleOverride, ActivePane: t.ActivePane, Tree: tree,
 		})
 	}
 	return out
 }
 
 func (m *Model) dumpNodeLocked(n *Node) any {
-	if n.Leaf!=nil {
-		p:=m.panes[*n.Leaf]
-		surfaceState:=any(map[string]any{"Empty":map[string]any{"label":"Empty"}})
-		kind:=SurfaceEmpty
+	if n.Leaf != nil {
+		p := m.panes[*n.Leaf]
+		surfaceState := any(map[string]any{"Empty": map[string]any{"label": "Empty"}})
+		kind := SurfaceEmpty
 		var terminal any
-		if p!=nil && p.Terminal!=nil {
-			kind=SurfaceTerminal
-			status:=any("running")
-			process:=any("running")
+		if p != nil && p.Terminal != nil {
+			kind = SurfaceTerminal
+			status := any("running")
+			process := any("running")
 			if p.Terminal.Exited {
-				status=map[string]any{"exited":map[string]any{"code":p.Terminal.ExitCode}}
-				process=map[string]any{"exited":map[string]any{"code":p.Terminal.ExitCode}}
+				status = map[string]any{"exited": map[string]any{"code": p.Terminal.ExitCode}}
+				process = map[string]any{"exited": map[string]any{"code": p.Terminal.ExitCode}}
 			}
-			tstate:=map[string]any{
-				"terminal_id":p.Terminal.TerminalID,
-				"session_id":p.Terminal.SessionID,
-				"program":p.Terminal.Program,
-				"title":p.Terminal.Title,
-				"process_name":p.Terminal.ProcessName,
-				"cwd":p.Terminal.CWD,
-				"args":p.Terminal.Args,
-				"status":status,
-				"columns":p.Terminal.Size.Columns,
-				"lines":p.Terminal.Size.Lines,
-				"agent":p.Terminal.Agent,
-				"agent_label":p.Terminal.AgentLabel,
+			tstate := map[string]any{
+				"terminal_id":  p.Terminal.TerminalID,
+				"session_id":   p.Terminal.SessionID,
+				"program":      p.Terminal.Program,
+				"title":        p.Terminal.Title,
+				"process_name": p.Terminal.ProcessName,
+				"cwd":          p.Terminal.CWD,
+				"args":         p.Terminal.Args,
+				"status":       status,
+				"columns":      p.Terminal.Size.Columns,
+				"lines":        p.Terminal.Size.Lines,
+				"agent":        p.Terminal.Agent,
+				"agent_label":  p.Terminal.AgentLabel,
 			}
-			surfaceState=map[string]any{"Terminal":tstate}
-			terminal=map[string]any{"summary":map[string]any{
-				"terminal_id":p.Terminal.TerminalID,
-				"size":p.Terminal.Size,
-				"process":process,
-				"process_name":p.Terminal.ProcessName,
-			"agent_name":p.Terminal.Agent.DisplayName(),
-				"cwd":p.Terminal.CWD,
+			surfaceState = map[string]any{"Terminal": tstate}
+			terminal = map[string]any{"summary": map[string]any{
+				"terminal_id":  p.Terminal.TerminalID,
+				"size":         p.Terminal.Size,
+				"process":      process,
+				"process_name": p.Terminal.ProcessName,
+				"agent_name":   p.Terminal.Agent.DisplayName(),
+				"cwd":          p.Terminal.CWD,
 			}}
 		}
 		return map[string]any{
-			"type":"leaf","pane_id":p.ID,"surface_id":p.SurfaceID,
-			"surface_kind":kind,"surface_state":surfaceState,"terminal":terminal,
+			"type": "leaf", "pane_id": p.ID, "surface_id": p.SurfaceID,
+			"surface_kind": kind, "surface_state": surfaceState, "terminal": terminal,
 		}
 	}
 	return map[string]any{
-		"type":"split","axis":n.Axis,"ratio":n.Ratio,
-		"first":m.dumpNodeLocked(n.First),"second":m.dumpNodeLocked(n.Second),
+		"type": "split", "axis": n.Axis, "ratio": n.Ratio,
+		"first": m.dumpNodeLocked(n.First), "second": m.dumpNodeLocked(n.Second),
 	}
 }
 
@@ -882,19 +1057,26 @@ type MemoryProjection struct {
 func (m *Model) MemoryProjection() MemoryProjection {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	stats:=MemoryProjection{SurfaceCount:len(m.panes)}
-	for _,pane:=range m.panes {
-		if pane==nil || pane.Terminal==nil { continue }
-		size:=pane.Terminal.Size.Normalized()
-		stats.VisibleCells+=size.Columns*size.Lines
+	stats := MemoryProjection{SurfaceCount: len(m.panes)}
+	for _, pane := range m.panes {
+		if pane == nil || pane.Terminal == nil {
+			continue
+		}
+		size := pane.Terminal.Size.Normalized()
+		stats.VisibleCells += size.Columns * size.Lines
 	}
 	return stats
 }
 
 func (m *Model) SortedTerminalIDs() []uuid.UUID {
-	m.mu.RLock(); defer m.mu.RUnlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	var ids []uuid.UUID
-	for _,p:=range m.panes { if p.Terminal!=nil { ids=append(ids,p.Terminal.TerminalID) } }
-	sort.Slice(ids,func(i,j int)bool{return ids[i].String()<ids[j].String()})
+	for _, p := range m.panes {
+		if p.Terminal != nil {
+			ids = append(ids, p.Terminal.TerminalID)
+		}
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
 	return ids
 }
