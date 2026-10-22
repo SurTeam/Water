@@ -566,12 +566,7 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 	// Continuing to draw accumulates graphics commands until restore, including automatic
 	// screen clears. Leave the retained frame untouched while Update and the
 	// terminal workers keep running. Explicit screenshots still render once.
-	invisible := false
-	if w.platform != nil {
-		state := w.platform.Snapshot()
-		invisible = state["hidden"] == true || state["occluded"] == true
-	}
-	if (invisible || ebiten.IsWindowMinimized()) && len(w.shots) == 0 {
+	if !windowChromeVisible(w) && len(w.shots) == 0 {
 		w.wasInvisible = true
 		return
 	}

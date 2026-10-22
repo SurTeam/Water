@@ -81,6 +81,20 @@ func matchNativeRows(rows []govt.Row, old map[int]nativeRowTexture) ([]int, []in
 }
 
 func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []govt.Row) {
+	// Cursor-only draws and unchanged panes retain their existing row slots.
+	// Check membership explicitly: a missing slot must not match a zero hash.
+	if len(cache.rows) == len(rows) {
+		unchanged := true
+		for y, row := range rows {
+			if cached, ok := cache.rows[y]; !ok || cached.hash != row.Hash {
+				unchanged = false
+				break
+			}
+		}
+		if unchanged {
+			return
+		}
+	}
 	matches, unused := matchNativeRows(rows, cache.rows)
 	next := make(map[int]nativeRowTexture, len(rows))
 	prepared := make(map[int]preparedRow, len(rows))

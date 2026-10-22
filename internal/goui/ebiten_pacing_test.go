@@ -57,7 +57,7 @@ func TestOutputPublicationKeepsFirstAndLatestViewBounded(t *testing.T) {
 	if outputPublicationDelay(time.Time{}, now) != 0 {
 		t.Fatal("first output was delayed")
 	}
-	interval := time.Second / 30
+	interval := time.Second / 60
 	for _, elapsed := range []time.Duration{0, time.Millisecond, interval - 1} {
 		if got := outputPublicationDelay(now, now.Add(elapsed)); got != interval-elapsed {
 			t.Fatalf("publication before deadline: elapsed=%v delay=%v", elapsed, got)

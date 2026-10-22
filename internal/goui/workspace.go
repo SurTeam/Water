@@ -1531,16 +1531,7 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 				continue
 			}
 		}
-		term.mu.Lock()
-		if term.emu != nil {
-			if term.inputPending.Swap(false) {
-				term.selection = Selection{}
-				term.emu.ScrollToBottom()
-			}
-			term.snapshot = term.emu.FrameSnapshot()
-			term.viewStale.Store(false)
-		}
-		term.mu.Unlock()
+		term.publishSnapshot()
 		delete(changed, term)
 		paint = true
 	}
@@ -1553,6 +1544,26 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 		c.invalidate()
 	}
 	return true
+}
+
+// publishSnapshot acquires the parser/lifetime lock before the view lock, so
+// waiting for parsing does not block Draw. Viewport changes and snapshot
+// replacement remain serialized with GUI scroll callbacks by term.mu: releasing
+// it during construction could overwrite a newer scroll snapshot or follow state.
+func (term *terminalClient) publishSnapshot() {
+	term.parseMu.Lock()
+	defer term.parseMu.Unlock()
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	if term.emu == nil {
+		return
+	}
+	if term.inputPending.Swap(false) {
+		term.selection = Selection{}
+		term.emu.ScrollToBottom()
+	}
+	term.snapshot = term.emu.FrameSnapshot()
+	term.viewStale.Store(false)
 }
 
 func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush) *terminalClient {

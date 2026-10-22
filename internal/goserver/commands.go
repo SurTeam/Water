@@ -66,7 +66,12 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 		if !ignoreResize {
 			s.recordCommandEvents(head.Type, p.Command, result)
 			s.pushSelection(ss, head.Type, result)
-			s.broadcastSnapshot()
+			// PTY input does not change the workspace model. Its echo arrives
+			// on the terminal stream; avoid rebuilding every client's layout
+			// for each keystroke or paste chunk.
+			if head.Type != "terminal.send_text" && head.Type != "terminal.send_bytes" {
+				s.broadcastSnapshot()
+			}
 		}
 	}
 	s.opsMu.Lock()

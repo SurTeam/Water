@@ -97,6 +97,11 @@ func editingSpecFromEvent(event objc.ID) (string, bool) {
 }
 
 func applySystemKeyRepeat(r *nativeKeyRepeater) {
+	// Values are retained until focus resets the repeater. Avoid querying
+	// AppKit on every frame when useSystemRepeat would ignore the result.
+	if r.initial > 0 && r.repeat > 0 {
+		return
+	}
 	nsEvent := objc.ID(objc.GetClass("NSEvent"))
 	delay := objc.Send[float64](nsEvent, objc.RegisterName("keyRepeatDelay"))
 	every := objc.Send[float64](nsEvent, objc.RegisterName("keyRepeatInterval"))

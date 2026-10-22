@@ -331,6 +331,16 @@ func (p *macNativePlatform) publish() {
 	}
 	p.state.Store(&snapshot)
 }
+
+// chromeVisible reads the immutable published state without copying the control
+// API's snapshot map on every pacing and drawing check.
+func (p *macNativePlatform) chromeVisible() bool {
+	if snapshot := p.state.Load(); snapshot != nil {
+		return (*snapshot)["hidden"] != true && (*snapshot)["occluded"] != true
+	}
+	return true
+}
+
 func (p *macNativePlatform) Snapshot() map[string]any {
 	if snapshot := p.state.Load(); snapshot != nil {
 		copy := make(map[string]any, len(*snapshot)+1)

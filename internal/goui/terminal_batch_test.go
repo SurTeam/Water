@@ -229,3 +229,59 @@ func TestTerminalBatchPreservesOrderAndDeduplicates(t *testing.T) {
 		t.Fatal("duplicate event invalidated the frame")
 	}
 }
+
+func TestSnapshotPublicationWaitsForParserWithoutHoldingViewLock(t *testing.T) {
+	emu := govt.New(20, 4, 100)
+	term := &terminalClient{emu: emu, snapshot: emu.FrameSnapshot()}
+	term.parseMu.Lock()
+	started := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		term.publishSnapshot()
+		close(done)
+	}()
+	<-started
+	// Draw must retain access to the previous immutable view while publication
+	// waits for the parser/lifetime owner.
+	if !term.mu.TryRLock() {
+		term.parseMu.Unlock()
+		t.Fatal("publication held the view lock while waiting for parsing")
+	}
+	term.mu.RUnlock()
+	select {
+	case <-done:
+		term.parseMu.Unlock()
+		t.Fatal("publication did not serialize with parsing")
+	default:
+	}
+	emu.Write([]byte("latest"))
+	term.parseMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("publication did not resume after parsing")
+	}
+	if term.snapshot.RowsData[0].Cells[0].Text != "l" {
+		t.Fatal("publication missed the completed parse")
+	}
+	term.close()
+	term.publishSnapshot() // A queued publication after close must be harmless.
+}
+
+func TestSnapshotPublicationSerializesWithClose(t *testing.T) {
+	term := &terminalClient{emu: govt.New(80, 24, 100)}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			term.publishSnapshot()
+		}
+	}()
+	term.close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("snapshot publication deadlocked closing terminal")
+	}
+}

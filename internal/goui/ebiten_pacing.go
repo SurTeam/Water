@@ -14,7 +14,7 @@ func outputPublicationDelay(published, now time.Time) time.Duration {
 	if published.IsZero() {
 		return 0
 	}
-	return max(0, time.Second/30-now.Sub(published))
+	return max(0, time.Second/60-now.Sub(published))
 }
 
 // noteVisibleTerminals publishes the terminals this window is actually drawing.
@@ -113,7 +113,9 @@ func (w *EbitengineWindow) updateFramePacing() {
 
 func windowChromeVisible(w *EbitengineWindow) bool {
 	visible := !ebiten.IsWindowMinimized()
-	if w.platform != nil {
+	if platform, ok := w.platform.(interface{ chromeVisible() bool }); ok {
+		visible = visible && platform.chromeVisible()
+	} else if w.platform != nil {
 		state := w.platform.Snapshot()
 		visible = visible && state["hidden"] != true && state["occluded"] != true
 	}
