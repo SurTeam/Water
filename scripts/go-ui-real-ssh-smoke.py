@@ -7,7 +7,8 @@ from pathlib import Path
 import shlex
 import time
 from fixtures.openssh_server import OpenSSHServer
-from water_test import WaterGUI, water_processes
+from water_test import WaterGUI, water_processes, hold_gui_lock
+hold_gui_lock()
 
 os.environ["WATER_TEST_UNFOCUSED"] = "1"
 

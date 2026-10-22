@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import os
 """Exercise the real macOS notification authorization/delivery path via BEL."""
 import json

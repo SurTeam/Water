@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Verify OSC progress projection and terminal control keys through Water ctl."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

@@ -10,6 +10,8 @@
 - dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/Library/Application Support/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server 进程 `water-dev`/`water-srv-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/Library/Application Support/water/config.json`、Bundle ID `dev.water.terminal`、进程 `water`/`water-server`。
 - GUI 在目标平台原生构建；headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 
+macOS app 的 `Contents/Resources/Licenses` 和 Linux archive 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 统一收集。
+
 控制命令见 [控制 API](control-api.md)，回归流程见 [测试策略](testing.md)。
 
 ## 签名与发布规则

@@ -121,6 +121,7 @@ func (w *EbitengineWindow) layout(c *WorkspaceClient, dst *ebiten.Image) {
 	defer c.layoutMu.Unlock()
 	defer w.publishDragTargets(c)
 	defer w.noteVisibleTerminals(c)
+	w.overlayBounds = image.Rectangle{}
 	c.pollSettingsSave()
 	c.pollAgentSettings()
 	c.mu.RLock()
@@ -496,6 +497,7 @@ func (w *EbitengineWindow) overlayPanel(c *WorkspaceClient, dst *ebiten.Image, w
 	width = min(width, w.size.X-w.dp(32))
 	height = min(height, w.size.Y-w.dp(96))
 	r := image.Rect((w.size.X-width)/2, (w.size.Y-height)/2, (w.size.X+width)/2, (w.size.Y+height)/2)
+	w.overlayBounds = r
 	if dim {
 		nativeRect(dst, image.Rect(0, w.titleHeight(c), w.size.X, w.size.Y), color.NRGBA{A: 130})
 	}

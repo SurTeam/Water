@@ -4,6 +4,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATER_BIN="${WATER_BIN:-$ROOT/target/go-scenarios/water}"
 WATER_SERVER_BIN="${WATER_SERVER_BIN:-$ROOT/target/go-scenarios/water-server}"
+# Server-only scenarios also participate: GUI cleanup snapshots see these PIDs.
+PYTHON="${WATER_PYTHON:-$HOME/.venv/bin/python}"
+[[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+if [[ "${1:-}" != "--gui-lock-held" ]]; then
+  exec "$PYTHON" "$ROOT/scripts/water_test.py" bash "$0" --gui-lock-held "$@"
+fi
+shift
 REQUIRE_ALL="${WATER_SCENARIO_REQUIRE_ALL:-0}"
 TEST_SHELL="$(command -v zsh || true)"
 [[ ! -x /opt/homebrew/bin/zsh ]] || TEST_SHELL=/opt/homebrew/bin/zsh
@@ -15,6 +22,8 @@ mkdir -p "$TMP_ROOT"
 current_pid=""
 current_socket=""
 cleanup() {
+  trap '' INT TERM
+  trap - EXIT
   if [[ -n "$current_socket" && -S "$current_socket" ]]; then
     "$WATER_BIN" --socket "$current_socket" server shutdown >/dev/null 2>&1 || true
   fi
@@ -24,7 +33,9 @@ cleanup() {
   fi
   rm -rf "$TMP_ROOT"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ ! -x "$WATER_BIN" ]]; then
   echo "missing WATER_BIN: $WATER_BIN" >&2

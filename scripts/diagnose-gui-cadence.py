@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Measure rendered-frame gaps for paced output and rapid GUI text input."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import argparse
 import json
 import os

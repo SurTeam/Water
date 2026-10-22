@@ -15,6 +15,8 @@ root=Path(__file__).resolve().parent.parent
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--gui",action="store_true",help="also verify native GUI remote pane routing")
 options=parser.parse_args()
+from water_test import hold_gui_lock
+hold_gui_lock()
 def run(*args):
     return subprocess.run(args,capture_output=True,text=True,timeout=10,check=True)
 for name in ("host","client"):

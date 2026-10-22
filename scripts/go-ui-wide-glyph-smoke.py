@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Check actual wide-icon pixels and cursor rendering in isolated native GUIs."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

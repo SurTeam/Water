@@ -23,7 +23,8 @@ binary = directory / "bin/water-test-gui"
 server = directory / "bin/water-srv-dev"
 server_revision = subprocess.run([sys.executable, str(root / "scripts/server-revision.py")], cwd=root, check=True, capture_output=True, text=True).stdout.strip()
 ldflags = "-X github.com/SurTeam/Water/internal/gobuild.Variant=dev -X github.com/SurTeam/Water/internal/gobuild.Version=" + version + " -X github.com/SurTeam/Water/internal/gobuild.ServerRevision=" + server_revision
-plan = [("vet", ["go", "vet", "./..."]),
+plan = [("test-harness", [sys.executable, "-m", "unittest", "discover", "-s", "scripts", "-p", "test_water_test.py"]),
+        ("vet", ["go", "vet", "./..."]),
         ("unit", ["go", "test", "./...", "-count=1", "-timeout=60s"]),
         ("race", ["go", "test", "-race", "./internal/goclient", "./internal/goserver", "./internal/goterminal", "./internal/govt", "./internal/xterm", "./internal/goui", "-timeout=60s"])]
 if args.profile != "unit":
@@ -38,6 +39,8 @@ if args.profile != "unit":
         scripts += ["go-ui-progress-smoke.py", "go-ui-agent-smoke.py"]
         if args.profile == "agent":
             scripts += ["go-ui-pi-redraw-smoke.py"]
+    if sys.platform == "darwin":
+        scripts += ["go-ui-metal-readback-smoke.py"]
     plan += [(name.removesuffix(".py"), [sys.executable, "scripts/" + name]) for name in scripts]
 if args.list:
     print(json.dumps({"profile": args.profile, "version": version, "step_timeout_seconds": 60,

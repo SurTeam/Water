@@ -89,6 +89,7 @@ def main():
             print('PASS 450 Chinese Cmd+V events through ZLE; distinct SHA-256 per cycle', flush=True)
         finally:
             subprocess.run(['swift', str(fixture), 'restore', str(saved)], check=True, timeout=20)
+            saved.unlink()
 
 
 if __name__ == '__main__':

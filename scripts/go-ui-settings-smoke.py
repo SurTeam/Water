@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the native Go GUI through Water's control API in an owned instance."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 import platform

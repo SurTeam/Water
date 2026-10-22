@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Verify settings and native rounded geometry in an owned GUI."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 import platform

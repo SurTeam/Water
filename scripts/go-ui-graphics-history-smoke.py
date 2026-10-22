@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Real GUI checks for selection during output, Delete, icat and image paste."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path
@@ -128,11 +131,15 @@ try:
         ctl("ui","screenshot","--output",directory/"agent-image-paste.png")
         print("PASS agent image attachment: "+agent,flush=True)
 finally:
-    if saved: subprocess.run(["swift",str(root/"scripts/clipboard-fixture.swift"),"restore",str(directory/"clipboard.json")],check=True,timeout=20)
-    try: ctl("server","shutdown")
-    except Exception: pass
-    if gui.poll() is None: gui.terminate()
-    try: gui.wait(timeout=5)
-    except subprocess.TimeoutExpired: gui.kill();gui.wait(timeout=5)
+    try:
+        if saved:
+            subprocess.run(["swift",str(root/"scripts/clipboard-fixture.swift"),"restore",str(directory/"clipboard.json")],check=True,timeout=20)
+            (directory/"clipboard.json").unlink()
+    finally:
+        try: ctl("server","shutdown")
+        except Exception: pass
+        if gui.poll() is None: gui.terminate()
+        try: gui.wait(timeout=5)
+        except subprocess.TimeoutExpired: gui.kill();gui.wait(timeout=5)
     log.close()
     print(f"artifacts={directory}",flush=True)

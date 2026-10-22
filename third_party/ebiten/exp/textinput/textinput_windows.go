@@ -1,0 +1,315 @@
+// Copyright 2024 The Ebitengine Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package textinput
+
+import (
+	"errors"
+	"image"
+	"sync"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/hajimehoshi/ebiten/v2/internal/microsoftgdk"
+	"github.com/hajimehoshi/ebiten/v2/internal/ui"
+)
+
+type textInputImpl struct {
+	events *textInputEvents
+
+	origWndProc     uintptr
+	wndProcCallback uintptr
+	window          windows.HWND
+	immContext      uintptr
+
+	highSurrogate uint16
+
+	initOnce sync.Once
+
+	err error
+}
+
+// errNoActiveWindow is returned by start when the application has no active
+// window, which is the case while it is not in the foreground.
+var errNoActiveWindow = errors.New("textinput: no active window")
+
+func (t *textInputImpl) markIMEDiscardNeeded() {
+}
+
+func (t *textInputImpl) Start(bounds image.Rectangle, _, _ string) (<-chan textInputState, func()) {
+	if microsoftgdk.IsXbox() {
+		return nil, nil
+	}
+
+	bounds = caretBoundsInClientNativePixels(bounds)
+	var ch chan textInputState
+	var err error
+	ebiten.RunOnMainThread(func() {
+		t.events.end()
+		err = t.start(bounds)
+		if errors.Is(err, errNoActiveWindow) {
+			return
+		}
+		ch, _ = t.events.start()
+	})
+	if ch == nil {
+		// Text inputting needs the window, and it becomes active once the
+		// application comes to the foreground.
+		return nil, nil
+	}
+	if err != nil {
+		t.events.send(textInputState{Error: err})
+		t.events.end()
+	}
+	return ch, func() {
+		ebiten.RunOnMainThread(func() {
+			// Disable IME again.
+			if t.immContext != 0 {
+				return
+			}
+			c, err := _ImmAssociateContext(t.window, 0)
+			if err != nil {
+				t.err = err
+				return
+			}
+			t.immContext = c
+			t.events.end()
+		})
+	}
+}
+
+// start must be called from the main thread.
+func (t *textInputImpl) start(bounds image.Rectangle) (err error) {
+	if t.err != nil {
+		return t.err
+	}
+
+	if t.window == 0 {
+		t.window = _GetActiveWindow()
+	}
+	if t.window == 0 {
+		return errNoActiveWindow
+	}
+	if t.origWndProc == 0 {
+		if t.wndProcCallback == 0 {
+			t.wndProcCallback = windows.NewCallback(t.wndProc)
+		}
+		// Note that a Win32API GetActiveWindow doesn't work on Xbox.
+		h, err := _SetWindowLongPtrW(t.window, _GWL_WNDPROC, t.wndProcCallback)
+		if err != nil {
+			return err
+		}
+		t.origWndProc = h
+	}
+
+	// By default, IME was disabled by setting 0 as the IMM context.
+	// Restore the context once.
+	t.initOnce.Do(func() {
+		err = ui.Get().RestoreIMMContextOnMainThread()
+	})
+	if err != nil {
+		return err
+	}
+
+	if t.immContext != 0 {
+		if _, err := _ImmAssociateContext(t.window, t.immContext); err != nil {
+			return err
+		}
+		t.immContext = 0
+	}
+	h := _ImmGetContext(t.window)
+	defer func() {
+		if winErr := _ImmReleaseContext(t.window, h); winErr != nil {
+			err = errors.Join(err, winErr)
+		}
+	}()
+
+	// CFS_EXCLUDE takes ptCurrentPos as the caret's top left corner and rcArea as
+	// the region the candidate window must not cover, so the input method places
+	// the window right below the caret, or above it when there is no room.
+	if err := _ImmSetCandidateWindow(h, &_CANDIDATEFORM{
+		dwIndex: 0,
+		dwStyle: _CFS_EXCLUDE,
+		ptCurrentPos: _POINT{
+			x: int32(bounds.Min.X),
+			y: int32(bounds.Min.Y),
+		},
+		rcArea: _RECT{
+			left:   int32(bounds.Min.X),
+			top:    int32(bounds.Min.Y),
+			right:  int32(bounds.Max.X),
+			bottom: int32(bounds.Max.Y),
+		},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (t *textInputImpl) wndProc(hWnd uintptr, uMsg uint32, wParam, lParam uintptr) uintptr {
+	switch uMsg {
+	case _WM_IME_SETCONTEXT:
+		// Draw preedit text by an application side.
+		if lParam&_ISC_SHOWUICOMPOSITIONWINDOW != 0 {
+			lParam &^= _ISC_SHOWUICOMPOSITIONWINDOW
+		}
+	case _WM_IME_COMPOSITION:
+		if lParam&(_GCS_RESULTSTR|_GCS_COMPSTR) != 0 {
+			if lParam&_GCS_RESULTSTR != 0 {
+				if err := t.commit(); err != nil {
+					t.events.send(textInputState{Error: err})
+					t.events.end()
+				}
+			}
+			if lParam&_GCS_COMPSTR != 0 {
+				if err := t.update(); err != nil {
+					t.events.send(textInputState{Error: err})
+					t.events.end()
+				}
+			}
+			return 1
+		}
+	case _WM_IME_ENDCOMPOSITION:
+		t.send("", 0, 0, commitNone)
+		return 1
+	case _WM_CHAR, _WM_SYSCHAR:
+		if wParam >= 0xd800 && wParam <= 0xdbff {
+			t.highSurrogate = uint16(wParam)
+		} else {
+			var c rune
+			if wParam >= 0xdc00 && wParam <= 0xdfff {
+				if t.highSurrogate != 0 {
+					c += (rune(t.highSurrogate) - 0xd800) << 10
+					c += (rune(wParam) & 0xffff) - 0xdc00
+					c += 0x10000
+				}
+			} else {
+				c = rune(wParam) & 0xffff
+			}
+			t.highSurrogate = 0
+			if c >= 0x20 {
+				str := string(c)
+				t.send(str, 0, len(str), commitRegular)
+			}
+		}
+	case _WM_UNICHAR:
+		if wParam == _UNICODE_NOCHAR {
+			// WM_UNICHAR is not sent by Windows, but is sent by some third-party input method engine.
+			// Returning TRUE here announces support for this message.
+			return 1
+		}
+		if r := rune(wParam); r >= 0x20 {
+			str := string(r)
+			t.send(str, 0, len(str), commitRegular)
+		}
+	}
+
+	return _CallWindowProcW(t.origWndProc, hWnd, uMsg, wParam, lParam)
+}
+
+// send must be called from the main thread.
+func (t *textInputImpl) send(text string, startInBytes, endInBytes int, kind commitKind) {
+	t.events.send(textInputState{
+		Text:                             text,
+		CompositionSelectionStartInBytes: startInBytes,
+		CompositionSelectionEndInBytes:   endInBytes,
+		ReplacementStartInBytes:          noReplacement,
+		ReplacementEndInBytes:            noReplacement,
+		CommitKind:                       kind,
+	})
+	if kind.committed() {
+		t.events.end()
+	}
+}
+
+// update must be called from the main thread.
+func (t *textInputImpl) update() (err error) {
+	if t.err != nil {
+		return t.err
+	}
+
+	hIMC := _ImmGetContext(t.window)
+	defer func() {
+		if winErr := _ImmReleaseContext(t.window, hIMC); winErr != nil {
+			err = errors.Join(err, winErr)
+		}
+	}()
+
+	buffer16, err := immGetCompositionStringW[uint16](hIMC, _GCS_COMPSTR)
+	if err != nil {
+		return err
+	}
+	if len(buffer16) == 0 {
+		return nil
+	}
+
+	attr, err := immGetCompositionStringW[byte](hIMC, _GCS_COMPATTR)
+	if err != nil {
+		return err
+	}
+
+	clause, err := immGetCompositionStringW[uint32](hIMC, _GCS_COMPCLAUSE)
+	if err != nil {
+		return err
+	}
+
+	// An IME is not guaranteed to report clause offsets that are consistent with the
+	// attribute buffer or the composition string, so treat every offset as untrusted.
+	start16 := len(buffer16)
+	end16 := len(buffer16)
+	if len(clause) > 0 {
+		for i, c := range clause[:len(clause)-1] {
+			if int(c) >= len(attr) {
+				break
+			}
+			if attr[c] == _ATTR_TARGET_CONVERTED || attr[c] == _ATTR_TARGET_NOTCONVERTED {
+				start16 = min(int(c), len(buffer16))
+				end16 = min(max(int(clause[i+1]), start16), len(buffer16))
+				break
+			}
+		}
+	}
+	text := windows.UTF16ToString(buffer16)
+	t.send(text, convertUTF16CountToByteCount(text, start16), convertUTF16CountToByteCount(text, end16), commitNone)
+
+	return nil
+}
+
+// commit must be called from the main thread.
+func (t *textInputImpl) commit() (err error) {
+	if t.err != nil {
+		return t.err
+	}
+
+	hIMC := _ImmGetContext(t.window)
+	defer func() {
+		if winErr := _ImmReleaseContext(t.window, hIMC); winErr != nil {
+			err = errors.Join(err, winErr)
+		}
+	}()
+
+	buffer16, err := immGetCompositionStringW[uint16](hIMC, _GCS_RESULTSTR)
+	if err != nil {
+		return err
+	}
+	if len(buffer16) == 0 {
+		return nil
+	}
+
+	text := windows.UTF16ToString(buffer16)
+	t.send(text, 0, len(text), commitRegular)
+
+	return nil
+}

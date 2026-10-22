@@ -1,4 +1,6 @@
 """Shared ownership, bounded waits and read-only GUI content for Water tests."""
+import atexit
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -7,6 +9,58 @@ import signal
 import subprocess
 import tempfile
 import time
+import sys
+
+
+class GUILifetimeLock:
+    """Serialize native GUI/clipboard tests for this user, including direct runs."""
+    _file = None
+    _depth = 0
+
+    def acquire(self):
+        if getattr(self, "acquired", False):
+            return self
+        cls = type(self)
+        if cls._depth == 0:
+            path = Path("/tmp") / ("water-gui-tests-" + str(os.getuid()) + ".lock")
+            cls._file = path.open("a+")
+            try:
+                print("Waiting for GUI test lock: " + str(path), flush=True)
+                fcntl.flock(cls._file.fileno(), fcntl.LOCK_EX)
+            except BaseException:
+                cls._file.close()
+                cls._file = None
+                raise
+        cls._depth += 1
+        self.acquired = True
+        return self
+
+    def release(self):
+        if not getattr(self, "acquired", False):
+            return
+        self.acquired = False
+        cls = type(self)
+        if cls._depth:
+            cls._depth -= 1
+            if cls._depth == 0:
+                cls._file.close()
+                cls._file = None
+
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *unused):
+        self.release()
+
+
+def hold_gui_lock():
+    """Legacy launchers hold the shared lock until their process exits."""
+    lock = GUILifetimeLock().acquire()
+    atexit.register(lock.release)
+    # Give legacy launchers' finally blocks a chance to close detached servers.
+    if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL:
+        signal.signal(signal.SIGTERM, WaterGUI.interrupted)
+    return lock
 
 
 class ControlError(RuntimeError):
@@ -14,17 +68,23 @@ class ControlError(RuntimeError):
 
 
 def water_processes():
-    result = subprocess.run(["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True, timeout=3)
+    # Separate comm from args: executable paths can contain spaces, and arguments
+    # can themselves mention Water binaries without making the process Water.
+    def inventory(field):
+        result = subprocess.run(["ps", "-axww", "-o", "pid=," + field + "="],
+                                capture_output=True, text=True, check=True, timeout=3)
+        rows = {}
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 1)
+            if len(parts) == 2:
+                rows[int(parts[0])] = parts[1]
+        return rows
+
     names = {"water", "water-dev", "water-server", "water-srv-dev", "water-test-gui"}
-    found = {}
-    for line in result.stdout.splitlines():
-        parts = line.strip().split(None, 1)
-        if len(parts) != 2:
-            continue
-        command = parts[1]
-        if command.startswith("/Applications/Water") or Path(command.split()[0]).name in names:
-            found[int(parts[0])] = command
-    return found
+    commands = inventory("comm")
+    arguments = inventory("args")
+    return {pid: arguments[pid] for pid, executable in commands.items()
+            if Path(executable).name in names and pid in arguments}
 
 
 class WaterGUI:
@@ -50,10 +110,20 @@ class WaterGUI:
         self.log = None
         self.window = None
         self.previous_sigterm = None
-        self.existing_water = water_processes()
+        self.existing_water = {}
+        self.gui_lock = None
         self.server_instances = {}
 
     def __enter__(self):
+        self.gui_lock = GUILifetimeLock().acquire()
+        try:
+            return self.start()
+        except BaseException as error:
+            self.finish(error)
+            raise
+
+    def start(self):
+        self.existing_water = water_processes()
         self.previous_sigterm = signal.getsignal(signal.SIGTERM)
         signal.signal(signal.SIGTERM, self.interrupted)
         config = self.directory / "config.json"
@@ -82,22 +152,42 @@ class WaterGUI:
             self.save("ownership.json", self.ownership)
             return self
         except BaseException as error:
-            self.save("failure.txt", str(error))
-            self.close()
+            try:
+                self.save("failure.txt", str(error))
+            except OSError:
+                pass
             raise
 
     def __exit__(self, error_type, error, traceback):
         if error is not None:
-            self.save("failure.txt", str(error))
             try:
+                self.save("failure.txt", str(error))
                 snapshot = self.ctl("ui", "snapshot")
                 self.save("failure-ui.json", snapshot)
                 pane = snapshot.get("frame_focused_pane")
                 if pane:
                     self.save("failure-content.json", self.content(pane, 0, 256))
-            except (ControlError, subprocess.TimeoutExpired):
+            except Exception:
                 pass
-        self.close()
+        self.finish(error)
+
+    def finish(self, primary_error=None):
+        try:
+            self.close()
+        except Exception as cleanup_error:
+            try:
+                self.save("cleanup-failure.txt", str(cleanup_error))
+            except OSError:
+                pass
+            if primary_error is None:
+                raise
+            if hasattr(primary_error, "add_note"):
+                primary_error.add_note("Cleanup also failed: " + str(cleanup_error))
+            print("FAIL owned GUI cleanup: " + str(cleanup_error), file=sys.stderr, flush=True)
+        finally:
+            if self.gui_lock is not None:
+                self.gui_lock.release()
+                self.gui_lock = None
 
     def save(self, name, value):
         path = self.directory / name
@@ -193,6 +283,8 @@ class WaterGUI:
             signal.signal(signal.SIGTERM, self.previous_sigterm)
             self.previous_sigterm = None
         if self.gui is None:
+            if self.log:
+                self.log.close()
             return
         cleanup_error = None
         try:
@@ -220,9 +312,16 @@ class WaterGUI:
         if self.log:
             self.log.close()
         current = water_processes()
+        deadline = time.monotonic() + 5
+        while any(pid in current for pid in self.server_instances.values()) and time.monotonic() < deadline:
+            time.sleep(.025)
+            current = water_processes()
         preserved = all(current.get(pid) == command for pid, command in self.existing_water.items())
+        servers_exited = not any(pid in current for pid in self.server_instances.values())
+        socket_removed = not Path(self.socket).exists()
+        passed = preserved and servers_exited and socket_removed
         self.save("cleanup.json", {"gui_exited": self.gui.poll() is not None,
-                                   "socket_removed": not Path(self.socket).exists(),
+                                   "socket_removed": socket_removed, "owned_servers_exited": servers_exited,
                                    "existing_water_preserved": preserved,
                                    "existing_water_before": self.existing_water,
                                    "existing_water_after": {pid: current.get(pid) for pid in self.existing_water},
@@ -230,12 +329,33 @@ class WaterGUI:
         export = os.environ.get("WATER_TEST_EVIDENCE_DIR")
         if export:
             shutil.copytree(self.directory, Path(export) / self.directory.name, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns("web-tls-*"))
-        print("PASS owned GUI cleanup; existing Water preserved=" + str(preserved)
+                            ignore=shutil.ignore_patterns("web-tls-*", "clipboard*.json"))
+        print(("PASS" if passed else "FAIL") + " owned GUI cleanup; existing Water preserved=" + str(preserved)
               + "; existing PIDs=" + ",".join(map(str, self.existing_water))
               + "; artifacts=" + str(self.directory), flush=True)
         self.gui = None
         if cleanup_error:
             raise cleanup_error
-        if not preserved:
-            raise RuntimeError("existing Water process changed during the test; inspect ownership/cleanup evidence")
+        if not passed:
+            raise RuntimeError("GUI cleanup failed: existing_water_preserved=" + str(preserved)
+                               + "; owned_servers_exited=" + str(servers_exited)
+                               + "; socket_removed=" + str(socket_removed)
+                               + "; artifacts=" + str(self.directory))
+
+
+if __name__ == "__main__":
+    # The shell smoke has no Python fixture; keep its whole process lifetime locked.
+    with GUILifetimeLock():
+        child = subprocess.Popen(sys.argv[1:])
+        forwarded = False
+        def forward(signum, frame):
+            global forwarded
+            if not forwarded and child.poll() is None:
+                forwarded = True
+                try:
+                    child.send_signal(signum)
+                except ProcessLookupError:
+                    pass
+        signal.signal(signal.SIGTERM, forward)
+        signal.signal(signal.SIGINT, forward)
+        sys.exit(child.wait())

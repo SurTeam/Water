@@ -7,6 +7,9 @@ pane stays idle. Parsing may use a little CPU, but it must not become a
 full-window refresh loop.
 """
 
+from water_test import hold_gui_lock
+hold_gui_lock()
+
 import argparse
 import json
 import os

@@ -70,9 +70,10 @@ mkdir -p "$stage_dir"
 install -m 755 "$build_dir/water" "$stage_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$stage_dir/$server_installed_name"
 install -m 755 "$build_dir/water-update" "$stage_dir/$updater_installed_name"
+bash "$root_dir/scripts/package-licenses.sh" "$stage_dir/Licenses"
 
 rm -f "$archive"
-tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$updater_installed_name"
+tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$updater_installed_name" Licenses
 
 echo "Built $archive"
 echo "Run with: tar xzf $(basename "$archive") && ./$gui_installed_name"

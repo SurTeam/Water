@@ -16,6 +16,8 @@ from fixtures.web_fonts import verify_web_fonts
 from fixtures.web_servers import verify_servers
 from fixtures.web_mobile_controls import verify_mobile_controls
 from fixtures.web_workspace_close import verify_workspace_close
+from water_test import hold_gui_lock
+hold_gui_lock()
 
 root=Path(__file__).resolve().parent.parent
 spec=importlib.util.spec_from_file_location("web_gui_helpers",root/"scripts/go-ui-web-smoke.py")

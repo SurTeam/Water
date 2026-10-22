@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Measure real GUI key handling while continuous output fills history."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import argparse
 import concurrent.futures
 import json

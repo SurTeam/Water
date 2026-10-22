@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from water_test import WaterGUI, ControlError
+from water_test import WaterGUI, ControlError, hold_gui_lock
+hold_gui_lock()
 
 os.environ["WATER_TEST_UNFOCUSED"] = "1"
 

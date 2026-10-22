@@ -402,7 +402,12 @@ func resolveSiblingServer(executable, variant string) (string, error) {
 	var failures []string
 	for _, candidate := range candidates {
 		info, err := os.Stat(candidate)
-		if err != nil || info.IsDir() {
+		if err != nil {
+			failures = append(failures, candidate+": "+err.Error())
+			continue
+		}
+		if info.IsDir() {
+			failures = append(failures, candidate+": is a directory")
 			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)

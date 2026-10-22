@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Measure idle and bounded ANSI output CPU in an owned, isolated native GUI."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import argparse
 import json
 import os

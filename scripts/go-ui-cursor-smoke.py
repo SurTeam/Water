@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Verify cursor preferences and IME geometry through an owned native Water GUI."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

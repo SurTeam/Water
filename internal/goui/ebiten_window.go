@@ -145,6 +145,7 @@ type EbitengineWindow struct {
 	layoutRevision          uint64
 	drawnRevision           uint64
 	lastLayout              time.Time
+	overlayBounds           image.Rectangle
 	lastFrameSize           image.Point
 	lastFrameScale          float64
 	lastFocus               bool
@@ -727,6 +728,7 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["window_position"] = []int{wx, wy}
 		state["window_size"] = []int{ww, wh}
 		state["display_scale"] = w.scale
+		state["overlay_bounds"] = []int{w.overlayBounds.Min.X, w.overlayBounds.Min.Y, w.overlayBounds.Max.X, w.overlayBounds.Max.Y}
 		state["ime_caret_bounds"] = []int{w.inputCaret.Min.X, w.inputCaret.Min.Y, w.inputCaret.Max.X, w.inputCaret.Max.Y}
 		if monitor := ebiten.Monitor(); monitor != nil {
 			sw, sh := monitor.Size()

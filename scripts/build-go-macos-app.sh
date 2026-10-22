@@ -69,6 +69,7 @@ install -m 755 "$build_dir/water" "$macos_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$macos_dir/$server_installed_name"
 install -m 755 "$build_dir/water-update" "$macos_dir/$updater_installed_name"
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
+bash "$root_dir/scripts/package-licenses.sh" "$resources_dir/Licenses"
 
 install -d -m 755 "$resources_dir/skills/water-control"
 install -m 644 "$root_dir/.agents/skills/water-control/SKILL.md"   "$resources_dir/skills/water-control/SKILL.md"

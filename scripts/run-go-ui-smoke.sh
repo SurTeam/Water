@@ -5,6 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WATER_BIN="${WATER_BIN:-$ROOT/target/go-ui-smoke/water}"
 PYTHON="${WATER_PYTHON:-$HOME/.venv/bin/python}"
 [[ -x "$PYTHON" ]] || PYTHON="$(command -v python3)"
+# Re-enter under the shared Python lock; only this shell invocation skips wrapping.
+if [[ "${1:-}" != "--gui-lock-held" ]]; then
+  exec "$PYTHON" "$ROOT/scripts/water_test.py" bash "$0" --gui-lock-held "$@"
+fi
+shift
 TEST_SHELL="$(command -v zsh || true)"
 [[ ! -x /opt/homebrew/bin/zsh ]] || TEST_SHELL=/opt/homebrew/bin/zsh
 [[ -n "$TEST_SHELL" ]] || { echo "error: zsh is required for the GUI smoke" >&2; exit 1; }
@@ -31,6 +36,8 @@ mkdir -p "$TMP_ROOT"
 
 gui_pid=""
 cleanup() {
+  trap '' INT TERM
+  trap - EXIT
   if [[ -S "$SOCKET" ]]; then
     "$WATER_BIN" --socket "$SOCKET" server shutdown >/dev/null 2>&1 || true
   fi
@@ -44,7 +51,9 @@ cleanup() {
     echo "UI smoke files retained at $TMP_ROOT"
   fi
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 cat >"$CONFIG" <<JSON
 {

@@ -7,7 +7,8 @@ import subprocess
 from pathlib import Path
 
 from fixtures.openssh_server import OpenSSHServer
-from water_test import ControlError, WaterGUI, water_processes
+from water_test import ControlError, WaterGUI, water_processes, hold_gui_lock
+hold_gui_lock()
 
 
 def hits(test):

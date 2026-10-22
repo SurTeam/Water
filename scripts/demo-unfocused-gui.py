@@ -5,6 +5,9 @@ Run on macOS with a built target/go-ui-smoke/water. The script prints the
 frontmost app while it sends a short command through Water's own control API,
 then keeps the window open for inspection until Ctrl+C.
 """
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

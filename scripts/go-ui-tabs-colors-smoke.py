@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Verify titlebar tabs and the real Codex composer in an owned native GUI."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

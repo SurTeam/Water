@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import os
 """Exercise shared-server windows through Water's real control API."""
 import argparse

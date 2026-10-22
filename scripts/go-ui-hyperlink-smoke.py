@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Verify displayed links against the actual native click opener argument."""
+
+from water_test import hold_gui_lock
+hold_gui_lock()
 import json
 import os
 from pathlib import Path

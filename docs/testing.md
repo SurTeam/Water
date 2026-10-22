@@ -17,10 +17,14 @@ Before delivery, run the matching profile once against the final code:
 
 | Profile | Checks |
 | --- | --- |
-| `unit` | Full Go tests, vet, race checks for transport/PTY/VT/UI |
+| `unit` | Python test-harness fault checks, full Go tests, vet, race checks for transport/PTY/VT/UI |
 | `terminal` | Unit profile, versioned dev GUI/server build, all scenarios, native GUI smoke, PTY queries, repeated CJK/large clipboard paste, generated-image/history checks, real Pi redraw |
 | `agent` | Unit profile, builds, all scenarios, native GUI smoke, status-icon pixel measurements, installed Agent startup/sidebar switching, real Pi redraw |
 | `full` | Union of terminal and Agent checks; each step runs once |
+
+GUI/clipboard test lifetimes use the shared per-user advisory lock in `scripts/water_test.py`, including directly invoked legacy scripts and shell runners. Acquire it before process baselines and desktop/clipboard access; release it after cleanup and clipboard restoration. The regression runner executes steps sequentially without a second outer lock. A competing test’s lock wait currently counts toward the step deadline.
+
+Cleanup verifies owned GUI/server exit, socket removal and preservation of pre-existing Water processes. Ownership failures refuse shutdown; ordinary transport or evidence failures still clean up directly owned processes. Cleanup errors do not replace the original test failure. Clipboard backups are deleted after successful restoration and excluded from evidence exports, including failure paths.
 
 Each step has a 60-second deadline. The whole profile consists of multiple
 steps and can take longer than a minute. A failure stops the profile; do not
@@ -140,6 +144,12 @@ not simulate holding a physical key. Physical Cmd+V repeat/IME acceptance remain
 a separate manual check. The large-paste assertion covers the stated 256 KiB
 payload, not an unbounded clipboard size.
 
+### Native rendering and restore checks
+
+macOS GUI profiles run `go-ui-metal-readback-smoke.py`: its native fixture forces repeated readback flushes across autorelease pools, then tests both a subsequent draw and an empty-command-buffer present. Go race and cross-builds cannot verify native drawable lifetime. Ebitengine fixes are maintained in `third_party/ebiten/WATER_CHANGES.md`.
+
+`go-ui-background-smoke.py` verifies screenshot readback while hidden/minimized and terminal round trips after restore. Ordinary measured requests retain a 500ms budget. Only the first snapshot following deminiaturization has a recorded 1500ms budget for the native AppKit/Dock transition; its actual latency remains in `latency.json`. A pass does not mean the native transition completed within 500ms. A native AppKit control reproduced event-loop blocking without Water/Metal; do not attribute the entire transition to terminal parsing or treat increased polling as a fix.
+
 ## Keep machine-readable evidence
 
 The runner writes `target/test-runs/<run>/summary.json` with every command, PID,
@@ -168,4 +178,4 @@ checks pass, stop; unrelated cleanup and repeated suites do not add evidence.
 
 ## 现有 fixture 的剪贴板边界
 
-完整类型保全是测试原则，不代表所有旧脚本已经满足。`scripts/go-ui-query-smoke.py` 目前用 pbpaste/pbcopy 仅备份与恢复文本，会丢失原有图片/文件等类型；在需要完整保留用户剪贴板的环境不能把它当作无副作用验证。新增或修订测试应复用完整原生类型备份方案，不能只恢复文本后报告剪贴板已完整恢复。
+`scripts/go-ui-query-smoke.py` 与文本粘贴测试使用 Swift fixture 备份并恢复全部原生类型；OSC52 断言仍读取文本以验证实际复制。备份在成功恢复后删除，导出证据排除备份；恢复失败保留本地恢复材料并报告失败，不能声称剪贴板已完整恢复。

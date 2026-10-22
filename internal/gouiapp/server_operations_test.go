@@ -4,11 +4,26 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goprotocol"
 )
+
+func TestSiblingResolutionReportsMissingCandidatePaths(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir)
+	_, err := resolveSiblingServer(filepath.Join(dir, "water-test-gui"), "dev")
+	if err == nil {
+		t.Fatal("missing sibling accepted")
+	}
+	for _, name := range []string{"water-srv-dev", "water-server"} {
+		if !strings.Contains(err.Error(), filepath.Join(dir, name)) {
+			t.Fatalf("missing candidate absent from diagnostic: %v", err)
+		}
+	}
+}
 
 func TestSiblingResolutionSkipsStaleServerBeforeRestart(t *testing.T) {
 	dir := t.TempDir()

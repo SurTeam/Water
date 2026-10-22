@@ -4,6 +4,8 @@ go 1.27
 
 replace github.com/go-text/typesetting => ./third_party/typesetting
 
+replace github.com/hajimehoshi/ebiten/v2 => ./third_party/ebiten
+
 require (
 	gioui.org v0.10.3
 	github.com/coder/websocket v1.8.14

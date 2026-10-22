@@ -52,11 +52,19 @@ with WaterGUI("water-selection-modal.", config=config, variant=os.environ.get("W
     test.save("remote.json", state)
     img = Image.open(test.screenshot("remote.png")).convert("RGB")
     scale = state["display_scale"]
-    height = min(round(270*scale), img.height-round(96*scale))
-    bottom = (img.height+height)//2
-    near = img.getpixel((img.width//2, bottom+round(3*scale)))
-    far = img.getpixel((img.width//2, bottom+round(20*scale)))
-    assert near == far and all(0 < v < 128 for v in near), (near, far)
+    panel = state["overlay_bounds"]
+    assert 0 <= panel[0] < panel[2] <= img.width and 0 <= panel[1] < panel[3] <= img.height, panel
+    for hit in state["automation_hits"]:
+        if hit["kind"] in ("remote_field", "remote_submit", "remote_cancel"):
+            x0, y0, x1, y1 = hit["rect"]
+            assert panel[0] <= x0 < x1 <= panel[2] and panel[1] <= y0 < y1 <= panel[3], (panel, hit)
+    points = [(img.width//2, panel[3]+round(offset*scale)) for offset in (3, 20)]
+    assert all(0 <= y < img.height for _, y in points), (panel, points)
+    original = [baseline.getpixel(point) for point in points]
+    assert all(pixel == (128, 128, 128) for pixel in original), original
+    near, far = [img.getpixel(point) for point in points]
+    expected = round(128*(255-130)/255)
+    assert near == far and all(abs(v-expected) <= 1 for v in near), (near, far, expected)
     field = next(h["rect"] for h in state["automation_hits"] if h["kind"] == "remote_field")
     x0, y0, x1, y1 = field
     ys = [py for py in range(y0+round(4*scale), y1-round(4*scale))
@@ -65,7 +73,8 @@ with WaterGUI("water-selection-modal.", config=config, variant=os.environ.get("W
     assert ys, "remote field text not rendered"
     top_gap, bottom_gap = min(ys)-y0, y1-1-max(ys)
     assert abs(top_gap-bottom_gap) <= round(4*scale), (top_gap,bottom_gap)
-    test.save("assertions.json", {"remote_near_edge": near, "remote_far_edge": far,
+    test.save("assertions.json", {"overlay_bounds": panel, "sample_points": points,
+                                 "remote_near_edge": near, "remote_far_edge": far,
                                  "field_top_gap": top_gap, "field_bottom_gap": bottom_gap})
     test.ctl("ui", "key", "escape")
     test.wait(lambda: not remote(), "remote closed")
