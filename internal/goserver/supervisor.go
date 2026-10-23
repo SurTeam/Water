@@ -113,9 +113,9 @@ func supervisorExecutable() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	names := []string{"water-server"}
+	names := []string{"water-pty", "water-server"}
 	if gobuild.Variant == "dev" {
-		names = []string{"water-srv-dev", "water-server"}
+		names = []string{"water-pty-dev", "water-srv-dev", "water-server"}
 	}
 	for _, name := range names {
 		candidate := filepath.Join(filepath.Dir(self), name)

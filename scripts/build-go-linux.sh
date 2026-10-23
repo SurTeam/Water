@@ -21,12 +21,14 @@ case "$variant" in
     package_name="water-dev"
     gui_installed_name="water-dev"
     server_installed_name="water-srv-dev"
+    supervisor_installed_name="water-pty-dev"
     updater_installed_name="water-update-dev"
     ;;
   release)
     package_name="water"
     gui_installed_name="water"
     server_installed_name="water-server"
+    supervisor_installed_name="water-pty"
     updater_installed_name="water-update"
     ;;
   *)
@@ -69,11 +71,13 @@ rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
 install -m 755 "$build_dir/water" "$stage_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$stage_dir/$server_installed_name"
+# Give the PTY owner a distinct process name while sharing the server build.
+install -m 755 "$build_dir/water-server" "$stage_dir/$supervisor_installed_name"
 install -m 755 "$build_dir/water-update" "$stage_dir/$updater_installed_name"
 bash "$root_dir/scripts/package-licenses.sh" "$stage_dir/Licenses"
 
 rm -f "$archive"
-tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$updater_installed_name" Licenses
+tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$supervisor_installed_name" "$updater_installed_name" Licenses
 
 echo "Built $archive"
 echo "Run with: tar xzf $(basename "$archive") && ./$gui_installed_name"

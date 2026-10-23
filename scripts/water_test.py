@@ -80,7 +80,7 @@ def water_processes():
                 rows[int(parts[0])] = parts[1]
         return rows
 
-    names = {"water", "water-dev", "water-server", "water-srv-dev", "water-test-gui"}
+    names = {"water", "water-dev", "water-server", "water-srv-dev", "water-pty", "water-pty-dev", "water-test-gui"}
     commands = inventory("comm")
     arguments = inventory("args")
     return {pid: arguments[pid] for pid, executable in commands.items()

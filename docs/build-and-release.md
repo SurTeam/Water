@@ -7,7 +7,7 @@
 ## 构建与变体
 
 - 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 打包产物分别在 `target/go-app/<variant>` 和 `target/go-linux/<variant>`。
-- dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/Library/Application Support/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server 进程 `water-dev`/`water-srv-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/Library/Application Support/water/config.json`、Bundle ID `dev.water.terminal`、进程 `water`/`water-server`。
+- dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/Library/Application Support/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server/PTY supervisor 进程 `water-dev`/`water-srv-dev`/`water-pty-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/Library/Application Support/water/config.json`、Bundle ID `dev.water.terminal`、GUI/server/PTY supervisor 进程 `water`/`water-server`/`water-pty`。
 - GUI 在目标平台原生构建；headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 
 macOS app 的 `Contents/Resources/Licenses` 和 Linux archive 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 统一收集。
@@ -18,12 +18,12 @@ macOS app 的 `Contents/Resources/Licenses` 和 Linux archive 的 `Licenses` 携
 
 - `.github/workflows/macos-signed.yml` 是唯一保留的 CI，为 signing-only workflow，唯一触发方式是 `workflow_dispatch`；不得把源码 checkout、编译或完整构建放回该 workflow。本地执行构建和验证。
 - workflow 必须接收 `variant`、`publication`、`tag`、`source_release`、`source_asset`。release 只接受 `v*` tag，dev 只接受 `dev-*` tag；`prerelease` 只给 dev，`release` 只给正式版，`draft`/`none` 可用于两者。
-- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供SurTeam证书的 `CODESIGN_IDENTITY="85B37EA8D5B9719CB5F443613573AD1F4986B17B"`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
+- 当前开发机是 macOS 时，优先在本机使用与 CI 相同的 SurTeam 证书完成签名：显式提供SurTeam证书的 `CODESIGN_IDENTITY="85B37EA8D5B9719CB5F443613573AD1F4986B17B"`、设置 `CODESIGN_REQUIRED=1`，本地构建后签 updater/server/PTY supervisor/GUI/app，验证签名和 archive，再上传已签名产物；不触发 CI 再签一次。
 - 本地证书不可用时，CI signing-only 路径保留为备用：由 macOS 构建机使用 `CODESIGN_SKIP=1` 原生构建 unsigned zip → `test -s`/`unzip -t` → 上传目标 tag 的 draft release → 触发 signing workflow。本地签名失败必须报告原因，不自动降级为 ad-hoc 或触发 CI 掩盖失败。unsigned app 不提交 Git，也不能当作已交付安装包。
 - 非 macOS 主机不能运行 macOS archive 构建脚本；只能接收 macOS 构建机生成的 archive 后上传交接。signing-only CI 不提供编译环境，也不能替代原生构建。
 - 需要真实签名时显式设置 `CODESIGN_IDENTITY` 和 `CODESIGN_REQUIRED=1`；本地 ad-hoc/unsigned 产物只能作为构建或签名交接中间物。
 - `SurTeamCode.p12` 只作为本地导入材料，放在仓库外并限制权限；`.env`、密码、p12、明文 identity 不得进入源码、workflow、日志或 shell tracing。Actions 只使用 `SURTEAM_CODE_P12_BASE64`、`SURTEAM_SIGN_PASS` 和可选的 `SURTEAM_SIGNING_IDENTITY`。
-- 本地与 Action 均必须签 nested updater/server/GUI 和 app，并执行 `codesign --verify --deep --strict`；失败不得发布。Action 使用临时 keychain，`always()` 清理 keychain 和 p12。`CODESIGN_SKIP=1` 与 `CODESIGN_REQUIRED` 互斥。
+- 本地与 Action 均必须签 nested updater/server/PTY supervisor/GUI 和 app，并执行 `codesign --verify --deep --strict`；失败不得发布。Action 使用临时 keychain，`always()` 清理 keychain 和 p12。`CODESIGN_SKIP=1` 与 `CODESIGN_REQUIRED` 互斥。
 
 
 ## Build

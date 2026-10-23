@@ -44,7 +44,7 @@ GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 Open
 
 PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervisor`），server 通过 unix socket 成为它的客户端。升级、重启或崩溃只影响 server，程序继续运行；新 server 按 pane id 重新 attach，并用 supervisor 保留的输出历史重建 replay。
 
-- supervisor 与 server 同一二进制，`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server。默认启用，`WATER_PTY_SUPERVISOR=off` 退回进程内模式。
+- 本地打包将 server 二进制另装为 `water-pty`（release）或 `water-pty-dev`（dev），优先以该名称启动 supervisor；旧安装包及仅携带 server 的远端 payload 回退到原 server 名称。`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server。默认启用，`WATER_PTY_SUPERVISOR=off` 退回进程内模式。
 - GUI 内嵌 server 与独立 server 都必须调用同一个启用入口；否则本地重启会重新 spawn pane，而远端升级却能接回。
 - supervisor 的键是 pane id（跨 server 重启稳定），terminal 实例 id 每次 spawn 都新建。两者必须分开：客户端按实例 id 订阅，替换 pane 的 terminal 时才会重新 attach；若让实例 id 等于 pane id，GUI 会继续挂在已退役的流上，OSC 标题、Agent 状态都会停在旧值。
 - 普通 spawn 用 `Replace` 关闭该键上的旧程序；只有 recovery 导入时传 `resume`，才接回上一个 server 留下的程序。旧代的事件按 generation 丢弃，被替换的 terminal 从 registry 移除后其 Exit 不再关闭 pane。

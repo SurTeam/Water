@@ -25,6 +25,7 @@ case "$variant" in
     bundle_id="dev.water.terminal.dev"
     gui_installed_name="water-dev"
     server_installed_name="water-srv-dev"
+    supervisor_installed_name="water-pty-dev"
     updater_installed_name="water-update-dev"
     ;;
   release)
@@ -32,6 +33,7 @@ case "$variant" in
     bundle_id="dev.water.terminal"
     gui_installed_name="water"
     server_installed_name="water-server"
+    supervisor_installed_name="water-pty"
     updater_installed_name="water-update"
     ;;
   *)
@@ -67,6 +69,8 @@ rm -rf "$app_dir"
 mkdir -p "$macos_dir" "$resources_dir"
 install -m 755 "$build_dir/water" "$macos_dir/$gui_installed_name"
 install -m 755 "$build_dir/water-server" "$macos_dir/$server_installed_name"
+# Give the PTY owner a distinct process name while sharing the server build.
+install -m 755 "$build_dir/water-server" "$macos_dir/$supervisor_installed_name"
 install -m 755 "$build_dir/water-update" "$macos_dir/$updater_installed_name"
 install -m 644 "$root_dir/assets/macos/Water.icns" "$resources_dir/Water.icns"
 bash "$root_dir/scripts/package-licenses.sh" "$resources_dir/Licenses"
@@ -103,6 +107,7 @@ elif [[ "$codesign_identity" == "-" ]]; then
 else
   codesign --force --options runtime --timestamp --sign "$codesign_identity" "$macos_dir/$updater_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$macos_dir/$server_installed_name" >/dev/null
+  codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$macos_dir/$supervisor_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$macos_dir/$gui_installed_name" >/dev/null
   codesign --force --options runtime --timestamp --sign "$codesign_identity"     "$app_dir" >/dev/null
 fi
