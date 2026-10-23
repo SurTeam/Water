@@ -674,6 +674,8 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 		return
 	}
 	switch label {
+	case "open-config-folder":
+		c.openConfigFolder()
 	case "cancel":
 		c.closeWebService()
 		s.cancelChanges()

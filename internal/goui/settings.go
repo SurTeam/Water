@@ -3,7 +3,11 @@ package goui
 import (
 	"fmt"
 	"image"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -680,4 +684,44 @@ func applyViewConfig(view *TerminalView, cfg goconfig.AppConfig) {
 		clear(view.cache)
 		view.mu.Unlock()
 	}
+}
+
+func (c *WorkspaceClient) settingsConfigPath() string {
+	if c.configPath == "" {
+		return c.tr("Settings path is unavailable")
+	}
+	path, err := filepath.Abs(c.configPath)
+	if err != nil {
+		return c.configPath
+	}
+	return path
+}
+
+func (c *WorkspaceClient) openConfigFolder() {
+	if c.configPath == "" {
+		c.settings.message = "Settings path is unavailable"
+		return
+	}
+	dir := filepath.Dir(c.settingsConfigPath())
+	go func() {
+		err := os.MkdirAll(dir, 0700)
+		if err == nil {
+			command := "xdg-open"
+			if runtime.GOOS == "darwin" {
+				command = "open"
+			}
+			if runtime.GOOS == "windows" {
+				command = "explorer"
+			}
+			err = exec.Command(command, dir).Run()
+		}
+		if err != nil {
+			c.layoutMu.Lock()
+			c.settings.message = err.Error()
+			c.layoutMu.Unlock()
+			if c.invalidate != nil {
+				c.invalidate()
+			}
+		}
+	}()
 }

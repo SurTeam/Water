@@ -7,7 +7,8 @@
 ## 构建与变体
 
 - 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 打包产物分别在 `target/go-app/<variant>` 和 `target/go-linux/<variant>`。
-- dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/Library/Application Support/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server/PTY supervisor 进程 `water-dev`/`water-srv-dev`/`water-pty-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/Library/Application Support/water/config.json`、Bundle ID `dev.water.terminal`、GUI/server/PTY supervisor 进程 `water`/`water-server`/`water-pty`。
+- dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/.config/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server/PTY supervisor 进程 `water-dev`/`water-srv-dev`/`water-pty-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/.config/water/config.json`、Bundle ID `dev.water.terminal`、GUI/server/PTY supervisor 进程 `water`/`water-server`/`water-pty`。
+- 默认配置根目录依次采用绝对路径 `$XDG_CONFIG_HOME`、兼容变量 `$XDG_CONFIG`、`~/.config`。macOS 首次读取新路径时复制旧 Application Support 配置，保留旧文件；目标已存在时不覆盖。
 - GUI 在目标平台原生构建；headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 
 macOS app 的 `Contents/Resources/Licenses` 和 Linux archive 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 统一收集。

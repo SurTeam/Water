@@ -599,7 +599,11 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 		c.hitRegions[len(c.hitRegions)-1].Label = "update:open"
 	}
 	groups := settingsGroups
-	top := r.Min.Y + w.dp(60)
+	path := c.settingsConfigPath()
+	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(50), r.Max.X-w.dp(176), r.Min.Y+w.dp(76)), path, 10, muted, false)
+	w.button(dst, c, image.Rect(r.Max.X-w.dp(168), r.Min.Y+w.dp(48), r.Max.X-w.dp(24), r.Min.Y+w.dp(78)), "Open config folder", hitSettingsControl, uuid.Nil, false)
+	c.hitRegions[len(c.hitRegions)-1].Label = "open-config-folder"
+	top := r.Min.Y + w.dp(90)
 	tabWidth := (r.Dx() - w.dp(48)) / len(groups)
 	w.round(dst, image.Rect(r.Min.X+w.dp(24), top-w.dp(3), r.Max.X-w.dp(24), top+w.dp(33)), w.dp(8), mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .045))
 	for i, name := range groups {

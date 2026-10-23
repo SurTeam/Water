@@ -3,6 +3,7 @@ package goconfig
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -424,6 +425,9 @@ func (c AppConfig) Normalized() AppConfig {
 
 func Load(path string) (AppConfig, error) {
 	cfg := Default()
+	if err := migrateLegacyConfig(path); err != nil {
+		return AppConfig{}, err
+	}
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
@@ -517,37 +521,81 @@ func ConfiguredLoadPath(buildVariant string) string {
 	return DefaultLoadPath(buildVariant)
 }
 
-func DefaultLoadPath(buildVariant string) string {
-	native := DefaultPath(buildVariant)
-	if info, err := os.Stat(native); err == nil && !info.IsDir() {
-		return native
-	}
-	standard := StandardPath(buildVariant)
-	if info, err := os.Stat(standard); err == nil && !info.IsDir() {
-		return standard
-	}
-	return native
-}
+func DefaultLoadPath(buildVariant string) string { return StandardPath(buildVariant) }
 
-func DefaultPath(buildVariant string) string {
-	dir := configDirName(buildVariant)
+func DefaultPath(buildVariant string) string { return StandardPath(buildVariant) }
+
+func legacyPath(buildVariant string) string {
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "darwin" && home != "" {
-		return filepath.Join(home, "Library", "Application Support", dir, "config.json")
+		return filepath.Join(home, "Library", "Application Support", configDirName(buildVariant), "config.json")
 	}
-	return StandardPath(buildVariant)
+	return ""
 }
 
 func StandardPath(buildVariant string) string {
 	dir := configDirName(buildVariant)
-	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
-		return filepath.Join(base, dir, "config.json")
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CONFIG"} {
+		if base := os.Getenv(name); filepath.IsAbs(base) {
+			return filepath.Join(base, dir, "config.json")
+		}
 	}
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		return filepath.Join(home, ".config", dir, "config.json")
 	}
 	return "water-config.json"
+}
+
+// Publish a complete, private copy without replacing an existing destination.
+// Keep the legacy file for older processes that still use it.
+func migrateLegacyConfig(path string) error {
+	for _, variant := range []string{"release", "dev"} {
+		if path != StandardPath(variant) {
+			continue
+		}
+		source := legacyPath(variant)
+		if source == "" || source == path {
+			return nil
+		}
+		if _, err := os.Lstat(path); err == nil {
+			return nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		data, err := os.ReadFile(source)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("migrate Water configuration: %w", err)
+		}
+		dir := filepath.Dir(path)
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(dir, ".config-migrate-*")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(f.Name())
+		if _, err = f.Write(data); err != nil {
+			f.Close()
+			return err
+		}
+		if err = f.Sync(); err != nil {
+			f.Close()
+			return err
+		}
+		if err = f.Close(); err != nil {
+			return err
+		}
+		if err = os.Link(f.Name(), path); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("migrate Water configuration: %w", err)
+		}
+		return nil
+	}
+	return nil
 }
 
 func (c AppConfig) DefaultCWD() string {

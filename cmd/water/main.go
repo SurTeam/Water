@@ -65,7 +65,7 @@ func runTUI(args []string) error {
 	flags := flag.NewFlagSet("water tui", flag.ContinueOnError)
 	var o gotui.Options
 	flags.StringVar(&o.Socket, "socket", os.Getenv("WATER_CONTROL_SOCKET"), "server socket")
-	flags.StringVar(&o.Config, "config", goconfig.DefaultLoadPath(buildVariant), "configuration path")
+	flags.StringVar(&o.Config, "config", goconfig.ConfiguredLoadPath(buildVariant), "configuration path")
 	flags.StringVar(&o.SSH, "ssh", "", "SSH destination")
 	flags.BoolVar(&o.Serve, "serve", false, "run headless server (internal)")
 	if err := flags.Parse(args); err != nil {

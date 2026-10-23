@@ -43,7 +43,11 @@ Settings 是客户端草稿，保存成功更新基线并保持面板打开；�
 | shell/server 与已有 PTY 生命周期相关选项 | 不改变已经启动的进程；按相应字段使用新终端或重启 server |
 | GUI Settings 的 Agent/Web/Server 操作 | 使用所选 connection 的服务配置，不能替代成本地外观保存 |
 
-完整字段见 [config.example.json](../config.example.json)。macOS release 默认 `~/Library/Application Support/water/config.json`，dev 使用 `water-dev`；已有 XDG 配置可被选用。`--config` 优先于 `WATER_CONFIG`。缺失文件用默认值，格式错误使启动失败。
+完整字段见 [config.example.json](../config.example.json)。release 默认 `~/.config/water/config.json`，dev 使用 `water-dev`。配置根目录优先使用绝对路径 `$XDG_CONFIG_HOME`，其次兼容 `$XDG_CONFIG`，否则使用 `~/.config`；相对路径环境值被忽略。GUI、TUI、控制命令和 server 使用一致的 `--config` > `WATER_CONFIG` > 默认路径优先级。缺失文件用默认值，格式错误使启动失败。
+
+macOS 首次读取默认新路径时，按原始字节复制 `~/Library/Application Support/water[-dev]/config.json`，以 0600 权限原子发布且不覆盖现有目标；旧文件保留。迁移需要目标文件系统支持硬链接，失败会报告错误。运行中旧进程继续使用旧路径，升级后重新启动 GUI/server 才能统一路径；旧文件后续不会自动同步。Web 授权、recovery 等其他目录数据不随配置文件复制，Web 可能需要重新配对；回退旧版本时需自行同步后来保存的新配置。
+
+设置顶部显示实际配置文件绝对路径，并支持打开其所在目录（目录不存在时创建）。恢复默认先修改客户端偏好草稿，保存后持久化；Agent/Web/Server 仍使用各自的设置流程。
 
 UI 支持 `en`、`zh-Hans`；加载兼容 `zh`/`zh-CN`。语言预览同时影响原生菜单，取消恢复已保存值；终端内容及用户名称不翻译。
 

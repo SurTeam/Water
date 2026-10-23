@@ -1056,7 +1056,7 @@ func attachTerminal(ctx cliContext, id uuid.UUID) error {
 }
 
 func extractGlobal(args []string) (socket, config string, filtered []string, err error) {
-	config = goconfig.DefaultLoadPath(buildVariant)
+	config = goconfig.ConfiguredLoadPath(buildVariant)
 	for i := 0; i < len(args); {
 		arg := args[i]
 		switch {

@@ -53,7 +53,7 @@ func Run(arguments []string, buildVariant string) error {
 	flags.SetOutput(os.Stderr)
 	flags.StringVar(&socket, "socket", "", "Unix control socket (compatibility alias)")
 	flags.StringVar(&socket, "control-socket", "", "Unix control socket")
-	flags.StringVar(&configPath, "config", goconfig.DefaultLoadPath(buildVariant), "Water config JSON")
+	flags.StringVar(&configPath, "config", goconfig.ConfiguredLoadPath(buildVariant), "Water config JSON")
 	flags.Var(&sshDestinations, "ssh", "SSH destination to add to this window (may be repeated)")
 	if err := flags.Parse(arguments); err != nil {
 		return err
