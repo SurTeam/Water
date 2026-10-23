@@ -84,7 +84,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "water-server: pty supervisor:", err)
 			os.Exit(1)
 		}
-		<-sig
+		select {
+		case <-sig:
+		case <-supervisor.Done():
+		}
 		_ = supervisor.Close()
 		return
 	}

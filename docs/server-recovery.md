@@ -70,3 +70,5 @@ WATER_TEST_EVIDENCE_DIR=/path/to/test-evidence \
 The reusable GUI fixture sets a unique socket/config and `WATER_TEST_INSTANCE`; dev windows visibly say **Water Test**. It records existing Water process identities before launch. Before shutdown it checks socket, variant, instance/PID ownership and process arguments, and refuses cleanup when ownership cannot be proven. Cleanup records whether pre-existing Water processes were preserved. Regression builds use unique per-run binary directories.
 
 Use the unit regression profile for transport/model/race coverage and the owned native server smoke for GUI behavior. Test evidence includes commands, PIDs, exit codes, screenshots, state/content, recovery documents and cleanup results. Never target a user's existing Water socket to exercise restart.
+
+普通关闭界面和服务器会结束终端及独占 PTY supervisor；仅通过经过 token 和布局校验的 `recovery.shutdown` 保留 PTY。恢复保留状态与普通关闭在同一个生命周期锁下决定，成功确认不得早于保留状态生效。旧版共享 supervisor 允许兼容接回，关闭时不得影响其他 server 的 pane。

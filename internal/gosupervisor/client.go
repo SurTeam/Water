@@ -491,3 +491,16 @@ func (c *Client) deliver(slot int, value any) {
 	}
 	waiter.ch <- value
 }
+
+// Shutdown stops the supervisor and all programs it owns.
+func (c *Client) Shutdown() error {
+	if err := c.send(kindShutdown, struct{}{}); err != nil {
+		return err
+	}
+	select {
+	case <-c.closed:
+		return nil
+	case <-time.After(requestTimeout):
+		return errors.New("supervisor shutdown timed out")
+	}
+}

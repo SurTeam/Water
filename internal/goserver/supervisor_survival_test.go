@@ -207,8 +207,12 @@ func TestSupervisedPaneSurvivesServerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := goclient.PrepareRecovery(session, recoveryPath, gobuild.Variant, "local:"+socket, true); err != nil {
+	prepared, err := goclient.PrepareRecovery(session, recoveryPath, gobuild.Variant, "local:"+socket, true)
+	if err != nil {
 		t.Fatalf("prepare recovery: %v", err)
+	}
+	if err := session.CallTimeout("recovery.shutdown", map[string]any{"token": prepared.Token}, nil, 3*time.Second); err != nil {
+		t.Fatal(err)
 	}
 	_ = session.Close()
 	if err := first.Close(); err != nil {
@@ -327,5 +331,49 @@ func TestReplacingSupervisedTerminalKeepsThePane(t *testing.T) {
 	state := readState(t, socket)
 	if !strings.Contains(state, replacement) {
 		t.Fatalf("pane does not reference the replacement terminal: %s", state)
+	}
+}
+
+// Ordinary shutdown must not retain terminals that a fresh startup cannot adopt.
+func TestOrdinaryCloseStopsSupervisor(t *testing.T) {
+	socket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
+	supervisor := gosupervisor.NewServer()
+	if err := supervisor.Listen(socket); err != nil {
+		t.Fatal(err)
+	}
+	defer supervisor.Close()
+	cfg := goconfig.Default()
+	cfg.Shell.Program = "/bin/sh"
+	cfg.Shell.Args = []string{"-c", "sleep 30"}
+	server := goserver.NewWithConfig(filepath.Join(t.TempDir(), "server.sock"), cfg)
+	if err := server.UseSupervisor(socket); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.Initialize(true, true); err != nil {
+		t.Fatal(err)
+	}
+	client, err := gosupervisor.Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	terms, err := client.List()
+	if err != nil || len(terms) != 1 {
+		t.Fatalf("terminals: %v, %v", terms, err)
+	}
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-supervisor.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("supervisor survived ordinary close")
+	}
+	// Close waits for the entire cleanup, including terminal process groups.
+	if err := supervisor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gosupervisor.Dial(socket); err == nil {
+		t.Fatal("supervisor still accepting connections")
 	}
 }

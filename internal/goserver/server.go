@@ -21,6 +21,7 @@ import (
 	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/gomodel"
 	"github.com/SurTeam/Water/internal/goprotocol"
+	"github.com/SurTeam/Water/internal/gosupervisor"
 	"github.com/SurTeam/Water/internal/goterminal"
 	"github.com/google/uuid"
 )
@@ -44,12 +45,15 @@ type Server struct {
 	web                     *webService
 	webActive               atomic.Bool
 
-	registry         *goterminal.Registry
-	supervisorSocket string
-	model            *gomodel.Model
-	listener         net.Listener
-	closing          chan struct{}
-	once             sync.Once
+	registry           *goterminal.Registry
+	supervisorSocket   string
+	preserveSupervisor atomic.Bool
+	lifecycleMu        sync.Mutex
+	sharedSupervisor   bool
+	model              *gomodel.Model
+	listener           net.Listener
+	closing            chan struct{}
+	once               sync.Once
 
 	opsMu   sync.RWMutex
 	ops     map[uuid.UUID]OperationSnapshot
@@ -173,19 +177,38 @@ func (s *Server) ListenAndServe() error {
 }
 
 func (s *Server) Close() error {
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
 	var err error
 	s.once.Do(func() {
 		close(s.closing)
 		s.web.stop()
 		if s.supervisorSocket != "" {
-			// Supervised programs belong to the supervisor, not this server:
-			// detaching keeps panes alive for the next server instance.
+			// Only a validated recovery shutdown leaves programs for a successor.
+			if !s.preserveSupervisor.Load() {
+				client, dialErr := gosupervisor.Dial(s.supervisorSocket)
+				if dialErr == nil {
+					if s.sharedSupervisor {
+						s.registry.CloseAll()
+						terms, listErr := client.List()
+						err = listErr
+						if listErr == nil && len(terms) == 0 {
+							err = client.Shutdown()
+						}
+					} else {
+						err = client.Shutdown()
+					}
+					_ = client.Close()
+				} else {
+					err = dialErr
+				}
+			}
 			s.detachSupervisor()
 		} else {
 			s.registry.CloseAll()
 		}
 		if s.listener != nil {
-			err = s.listener.Close()
+			err = errors.Join(err, s.listener.Close())
 		}
 		s.sessionsMu.RLock()
 		for ss := range s.sessions {

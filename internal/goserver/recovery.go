@@ -125,9 +125,20 @@ func (s *Server) recoveryRequest(ss *session, msg goprotocol.WireMessage) error 
 		s.recovery = nil
 		return errors.New("server layout or windows changed; server was not stopped")
 	}
+	s.lifecycleMu.Lock()
+	select {
+	case <-s.closing:
+		s.lifecycleMu.Unlock()
+		return errors.New("server is already closing")
+	default:
+	}
+	s.preserveSupervisor.Store(true)
 	if err := ss.write(goprotocol.Success(msg.RequestID, map[string]bool{"ack": true})); err != nil {
+		s.preserveSupervisor.Store(false)
+		s.lifecycleMu.Unlock()
 		return err
 	}
+	s.lifecycleMu.Unlock()
 	go s.Close()
 	return nil
 }

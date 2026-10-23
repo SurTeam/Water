@@ -782,3 +782,6 @@ func (w *connWriter) writeJSON(kind byte, value any) error {
 	copy(frame[5:], payload)
 	return w.write(frame)
 }
+
+// Done closes when the supervisor is stopped, including a protocol shutdown.
+func (s *Server) Done() <-chan struct{} { return s.done }

@@ -1,6 +1,7 @@
 package goserver
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -31,6 +32,19 @@ func supervisorSocketPath() string {
 // server and keeps the programs inside panes alive across upgrades.
 func (s *Server) EnableSupervisor() error {
 	socket := supervisorSocketPath()
+	if os.Getenv("WATER_PTY_SUPERVISOR_SOCKET") == "" {
+		// Independent servers must never terminate each other's terminals.
+		identity := sha256.Sum256([]byte(s.SocketPath))
+		legacy := socket
+		socket = filepath.Join(filepath.Dir(socket), fmt.Sprintf("water-pty-%s-%d-%x.sock", gobuild.Variant, os.Geteuid(), identity[:8]))
+		// Preserve upgrades from the legacy shared supervisor. Close only this
+		// server's panes there; another old server may still own other panes.
+		if client, err := gosupervisor.Dial(legacy); err == nil {
+			_ = client.Close()
+			socket = legacy
+			s.sharedSupervisor = true
+		}
+	}
 	if err := ensureSupervisor(socket); err != nil {
 		return err
 	}
