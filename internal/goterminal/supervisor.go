@@ -138,6 +138,7 @@ func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string,
 		resizeRequests:  make(chan resizeRequest),
 		supervised:      supervisor.client,
 		program:         program,
+		args:            append([]string(nil), args...),
 	}
 	attach, events, err := supervisor.client.Attach(key, 0)
 	if err != nil {
@@ -149,6 +150,9 @@ func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string,
 	r.mu.Lock()
 	r.terms[id] = t
 	r.mu.Unlock()
+	if len(attach.Restore) > 0 {
+		t.publish(goprotocol.TerminalEvent{Kind: goprotocol.OutputEvent, Size: size, Data: attach.Restore})
+	}
 	go t.supervisedLoop(events, attach.Exited, attach.Code)
 	return t, resumed, nil
 }

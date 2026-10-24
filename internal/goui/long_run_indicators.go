@@ -1,7 +1,6 @@
 package goui
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"reflect"
@@ -41,23 +40,12 @@ func (w *EbitengineWindow) updateLongRunIndicators(hosts []nativeHost, now time.
 			if threshold <= 0 {
 				threshold = 300
 			}
-			if agent, ok := agents[command.terminal]; ok {
-				if !agent.running || agent.status != "Running" {
-					continue
-				}
-				name = "agent:" + agent.kind
-				if agent.run != nil {
-					name += fmt.Sprintf(":%d:%s", agent.run.PID, agent.run.Started)
-				}
-				identity = foregroundIdentity{name: name}
-				threshold = cfg.AgentLongRunNotificationSeconds
-				if threshold <= 0 {
-					threshold = 600
-				}
-				if agent.profile != nil && agent.profile.LongRunSeconds > 0 {
-					threshold = agent.profile.LongRunSeconds
-				}
-			} else if isInteractiveShell(name) {
+			// Recognized agents have their own status and notifications. They
+			// must not also appear as ordinary long-running shell commands.
+			if _, ok := agents[command.terminal]; ok {
+				continue
+			}
+			if isInteractiveShell(name) {
 				continue
 			}
 			key := longRunKey{host.entry.ID, command.terminal}

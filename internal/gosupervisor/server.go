@@ -57,6 +57,7 @@ type terminal struct {
 	pid        int
 
 	mu          sync.Mutex
+	restore     historyRestore
 	history     []byte
 	historyHead int    // physical index of the oldest retained byte
 	start       uint64 // absolute offset of the oldest retained byte
@@ -219,13 +220,7 @@ func (s *Server) serve(conn net.Conn) {
 				continue
 			}
 			subs[req.ID] = sub
-			if err := reply(kindAttached, resp); err != nil {
-				sub.close()
-				return
-			}
-			if len(replay) > 0 {
-				sub.writeReplay(resp, replay)
-			}
+			_ = replay // attach queues response and replay before registering live output.
 		case kindWrite:
 			var req writeRequest
 			if err := unmarshal(payload, &req); err != nil {
@@ -336,10 +331,23 @@ func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, [
 	if offset > produced {
 		offset = produced
 	}
+	var restore []byte
+	if truncated {
+		restore = t.restore.bytes()
+	}
 	replay := t.copyHistoryLocked(offset)
+	resp := attachedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Restore: restore, Exited: exited, Code: code}
+	// The bounded replay uses at most 32 frames, leaving room in the 64-frame
+	// queue. Queue the entire attach prefix under the snapshot lock, before
+	// publishers can discover this subscriber. No socket I/O holds the lock.
+	if sub.frames != nil {
+		payload, _ := json.Marshal(resp)
+		sub.enqueueJSON(kindAttached, payload)
+		sub.writeReplay(resp, replay)
+	}
 	t.subs[sub] = struct{}{}
 	t.mu.Unlock()
-	return attachedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Exited: exited, Code: code}, replay
+	return resp, replay
 }
 
 func (s *Server) detach(sub *subscriber) {

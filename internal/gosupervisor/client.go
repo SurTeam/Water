@@ -64,6 +64,7 @@ type Attach struct {
 	PID       int
 	Offset    uint64
 	Available uint64
+	Restore   []byte
 	Truncated bool
 	Exited    bool
 	Code      int32
@@ -253,7 +254,7 @@ func (c *Client) Attach(id uuid.UUID, offset uint64) (Attach, <-chan Event, erro
 		c.dropEvents(key)
 		return Attach{}, nil, errors.New(resp.Error)
 	}
-	return Attach{PID: resp.PID, Offset: resp.Offset, Available: resp.Available, Truncated: resp.Truncated, Exited: resp.Exited, Code: resp.Code}, events, nil
+	return Attach{PID: resp.PID, Offset: resp.Offset, Available: resp.Available, Truncated: resp.Truncated, Restore: resp.Restore, Exited: resp.Exited, Code: resp.Code}, events, nil
 }
 
 // Write sends terminal input.

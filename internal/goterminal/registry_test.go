@@ -2,6 +2,7 @@ package goterminal
 
 import (
 	"bytes"
+ "os/exec"
 	"strconv"
 	"strings"
 	"syscall"
@@ -51,7 +52,9 @@ func TestCloseTerminatesProcessGroup(t *testing.T) {
 	r := NewRegistry()
 	term, err := r.Spawn("/bin/sh", []string{
 		"-c",
-		"sleep 30 & child=$!; printf 'CHILD:%s\\n' \"$child\"; wait",
+		// Report readiness from the child after resetting the background shell's
+		// signal disposition, so Close tests group delivery rather than fork setup.
+		"/bin/sh -c 'trap - HUP; printf \"CHILD:%s\\n\" \"$$\"; exec sleep 30' & wait",
 	}, goprotocol.TerminalSize{Columns:80, Lines:24})
 	if err != nil {
 		t.Fatal(err)
@@ -89,11 +92,19 @@ func TestCloseTerminatesProcessGroup(t *testing.T) {
 	}
 	killDeadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(killDeadline) {
-		if err := syscall.Kill(childPID, 0); err != nil {
+		if err := syscall.Kill(childPID, 0); err == syscall.ESRCH {
+			return
+		}
+		// An orphaned zombie has terminated; reaping belongs to the OS, and
+		// kill(pid, 0) alone can still report it as present under load.
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(childPID)).Output()
+		if err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	state, _ := exec.Command("ps", "-o", "pid=,ppid=,pgid=,stat=,command=", "-p", strconv.Itoa(childPID)).CombinedOutput()
+	t.Logf("descendant state: %s", state)
 	_ = syscall.Kill(childPID, syscall.SIGKILL)
 	t.Fatalf("terminal descendant %d survived process-group close", childPID)
 }

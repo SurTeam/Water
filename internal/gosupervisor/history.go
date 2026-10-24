@@ -7,6 +7,17 @@ func (t *terminal) appendHistoryLocked(data []byte) {
 	if len(data) == 0 {
 		return
 	}
+	// Observe exactly the bytes about to leave the ring, in stream order.
+	discard := len(t.history) + len(data) - historyLimit
+	if discard > 0 {
+		old := minInt(discard, len(t.history))
+		if old > 0 {
+			first := minInt(old, len(t.history)-t.historyHead)
+			t.restore.observe(t.history[t.historyHead : t.historyHead+first])
+			t.restore.observe(t.history[:old-first])
+		}
+		t.restore.observe(data[:discard-old])
+	}
 	if len(data) >= historyLimit {
 		if cap(t.history) < historyLimit {
 			t.history = make([]byte, historyLimit)

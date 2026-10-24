@@ -450,3 +450,28 @@ func TestShellRunIdentitySuccessiveCompletionsAndDisconnect(t *testing.T) {
 		}
 	}
 }
+
+func TestShellLongRunRecognitionRetiresWithoutCompletion(t *testing.T) {
+	cfg := goconfig.Default()
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	defer view.Close()
+	connection, pane, terminal := uuid.New(), uuid.New(), uuid.New()
+	now := time.Unix(100, 0)
+	key := connection.String() + ":" + terminal.String()
+	window := &EbitengineWindow{notificationShellRuns: map[string]notificationRun{
+		key: {name: "node", startedAt: now.Add(-time.Hour), pane: pane},
+	}}
+	hosts := []nativeHost{{entry: ConnectionEntry{ID: connection, Status: "connected"}, view: view, state: view.state}}
+	for _, status := range []string{"Running", "Idle", "Unknown", "Paused", "Completed", "Error"} {
+		t.Run(status, func(t *testing.T) {
+			agents := map[uuid.UUID]nativeAgent{terminal: {terminal: terminal, pane: pane, kind: "pi", status: status}}
+			next := updateShellLongRunNotifications(window, view, hosts, agents, uuid.Nil, false, now, 1, func(message string) bool {
+				t.Errorf("recognized agent emitted shell notification: %s", message)
+				return true
+			})
+			if len(next) != 0 {
+				t.Fatal("recognized agent retained shell timer")
+			}
+		})
+	}
+}

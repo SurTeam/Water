@@ -26,6 +26,12 @@ GUI/clipboard test lifetimes use the shared per-user advisory lock in `scripts/w
 
 Cleanup verifies owned GUI/server exit, socket removal and preservation of pre-existing Water processes. Ownership failures refuse shutdown; ordinary transport or evidence failures still clean up directly owned processes. Cleanup errors do not replace the original test failure. Clipboard backups are deleted after successful restoration and excluded from evidence exports, including failure paths.
 
+Regression launchers must preserve the default SIGHUP disposition. `nohup` passes
+ignored SIGHUP into test shells and invalidates process-group close tests. For
+background runs use a new session with SIGHUP restored to its default. Process
+termination checks distinguish a running descendant from an exited zombie still
+awaiting OS reaping, and report process state on failure.
+
 Each step has a 60-second deadline. The whole profile consists of multiple
 steps and can take longer than a minute. A failure stops the profile; do not
 silently skip a dependency or repeat the same failed test until it passes.

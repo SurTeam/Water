@@ -383,7 +383,7 @@ func (t *Terminal) interactivePOSIXShell() bool {
 	default:
 		return false
 	}
-	for _, arg := range t.cmd.Args[1:] {
+	for _, arg := range t.args {
 		if arg == "--" {
 			break
 		}

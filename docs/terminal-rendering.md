@@ -109,3 +109,9 @@ model request. Kitty protocol details are defined in its [graphics specification
 ## Agent 命令执行的屏幕范围
 
 `pane.execute` 复用原始 replay 和订阅流临时重建模拟器，不持久化服务端逐屏快照，也不读取或修改 GUI viewport。唯一 OSC 生命周期标记确定执行边界，输出按 sequence 去重；范围使用保留行与裁剪计数定位。resize/reflow、备用屏幕切换及部分光标定位使范围失效时，返回有界活动屏幕并标记 `truncated`；重绘覆盖的文字不能作为日志恢复。具体参数、子 shell 和超时进程组保护见 [控制 API](control-api.md#在指定-pane-执行命令)。修改此路径须覆盖真实 PTY 的范围隔离、重绘、裁剪/上限、resize、备用屏幕、TERM/KILL、后代清理与 pane shell 存活。
+
+## Supervisor 历史裁剪与重连模式
+
+Supervisor 的 2 MiB 原始历史环在丢弃字节时推进有界的输入模式和解析状态检查点。历史已裁剪的 attach 单独携带恢复字节，server 在消费 replay 前发布它们；恢复字节不计入 supervisor 原始输出 offset。检查点保留鼠标跟踪/编码、备用屏幕及相关有限输入模式，并处理边界处拆开的控制序列。它不恢复已丢弃的屏幕内容，也不能补回旧 supervisor 已经丢失的模式。
+
+Attach 响应和完整 replay 必须在快照锁内先入队，再注册 live 订阅，保证响应、replay、live 的顺序；socket 写入仍在异步队列消费端执行。修改此路径须验证环绕/超大写入的 offset、控制序列跨边界、模式重置、实际模拟器的鼠标报告，以及并发 attach 的 replay/live 连续性。GUI 重连滚轮验证使用 `scripts/go-ui-tui-reattach-scroll-smoke.py`，确认上下 SGR 滚轮实际到达 TUI。

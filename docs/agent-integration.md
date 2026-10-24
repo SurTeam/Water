@@ -120,8 +120,11 @@ as an Agent state event.
 
 Agent-specific interrupt, exit and force-stop actions are unavailable in the GUI, CLI, TUI and server dispatcher. Ordinary terminal input and terminal/pane lifecycle actions retain their normal semantics. Legacy `interrupt` and `exit` profile fields remain accepted for configuration compatibility but have no Agent control effect.
 
-**Long-run seconds** overrides the Agent notification/indicator threshold;
-`0` inherits the global Agent threshold. **Keep history on clear** selects the
+**Long-run seconds** overrides the Agent notification threshold;
+`0` inherits the global Agent threshold. Recognized Agents do not contribute to
+ordinary long-running command dots/counts, regardless of Agent state. Recognition
+clears any previous shell timer without treating it as command completion; Agent
+status icons and Agent-specific notifications remain independent. **Keep history on clear** selects the
 existing client-side clear-screen policy. Shell long-run tracking distinguishes
 runs by command name, PID and start identity; replacing a command with another
 instance of the same name resets its timer. Completing one run does not mark its

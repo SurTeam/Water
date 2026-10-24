@@ -413,7 +413,12 @@ func resolveSiblingServer(executable, variant string) (string, error) {
 		candidates = append(candidates, found)
 	}
 	var failures []string
+	seen := make(map[string]bool)
 	for _, candidate := range candidates {
+		if seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
 		info, err := os.Stat(candidate)
 		if err != nil {
 			failures = append(failures, candidate+": "+err.Error())
@@ -423,11 +428,13 @@ func resolveSiblingServer(executable, variant string) (string, error) {
 			failures = append(failures, candidate+": is a directory")
 			continue
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		raw, err := exec.CommandContext(ctx, candidate, "--server-info").Output()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cmd := exec.CommandContext(ctx, candidate, "--server-info")
+		cmd.WaitDelay = 250 * time.Millisecond
+		raw, err := cmd.Output()
 		cancel()
 		if err != nil {
-			failures = append(failures, filepath.Base(candidate)+": descriptor unavailable")
+			failures = append(failures, filepath.Base(candidate)+": descriptor unavailable: "+err.Error())
 			continue
 		}
 		var descriptor goprotocol.Descriptor

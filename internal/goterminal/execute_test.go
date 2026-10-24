@@ -3,6 +3,8 @@ package goterminal
 import (
 	"context"
 	"encoding/base64"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -10,6 +12,8 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goprotocol"
+	"github.com/SurTeam/Water/internal/gosupervisor"
+	"github.com/google/uuid"
 )
 
 func executionShell(t *testing.T) *Terminal {
@@ -20,9 +24,14 @@ func executionShell(t *testing.T) *Terminal {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return waitExecutionShell(t, term)
+}
+
+func waitExecutionShell(t *testing.T, term *Terminal) *Terminal {
+	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if fg, err := term.ForegroundGroup(); err == nil && fg == term.cmd.Process.Pid && len(term.Replay()) > 0 {
+		if fg, err := term.ForegroundGroup(); err == nil && fg == term.processID() && len(term.Replay()) > 0 {
 			return term
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -247,5 +256,86 @@ func TestExecuteMaximumCommandTransport(t *testing.T) {
 	got, err := term.Execute(context.Background(), ExecuteOptions{Command: command, Timeout: 3 * time.Second})
 	if err != nil || got.ExitCode == nil || *got.ExitCode != 0 || got.TimedOut || !strings.Contains(got.Text, "maximum") {
 		t.Fatalf("%#v %v", got, err)
+	}
+}
+
+func TestInteractivePOSIXShellWithoutCmd(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"default", nil, true},
+		{"interactive", []string{"-i"}, true},
+		{"login", []string{"--login", "--norc", "-i"}, true},
+		{"command", []string{"-ic", "true"}, false},
+		{"script", []string{"script.sh"}, false},
+		{"unknown-option", []string{"--unknown"}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			term := &Terminal{program: "/bin/sh", pid: 123, args: tt.args}
+			if got := term.interactivePOSIXShell(); got != tt.want {
+				t.Fatalf("eligibility = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExecuteSupervisedAndResumed(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "water-exec-sup-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	supervisor := gosupervisor.NewServer()
+	socket := filepath.Join(dir, "supervisor.sock")
+	if err := supervisor.Listen(socket); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = supervisor.Close() })
+	r := NewRegistry()
+	t.Cleanup(r.DetachSupervisor)
+	if err := r.AttachSupervisor(socket); err != nil {
+		t.Fatal(err)
+	}
+	key := uuid.New()
+	args := []string{"-i"}
+	term, resumed, err := r.SpawnSupervised(key, "/bin/sh", args, goprotocol.TerminalSize{Columns: 80, Lines: 24}, "", false)
+	if err != nil || resumed {
+		t.Fatalf("spawn: resumed=%v err=%v", resumed, err)
+	}
+	// The mirror must own its argument slice, rather than the caller's memory.
+	args[0] = "-c"
+	if term.cmd != nil || !term.interactivePOSIXShell() {
+		t.Fatal("invalid supervised shell metadata")
+	}
+	waitExecutionShell(t, term)
+	pid := term.processID()
+	for _, recover := range []bool{false, true} {
+		if recover {
+			r.DetachSupervisor()
+			r = NewRegistry()
+			t.Cleanup(r.DetachSupervisor)
+			if err := r.AttachSupervisor(socket); err != nil {
+				t.Fatal(err)
+			}
+			term, resumed, err = r.SpawnSupervised(key, "/bin/sh", []string{"-i"}, goprotocol.TerminalSize{Columns: 80, Lines: 24}, "", true)
+			if err != nil || !resumed || term.processID() != pid {
+				t.Fatalf("resume: resumed=%v err=%v", resumed, err)
+			}
+			waitExecutionShell(t, term)
+		}
+		got, err := term.Execute(context.Background(), ExecuteOptions{Command: "printf 'old\rnew\033[K\n'; exit 7"})
+		if err != nil || got.ExitCode == nil || *got.ExitCode != 7 || !strings.Contains(got.Text, "new") || strings.Contains(got.Text, "old") {
+			t.Fatalf("execute: %#v %v", got, err)
+		}
+		got, err = term.Execute(context.Background(), ExecuteOptions{Command: "trap '' TERM; printf 'started\n'; while :; do sleep 1; done", Timeout: 300 * time.Millisecond})
+		if err != nil || !got.TimedOut || !strings.Contains(got.Text, "started") || len(got.Signals) < 2 || got.Signals[0] != "TERM" || got.Signals[1] != "KILL" {
+			t.Fatalf("timeout: %#v %v", got, err)
+		}
+		got, err = term.Execute(context.Background(), ExecuteOptions{Command: "printf 'survived\n'"})
+		if err != nil || got.ExitCode == nil || *got.ExitCode != 0 || !strings.Contains(got.Text, "survived") {
+			t.Fatalf("survival: %#v %v", got, err)
+		}
 	}
 }

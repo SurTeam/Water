@@ -90,6 +90,7 @@ type attachedResponse struct {
 	Offset     uint64 `json:"offset"`
 	Available  uint64 `json:"available"`
 	Truncated  bool   `json:"truncated"`
+	Restore    []byte `json:"restore,omitempty"`
 	Generation uint64 `json:"generation"`
 	Exited     bool   `json:"exited"`
 	Code       int32  `json:"code"`

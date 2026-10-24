@@ -67,7 +67,7 @@ func TestLongRunIndicatorsTrackCurrentTerminals(t *testing.T) {
 	tick(7, "connected")
 	check(0)
 	tick(10, "connected")
-	check(1)
+	check(0)
 	agent["status"] = map[string]any{"exited": map[string]any{"code": 0}}
 	tick(11, "connected")
 	check(0)

@@ -70,7 +70,7 @@ water ctl pane execute --pane PANE_UUID \
 
 先检查目标 connection 的 `server info` 是否含 `pane-execute/v1` capability。旧的 detached/remote server 可能继续运行旧代码；升级 GUI 不会自动替换它，也不得为获得此接口擅自重启用户 server。
 
-RPC 为 `pane.execute`，参数是 `pane_id`、`command`、`timeout_ms`、`max_rows`、`max_bytes`。必须显式指定终端 pane，且处于空闲交互式 `sh`、`bash`、`dash`、`ksh` 或 `zsh` 的空输入行。只能检测前台进程组，无法证明输入行为空；调用方须先检查目标，执行期间避免并发输入。每个终端仅允许一个 execute，其他连接的模型命令不受执行等待阻塞。
+RPC 为 `pane.execute`，参数是 `pane_id`、`command`、`timeout_ms`、`max_rows`、`max_bytes`。必须显式指定终端 pane，且处于空闲交互式 `sh`、`bash`、`dash`、`ksh` 或 `zsh` 的空输入行。只能检测前台进程组，无法证明输入行为空；调用方须先检查目标，执行期间避免并发输入。每个终端仅允许一个 execute，其他连接的模型命令不受执行等待阻塞。 本地及 supervised/resumed 终端使用独立保存的启动参数检查 shell 资格，不依赖仅本地进程才有的 `exec.Cmd`；仍拒绝 `-c` 和脚本参数等非交互启动方式。
 
 命令通过当前 pane 的交互 shell 启动前台 `/bin/sh` 子进程，继承当前工作目录与导出环境；不承诺父 shell 的 alias/function，`cd` 和变量赋值不会持久化到交互 shell。传输依赖系统 `base64 -d`，命令通过编码传入以避免 PTY 控制字符和 canonical 长行限制。
 

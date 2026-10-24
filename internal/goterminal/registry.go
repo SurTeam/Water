@@ -43,6 +43,7 @@ type Terminal struct {
 	supervisorKey         string
 	pid                   int
 	program               string
+	args                  []string // launch arguments, independent of local process ownership
 	shellIntegrationDir   string
 	cellWidth, cellHeight int        // owned by the ordered PTY reader
 	executeMu             sync.Mutex // one foreground execution per pane
@@ -155,6 +156,7 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		ptmx:                ptmx,
 		pid:                 cmd.Process.Pid,
 		program:             program,
+		args:                append([]string(nil), cmd.Args[1:]...),
 		size:                size,
 		scrollbackLines:     r.scrollbackLines,
 		subs:                make(map[uint64]*subscriber),

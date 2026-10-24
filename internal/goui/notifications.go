@@ -237,6 +237,11 @@ func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, ho
 	// new interactive shell took over). A long-running command finishing is
 	// itself a shell state change and should notify.
 	for key, run := range w.notificationShellRuns {
+		_, terminal, _ := strings.Cut(key, ":")
+		if _, recognized := agents[nativeUUID(terminal)]; recognized {
+			// Recognition retires shell tracking; it is not command completion.
+			continue
+		}
 		if currentKeys[key] {
 			continue
 		}
