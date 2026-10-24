@@ -157,12 +157,27 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 		return map[string]any{"type": "workspace_created", "workspace_id": id}, nil
 
 	case "workspace.new":
+		var c struct {
+			CWD string `json:"cwd"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fail("INVALID_COMMAND", err)
+		}
+		if c.CWD != "" {
+			info, err := os.Stat(c.CWD)
+			if err != nil {
+				return fail("INVALID_DIRECTORY", err)
+			}
+			if !filepath.IsAbs(c.CWD) || !info.IsDir() {
+				return fail("INVALID_DIRECTORY", errors.New("cwd must be an absolute directory"))
+			}
+		}
 		wid := s.model.CreateWorkspace("")
 		_, paneID, err := s.model.CreateTab(wid, "", false)
 		if err != nil {
 			return fail("WORKSPACE_CREATE_FAILED", err)
 		}
-		if _, err := s.spawnInPane(paneID, "", nil, s.defaultTerminalSize()); err != nil {
+		if _, err := s.spawnInPane(paneID, "", nil, s.defaultTerminalSize(), c.CWD); err != nil {
 			return fail("TERMINAL_SPAWN_FAILED", err)
 		}
 		return map[string]any{"type": "workspace_created", "workspace_id": wid}, nil

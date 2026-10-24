@@ -51,6 +51,14 @@ macOS 首次读取默认新路径时，按原始字节复制 `~/Library/Applicat
 
 UI 支持 `en`、`zh-Hans`；加载兼容 `zh`/`zh-CN`。语言预览同时影响原生菜单，取消恢复已保存值；终端内容及用户名称不翻译。
 
+## Finder 文件夹服务
+
+macOS app 声明 Finder 服务 `Open New Workspace in Water`，开发版名称为 `Open New Workspace in Water Dev`。安装应用并由系统注册服务后，可在 Finder 文件夹右键菜单的 Services 中调用；菜单是否显示也受 macOS 服务启用状态和缓存影响。
+
+服务读取调用方 pasteboard 的文件路径或 file URL，校验所选项目均为目录。每个目录分别创建一个新的本地 workspace，终端以该目录为工作目录；重复打开同一目录仍创建新 workspace，不向 shell 注入 `cd`。当前选中远程连接时切换至本地连接。多选目录按完整请求放入有界队列，队列满时返回服务错误。
+
+原生服务 provider 在 GUI 初始化时注册，保持 GLFW 的 application delegate。尚未验证 Finder 实际菜单点击、冷启动投递和多个 GUI 进程同时运行时的系统目标窗口选择；这些行为不能由构建、plist 校验或普通 GUI 冒烟测试推断。
+
 ## 启动与验证
 
 使用 `go.mod` 指定的 Go 版本。macOS 原生构建需要 Xcode Command Line Tools；Linux 需要原生图形依赖与 display/GPU。裸构建的身份限制见 [构建打包与发布](build-and-release.md)。

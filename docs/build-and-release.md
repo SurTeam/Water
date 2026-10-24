@@ -106,6 +106,12 @@ to the native test binary. It uses an isolated socket/config and real Water
 control actions, checks the localized panel/menu and bounded release lookup,
 and captures screenshots without installing a release.
 ## macOS local signing and CI fallback
+The macOS app also declares the Finder folder service **Open New Workspace in Water**
+(**Open New Workspace in Water Dev** for dev). Each selected directory opens a new
+local workspace with its terminal rooted there. Service names and ports follow the
+app variant; the plist template is the packaging source. Finder visibility depends
+on macOS service registration and enablement.
+
 The macOS app registers as an alternate handler for `.command` files. Choose
 Water in Finder's **Open With** menu to run an executable command file in a new
 local workspace. Its working directory is the script's directory; the configured

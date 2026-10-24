@@ -30,6 +30,8 @@ target/go-ui-smoke/water ctl --socket /tmp/water-dev.sock debug memory
 
 Model dispatch commands return an operation snapshot. `pane execute` is a synchronous RPC and returns its execution result directly, without an operation ID. Synchronize on the returned operation, terminal output, revision, or process exit; do not add arbitrary sleeps to make a test pass.
 
+协议命令 `workspace.new` 支持可选 `cwd`，用于新 workspace 中的首个终端。显式目录必须是存在的绝对目录，非法值在创建 workspace 前拒绝；省略时沿用配置默认目录。Finder 服务通过本地 connection 发送此命令。
+
 ### Real GUI control
 
 `ui key` dispatches a keystroke through the GUI's input handler. `ui click` dispatches a control-API click at a window-local point, `ui wheel` sends a wheel event, `ui state` reports the current window state, and `ui screenshot` captures the real Ebitengine rendered frame.

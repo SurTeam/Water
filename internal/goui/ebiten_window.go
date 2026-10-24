@@ -384,6 +384,13 @@ func (w *EbitengineWindow) Update() error {
 	if c == nil {
 		return nil
 	}
+	select {
+	case paths := <-finderFolderRequests:
+		for _, path := range paths {
+			w.menuAction("open-folder:" + path)
+		}
+	default:
+	}
 	if w.startupFrameDrawn && !w.startupAcknowledged {
 		w.startupAcknowledged = true
 		go goupdate.AcknowledgeStartup()

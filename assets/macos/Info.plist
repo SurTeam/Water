@@ -39,6 +39,22 @@
             <string>Alternate</string>
         </dict>
     </array>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSMenuItem</key>
+            <dict><key>default</key><string>Open New Workspace in Water</string></dict>
+            <key>NSMessage</key><string>openFolder</string>
+            <key>NSPortName</key><string>Water</string>
+            <key>NSSendTypes</key>
+            <array><string>NSFilenamesPboardType</string><string>public.file-url</string></array>
+            <key>NSSendFileTypes</key><array><string>public.directory</string></array>
+            <key>NSRequiredContext</key>
+            <dict>
+                <key>NSApplicationIdentifier</key><string>com.apple.finder</string>
+            </dict>
+        </dict>
+    </array>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSPrincipalClass</key>

@@ -2,6 +2,7 @@ package goui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -87,11 +88,46 @@ func newNativePlatform(emit func(string), canQuitServer bool) (nativePlatform, e
 				}
 			}
 		},
+	}, {
+		Cmd: objc.RegisterName("openFolder:userData:error:"),
+		Fn: func(_ objc.ID, _ objc.SEL, pb objc.ID, _ objc.ID, serviceError *objc.ID) {
+			paths := pasteboardFilenameList(pb)
+			if len(paths) == 0 {
+				paths = pasteboardFileURLs(pb)
+			}
+			if len(paths) == 0 {
+				paths = pasteboardItemFileURLs(pb)
+			}
+			if len(paths) == 0 {
+				if serviceError != nil {
+					*serviceError = macText("Select a folder to open in Water.")
+				}
+				return
+			}
+			for _, path := range paths {
+				info, err := os.Stat(path)
+				if err != nil || !info.IsDir() {
+					if serviceError != nil {
+						*serviceError = macText("Select a folder to open in Water.")
+					}
+					return
+				}
+			}
+			select {
+			case finderFolderRequests <- paths:
+				p.emit("show-window")
+			default:
+				if serviceError != nil {
+					*serviceError = macText("Water is busy opening folders. Please try again.")
+				}
+			}
+		},
 	}})
 	if err != nil {
 		return nil, fmt.Errorf("register Water menu: %w", err)
 	}
 	p.controller = macSend(objc.ID(class), "new")
+	p.onMain(func() { macSend(macApplication(), "setServicesProvider:", p.controller) })
 	return p, nil
 }
 
