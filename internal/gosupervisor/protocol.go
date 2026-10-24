@@ -85,16 +85,17 @@ type spawnedResponse struct {
 // attachedResponse reports how much history the supervisor still holds for the
 // terminal. A resumed terminal keeps running across server restarts.
 type attachedResponse struct {
-	ID         string `json:"id"`
-	PID        int    `json:"pid"`
-	Offset     uint64 `json:"offset"`
-	Available  uint64 `json:"available"`
-	Truncated  bool   `json:"truncated"`
-	Restore    []byte `json:"restore,omitempty"`
-	Generation uint64 `json:"generation"`
-	Exited     bool   `json:"exited"`
-	Code       int32  `json:"code"`
-	Error      string `json:"error,omitempty"`
+	RestoreSupported bool   `json:"restore_supported,omitempty"`
+	ID               string `json:"id"`
+	PID              int    `json:"pid"`
+	Offset           uint64 `json:"offset"`
+	Available        uint64 `json:"available"`
+	Truncated        bool   `json:"truncated"`
+	Restore          []byte `json:"restore,omitempty"`
+	Generation       uint64 `json:"generation"`
+	Exited           bool   `json:"exited"`
+	Code             int32  `json:"code"`
+	Error            string `json:"error,omitempty"`
 }
 
 type resizedEvent struct {

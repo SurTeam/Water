@@ -34,6 +34,9 @@ type RecoveryTab struct {
 	Tree          *RecoveryNode `json:"tree"`
 }
 type RecoveryNode struct {
+	// InputModes is a finite GUI checkpoint for legacy supervisors that cannot
+	// restore modes after truncating PTY output.
+	InputModes string                  `json:"input_modes,omitempty"`
 	PaneID     uuid.UUID               `json:"pane_id,omitempty"`
 	SurfaceID  uuid.UUID               `json:"surface_id,omitempty"`
 	Axis       string                  `json:"axis,omitempty"`

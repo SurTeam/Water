@@ -3,6 +3,7 @@ package goterminal
 import (
 	"errors"
 	"os"
+	"strings"
 
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/gosupervisor"
@@ -63,7 +64,7 @@ func (r *Registry) SupervisorSocket() string {
 // id. resume is set only by recovery: it keeps the program a previous server left
 // running instead of replacing it. An ordinary spawn always replaces the pane's
 // terminal, even though the supervisor key stays the same.
-func (r *Registry) SpawnSupervisedPane(pane uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
+func (r *Registry) SpawnSupervisedPane(pane uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool, inputModes ...string) (*Terminal, bool, error) {
 	// The supervisor keeps the PTY under the pane id so a later server can resume
 	// it, but each terminal instance gets its own id. Clients attach by instance
 	// id, so a replacement is visible to them instead of silently reusing a
@@ -84,13 +85,13 @@ func (r *Registry) SpawnSupervisedPane(pane uuid.UUID, program string, args []st
 			r.Remove(previous)
 		}
 	}
-	return r.SpawnSupervised(pane, program, args, size, cwd, resume)
+	return r.SpawnSupervised(pane, program, args, size, cwd, resume, inputModes...)
 }
 
 // SpawnSupervised starts a terminal in the supervisor under key and mirrors its
 // output into this registry's replay. The returned Terminal has its own instance
 // id; only the supervisor key survives a restart.
-func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool) (*Terminal, bool, error) {
+func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string, size goprotocol.TerminalSize, cwd string, resume bool, inputModes ...string) (*Terminal, bool, error) {
 	keyString := key.String()
 	r.mu.RLock()
 	supervisor := r.supervisor
@@ -150,6 +151,15 @@ func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string,
 	r.mu.Lock()
 	r.terms[id] = t
 	r.mu.Unlock()
+	// Older supervisors cannot checkpoint discarded mode commands. Seed only a
+	// resumed, truncated stream without a supervisor checkpoint, before its tail
+	// so retained resets and subsequent live output still take precedence.
+	if len(inputModes) > 0 {
+		if modes := legacyRecoveryInputModes(attach, resumed, inputModes[0]); modes != "" {
+			t.publish(goprotocol.TerminalEvent{Kind: goprotocol.OutputEvent, Size: size, Data: []byte(modes)})
+		}
+	}
+
 	if len(attach.Restore) > 0 {
 		t.publish(goprotocol.TerminalEvent{Kind: goprotocol.OutputEvent, Size: size, Data: attach.Restore})
 	}
@@ -218,4 +228,34 @@ func (t *Terminal) supervisedResize(size goprotocol.TerminalSize, cellWidth, cel
 
 func (t *Terminal) supervisedClose() error {
 	return t.supervised.CloseTerminal(t.supervisedKeyUUID())
+}
+
+// Accept only finite terminal mode commands from a recovery document.
+func validatedRecoveryInputModes(input string) string {
+	if len(input) > 128 {
+		return ""
+	}
+	out := ""
+	for len(input) > 0 {
+		matched := false
+		for _, seq := range []string{"\x1b[?1049h", "\x1b[?9h", "\x1b[?1000h", "\x1b[?1002h", "\x1b[?1003h", "\x1b[?1006h", "\x1b[?1016h"} {
+			if strings.HasPrefix(input, seq) {
+				out += seq
+				input = input[len(seq):]
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return ""
+		}
+	}
+	return out
+}
+
+func legacyRecoveryInputModes(attach gosupervisor.Attach, resumed bool, modes string) string {
+	if attach.RestoreSupported || !resumed || !attach.Truncated || len(attach.Restore) != 0 {
+		return ""
+	}
+	return validatedRecoveryInputModes(modes)
 }

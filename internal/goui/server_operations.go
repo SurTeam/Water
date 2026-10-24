@@ -1,7 +1,9 @@
 package goui
 
 import (
+	"encoding/json"
 	"errors"
+	"github.com/SurTeam/Water/internal/govt"
 	"maps"
 	"time"
 
@@ -44,6 +46,49 @@ func (m *MultiWorkspaceClient) ProjectRecoveryLayout(id uuid.UUID, d *gomodel.Re
 			return false
 		}
 		return n.PaneID == p || contains(n.First, p) || contains(n.Second, p)
+	}
+	var checkpoint func(*gomodel.RecoveryNode)
+	checkpoint = func(n *gomodel.RecoveryNode) {
+		if n == nil {
+			return
+		}
+		if n.Terminal {
+			var find func(*paneTree) uuid.UUID
+			find = func(p *paneTree) uuid.UUID {
+				if p == nil {
+					return uuid.Nil
+				}
+				if p.PaneID == n.PaneID && p.Terminal != nil {
+					return p.Terminal.Summary.TerminalID
+				}
+				if id := find(p.First); id != uuid.Nil {
+					return id
+				}
+				return find(p.Second)
+			}
+			for _, w := range c.state.Workspaces {
+				for _, tab := range w.Tabs {
+					var root paneTree
+					if json.Unmarshal(tab.Tree, &root) != nil {
+						continue
+					}
+					if term := c.terminals[find(&root)]; term != nil {
+						term.mu.RLock()
+						if term.emu != nil {
+							n.InputModes = recoveryInputModes(term.emu.FrameSnapshot())
+						}
+						term.mu.RUnlock()
+					}
+				}
+			}
+		}
+		checkpoint(n.First)
+		checkpoint(n.Second)
+	}
+	for _, w := range d.Workspaces {
+		for _, tab := range w.Tabs {
+			checkpoint(tab.Tree)
+		}
 	}
 	for wi := range d.Workspaces {
 		w := &d.Workspaces[wi]
@@ -187,4 +232,28 @@ func (m *MultiWorkspaceClient) serverOperation(id uuid.UUID, action string) (gop
 		m.invalidate()
 	}
 	return view.ServerPanelState().Server, path, nil
+}
+
+func recoveryInputModes(s govt.Snapshot) string {
+	out := ""
+	if s.AltScreen {
+		out += "\x1b[?1049h"
+	}
+	switch s.MouseTracking {
+	case "X10":
+		out += "\x1b[?9h"
+	case "VT200":
+		out += "\x1b[?1000h"
+	case "DRAG":
+		out += "\x1b[?1002h"
+	case "ANY":
+		out += "\x1b[?1003h"
+	}
+	switch s.MouseEncoding {
+	case "SGR":
+		out += "\x1b[?1006h"
+	case "SGR_PIXELS":
+		out += "\x1b[?1016h"
+	}
+	return out
 }

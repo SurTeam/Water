@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Replay a fullscreen mouse TUI after trimming, then verify real wheel input."""
+"""Restart the server after truncating TUI replay, then verify real wheel input."""
 import os
 import shlex
-import subprocess
 import sys
 
 from water_test import WaterGUI
@@ -19,7 +18,7 @@ from pathlib import Path
 tty.setraw(0)
 os.write(1, b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h")
 frame = b"\x1b[H" + b"WHEEL_REPLAY_FRAME" + b" " * 60
-os.write(1, frame * 12000)
+os.write(1, frame * 40000)
 os.write(1, b"\x1b[2J\x1b[HWHEEL_REPLAY_READY")
 pending = b""
 while True:
@@ -41,26 +40,31 @@ while True:
     before = test.ctl("server", "info")
     test.save("before-reattach.json", test.content(pane))
 
-    old_gui = test.gui
-    test.ctl("ui", "menu", "quit-gui")
-    assert old_gui.wait(timeout=5) == 0, "first GUI did not detach cleanly"
-    test.log.close()
-    test.log = (test.directory / "reattached-gui.log").open("w")
-    env = dict(os.environ, WATER_TEST_INSTANCE=test.test_instance, WATER_TEST_UNFOCUSED="1",
-               WATER_CONTROL_SOCKET=test.socket, WATER_CONFIG=str(test.directory / "config.json"))
-    test.gui = subprocess.Popen([test.binary, "--control-socket", test.socket,
-                                 "--config", str(test.directory / "config.json")],
-                                stdout=test.log, stderr=subprocess.STDOUT, env=env)
-    test.ownership.update(original_gui_pid=old_gui.pid, gui_pid=test.gui.pid)
-    test.save("ownership.json", test.ownership)
-    snapshot = test.wait(lambda: test.ctl("ui", "snapshot"), "reattached GUI", transient=True)
+    def click(label):
+        hit = test.wait(lambda: next((h for h in test.ctl("ui", "snapshot").get("automation_hits", [])
+                                     if h.get("label") == label), None), label)
+        x0, y0, x1, y1 = hit["rect"]
+        assert test.ctl("ui", "click", "--x", (x0+x1)/2, "--y", (y0+y1)/2)["handled"]
+
+    test.ctl("ui", "key", "cmd-,")
+    click("category:Server")
+    click("server:restart")
+    click("server:restart")
+    def restarted():
+        info = test.ctl("server", "info")
+        if info["instance_id"] == before["instance_id"]:
+            return None
+        test.record_server_info(info)
+        snapshot = test.ctl("ui", "snapshot")
+        status = snapshot["server_status"]
+        return snapshot if not status["busy"] and status["server"]["instance_id"] == info["instance_id"] else None
+    snapshot = test.wait(restarted, "server restart and GUI recovery", timeout=20, transient=True)
     test.window = snapshot["window_id"]
-    test.wait(lambda: "WHEEL_REPLAY_READY" in test.content(pane)["text"], "replayed fullscreen frame")
     after = test.ctl("server", "info")
-    assert after["instance_id"] == before["instance_id"], "reattach replaced the server"
-    assert after["server_pid"] == before["server_pid"], "reattach restarted the server"
-    test.ownership["window_id"] = test.window
-    test.save("ownership.json", test.ownership)
+    assert after["server_pid"] != before["server_pid"], "server did not restart"
+    test.ctl("ui", "key", "escape")
+    test.wait(lambda: "WHEEL_REPLAY_READY" in test.content(pane)["text"], "recovered fullscreen frame")
+    test.save("after-restart.json", after)
 
     for delta, marker in ((-80, "WHEEL_RECEIVED_UP"), (80, "WHEEL_RECEIVED_DOWN")):
         snapshot = test.ctl("ui", "snapshot")
@@ -74,5 +78,5 @@ while True:
         assert not result["selection"]["Active"], "wheel left a selection"
         test.save(marker + ".json", result)
     test.screenshot("reattached-wheel.png")
-    print("PASS bounded fullscreen replay, GUI detach/reattach, up/down SGR wheel delivered to the running TUI; artifacts="
+    print("PASS bounded fullscreen replay, server restart/PTY takeover, up/down SGR wheel delivered to the running TUI; artifacts="
           + str(test.directory), flush=True)

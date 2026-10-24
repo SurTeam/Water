@@ -336,7 +336,7 @@ func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, [
 		restore = t.restore.bytes()
 	}
 	replay := t.copyHistoryLocked(offset)
-	resp := attachedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Restore: restore, Exited: exited, Code: code}
+	resp := attachedResponse{RestoreSupported: true, ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Restore: restore, Exited: exited, Code: code}
 	// The bounded replay uses at most 32 frames, leaving room in the 64-frame
 	// queue. Queue the entire attach prefix under the snapshot lock, before
 	// publishers can discover this subscriber. No socket I/O holds the lock.

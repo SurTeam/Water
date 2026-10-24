@@ -1,6 +1,7 @@
 package goserver_test
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/goserver"
 	"github.com/SurTeam/Water/internal/gosupervisor"
+	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
 )
 
@@ -266,6 +268,125 @@ func TestSupervisedPaneSurvivesServerRestart(t *testing.T) {
 	}
 	if got := strings.Count(text, "tick-"); got <= beforeTicks {
 		t.Fatalf("program did not keep running: %d ticks, previously %d", got, beforeTicks)
+	}
+}
+
+func TestSupervisedMouseSurvivesServerRestart(t *testing.T) {
+	socket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
+	supervisorSocket := filepath.Join("/tmp", "water-go-sup-"+uuid.New().String()+".sock")
+	recoveryPath := filepath.Join(t.TempDir(), "recovery.json")
+
+	supervisor := gosupervisor.NewServer()
+	if err := supervisor.Listen(supervisorSocket); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = supervisor.Close() }()
+
+	cfg := goconfig.Default()
+	cfg.Startup.InitialWorkspace = true
+	cfg.Startup.InitialTerminal = true
+	cfg.Shell.Program = "/bin/sh"
+	cfg.Shell.Args = []string{"-c", `stty raw -echo; printf '\033[?1049h\033[?1003;1006h'; i=0; while [ "$i" -lt 40000 ]; do printf '\033[HFRAME                                                            '; i=$((i+1)); done; printf '\033[2J\033[HMOUSE_READY'; dd bs=1 count=10 2>/dev/null | od -An -tx1; printf 'MOUSE_RECEIVED'; sleep 30`}
+
+	first := goserver.NewWithConfig(socket, cfg)
+	if err := first.UseSupervisor(supervisorSocket); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Initialize(true, true); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- first.ListenAndServe() }()
+	waitSocket(t, socket)
+
+	key := supervisedTerminal(t, supervisorSocket)
+	terminal := serverTerminal(t, socket)
+	pid := supervisorPID(t, supervisorSocket, key)
+	if pid <= 0 {
+		t.Fatalf("supervisor has no pid for %s", terminal)
+	}
+	if text := waitText(t, socket, terminal, "MOUSE_READY"); !strings.Contains(text, "MOUSE_READY") {
+		t.Fatalf("TUI not ready: %q", text)
+	}
+
+	// Export the layout exactly like the GUI restart does, then stop the server.
+	session, err := goclient.New(socket).OpenSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, err := goclient.PrepareRecovery(session, recoveryPath, gobuild.Variant, "local:"+socket, true)
+	if err != nil {
+		t.Fatalf("prepare recovery: %v", err)
+	}
+	if err := session.CallTimeout("recovery.shutdown", map[string]any{"token": prepared.Token}, nil, 3*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_ = session.Close()
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first server did not stop")
+	}
+
+	// The new server imports the layout; panes must resume, not respawn.
+	// A replacement server starts empty and adopts the exported layout.
+	second := goserver.NewWithConfig(socket, cfg)
+	if err := second.UseSupervisor(supervisorSocket); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Initialize(false, false); err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- second.ListenAndServe() }()
+	waitSocket(t, socket)
+	defer func() { _ = second.Close() }()
+
+	session2, err := goclient.New(socket).OpenSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session2.Close()
+	if err := goclient.RestorePending(session2, recoveryPath, gobuild.Variant, "local:"+socket); err != nil {
+		t.Fatalf("restore recovery: %v", err)
+	}
+
+	resumedPID := supervisorPID(t, supervisorSocket, key)
+	if resumedPID != pid {
+		t.Fatalf("program restarted across upgrade: pid %d -> %d", pid, resumedPID)
+	}
+	// The counter must keep climbing: a restarted shell would emit a low count
+	// again, while the same process continues past where it was.
+	// The resumed pane is a new terminal instance; the program behind it is the
+	// same supervisor terminal.
+	resumed := serverTerminal(t, socket)
+	text := waitText(t, socket, resumed, "MOUSE_READY")
+	emu := govt.New(80, 24, 100)
+	defer emu.Close()
+	emu.WriteReplay([]byte(text))
+	if !emu.Snapshot().AltScreen {
+		t.Fatal("alternate screen lost after server restart")
+	}
+	if !emu.Mouse(govt.MouseEvent{Col: 5, Row: 3, Button: govt.MouseWheel, Action: govt.MouseUp}) {
+		t.Fatal("resumed TUI rejects mouse")
+	}
+	report := bytes.Join(emu.TakeResponses(), nil)
+	if string(report) != "\x1b[<64;5;3M" {
+		t.Fatalf("wheel report=%q", report)
+	}
+	values := make([]int, len(report))
+	for i, b := range report {
+		values[i] = int(b)
+	}
+	var result map[string]any
+	if err := goclient.New(socket).Dispatch(map[string]any{"type": "terminal.send_bytes", "terminal_id": resumed, "bytes": values}, &result); err != nil {
+		t.Fatal(err)
+	}
+	text = waitText(t, socket, resumed, "MOUSE_RECEIVED")
+	if !strings.Contains(text, "1b 5b 3c 36 34 3b 35 3b 33 4d") {
+		t.Fatalf("original PTY did not receive wheel: %q", text)
 	}
 }
 

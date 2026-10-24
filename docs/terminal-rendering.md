@@ -112,6 +112,8 @@ model request. Kitty protocol details are defined in its [graphics specification
 
 ## Supervisor 历史裁剪与重连模式
 
-Supervisor 的 2 MiB 原始历史环在丢弃字节时推进有界的输入模式和解析状态检查点。历史已裁剪的 attach 单独携带恢复字节，server 在消费 replay 前发布它们；恢复字节不计入 supervisor 原始输出 offset。检查点保留鼠标跟踪/编码、备用屏幕及相关有限输入模式，并处理边界处拆开的控制序列。它不恢复已丢弃的屏幕内容，也不能补回旧 supervisor 已经丢失的模式。
+Supervisor 的 2 MiB 原始历史环在丢弃字节时推进有界的输入模式和解析状态检查点。历史已裁剪的 attach 单独携带恢复字节，server 在消费 replay 前发布它们；恢复字节不计入 supervisor 原始输出 offset。检查点保留鼠标跟踪/编码、备用屏幕及相关有限输入模式，并处理边界处拆开的控制序列。它不恢复已丢弃的屏幕内容。Attach 通过 `restore_supported` 区分支持检查点的 supervisor 与旧版本；支持检查点时空恢复字节表示模式已关闭，不能用旧状态覆盖。
 
-Attach 响应和完整 replay 必须在快照锁内先入队，再注册 live 订阅，保证响应、replay、live 的顺序；socket 写入仍在异步队列消费端执行。修改此路径须验证环绕/超大写入的 offset、控制序列跨边界、模式重置、实际模拟器的鼠标报告，以及并发 attach 的 replay/live 连续性。GUI 重连滚轮验证使用 `scripts/go-ui-tui-reattach-scroll-smoke.py`，确认上下 SGR 滚轮实际到达 TUI。
+GUI 在 server 重启的 recovery layout 中保存已知鼠标跟踪/编码及备用屏幕模式。仅在旧 supervisor、原进程被恢复、历史已裁剪且未提供检查点时，server 在 replay 前补入这个有限模式种子；保留输出中的模式重置和 live 输出仍优先。恢复字段限制为有界模式白名单，不接受任意终端输出。该兼容路径依赖重启前 GUI 仍知道正确模式；已经丢失的状态不能凭空恢复，GUI 快照之后又被旧 supervisor 丢弃的模式变化也无法准确重建。
+
+Attach 响应和完整 replay 必须在快照锁内先入队，再注册 live 订阅，保证响应、replay、live 的顺序；socket 写入仍在异步队列消费端执行。修改此路径须验证环绕/超大写入的 offset、控制序列跨边界、模式重置、实际模拟器的鼠标报告，以及并发 attach 的 replay/live 连续性。真实 server 重启接管后的滚轮验证使用 `scripts/go-ui-tui-reattach-scroll-smoke.py`，确认上下 SGR 滚轮实际到达 TUI。

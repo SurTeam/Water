@@ -186,7 +186,7 @@ func (s *Server) restoreLayout(d gomodel.RecoveryLayout) error {
 		if s.supervisorSocket != "" {
 			// A supervised pane may still be running from the previous server:
 			// resume it instead of restarting the program inside it.
-			terminal, _, spawnErr = s.registry.SpawnSupervisedPane(pane.ID, program, args, n.Size, n.CWD, true)
+			terminal, _, spawnErr = s.registry.SpawnSupervisedPane(pane.ID, program, args, n.Size, n.CWD, true, n.InputModes)
 		} else {
 			terminal, spawnErr = s.registry.SpawnWithDir(program, args, n.Size, n.CWD)
 		}
