@@ -17,6 +17,10 @@
 
 客户端按对象 connection 建立 session，session.open 双向判断协议、API signature 和能力，不兼容则只开放诊断。普通变更通过 dispatcher 更新模型，再用 operation/revision 与客户端投影同步；`pane.execute` 是直接返回结果的有界终端 RPC，解析目标时短暂持有命令锁，执行等待不持有全局锁，且不创建 operation；GUI 的本地导航、选择和 preview 不代替共享模型变更。
 
+新 tab 和 split 继承来源 pane 的实时目录，优先查询前台进程，再查询 shell；查询失败时依次使用客户端报告目录和 pane 元数据，空窗格再按 workspace 与默认目录补齐。macOS 的 `lsof` 子进程固定使用 UTF-8 locale，避免 C locale 把中文路径转成显示转义；仅接受存在的绝对目录。外部查询预算为 250ms，并避免 `lsof` 的阻塞式文件系统探测；该预算不包含前置 ioctl、后续目录校验及 shell 启动，不能视为整个创建命令的延迟上限。
+
+`tab.new`、`tab.new_in_workspace` 和 `pane.split` 创建模型对象后若 shell 启动失败，必须撤销新 tab/pane 并恢复原 workspace/tab/pane 选择，不能遗留空窗格。回滚只恢复选择，不导入整份旧模型，以保留启动等待期间积累的终端元数据。
+
 启动探测发现正在监听的 socket 时，不因暂时超时就 unlink 或替换；listener 持锁并按 inode 清理自己的路径。SSH 先发现稳定 endpoint，复用可诊断旧实例，避免产品升级新建一套空工作区；缓存 payload 与 endpoint 身份分开管理。
 
 远端存在两套 endpoint：稳定 endpoint 用于跨版本复用，side endpoint 在路径中带协议与 API signature 身份，仅在稳定 endpoint 被不可兼容实例占用时使用。占用判定用 `test -S` 区分"尚无 server"（照常在稳定 endpoint 启动）与"有但无法通信"（转 side endpoint）；再次连接复用已存在的 side 实例，不重复启动。
@@ -67,5 +71,7 @@ SSH 认证和诊断变化须覆盖密钥拒绝后的 GUI 密码输入、取消�
 远端版本差异须在真实主机上验证：兼容旧版本弹窗并可重启（布局保留）、不可兼容时新实例与旧实例并存且旧实例仍在应答、稍后路径不触发重启。以 `WATER_TEST_INSTANCE`、独立 config/socket 的隔离实例执行，结束后只清理自己创建的进程、socket 与 ControlMaster。
 
 supervisor 改动须覆盖：程序跨 server 重启存活（PID 不变、输出计数继续增长）、从 offset 重放不丢字节、resize/exit 与输出有序、历史有界但保留尾部、并发 spawn 各自拿到自己的回复、慢消费者不阻塞控制流量也不杀死程序。即时回复不得丢失，并发前台查询须返回各自终端的结果；取消后迟到回复不得污染后续查询，阻塞写入必须可取消。真实升级另需在远端主机上验证。
+
+目录继承与创建失败回滚须覆盖 C locale 下的中文及空格路径、父 shell `cd` 后实时目录与启动元数据不同、进程查询失败时的目录回退，以及启动失败后的原布局与跨 workspace 选择保持。
 
 协议/dispatcher/model/session 改动先运行相关包的单元与 race 检查；远端、焦点和生命周期变化另用真实多窗口/SSH fixture。恢复不能只断言进程重启，必须验证拓扑、目录、选择、失败后 artifact 保留及用户实例未被操作。可复用入口见 [测试策略](testing.md)。

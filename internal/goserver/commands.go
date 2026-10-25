@@ -284,11 +284,14 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 			title = *c.Title
 			pinned = true
 		}
+		selection := s.model.Dump()
 		tabID, paneID, err := s.model.CreateTab(wid, title, pinned)
 		if err != nil {
 			return fail("TAB_CREATE_FAILED", err)
 		}
 		if _, err := s.spawnInPane(paneID, "", nil, s.defaultTerminalSize(), cwd); err != nil {
+			_, _ = s.model.CloseTab(tabID)
+			s.restoreCreationSelection(selection)
 			return fail("TERMINAL_SPAWN_FAILED", err)
 		}
 		return map[string]any{"type": "tab_created", "tab_id": tabID}, nil
@@ -378,11 +381,14 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 			return fail("INVALID_COMMAND", errors.New("cwd must be absolute"))
 		}
 		cwd = s.currentPaneDirectory(pid, cwd)
+		selection := s.model.Dump()
 		newPane, err := s.model.SplitPane(pid, c.Direction)
 		if err != nil {
 			return fail("PANE_SPLIT_FAILED", err)
 		}
 		if _, err := s.spawnInPane(newPane, "", nil, s.defaultTerminalSize(), cwd); err != nil {
+			_, _ = s.model.ClosePane(newPane)
+			s.restoreCreationSelection(selection)
 			return fail("TERMINAL_SPAWN_FAILED", err)
 		}
 		return map[string]any{"type": "pane_created", "pane_id": newPane}, nil
@@ -731,6 +737,22 @@ func (s *Server) resolveTerminal(terminalID, paneID *uuid.UUID) (uuid.UUID, erro
 		}
 	}
 	return uuid.Nil, errors.New("terminal not found")
+}
+
+// Restore only selection after removing a failed creation; keep live terminal
+// metadata and output accumulated during the spawn attempt.
+func (s *Server) restoreCreationSelection(before gomodel.StateDump) {
+	for _, workspace := range before.Workspaces {
+		for _, tab := range workspace.Tabs {
+			_ = s.model.FocusPane(tab.ActivePane)
+		}
+		if workspace.ActiveTab != nil {
+			_ = s.model.ActivateTab(*workspace.ActiveTab)
+		}
+	}
+	if before.ActiveWorkspace != nil {
+		_ = s.model.ActivateWorkspace(*before.ActiveWorkspace)
+	}
 }
 
 func (s *Server) currentPaneDirectory(paneID uuid.UUID, reported string) string {

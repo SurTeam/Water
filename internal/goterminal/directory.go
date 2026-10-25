@@ -30,14 +30,18 @@ func (t *Terminal) CurrentDirectory() string {
 			})
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 	defer cancel()
 	for _, candidate := range []int{foreground, pid} {
 		var dir string
 		if runtime.GOOS == "linux" {
 			dir, _ = os.Readlink("/proc/" + strconv.Itoa(candidate) + "/cwd")
 		} else if runtime.GOOS == "darwin" {
-			out, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-a", "-p", strconv.Itoa(candidate), "-d", "cwd", "-Fn").Output()
+			cmd := exec.CommandContext(ctx, "/usr/sbin/lsof", "-b", "-w", "-a", "-p", strconv.Itoa(candidate), "-d", "cwd", "-Fn")
+			// lsof escapes non-ASCII bytes under the C locale (common for GUI
+			// launches). Those display escapes are not a filesystem path.
+			cmd.Env = append(os.Environ(), "LC_ALL=en_US.UTF-8")
+			out, err := cmd.Output()
 			if err == nil {
 				for _, line := range strings.Split(string(out), "\n") {
 					if strings.HasPrefix(line, "n/") {
@@ -48,9 +52,11 @@ func (t *Terminal) CurrentDirectory() string {
 			}
 		}
 		if filepath.IsAbs(dir) {
-			return dir
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				return dir
+			}
 		}
-		if candidate == pid {
+		if candidate == pid || ctx.Err() != nil {
 			break
 		}
 	}
