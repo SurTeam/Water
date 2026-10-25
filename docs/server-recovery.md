@@ -38,7 +38,7 @@ Remote restart preserves the discovered endpoint, including a legacy endpoint. R
 
 The schema retains workspace/tab/pane identities and order, names and title overrides, split axes/ratios, empty panes, active selections, terminal geometry, labels and current directories. Restored terminals and terminal surfaces receive new UUIDv4 identities. Shells use the replacement server's configured shell. Running jobs/Agents, terminal replay/history and process memory are not resumed.
 
-Artifacts live under `recovery/` beside the GUI config, keyed by variant and logical endpoint; files are mode 0600. Pending artifacts are retried at startup/reconnect, but never imported into an unrelated nonempty model. A failed start/import retains the artifact and exposes Retry restore. An invalid existing artifact is not silently overwritten.
+Artifacts live under `recovery/` beside the GUI config, keyed by variant and logical endpoint; files are mode 0600. Pending artifacts are retried at startup/reconnect, but never imported into an unrelated nonempty model. A failed start/import retains the artifact and exposes Retry restore. An invalid existing artifact is not silently overwritten. Updating Water does not rewrite directories already stored in an artifact; if an older export contains an invalid directory, back up the artifact and verify the intended directory before correcting it and retrying.
 
 Recovery availability and normal API admission are separate checks. A server
 that satisfies all current required capabilities but lacks recovery support may
