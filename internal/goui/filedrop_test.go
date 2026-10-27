@@ -6,6 +6,25 @@ import (
 	"time"
 )
 
+func TestClipboardImagePath(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{
+		{"/tmp/picture.PNG", true},
+		{"file:///tmp/my%20picture.tiff", true},
+		{"/tmp/document.pdf", false},
+		{"picture.png", false},
+		{"name\tvalue\nimage\t1", false},
+		{"/tmp/a.png\t/tmp/b.png", false},
+		{"https://example.com/picture.png", false},
+	} {
+		if got := clipboardImagePath(tc.value); got != tc.want {
+			t.Errorf("clipboardImagePath(%q) = %v, want %v", tc.value, got, tc.want)
+		}
+	}
+}
+
 func TestShellQuote(t *testing.T) {
 	for _, tc := range []struct {
 		in   string

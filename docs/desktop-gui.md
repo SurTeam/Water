@@ -27,6 +27,8 @@ macOS 最小化恢复调用返回不代表动画及事件处理完成；AppKit/D
 
 Cmd+C 只复制，无选区不发送字节；Ctrl+C 才是中断，Command/Super 不隐式编码成 Control。Cmd+D 不隐式发送 EOF。文本粘贴走终端 bracketed-paste 状态；macOS 图片粘贴交给前台 Agent 的图像读取路径，不自动上传本地剪贴板到远端。
 
+Cmd+V 对 Excel 等同时提供文本和图片的富剪贴板优先读取纯文本，保留 Tab 与换行。图片数据同时带有绝对图片路径或 `file://` URL 时仍优先图片；纯图片同样通过 Ctrl+V 交给应用读取。文件 URL 全部指向受支持的图片扩展名且剪贴板提供图片数据时走图片分支，其他文件或混合文件引用继续转成 shell 引用的路径文本，避免把 PDF 等文件的 TIFF 图标误当成图片粘贴。图片路径识别要求单个绝对路径、无 Tab 或换行，并匹配 PNG、TIFF、JPEG、HEIC、HEIF、GIF、BMP 或 WebP 扩展名；它不解码文件内容，也不保证接收端支持系统剪贴板。
+
 IME composition/caret 使用统一坐标变换，平台缩放只应用一次。控制 API 注入用于验证共享处理器，真实系统键盘、IME 候选窗口仍需人工验收。
 
 字体按配置的逗号分隔 family 顺序逐字形 fallback；字体元数据和 collection index 由实际字体文件读取。普通 Unicode 保留字体原点与共同基线，emoji/私用图标走专用适配；字形与选择的列宽语义统一由 [终端输出与渲染](terminal-rendering.md) 维护。

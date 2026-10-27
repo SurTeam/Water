@@ -2,6 +2,8 @@ package goui
 
 import (
 	"io/fs"
+	"net/url"
+	"path/filepath"
 	"strings"
 )
 
@@ -19,6 +21,23 @@ func fileDropToText(paths []string) string {
 		quoted[i] = shellQuote(p)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// clipboardImagePath identifies a single image file reference, including the
+// plain-text path representation supplied by some image applications.
+func clipboardImagePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if u, err := url.Parse(value); err == nil && u.Scheme == "file" {
+		value = u.Path
+	}
+	if !filepath.IsAbs(value) || strings.ContainsAny(value, "\t\r\n") {
+		return false
+	}
+	switch strings.ToLower(filepath.Ext(value)) {
+	case ".png", ".tif", ".tiff", ".jpg", ".jpeg", ".heic", ".heif", ".gif", ".bmp", ".webp":
+		return true
+	}
+	return false
 }
 
 // absPather is implemented by desktop drop entries that know their real path.

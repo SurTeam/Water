@@ -1113,9 +1113,17 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	}
 	if shortcutMatches(pressed, bindings.Paste) {
 		if w.clipboardReady {
-			// Finder file copies include a TIFF icon. Check file URLs first or a
-			// copied PDF is treated as an image and only Ctrl+V is sent.
+			// File copies may include a TIFF icon. Only image file references
+			// should use image paste; other files retain their path paste behavior.
 			if paths := clipboardFileURLs(); len(paths) > 0 {
+				imagesOnly := true
+				for _, path := range paths {
+					imagesOnly = imagesOnly && clipboardImagePath(path)
+				}
+				if imagesOnly && clipboardHasImage() {
+					term.input.emit([]byte{0x16})
+					return true
+				}
 				data := []byte(fileDropToText(paths))
 				if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
 					data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
@@ -1123,13 +1131,15 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 				term.input.emit(data)
 				return true
 			}
-			// Coding agents read images directly from the system clipboard on
-			// Ctrl+V. Preserve the clipboard and deliver that key for image paste.
-			if clipboardHasImage() {
+			// Rich clipboard sources such as Excel offer both text and images.
+			// Prefer their plain text representation for normal terminal paste.
+			data := clipboard.Read(clipboard.FmtText)
+			// Images may also advertise their source path as plain text.
+			// Keep image paste for those references and image-only contents.
+			if (len(data) == 0 || clipboardImagePath(string(data))) && clipboardHasImage() {
 				term.input.emit([]byte{0x16})
 				return true
 			}
-			data := clipboard.Read(clipboard.FmtText)
 			if snap.BracketedPaste && c.currentConfig().Features.BracketedPaste {
 				data = append(append([]byte("\x1b[200~"), data...), []byte("\x1b[201~")...)
 			}
