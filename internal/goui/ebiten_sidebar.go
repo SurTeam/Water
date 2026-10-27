@@ -81,7 +81,7 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 		c.mu.RLock()
 		term := c.terminals[a.terminal]
 		c.mu.RUnlock()
-		if term != nil {
+		if term != nil && term.parseMu.TryLock() {
 			term.mu.RLock()
 			var title string
 			if term.emu != nil {
@@ -94,6 +94,7 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 				}
 			}
 			term.mu.RUnlock()
+			term.parseMu.Unlock()
 			title = strings.TrimSpace(strings.Map(func(r rune) rune {
 				if unicode.IsControl(r) {
 					return -1

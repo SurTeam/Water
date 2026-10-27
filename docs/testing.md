@@ -22,6 +22,8 @@ Before delivery, run the matching profile once against the final code:
 | `agent` | Unit profile, builds, all scenarios, native GUI smoke, status-icon pixel measurements, installed Agent startup/sidebar switching, real Pi redraw |
 | `full` | Union of terminal and Agent checks; each step runs once |
 
+`go-ui-output-isolation-smoke.py` is included in every GUI profile. It parses a 500,000-line ANSI/CJK burst, then runs roughly 4 MiB/s continuous output while checking another pane’s input/output, new workspace creation and shortcut closure of the flooding pane. It verifies child-process exit and active PTY removal, and records control round-trip times without asserting a fixed latency target. It does not establish CPU/RSS bounds, long-term leak freedom or physical-keyboard behavior.
+
 GUI/clipboard test lifetimes use the shared per-user advisory lock in `scripts/water_test.py`, including directly invoked legacy scripts and shell runners. Acquire it before process baselines and desktop/clipboard access; release it after cleanup and clipboard restoration. The regression runner executes steps sequentially without a second outer lock. A competing test’s lock wait currently counts toward the step deadline.
 
 Cleanup verifies owned GUI/server exit, socket removal and preservation of pre-existing Water processes. Ownership failures refuse shutdown; ordinary transport or evidence failures still clean up directly owned processes. Cleanup errors do not replace the original test failure. Clipboard backups are deleted after successful restoration and excluded from evidence exports, including failure paths.

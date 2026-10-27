@@ -2,6 +2,7 @@ package goclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -166,9 +167,10 @@ type Session struct {
 	SocketPath string
 	// Bulk terminal output travels over separate connections (and independent
 	// SSH-forwarded channels) so a slow TUI cannot block control RPC replies.
-	terminalMu      sync.Mutex
-	terminalStreams map[uuid.UUID]*terminalStream
-	terminalReaders sync.WaitGroup
+	terminalMu            sync.Mutex
+	terminalStreams       map[uuid.UUID]*terminalStream
+	terminalSubscriptions map[*TerminalSubscription]struct{}
+	terminalReaders       sync.WaitGroup
 
 	Server        goprotocol.ServerInfo
 	Compatibility goprotocol.Compatibility
@@ -215,7 +217,10 @@ func (c *Client) OpenSession() (*Session, error) {
 }
 
 func (c *Client) openSession(role string) (*Session, error) {
-	conn, err := net.DialTimeout("unix", c.SocketPath, time.Second)
+	return c.openSessionContext(context.Background(), role)
+}
+func (c *Client) openSessionContext(ctx context.Context, role string) (*Session, error) {
+	conn, err := (&net.Dialer{Timeout: time.Second}).DialContext(ctx, "unix", c.SocketPath)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +238,8 @@ func (c *Client) openSession(role string) (*Session, error) {
 		done:       make(chan struct{}),
 		outbound:   make(chan pendingSessionFrame, sessionSendQueueCapacity),
 	}
+	stopCancellation := context.AfterFunc(ctx, func() { _ = s.Close() })
+	defer stopCancellation()
 	go s.writeLoop()
 	go s.readLoop()
 
@@ -743,8 +750,13 @@ func (s *Session) closeWithError(cause error) error {
 		err = s.conn.Close()
 		s.terminalMu.Lock()
 		streams := s.terminalStreams
+		subscriptions := s.terminalSubscriptions
+		s.terminalSubscriptions = nil
 		s.terminalStreams = nil
 		s.terminalMu.Unlock()
+		for subscription := range subscriptions {
+			_ = subscription.Close()
+		}
 		for _, stream := range streams {
 			close(stream.stop)
 			_ = stream.session.Close()

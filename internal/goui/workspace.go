@@ -1,6 +1,7 @@
 package goui
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -132,6 +133,10 @@ type ConnectionEntry struct {
 
 type terminalClient struct {
 	id                      uuid.UUID
+	worker                  terminalWorker
+	closed                  atomic.Bool
+	dirty                   atomic.Bool
+	publishing              atomic.Bool
 	mu                      sync.RWMutex
 	parseMu                 sync.Mutex
 	emu                     *govt.Emulator
@@ -156,6 +161,7 @@ type terminalClient struct {
 }
 
 func (t *terminalClient) close() {
+	t.closed.Store(true)
 	t.parseMu.Lock()
 	defer t.parseMu.Unlock()
 	t.mu.Lock()
@@ -178,6 +184,7 @@ func (t *terminalClient) setScrollbackOnClearScreen(enabled bool) {
 }
 
 type WorkspaceClient struct {
+	stopped              atomic.Bool
 	oscClipboardMu       sync.Mutex
 	oscClipboardWrite    []byte
 	native               atomic.Pointer[EbitengineWindow]
@@ -210,6 +217,9 @@ type WorkspaceClient struct {
 	focusGeneration uint64
 	connectionError string
 	terminals       map[uuid.UUID]*terminalClient
+	attaching       map[uuid.UUID]*terminalAttachAttempt
+	asyncOutput     atomic.Bool
+	outputWake      chan struct{}
 
 	layoutMu             sync.Mutex
 	frameSize            image.Point
@@ -369,8 +379,13 @@ func (c *WorkspaceClient) connectionListResponse() map[string]any {
 }
 
 func (c *WorkspaceClient) Close() {
+	c.stopped.Store(true)
 	c.closeWebService()
 	c.mu.Lock()
+	for id, ticket := range c.attaching {
+		ticket.Store(true)
+		delete(c.attaching, id)
+	}
 	terms := make([]*terminalClient, 0, len(c.terminals))
 	for _, term := range c.terminals {
 		terms = append(terms, term)
@@ -378,12 +393,12 @@ func (c *WorkspaceClient) Close() {
 	c.terminals = make(map[uuid.UUID]*terminalClient)
 	c.mu.Unlock()
 	for _, term := range terms {
-		_ = c.session.Detach(term.id)
-		term.close()
+		term.stopWorker()
 	}
 }
 
 func (c *WorkspaceClient) Run() {
+	c.asyncOutput.Store(true)
 	pushes := c.session.Pushes
 	events := c.session.Events
 	// The renderer consumes immutable views and asks for the next latest view.
@@ -391,6 +406,38 @@ func (c *WorkspaceClient) Run() {
 	// view at a bounded output cadence. Input wakes the GUI independently. ANSI
 	// parsing never waits for the renderer, including when its window is hidden.
 	pending := make(map[*terminalClient]bool)
+	workerWake := make(chan struct{}, 1)
+	c.mu.Lock()
+	c.outputWake = workerWake
+	initial := make([]*terminalClient, 0, len(c.terminals))
+	for _, term := range c.terminals {
+		initial = append(initial, term)
+	}
+	c.mu.Unlock()
+	for _, term := range initial {
+		term.worker.mu.Lock()
+		sub := term.worker.subscription
+		term.worker.mu.Unlock()
+		if sub != nil {
+			term.startSubscription(c, sub)
+		}
+	}
+	select {
+	case workerWake <- struct{}{}:
+	default:
+	}
+	defer func() {
+		c.stopped.Store(true)
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		for id, ticket := range c.attaching {
+			ticket.Store(true)
+			delete(c.attaching, id)
+		}
+		for _, t := range c.terminals {
+			t.stopWorker()
+		}
+	}()
 	outstanding := false
 	var published time.Time
 	publication := time.NewTimer(time.Hour)
@@ -398,6 +445,11 @@ func (c *WorkspaceClient) Run() {
 	defer publication.Stop()
 	var publicationDue <-chan time.Time
 	publish := func() {
+		for term := range pending {
+			if term.closed.Load() {
+				delete(pending, term)
+			}
+		}
 		if outstanding && c.native.Load() != nil {
 			return
 		}
@@ -417,6 +469,15 @@ func (c *WorkspaceClient) Run() {
 	}
 	for pushes != nil || events != nil {
 		select {
+		case <-workerWake:
+			c.mu.RLock()
+			for _, term := range c.terminals {
+				if term.dirty.Swap(false) {
+					pending[term] = true
+				}
+			}
+			c.mu.RUnlock()
+			publish()
 		case <-publicationDue:
 			publicationDue = nil
 			publish()
@@ -444,8 +505,11 @@ func (c *WorkspaceClient) Run() {
 				events = nil
 				continue
 			}
-			if term := c.applyTerminalEventDeferred(push); term != nil {
-				pending[term] = true
+			c.mu.RLock()
+			term := c.terminals[push.TerminalID]
+			c.mu.RUnlock()
+			if term != nil {
+				term.enqueueEvent(c, push)
 			}
 			// Prioritize a frame request after each bounded ordered event, rather
 			// than letting a permanently full output channel starve publication.
@@ -485,12 +549,21 @@ func (c *WorkspaceClient) handleUIPush(msg goprotocol.WireMessage) {
 		_ = c.session.ReplyFailure(msg.RequestID, "UI_AUTOMATION_FAILED", err.Error())
 		return
 	}
-	result, err := c.handleUIRequest(request.Method, request.Params)
-	if err != nil {
-		_ = c.session.ReplyFailure(msg.RequestID, "UI_AUTOMATION_FAILED", err.Error())
+	reply := func() {
+		result, err := c.handleUIRequest(request.Method, request.Params)
+		if err != nil {
+			_ = c.session.ReplyFailure(msg.RequestID, "UI_AUTOMATION_FAILED", err.Error())
+			return
+		}
+		_ = c.session.ReplySuccess(msg.RequestID, result)
+	}
+	// Content extraction takes the requested pane's parser gate. It must not
+	// occupy the shared event dispatcher while that pane is busy.
+	if request.Method == "ui.content" || request.Method == "ui.snapshot" {
+		go reply()
 		return
 	}
-	_ = c.session.ReplySuccess(msg.RequestID, result)
+	reply()
 }
 
 func (c *WorkspaceClient) handleUIRequest(method string, params json.RawMessage) (any, error) {
@@ -963,6 +1036,10 @@ func (c *WorkspaceClient) scrollActiveTerminal(deltaY float32) bool {
 	if lines == 0 {
 		return false
 	}
+	if !term.parseMu.TryLock() {
+		return false
+	}
+	defer term.parseMu.Unlock()
 	term.mu.Lock()
 	if term.emu == nil {
 		term.mu.Unlock()
@@ -1001,6 +1078,9 @@ func (c *WorkspaceClient) Bootstrap() error {
 }
 
 func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
+	if c.stopped.Load() {
+		return
+	}
 	if c.session != nil && c.session.Diagnostic {
 		return
 	}
@@ -1039,12 +1119,14 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 	for id, previous := range previousRuns {
 		if !reflect.DeepEqual(previous, currentRuns[id]) {
 			if term := c.terminals[id]; term != nil {
-				term.mu.RLock()
-				if term.emu != nil {
-					term.emu.ResetAgentStatus()
-				}
-				term.mu.RUnlock()
+				term.worker.reset.Store(true)
 			}
+		}
+	}
+	for id, ticket := range c.attaching {
+		if _, ok := wanted[id]; !ok {
+			ticket.Store(true)
+			delete(c.attaching, id)
 		}
 	}
 	c.state = c.selection.project(state)
@@ -1067,14 +1149,26 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 	c.mu.Unlock()
 
 	for _, term := range remove {
-		_ = c.session.Detach(term.id)
-		term.close()
+		term.stopWorker()
 	}
 	for _, term := range update {
-		term.setScrollbackOnClearScreen(scrollbackOnClearScreen[term.id])
+		term.queueConfig(scrollbackOnClearScreen[term.id])
 	}
 	for _, summary := range add {
-		c.attachTerminal(summary, scrollbackOnClearScreen[summary.TerminalID])
+		c.mu.Lock()
+		if c.stopped.Load() || c.state.StateRevision != state.StateRevision {
+			c.mu.Unlock()
+			continue
+		}
+		if c.attaching == nil {
+			c.attaching = make(map[uuid.UUID]*terminalAttachAttempt)
+		}
+		if c.attaching[summary.TerminalID] == nil {
+			ticket := newTerminalAttachAttempt()
+			c.attaching[summary.TerminalID] = ticket
+			go c.attachTerminalAsync(summary, scrollbackOnClearScreen[summary.TerminalID], ticket)
+		}
+		c.mu.Unlock()
 	}
 	if c.invalidate != nil {
 		c.invalidate()
@@ -1117,8 +1211,54 @@ func collectTreeTerminals(node *paneTree, out map[uuid.UUID]terminalSummary) {
 }
 
 func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnClearScreen bool) {
+	c.attachTerminalAsync(summary, scrollbackOnClearScreen, nil)
+}
+func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbackOnClearScreen bool, ticket *terminalAttachAttempt) {
+	if ticket != nil {
+		defer func() {
+			c.mu.Lock()
+			if c.attaching[summary.TerminalID] == ticket {
+				delete(c.attaching, summary.TerminalID)
+			}
+			c.mu.Unlock()
+		}()
+	}
 	var attached terminalAttach
-	if err := c.session.Attach(summary.TerminalID, &attached); err != nil {
+	ctx := context.Background()
+	if ticket != nil {
+		ctx = ticket.ctx
+	}
+	var subscription *goclient.TerminalSubscription
+	installed := false
+	defer func() {
+		if !installed {
+			if subscription != nil {
+				_ = subscription.Close()
+			}
+			if ticket != nil {
+				ticket.cancel()
+			}
+		}
+	}()
+	var err error
+	subscription, err = retryTerminalAttach(ctx, func() (*goclient.TerminalSubscription, error) {
+		if c.stopped.Load() {
+			return nil, context.Canceled
+		}
+		if c.session.SocketPath != "" {
+			return c.session.AttachTerminal(ctx, summary.TerminalID, &attached)
+		}
+		return nil, c.session.Attach(summary.TerminalID, &attached)
+	})
+	if err != nil {
+		if ctx.Err() == nil && !c.stopped.Load() {
+			c.mu.Lock()
+			c.connectionError = fmt.Sprintf("attach terminal %s: %v", summary.TerminalID, err)
+			c.mu.Unlock()
+			if c.invalidate != nil {
+				c.invalidate()
+			}
+		}
 		return
 	}
 	emu := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
@@ -1134,7 +1274,25 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 		if ev.Seq <= last {
 			continue
 		}
-		applyWireEvent(emu, ev)
+		if (ticket != nil && ticket.Load()) || c.stopped.Load() {
+			emu.Close()
+			return
+		}
+		if ev.Type == "output" {
+			if data, err := base64.StdEncoding.DecodeString(ev.Bytes); err == nil {
+				for len(data) > 0 {
+					if (ticket != nil && ticket.Load()) || c.stopped.Load() {
+						emu.Close()
+						return
+					}
+					n := min(len(data), 4096)
+					emu.WriteReplay(data[:n])
+					data = data[n:]
+				}
+			}
+		} else {
+			applyWireEvent(emu, ev)
+		}
 		last = ev.Seq
 	}
 	if attached.LastSeq > last {
@@ -1154,7 +1312,8 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 	term := &terminalClient{
 		id: summary.TerminalID, emu: emu, lastSeq: last, scrollbackOnClearScreen: scrollbackOnClearScreen,
 		cols: attached.Size.Columns, rows: attached.Size.Lines,
-		view: view,
+		view:   view,
+		worker: terminalWorker{subscription: subscription},
 	}
 	term.input = &TerminalInput{
 		OnShortcut:            c.dispatchWindowShortcut,
@@ -1182,6 +1341,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			if !c.hyperlinkConfig().Features.MouseReporting {
 				return false
 			}
+			if !term.parseMu.TryLock() {
+				return false
+			}
+			defer term.parseMu.Unlock()
 			term.mu.Lock()
 			if term.emu == nil {
 				term.mu.Unlock()
@@ -1204,6 +1367,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 		},
 		OnScroll: func(lines int) {
 			term.inputPending.Store(false)
+			if !term.parseMu.TryLock() {
+				return
+			}
+			defer term.parseMu.Unlock()
 			term.mu.Lock()
 			if term.emu == nil {
 				term.mu.Unlock()
@@ -1219,6 +1386,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			if !c.hyperlinkConfig().Features.Selection {
 				return
 			}
+			if !term.parseMu.TryLock() {
+				return
+			}
+			defer term.parseMu.Unlock()
 			term.mu.Lock()
 			if term.emu != nil {
 				term.emu.HoldViewport()
@@ -1249,6 +1420,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			if !c.hyperlinkConfig().Features.Selection {
 				return
 			}
+			if !term.parseMu.TryLock() {
+				return
+			}
+			defer term.parseMu.Unlock()
 			term.mu.Lock()
 			if term.emu != nil {
 				term.emu.HoldViewport()
@@ -1311,6 +1486,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			if !c.hyperlinkConfig().Features.Selection {
 				return
 			}
+			if !term.parseMu.TryLock() {
+				return
+			}
+			defer term.parseMu.Unlock()
 			term.mu.Lock()
 			if term.emu == nil || !term.selection.Active {
 				term.mu.Unlock()
@@ -1335,6 +1514,10 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 			if !c.hyperlinkConfig().Features.Selection {
 				return ""
 			}
+			if !term.parseMu.TryLock() {
+				return "" // Callers retain the clipboard when no text is available.
+			}
+			defer term.parseMu.Unlock()
 			term.mu.RLock()
 			selection := term.selection
 			snapshot := term.snapshot
@@ -1357,13 +1540,20 @@ func (c *WorkspaceClient) attachTerminal(summary terminalSummary, scrollbackOnCl
 	c.flushVTResponses(term)
 
 	c.mu.Lock()
-	if old := c.terminals[summary.TerminalID]; old != nil {
+	if old := c.terminals[summary.TerminalID]; old != nil || c.stopped.Load() || (ticket != nil && (ticket.Load() || c.attaching[summary.TerminalID] != ticket)) {
 		c.mu.Unlock()
 		term.close()
 		return
 	}
 	c.terminals[summary.TerminalID] = term
 	c.mu.Unlock()
+	installed = true
+	if subscription != nil && (ticket != nil || c.asyncOutput.Load()) {
+		term.startSubscription(c, subscription)
+	}
+	if c.invalidate != nil {
+		c.invalidate()
+	}
 }
 
 func (c *WorkspaceClient) activateHyperlink(uri string) {
@@ -1490,7 +1680,9 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 	c.mu.RLock()
 	for _, term := range c.terminals {
 		if term.inputPending.Load() {
-			term.mu.Lock()
+			if !term.mu.TryLock() {
+				continue
+			}
 			if term.snapshot.YDisp != term.snapshot.YBase || term.selection.Active {
 				changed[term] = true
 			}
@@ -1520,6 +1712,11 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 		// them redraws the visible workspace at the output rate.
 		if shown != nil {
 			if _, visible := shown[term.id]; !visible {
+				if c.asyncOutput.Load() {
+					term.viewStale.Store(true)
+					delete(changed, term)
+					continue
+				}
 				term.mu.Lock()
 				if term.emu != nil && term.inputPending.Swap(false) {
 					term.selection = Selection{}
@@ -1531,17 +1728,52 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 				continue
 			}
 		}
-		term.publishSnapshot()
+		if !c.asyncOutput.Load() {
+			term.publishSnapshot()
+			delete(changed, term)
+			paint = true
+			continue
+		}
+		if term.closed.Load() {
+			delete(changed, term)
+			continue
+		}
+		if !term.publishing.CompareAndSwap(false, true) {
+			term.dirty.Store(true)
+			continue
+		}
 		delete(changed, term)
+		go func(term *terminalClient) {
+			defer func() {
+				term.publishing.Store(false)
+				if (term.dirty.Load() || term.inputPending.Load()) && !term.closed.Load() {
+					select {
+					case c.snapshotWake <- struct{}{}:
+					default:
+					}
+				}
+			}()
+			term.publishSnapshot()
+			if term.closed.Load() {
+				return
+			}
+			if window != nil {
+				window.invalidateOutput()
+			} else if c.invalidate != nil {
+				c.invalidate()
+			}
+		}(term)
 		paint = true
 	}
 	if !paint {
 		return false
 	}
-	if window != nil {
-		window.invalidateOutput()
-	} else if c.invalidate != nil {
-		c.invalidate()
+	if !c.asyncOutput.Load() {
+		if window != nil {
+			window.invalidateOutput()
+		} else if c.invalidate != nil {
+			c.invalidate()
+		}
 	}
 	return true
 }
@@ -1553,6 +1785,10 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 func (term *terminalClient) publishSnapshot() {
 	term.parseMu.Lock()
 	defer term.parseMu.Unlock()
+	term.publishSnapshotLocked()
+}
+
+func (term *terminalClient) publishSnapshotLocked() {
 	term.mu.Lock()
 	defer term.mu.Unlock()
 	if term.emu == nil {
@@ -1573,6 +1809,10 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 	c.mu.RLock()
 	term := c.terminals[push.TerminalID]
 	c.mu.RUnlock()
+	return c.applyTerminalEventFor(term, push)
+}
+
+func (c *WorkspaceClient) applyTerminalEventFor(term *terminalClient, push goclient.TerminalPush) *terminalClient {
 	if term == nil {
 		return nil
 	}
@@ -1580,7 +1820,7 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 	defer term.parseMu.Unlock()
 
 	term.mu.Lock()
-	if term.emu == nil {
+	if term.emu == nil || term.closed.Load() {
 		term.mu.Unlock()
 		return nil
 	}
@@ -1589,8 +1829,9 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 		return nil
 	}
 	if term.lastSeq != 0 && push.Event.Seq != term.lastSeq+1 {
+		previous := term.lastSeq
 		term.mu.Unlock()
-		c.resyncTerminal(push.TerminalID)
+		term.failOutput(c, fmt.Errorf("terminal event sequence gap: have %d, received %d", previous, push.Event.Seq))
 		return nil
 	}
 	term.lastSeq = push.Event.Seq
@@ -1601,7 +1842,14 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 		beforeTrim, beforeAlt := emu.HistoryState()
 		bells := emu.BellCount()
 		end := traceNativeWork("terminal.parse")
-		emu.Write(push.Event.Data)
+		for data := push.Event.Data; len(data) > 0; {
+			if term.closed.Load() {
+				return nil
+			}
+			n := min(len(data), 4096)
+			emu.Write(data[:n])
+			data = data[n:]
+		}
 		if end != nil {
 			end()
 		}
@@ -1638,57 +1886,6 @@ func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush)
 	}
 	c.flushVTResponses(term)
 	return term
-}
-
-func (c *WorkspaceClient) resyncTerminal(id uuid.UUID) {
-	c.mu.RLock()
-	old := c.terminals[id]
-	c.mu.RUnlock()
-	if old == nil {
-		return
-	}
-	var attached terminalAttach
-	if err := c.session.Attach(id, &attached); err != nil {
-		return
-	}
-	old.mu.RLock()
-	scrollbackOnClearScreen := old.scrollbackOnClearScreen
-	old.mu.RUnlock()
-	next := govt.New(attached.Size.Columns, attached.Size.Lines, c.config.Terminal.ScrollbackLines)
-	next.SetScrollbackOnClearScreen(scrollbackOnClearScreen)
-	next.SetCursorDefaults(c.currentConfig().Terminal.CursorStyle, c.currentConfig().Terminal.CursorBlink)
-	next.SetDefaultColors(terminalDefaultColors(c.config))
-	next.SetCellSize(
-		max(1, int(c.config.Terminal.FontSize*0.6)),
-		max(1, int(c.config.Terminal.LineHeight)),
-	)
-	var last uint64
-	for _, ev := range attached.Replay {
-		if ev.Seq <= last {
-			continue
-		}
-		applyWireEvent(next, ev)
-		last = ev.Seq
-	}
-	if attached.LastSeq > last {
-		last = attached.LastSeq
-	}
-	old.mu.Lock()
-	prev := old.emu
-	old.emu = next
-	old.snapshot = next.Snapshot()
-	old.selection = Selection{}
-	old.lastSeq = last
-	old.cols = attached.Size.Columns
-	old.rows = attached.Size.Lines
-	old.mu.Unlock()
-	if prev != nil {
-		prev.Close()
-	}
-	c.flushVTResponses(old)
-	if c.invalidate != nil {
-		c.invalidate()
-	}
 }
 
 func (c *WorkspaceClient) flushVTResponses(term *terminalClient) {
@@ -2390,7 +2587,15 @@ func (c *WorkspaceClient) ensureTerminalSize(gtx layout.Context, term *terminalC
 		rows = 256
 	}
 
+	if !term.parseMu.TryLock() {
+		return
+	}
+	defer term.parseMu.Unlock()
 	term.mu.Lock()
+	if term.emu == nil {
+		term.mu.Unlock()
+		return
+	}
 	term.emu.SetCellSize(cellWidth, lineHeight)
 	if cols == term.cols && rows == term.rows {
 		term.mu.Unlock()

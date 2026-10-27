@@ -25,7 +25,7 @@
 
 远端存在两套 endpoint：稳定 endpoint 用于跨版本复用，side endpoint 在路径中带协议与 API signature 身份，仅在稳定 endpoint 被不可兼容实例占用时使用。占用判定用 `test -S` 区分"尚无 server"（照常在稳定 endpoint 启动）与"有但无法通信"（转 side endpoint）；再次连接复用已存在的 side 实例，不重复启动。
 
-GUI 多窗口按 focus 决定自动 PTY resize。TUI 也声明焦点；浏览器使用受限 session，不具备恢复、管理或 GUI 自动化权限。Go 桌面/TUI 正常 socket 路径的终端流独立于控制 RPC；浏览器复用 WebSocket。具体背压与已知缺口见 [性能与资源管理](performance.md)。原始 replay 的行预算与单帧 attach 边界见 [终端输出与渲染](terminal-rendering.md)。
+GUI 多窗口按 focus 决定自动 PTY resize。TUI 也声明焦点；浏览器使用受限 session，不具备恢复、管理或 GUI 自动化权限。Go 桌面/TUI 正常 socket 路径的终端流独立于控制 RPC；GUI 进一步按 terminal 实例拥有独立订阅与 worker，满队列只背压该流。GUI 订阅按连接句柄持有和取消，迟到旧 attach 的取消不会 detach 同 UUID 的新订阅；初次 attach/replay 不占用共享模型消费循环。浏览器复用 WebSocket。具体背压与已知缺口见 [性能与资源管理](performance.md)。原始 replay 的行预算与单帧 attach 边界见 [终端输出与渲染](terminal-rendering.md)。
 
 ## SSH 认证与诊断
 

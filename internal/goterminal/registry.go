@@ -832,9 +832,18 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 	// The 64-event subscriber queue is a
 	// bounded backpressure boundary. Never silently drop a terminal event.
 	for _, sub := range subs {
+		// Preserve final/exit events for consumers that still have capacity.
+		// Closing only cancels delivery that would otherwise remain blocked.
+		select {
+		case sub.events <- ev:
+			continue
+		default:
+		}
 		select {
 		case sub.events <- ev:
 		case <-sub.done:
+		case <-t.closed:
+			return
 		}
 	}
 }

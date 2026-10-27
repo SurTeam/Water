@@ -81,6 +81,12 @@ func ensureTerminalView(term *terminalClient) {
 	if term == nil || !term.viewStale.Load() {
 		return
 	}
+	// A hidden terminal may still be parsing a large output event. Keep the
+	// last immutable view and retry next frame instead of blocking the GUI.
+	if !term.parseMu.TryLock() {
+		return
+	}
+	defer term.parseMu.Unlock()
 	term.mu.Lock()
 	defer term.mu.Unlock()
 	if term.emu == nil || !term.viewStale.Swap(false) {

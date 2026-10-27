@@ -119,6 +119,12 @@ func recycleNativeRows(cache *nativeTerminalTexture, v *TerminalView, rows []gov
 
 func (w *EbitengineWindow) resizeTerminal(c *WorkspaceClient, term *terminalClient, r image.Rectangle, cw, lh int) {
 	cols, rows := min(512, max(2, r.Dx()/cw)), min(256, max(1, r.Dy()/lh))
+	// Parsing and terminal lifetime changes must not stall the frame loop.
+	// Leave geometry uncommitted when busy so the next layout retries it.
+	if !term.parseMu.TryLock() {
+		return
+	}
+	defer term.parseMu.Unlock()
 	term.mu.Lock()
 	if term.emu == nil {
 		term.mu.Unlock()

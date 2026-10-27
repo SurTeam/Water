@@ -23,6 +23,15 @@ func themeColors(theme TerminalTheme) [259]uint32 {
 }
 
 func syncTerminalColors(term *terminalClient) bool {
+	if !term.parseMu.TryLock() {
+		return false
+	}
+	defer term.parseMu.Unlock()
+	term.mu.Lock()
+	defer term.mu.Unlock()
+	if term.emu == nil {
+		return false
+	}
 	colors := themeColors(term.view.baseTheme)
 	if colors != term.defaultColors {
 		term.defaultColors = colors
@@ -34,6 +43,12 @@ func syncTerminalColors(term *terminalClient) bool {
 
 func syncTerminalCursor(term *terminalClient, cfg goconfig.AppConfig) {
 	style, blink := cfg.Terminal.CursorStyle, cfg.Terminal.CursorBlink
+	// Defaults are reconciled each layout; a busy parser can use the old
+	// defaults until the next frame without blocking other windows.
+	if !term.parseMu.TryLock() {
+		return
+	}
+	defer term.parseMu.Unlock()
 	term.mu.Lock()
 	defer term.mu.Unlock()
 	if term.emu == nil || (term.cursorStyle == style && term.cursorBlink == blink) {

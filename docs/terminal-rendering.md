@@ -11,7 +11,7 @@
 
 ## 当前输出与历史逻辑
 
-PTY reader 发布有序事件，waitLoop 等待读取完成后发布 Exit。attach 先建立订阅再取得 replay，客户端按 sequence 跳过重叠；gap 重建依各前端实现。队列满时 decoded/subscriber 等待容量，发送拒绝与生命周期边界见 [性能与资源管理](performance.md)。
+PTY reader 发布有序事件，waitLoop 等待读取完成后发布 Exit。attach 先建立订阅再取得 replay，客户端按 sequence 跳过重叠。GUI 的 live sequence 出现 gap 时停止该终端输出并显示错误，不自动丢弃 live 字节后用 replay 重建；其他前端按各自实现处理。队列满时 decoded/subscriber 等待容量，发送拒绝与生命周期边界见 [性能与资源管理](performance.md)。
 
 主屏按配置 scrollback 行数加 viewport 的原始换行保留，普通长行可完整保留，因而不是固定字节硬上限。含 escape 的超大重绘片段及活动 alternate buffer 使用屏幕预算；alternate 输出单独管理，离开后恢复主屏 replay。
 
@@ -38,7 +38,7 @@ ANSI parser 的普通 ASCII run 批量写入 cells，保留前景/背景、宽�
 - replay 作为单个 JSON attach 响应，受 16 MiB frame 上限约束；主屏按行保留可能产生超大响应，长行/大历史不能保证重建成功。
 - `shrinkPrimaryRedrawsLocked` 收集全部 Output 再替换，跨 Resize 保留非 Output 事件时可能产生 sequence 次序问题；尚未运行专门复现，不能将目标有序性宣称为所有压缩路径的已验证保证。
 - 服务端原始裁剪不等同于客户端 Agent 历史语义，重连恢复范围只限保留 replay。
-- 满 subscriber 的取消与关闭风险见 [性能与资源管理](performance.md#静态审查确认的边界)。
+- 满 subscriber 的取消与关闭边界见 [性能与资源管理](performance.md#静态审查确认的边界)。
 
 ## 终端报告与剪贴板
 
