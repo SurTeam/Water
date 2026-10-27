@@ -1,7 +1,6 @@
 package goui
 
 import (
-	"fmt"
 	"image"
 	"math"
 	"sort"
@@ -46,10 +45,21 @@ type nativeRowTexture struct {
 	hash  uint64
 	image *ebiten.Image
 }
+type nativeTerminalStyle struct {
+	fontFamily     string
+	fontSize       float32
+	cellWidth      int
+	lineHeight     int
+	theme          TerminalTheme
+	hyperlinks     bool
+	ligatures      bool
+	fontGeneration uint64
+}
+
 type nativeTerminalTexture struct {
 	rows    map[int]nativeRowTexture
 	images  map[uint64]*ebiten.Image
-	style   string
+	style   nativeTerminalStyle
 	surface *ebiten.Image
 }
 
@@ -212,7 +222,12 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 		cache = &nativeTerminalTexture{rows: map[int]nativeRowTexture{}, images: map[uint64]*ebiten.Image{}}
 		w.textures[term.id] = cache
 	}
-	style := fmt.Sprintf("%s:%g:%d:%d:%v:%t:%t:%d", cfg.Terminal.FontFamily, cfg.Terminal.FontSize, cw, lh, v.Theme, cfg.Terminal.Hyperlinks, cfg.Terminal.Ligatures, w.fonts.generation.Load())
+	style := nativeTerminalStyle{
+		fontFamily: cfg.Terminal.FontFamily, fontSize: cfg.Terminal.FontSize,
+		cellWidth: cw, lineHeight: lh, theme: v.Theme,
+		hyperlinks: cfg.Terminal.Hyperlinks, ligatures: cfg.Terminal.Ligatures,
+		fontGeneration: w.fonts.generation.Load(),
+	}
 	rowCount := min(snap.Rows, len(snap.RowsData), (r.Dy()+lh-1)/lh)
 	width, height := max(1, snap.Cols*cw), max(1, rowCount*lh)
 	if style != cache.style || cache.surface == nil || cache.surface.Bounds().Size() != image.Pt(width, height) {

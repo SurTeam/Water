@@ -1778,10 +1778,9 @@ func (c *WorkspaceClient) publishTerminalSnapshots(changed map[*terminalClient]b
 	return true
 }
 
-// publishSnapshot acquires the parser/lifetime lock before the view lock, so
-// waiting for parsing does not block Draw. Viewport changes and snapshot
-// replacement remain serialized with GUI scroll callbacks by term.mu: releasing
-// it during construction could overwrite a newer scroll snapshot or follow state.
+// publishSnapshot keeps emulator lifetime and viewport mutations ordered with
+// parseMu. Only the state handoff takes mu; constructing the immutable frame
+// must not block Draw or pane hit testing.
 func (term *terminalClient) publishSnapshot() {
 	term.parseMu.Lock()
 	defer term.parseMu.Unlock()
@@ -1789,17 +1788,30 @@ func (term *terminalClient) publishSnapshot() {
 }
 
 func (term *terminalClient) publishSnapshotLocked() {
+	term.publishSnapshotWith((*govt.Emulator).FrameSnapshot)
+}
+
+// The caller holds parseMu throughout construction and publication.
+func (term *terminalClient) publishSnapshotWith(build func(*govt.Emulator) govt.Snapshot) {
 	term.mu.Lock()
-	defer term.mu.Unlock()
-	if term.emu == nil {
+	emu := term.emu
+	if emu == nil {
+		term.mu.Unlock()
 		return
 	}
 	if term.inputPending.Swap(false) {
 		term.selection = Selection{}
-		term.emu.ScrollToBottom()
+		emu.ScrollToBottom()
 	}
-	term.snapshot = term.emu.FrameSnapshot()
+	term.mu.Unlock()
+
+	snapshot := build(emu)
+
+	term.mu.Lock()
+	term.snapshot = snapshot
 	term.viewStale.Store(false)
+	// Preserve selection changes and new input arriving during construction.
+	term.mu.Unlock()
 }
 
 func (c *WorkspaceClient) applyTerminalEventDeferred(push goclient.TerminalPush) *terminalClient {
