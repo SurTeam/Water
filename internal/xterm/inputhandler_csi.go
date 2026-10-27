@@ -212,12 +212,12 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 			// Retain shell clear-screen contents, but during application redraw
 			// only move the protected prefix out of the viewport before erasing.
 			last := -1
-			if h.scrollbackOnClearScreen {
+			if h.scrollbackOnClearScreen && !h.scrollbackClearedSincePrint {
 				last = h.bufferService.Rows - 1
 				for last >= 0 && buf.Lines.Get(buf.YBase+last).GetTrimmedLength() == 0 {
 					last--
 				}
-			} else if marker := h.redrawHistoryStart; marker != nil && !marker.IsDisposed {
+			} else if marker := h.redrawHistoryStart; !h.scrollbackOnClearScreen && marker != nil && !marker.IsDisposed {
 				last = min(h.bufferService.Rows-1, marker.Line-buf.YBase)
 			}
 			for n := 0; n <= last; n++ {
@@ -263,6 +263,9 @@ func (h *InputHandler) eraseInDisplayInternal(params *Params, respectProtect boo
 				}
 			}
 			return true
+		}
+		if buf == h.bufferService.Buffers.Normal() {
+			h.scrollbackClearedSincePrint = true
 		}
 		scrollBackSize := buf.Lines.Length() - h.bufferService.Rows
 		if scrollBackSize > 0 {

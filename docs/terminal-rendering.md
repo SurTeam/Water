@@ -19,7 +19,9 @@ PTY reader 发布有序事件，waitLoop 等待读取完成后发布 Exit。atta
 
 ## 清屏与 Agent 重绘
 
-默认客户端可将 CSI 2 J 清屏内容保留为历史。普通 shell 的 CSI 3 J 清除历史；启用对应 Agent clear policy 时，模拟器用首次同步输出边界保留 shell 前缀，并替换 Agent 自身重绘历史。边界随客户端裁剪和 reflow 更新。
+默认客户端可将 CSI 2 J 清屏内容保留为历史，供 Ctrl+L 清屏后回看。普通 shell 的 CSI 3 J 清除历史；若随后尚未写入新的主屏文本，CSI 2 J 不再将旧 viewport 重新存入历史，因此 `clear` 的 CSI 3 J → CSI H → CSI 2 J 顺序也会清除旧内容。该状态跨输出分块和光标控制保留，由新的主屏文本或终端 reset 清除；备用屏幕输出不改变主屏状态，退出后恢复原有主屏内容和光标位置。
+
+启用对应 Agent clear policy 时，模拟器用首次同步输出边界保留 shell 前缀，并替换 Agent 自身重绘历史。边界随客户端裁剪和 reflow 更新。
 
 此策略作用于客户端模拟器的历史，隐藏终端也继续应用；它不改变服务端原始 replay 保留策略。服务端仍按原始换行裁剪，attach 只能重建尚在 replay 中的字节；不能保证 live 客户端保留的 shell 前缀在多轮重绘后重连仍存在。
 

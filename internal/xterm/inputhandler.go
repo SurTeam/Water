@@ -80,7 +80,9 @@ type InputHandler struct {
 	eraseAttrDataInternal     AttributeData
 	preserveScrollbackOnErase bool
 	scrollbackOnClearScreen   bool
-	redrawHistoryStart        *Marker
+	// ED3 leaves the viewport intact; a following ED2 must not retain it again.
+	scrollbackClearedSincePrint bool
+	redrawHistoryStart          *Marker
 
 	utf8Decoder     Utf8ToUtf32
 	parseBuffer     []uint32
@@ -440,6 +442,9 @@ func (h *InputHandler) tryParsePlainASCII(data []byte) bool {
 }
 
 func (h *InputHandler) printASCIIBytes(data []byte) {
+	if len(data) > 0 && h.activeBuffer() == h.bufferService.Buffers.Normal() {
+		h.scrollbackClearedSincePrint = false
+	}
 	if len(data) == 0 {
 		return
 	}
@@ -504,6 +509,9 @@ func (h *InputHandler) printASCIIBytes(data []byte) {
 }
 
 func (h *InputHandler) printASCIICodepoints(data []uint32) {
+	if len(data) > 0 && h.activeBuffer() == h.bufferService.Buffers.Normal() {
+		h.scrollbackClearedSincePrint = false
+	}
 	if len(data) == 0 {
 		return
 	}
@@ -574,6 +582,9 @@ func (h *InputHandler) ParseString(data string) {
 
 // Print handles printable characters — writes them to the buffer.
 func (h *InputHandler) Print(data []uint32, start, end int) {
+	if end > start && h.activeBuffer() == h.bufferService.Buffers.Normal() {
+		h.scrollbackClearedSincePrint = false
+	}
 	if h.charsetService.Charset == nil && !h.coreService.Modes.InsertMode && h.coreService.DecPrivateModes.Wraparound && !h.optionsService.Options.ScreenReaderMode && h.curAttrData.Extended == nil {
 		ascii := true
 		for _, code := range data[start:end] {
@@ -746,6 +757,7 @@ func (h *InputHandler) Print(data []uint32, start, end int) {
 
 // Reset resets the input handler state.
 func (h *InputHandler) Reset() {
+	h.scrollbackClearedSincePrint = false
 	if h.redrawHistoryStart != nil {
 		h.redrawHistoryStart.Dispose()
 		h.redrawHistoryStart = nil

@@ -194,3 +194,67 @@ func TestClearScreenKeepsBoundedHistoryAndCursor(t *testing.T) {
 		t.Fatalf("alternate screen must erase without history: %+v", s)
 	}
 }
+
+func TestShellClearDropsHistoryBeforeOrAfterViewportErase(t *testing.T) {
+	for _, sequence := range []string{"\x1b[3J\x1b[H\x1b[2J", "\x1b[H\x1b[2J\x1b[3J"} {
+		for _, lines := range []int{1, 12} {
+			for _, prompt := range []string{"prompt>", "提示>"} {
+				t.Run(fmt.Sprintf("%q/%d/%s", sequence, lines, prompt), func(t *testing.T) {
+					e := New(24, 4, 32)
+					defer e.Close()
+					for n := 0; n < lines; n++ {
+						e.Write([]byte("old-history\r\n"))
+					}
+					// Exercise parsing across output event and escape boundaries.
+					for _, b := range []byte(sequence) {
+						e.Write([]byte{b})
+					}
+					e.Scroll(-100)
+					if s := e.Snapshot(); s.YBase != 0 || s.YDisp != 0 || strings.Contains(clearScreenText(s), "old-history") {
+						t.Fatalf("clear restored old history: %+v", s)
+					}
+					e.Write([]byte(prompt))
+					e.Write([]byte("\x1b[H\x1b[2J"))
+					e.Scroll(-100)
+					if s := e.Snapshot(); s.YBase == 0 || !strings.Contains(clearScreenText(s), prompt) {
+						t.Fatalf("Ctrl+L lost new prompt history: %+v", s)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestAlternateScreenClearRestoresShellPosition(t *testing.T) {
+	e := New(24, 4, 32)
+	defer e.Close()
+	e.Write([]byte("shell-history\r\nshell> draft"))
+	before := e.Snapshot()
+	e.Write([]byte("\x1b[?1049happlication\x1b[3J\x1b[H\x1b[2Jredraw\x1b[?1049l"))
+	after := e.Snapshot()
+	if after.AltScreen || after.CursorX != before.CursorX || after.CursorY != before.CursorY || after.YBase != before.YBase || clearScreenText(after) != clearScreenText(before) {
+		t.Fatalf("application exit changed shell content or position: before=%+v after=%+v", before, after)
+	}
+	e.Write([]byte("\x1b[H\x1b[2J"))
+	e.Scroll(-100)
+	if !strings.Contains(clearScreenText(e.Snapshot()), "shell> draft") {
+		t.Fatal("alternate screen clear disabled subsequent shell history retention")
+	}
+}
+
+func TestAlternateScreenPrintingDoesNotReviveClearedShellHistory(t *testing.T) {
+	for _, output := range []string{"application", "应用"} {
+		t.Run(output, func(t *testing.T) {
+			e := New(24, 4, 32)
+			defer e.Close()
+			e.Write([]byte("old-history\r\nshell>"))
+			e.Write([]byte("\x1b[3J\x1b[?1049h"))
+			e.Write([]byte(output))
+			e.Write([]byte("\x1b[?1049l\x1b[H\x1b[2J"))
+			e.Scroll(-100)
+			if s := e.Snapshot(); s.YBase != 0 || strings.Contains(clearScreenText(s), "old-history") {
+				t.Fatalf("alternate output revived cleared shell history: %+v", s)
+			}
+		})
+	}
+}
