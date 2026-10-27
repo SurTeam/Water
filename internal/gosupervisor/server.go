@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/ptyprocess"
 	"io"
 	"net"
 	"os"
@@ -50,11 +51,12 @@ type Server struct {
 }
 
 type terminal struct {
-	id         string
-	generation uint64
-	ptmx       *os.File
-	cmd        *exec.Cmd
-	pid        int
+	id             string
+	generation     uint64
+	ptmx           *os.File
+	cmd            *exec.Cmd
+	processSession *ptyprocess.Session
+	pid            int
 
 	mu          sync.Mutex
 	restore     historyRestore
@@ -283,10 +285,11 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 	if err != nil {
 		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
 	}
+	processSession := ptyprocess.Capture(cmd.Process)
 	pollable, err := makePollablePTY(ptmx)
 	if err != nil {
 		_ = ptmx.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
+		_ = processSession.Kill()
 		_ = cmd.Wait()
 		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
 	}
@@ -296,14 +299,15 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 	generation := s.generation[req.ID]
 	s.mu.Unlock()
 	t := &terminal{
-		id:         req.ID,
-		generation: generation,
-		ptmx:       ptmx,
-		cmd:        cmd,
-		pid:        cmd.Process.Pid,
-		subs:       make(map[*subscriber]struct{}),
-		resize:     make(chan resizeRequest, 8),
-		closed:     make(chan struct{}),
+		id:             req.ID,
+		generation:     generation,
+		ptmx:           ptmx,
+		cmd:            cmd,
+		processSession: processSession,
+		pid:            cmd.Process.Pid,
+		subs:           make(map[*subscriber]struct{}),
+		resize:         make(chan resizeRequest, 8),
+		closed:         make(chan struct{}),
 	}
 	s.mu.Lock()
 	s.terms[req.ID] = t
@@ -701,12 +705,7 @@ func (t *terminal) waitLoop(s *Server) {
 func (t *terminal) close() {
 	t.once.Do(func() {
 		close(t.closed)
-		if t.cmd.Process != nil {
-			pid := t.cmd.Process.Pid
-			if err := syscall.Kill(-pid, syscall.SIGHUP); err != nil && !errors.Is(err, syscall.ESRCH) {
-				_ = t.cmd.Process.Signal(syscall.SIGHUP)
-			}
-		}
+		_ = t.processSession.Kill()
 		_ = t.ptmx.Close()
 	})
 }

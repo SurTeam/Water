@@ -57,6 +57,9 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - resize 由 supervisor 的读循环串行处理：先 flush 已观察输出，再应用几何并发布 resize 事件，保证 server 不会先看到新几何。
 - 每个连接一个写协程串行化所有帧（控制回复与终端输出共用 socket，不串行会交叉破坏帧）；订阅者队列满时只丢弃该订阅，不阻塞 PTY 读循环，也不关闭承载控制流量的连接。
 - 只有已确认的 `recovery.shutdown` 才 detach 并保留程序；普通 `Close` 关闭 supervisor 并等待连接结束。supervisor 收到关闭请求后终止程序并退出进程。默认按控制 socket 隔离 supervisor；升级时发现旧版共享 socket 则兼容接回，普通关闭只清理自己的 pane，共享 supervisor 无剩余终端时才关闭。异常强制终止不能保证执行清理。
+- 关闭 pane、替换 terminal 和普通关闭 server 时，进程内终端与新版 supervisor 共用 `internal/ptyprocess` 清理：spawn 后、启动 Wait 前保存根进程的原生启动身份，关闭时在终止 shell 前枚举同一 PTY 会话成员及仍可追溯的后代，并发送 `SIGKILL`，包括独立任务进程组和仍保有亲缘关系的另建会话子进程。此操作强制终止程序，不执行优雅退出。
+- 进程枚举使用 750 ms 预算和 4 MiB 输出上限；信号前复核根进程与目标身份，避免历史 PID 复用建立错误的清理归属。枚举失败时只回退到身份已确认的原进程组及直接子进程；根进程已回收或身份无法确认时只尝试由 `os.Process` 持有的直接子进程。清理为尽力执行，快照之后新建的后代，以及已经脱离会话且失去可追溯关系的进程，不保证被终止。预算不代表整个关闭操作的硬性时限。
+- 升级后保留的旧 supervisor 继续使用旧清理实现；仅更新 GUI 或通过 recovery 接回已有 PTY，不会替换该 supervisor 的代码。
 - 显式替换 pane 的 terminal 走 supervisor 的 `Replace`：先注册新 terminal 并把回复写到线上，再关闭旧程序，server 因此能在旧 Exit 到达前完成安装。
 - supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
 - 客户端须在发送请求前登记响应等待项，登记顺序与帧写入顺序共用同一个可取消的门；带终端身份的响应还须校验目标，避免后台采样与手动诊断并发时丢失或错配回复。请求写入与等待均受截止时间约束。

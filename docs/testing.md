@@ -34,6 +34,13 @@ background runs use a new session with SIGHUP restored to its default. Process
 termination checks distinguish a running descendant from an exited zombie still
 awaiting OS reaping, and report process state on failure.
 
+PTY close regression checks must exercise ignored HUP/TERM, separate job process
+groups, traceable descendants that create another session, and neighboring PTY
+isolation. Cover both in-process and supervisor close paths, bounded enumeration
+failure, and reaped/replaced root identities. A historical PID must never grant
+permission to discover or kill an unrelated session. These checks do not prove
+cleanup of already-reparented descendants outside the PTY session.
+
 Each step has a 60-second deadline. The whole profile consists of multiple
 steps and can take longer than a minute. A failure stops the profile; do not
 silently skip a dependency or repeat the same failed test until it passes.

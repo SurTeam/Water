@@ -2,6 +2,7 @@ package goterminal
 
 import (
 	"errors"
+	"github.com/SurTeam/Water/internal/ptyprocess"
 	"io"
 	"os"
 	"os/exec"
@@ -35,9 +36,10 @@ type Terminal struct {
 
 	registry *Registry
 
-	cmd        *exec.Cmd
-	ptmx       *os.File
-	supervised *gosupervisor.Client
+	cmd            *exec.Cmd
+	processSession *ptyprocess.Session
+	ptmx           *os.File
+	supervised     *gosupervisor.Client
 	// supervisorKey is the pane id the supervisor holds the PTY under. It survives
 	// server restarts, while ID identifies this terminal instance to clients.
 	supervisorKey         string
@@ -140,10 +142,11 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 	if err != nil {
 		return nil, err
 	}
+	processSession := ptyprocess.Capture(cmd.Process)
 	pollable, err := makePollablePTY(ptmx)
 	if err != nil {
 		_ = ptmx.Close()
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
+		_ = processSession.Kill()
 		_ = cmd.Wait()
 		return nil, err
 	}
@@ -153,6 +156,7 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		shellIntegrationDir: integrationDir,
 		ID:                  uuid.New(),
 		cmd:                 cmd,
+		processSession:      processSession,
 		ptmx:                ptmx,
 		pid:                 cmd.Process.Pid,
 		program:             program,
@@ -441,15 +445,7 @@ func (t *Terminal) Close() error {
 	var err error
 	t.once.Do(func() {
 		close(t.closed)
-		if t.cmd.Process != nil {
-			// creack/pty starts the child in its own session/process group.
-			// Signal the whole group so pane/tab closure cannot leave shell
-			// descendants running in the background.
-			pid := t.cmd.Process.Pid
-			if killErr := syscall.Kill(-pid, syscall.SIGHUP); killErr != nil && !errors.Is(killErr, syscall.ESRCH) {
-				err = t.cmd.Process.Signal(syscall.SIGHUP)
-			}
-		}
+		err = t.processSession.Kill()
 		_ = t.ptmx.Close()
 	})
 	return err
