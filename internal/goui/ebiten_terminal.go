@@ -199,6 +199,14 @@ func (w *EbitengineWindow) drawTerminal(c *WorkspaceClient, dst *ebiten.Image, t
 	term.mu.RLock()
 	snap, selection := term.snapshot, term.selection
 	term.mu.RUnlock()
+	if at := term.publishedAt.Swap(0); at != 0 {
+		sampleNativeLatency("publish.present", time.Since(time.Unix(0, at)))
+		// A fresh snapshot is about to be drawn; if it follows a keystroke,
+		// this is the frame in which that keystroke's echo becomes visible.
+		if input := term.inputAt.Swap(0); input != 0 {
+			sampleNativeLatency("input.present", time.Since(time.Unix(0, input)))
+		}
+	}
 	v := term.view
 	cfg := c.currentConfig()
 	faces := w.terminalFaces(c)

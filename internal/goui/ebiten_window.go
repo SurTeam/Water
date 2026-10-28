@@ -64,6 +64,15 @@ type nativeView struct {
 	sidebarContentHeight                     int
 	rename                                   *nativeRename
 }
+
+// The last geometry applied to the platform IME view. Repositioning is a
+// synchronous main-thread call, so identical geometry is skipped instead of
+// coupling every frame to AppKit.
+type textInputFrame struct {
+	x, y, width, height, scale float64
+	valid                      bool
+}
+
 type nativeDrag struct {
 	editor                          *widget.Editor
 	sidebarWidth                    float32
@@ -140,6 +149,16 @@ type EbitengineWindow struct {
 	cursorBlink             atomic.Bool
 	frameWake               chan struct{}
 	frameActivity           atomic.Int64
+	frameIntervalNanos      atomic.Int64
+	lastDrawAt              time.Time
+	frameStartedAt          time.Time
+	presentMisses           atomic.Int64
+	imeFrame                textInputFrame
+	imeCommitted            bool
+	echoTimer               *time.Timer
+	echoWaitMisses          int
+	echoWaitArmed           bool
+	echoWaitDisabledUntil   time.Time
 	visibleTerminals        atomic.Pointer[map[uuid.UUID]struct{}]
 	keyRepeat               nativeKeyRepeater
 	layoutRevision          uint64
@@ -177,6 +196,161 @@ func (w *EbitengineWindow) invalidateOutput() {
 	case w.frameWake <- struct{}{}:
 	default:
 	}
+}
+
+// notePresentedFrame keeps a bounded estimate of the display frame period and
+// counts frames that missed a presentation. The publication cadence and the
+// bounded echo wait both use this instead of a hardcoded 60Hz. Gaps from an
+// idle (event-driven) window are ignored so they do not look like slow frames.
+func (w *EbitengineWindow) notePresentedFrame(now time.Time) {
+	if !w.lastDrawAt.IsZero() {
+		if interval := now.Sub(w.lastDrawAt); interval > 0 && interval < 4*time.Second/60 {
+			previous := w.frameIntervalNanos.Load()
+			if previous <= 0 {
+				w.frameIntervalNanos.Store(int64(interval))
+			} else {
+				w.frameIntervalNanos.Store((previous*3 + int64(interval)) / 4)
+			}
+			sampleNativeLatency("present.interval", interval)
+			if interval > w.frameInterval()*3/2 {
+				w.presentMisses.Add(1)
+				countNativeWork("count.present_miss", 1)
+				if w.echoWaitArmed {
+					// A frame that waited for its echo and still missed the
+					// presentation counts against the wait, so a slow or busy
+					// display disables it instead of paying the budget forever.
+					w.echoWaitMisses++
+					if w.echoWaitMisses >= echoWaitMissLimit {
+						w.echoWaitMisses = 0
+						w.echoWaitDisabledUntil = now.Add(echoWaitBackoff)
+					}
+				}
+			}
+		}
+	}
+	w.lastDrawAt = now
+	w.echoWaitArmed = false
+}
+
+// frameInterval reports the smoothed display period, clamped to a plausible
+// range so a stalled or hidden window cannot distort the cadence.
+func (w *EbitengineWindow) frameInterval() time.Duration {
+	value := w.frameIntervalNanos.Load()
+	if value <= 0 {
+		return time.Second / 60
+	}
+	return min(max(time.Duration(value), time.Second/240), time.Second/30)
+}
+
+const (
+	// echoDrawSlack is the delay between the wait ending and Draw reading the
+	// terminal snapshot. An echo published inside this slack still lands in
+	// this frame, so it is part of the usable budget.
+	echoDrawSlack = 500 * time.Microsecond
+	// echoWaitOverhead covers the IME session rebuild and one snapshot build
+	// that share the frame with the wait.
+	echoWaitOverhead = 200 * time.Microsecond
+	// After this many consecutive misses the wait backs off for a while. A
+	// shell that does not echo would otherwise pay the budget on every key.
+	echoWaitMissLimit = 8
+	echoWaitBackoff   = 2 * time.Second
+	// echoFixedOffsets is the fixed part of the inclusion test: the write
+	// offset, the IME rebuild and the Draw snapshot delay that separate the
+	// PTY write from the snapshot read.
+	echoFixedOffsets = 600 * time.Microsecond
+)
+
+// syncEchoWait blocks for at most one budget so the first output after a
+// keystroke is published before this frame draws. The budget follows the
+// measured frame period and echo latency: a frame without headroom or a shell
+// whose echo is slower than the budget skips the wait instead of stretching
+// the frame. The pump signals non-blockingly; no lock is held while waiting.
+func (w *EbitengineWindow) syncEchoWait(c *WorkspaceClient) {
+	countNativeWork("count.echo_wait_enter", 1)
+	term := c.echoWaitTerm.Swap(nil)
+	if term == nil || term.closed.Load() {
+		return
+	}
+	// The owned test fixture runs without window focus; the wait itself only
+	// depends on frame timing, so it stays measurable there.
+	focused := ebiten.IsFocused() || w.testUnfocused()
+	if !echoWaitAllowed(focused, windowChromeVisible(w), w.catchingUp, w.closing) {
+		countNativeWork("count.echo_wait_skip_focus", 1)
+		return
+	}
+	now := time.Now()
+	if !w.echoWaitDisabledUntil.IsZero() && now.Before(w.echoWaitDisabledUntil) {
+		return
+	}
+	period := w.frameInterval()
+	budget := echoWaitBudget(period, time.Duration(term.echoLatency.Load()))
+	if budget <= 0 {
+		countNativeWork("count.echo_wait_skip_budget", 1)
+		return
+	}
+	if !w.frameStartedAt.IsZero() {
+		if remaining := period - now.Sub(w.frameStartedAt); remaining <= budget+echoWaitOverhead {
+			return
+		}
+	}
+	// Drop a token left by an earlier publish, then re-check: the echo may have
+	// arrived before this frame reached the wait.
+	select {
+	case <-term.echoSignal:
+	default:
+	}
+	if !term.echoBypass(now) {
+		w.echoWaitMisses = 0
+		return
+	}
+	if w.echoTimer == nil {
+		w.echoTimer = time.NewTimer(time.Hour)
+		w.echoTimer.Stop()
+	}
+	countNativeWork("count.echo_wait_run", 1)
+	w.echoTimer.Reset(budget)
+	w.echoWaitArmed = true
+	select {
+	case <-term.echoSignal:
+		w.echoWaitMisses = 0
+		sampleNativeLatency("input.echo_wait", time.Since(now))
+	case <-w.echoTimer.C:
+		w.echoWaitMisses++
+		if w.echoWaitMisses >= echoWaitMissLimit {
+			w.echoWaitMisses = 0
+			w.echoWaitDisabledUntil = now.Add(echoWaitBackoff)
+		}
+	}
+}
+
+// echoWaitBudget returns the bounded wait for one keystroke frame. It is zero
+// until an echo latency has actually been measured. The cap is the frame
+// budget left after the IME restart and one snapshot build (P/6), and the wait
+// is only enabled when the measured latency can still land in this frame,
+// i.e. latency <= U+R+budget+delta-epsilon (0.9ms of fixed offsets here).
+// That keeps the frame-occupancy bound while adapting the hard limit to the
+// measured latency instead of a fixed 2.3ms.
+// echoWaitAllowed keeps the bounded wait on the focused, visible, idle path
+// only: an unfocused, hidden or closing window must never block a frame.
+func echoWaitAllowed(focused, visible, catchingUp, closing bool) bool {
+	return focused && visible && !catchingUp && !closing
+}
+
+func echoWaitBudget(period, latency time.Duration) time.Duration {
+	if latency <= 0 {
+		return 0
+	}
+	budget := min(period/6-echoWaitOverhead, 2*latency)
+	if budget <= 0 {
+		return 0
+	}
+	// Only wait when the measured write-to-publish latency can still land in
+	// this frame. The frame budget left after the fixed offsets is what makes
+	// an echo of B milliseconds includable; a slower echo never waits.
+	if latency > echoFixedOffsets+budget {
+		return 0
+	}
+	return budget
 }
 
 func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *EbitengineWindow {
@@ -327,6 +501,7 @@ func (w *EbitengineWindow) deliverFileDrop(c *WorkspaceClient) {
 }
 
 func (w *EbitengineWindow) Update() error {
+	w.frameStartedAt = time.Now()
 	defer w.updateFramePacing()
 	defer func() {
 		blinking := w.focusedCursorBlinks(w.active())
@@ -507,13 +682,6 @@ func (w *EbitengineWindow) Update() error {
 	if c == nil {
 		return nil
 	}
-	if processed || w.frameRevision.Load() != w.layoutRevision {
-		w.layout(c, nil)
-		w.layoutRevision = w.frameRevision.Load()
-	}
-	w.nativePointer(c)
-	w.updateCursor(c)
-	w.keyRepeat.observe(ebiten.IsKeyPressed, false)
 	// Drops arrive on an unfocused window too. Reading them after the focus
 	// return drops the only frame ebiten reports DroppedFiles.
 	w.deliverFileDrop(c)
@@ -524,9 +692,35 @@ func (w *EbitengineWindow) Update() error {
 		// control API drives input, so key events (incl. IME-confirmed native
 		// text) are still delivered without activating the app.
 		if !w.testUnfocused() {
+			// Drop any echo wait recorded before focus was lost.
+			w.syncEchoWait(c)
 			return nil
 		}
 	}
+	// Keyboard and IME input runs before the post-queue layout: the PTY write
+	// starts the echo latency chain, and the layout that follows observes any
+	// state change the input produced.
+	if err := w.handleFrameInput(c); err != nil {
+		return err
+	}
+	if processed || w.frameRevision.Load() != w.layoutRevision {
+		w.layout(c, nil)
+		w.layoutRevision = w.frameRevision.Load()
+	}
+	w.nativePointer(c)
+	w.updateCursor(c)
+	// Wait (bounded) for the echo of this frame's keystroke so it can be drawn
+	// in this frame instead of the next one. Skipped when the frame has no
+	// headroom, when the window is not focused, or after repeated misses.
+	w.syncEchoWait(c)
+	return nil
+}
+
+// handleFrameInput dispatches keyboard, IME and control input for one frame.
+// It is called before the post-queue layout so a keystroke is written to the
+// PTY as early as possible; the layout that follows observes any state change.
+func (w *EbitengineWindow) handleFrameInput(c *WorkspaceClient) error {
+	w.keyRepeat.observe(ebiten.IsKeyPressed, false)
 	// Command chords must not be swallowed or turned into text by the IME.
 	// Active composition remains owned by the input method until it commits.
 	if w.composition == "" && (ebiten.IsKeyPressed(ebiten.KeyControl) || ebiten.IsKeyPressed(ebiten.KeyMeta) || ebiten.IsKeyPressed(ebiten.KeyAlt)) {
@@ -535,13 +729,37 @@ func (w *EbitengineWindow) Update() error {
 		return nil
 	}
 	previousComposition := w.composition
+	end := traceNativeWork("input.frame")
+	// input.ime covers Composer.Update, which consumes IME commits and, after
+	// each commit, synchronously rebuilds the platform text session.
+	imeEnd := traceNativeWork("input.ime")
+	imeStarted := time.Now()
+	w.imeCommitted = false
 	handled, err := w.updateComposer(c)
+	if imeEnd != nil {
+		imeEnd()
+	}
+	if w.imeCommitted {
+		// This Update consumed a commit and synchronously rebuilt the platform
+		// text session; report the whole call so the rebuild cost is visible.
+		w.imeCommitted = false
+		sampleNativeLatency("input.ime_commit", time.Since(imeStarted))
+	}
 	if handled || previousComposition != w.composition {
 		w.Invalidate()
 	}
 	if err != nil {
+		if end != nil {
+			end()
+		}
 		return err
 	}
+	return w.finishFrameInput(c, handled, previousComposition, end)
+}
+
+// finishFrameInput applies queued editing keys, the physical-key fallback and
+// the key-repeat bookkeeping shared by the timed and untimed IME paths.
+func (w *EbitengineWindow) finishFrameInput(c *WorkspaceClient, handled bool, previousComposition string, end func()) error {
 	// Editing keys arrive as text-command events while the IME view owns the
 	// responder chain. Apply them before the physical-key fallback, and never
 	// while a composition is still marked.
@@ -560,6 +778,9 @@ func (w *EbitengineWindow) Update() error {
 	if !handled {
 		w.nativeKeys(c)
 	}
+	if end != nil {
+		end()
+	}
 	return nil
 }
 
@@ -567,6 +788,7 @@ func (w *EbitengineWindow) Draw(screen *ebiten.Image) {
 	if end := traceNativeWork("native.draw"); end != nil {
 		defer end()
 	}
+	w.notePresentedFrame(time.Now())
 	revision := w.frameRevision.Load()
 	w.presentedRevision.Store(revision)
 	// Ebitengine does not swap buffers for hidden or fully occluded windows.

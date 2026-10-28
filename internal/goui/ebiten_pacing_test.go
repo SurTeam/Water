@@ -54,17 +54,17 @@ func TestCursorVisibilityExcludesHiddenAndScrolledOffscreen(t *testing.T) {
 
 func TestOutputPublicationKeepsFirstAndLatestViewBounded(t *testing.T) {
 	now := time.Unix(1, 0)
-	if outputPublicationDelay(time.Time{}, now) != 0 {
+	if outputPublicationDelay(time.Time{}, now, 0) != 0 {
 		t.Fatal("first output was delayed")
 	}
 	interval := time.Second / 60
 	for _, elapsed := range []time.Duration{0, time.Millisecond, interval - 1} {
-		if got := outputPublicationDelay(now, now.Add(elapsed)); got != interval-elapsed {
+		if got := outputPublicationDelay(now, now.Add(elapsed), 0); got != interval-elapsed {
 			t.Fatalf("publication before deadline: elapsed=%v delay=%v", elapsed, got)
 		}
 	}
 	for _, elapsed := range []time.Duration{interval, time.Second} {
-		if outputPublicationDelay(now, now.Add(elapsed)) != 0 {
+		if outputPublicationDelay(now, now.Add(elapsed), 0) != 0 {
 			t.Fatal("latest view stayed pending after deadline")
 		}
 	}

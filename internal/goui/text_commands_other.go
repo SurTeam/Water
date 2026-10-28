@@ -8,4 +8,4 @@ func ensureTextCommandHook() {}
 
 func applySystemKeyRepeat(*nativeKeyRepeater) {}
 
-func repositionTextInput(image.Rectangle, float64) {}
+func repositionTextInput(image.Rectangle, float64, *textInputFrame) {}

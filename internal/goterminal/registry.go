@@ -25,10 +25,14 @@ const (
 	idleReadCacheBlocks    = 2
 	outputBatchIdle        = time.Millisecond
 	outputBatchMaxAge      = 5 * time.Millisecond
-	replayEventOverhead    = 64
-	exitedTerminalLimit    = 32
-	exitedReplayLimit      = 8 * 1024 * 1024
-	coalesceReplayBytes    = 32 * 1024
+	// A tiny read right after input is almost certainly the echo the user is
+	// waiting for; flush it immediately and keep larger reads batched.
+	echoFlushWindow     = 100 * time.Millisecond
+	echoFlushMaxBytes   = 64
+	replayEventOverhead = 64
+	exitedTerminalLimit = 32
+	exitedReplayLimit   = 8 * 1024 * 1024
+	coalesceReplayBytes = 32 * 1024
 )
 
 type Terminal struct {
@@ -47,8 +51,9 @@ type Terminal struct {
 	program               string
 	args                  []string // launch arguments, independent of local process ownership
 	shellIntegrationDir   string
-	cellWidth, cellHeight int        // owned by the ordered PTY reader
-	executeMu             sync.Mutex // one foreground execution per pane
+	cellWidth, cellHeight int          // owned by the ordered PTY reader
+	executeMu             sync.Mutex   // one foreground execution per pane
+	lastInput             atomic.Int64 // UnixNano of the most recent input write
 
 	mu              sync.RWMutex
 	size            goprotocol.TerminalSize
@@ -334,8 +339,11 @@ func (t *Terminal) Write(data []byte) error {
 	if t.supervised != nil {
 		return t.supervisedWrite(data)
 	}
-	_, err := t.ptmx.Write(data)
-	return err
+	if _, err := t.ptmx.Write(data); err != nil {
+		return err
+	}
+	t.lastInput.Store(time.Now().UnixNano())
+	return nil
 }
 
 type resizeRequest struct {
@@ -750,6 +758,9 @@ func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
 					gometrics.PTYReadWouldBlock.Add(1)
 					if n == 0 {
 						return false
+					}
+					if n <= echoFlushMaxBytes && time.Since(time.Unix(0, t.lastInput.Load())) < echoFlushWindow {
+						return true
 					}
 					// Keep this partial block while the poller waits for readiness.
 					// Bound that wait so a prompt or resize cannot get stuck behind

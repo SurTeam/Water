@@ -140,10 +140,17 @@ type macRect struct {
 // On macOS, GLFW and the text-input view are already in AppKit points.
 // Multiplying by the backing scale places the candidate window about one
 // full screen away from the caret.
-func repositionTextInput(bounds image.Rectangle, scale float64) {
+func repositionTextInput(bounds image.Rectangle, scale float64, cache *textInputFrame) {
 	x, y, width, height, ok := imeCaretFrame(bounds, scale)
 	if !ok {
 		return
+	}
+	if cache != nil {
+		if cache.valid && cache.scale == scale && cache.x == x && cache.y == y &&
+			cache.width == width && cache.height == height {
+			return
+		}
+		*cache = textInputFrame{x, y, width, height, scale, true}
 	}
 	// AppKit view geometry from the game thread deadlocks the main thread when
 	// the window is being activated. The beachball is that deadlock.

@@ -10,11 +10,52 @@ import (
 
 // A fast byte stream does not require presenting every intermediate screen.
 // Keep this clock independent of display-rate pointer/keyboard interaction.
-func outputPublicationDelay(published, now time.Time) time.Duration {
+//
+// Non-echo streams never publish faster than 60/s, but must not be slower than
+// the display either: on a 30Hz panel a fixed 60Hz window would queue a second
+// frame that can never be shown. The input echo has its own bounded bypass.
+func publicationPeriod(frameInterval time.Duration) time.Duration {
+	period := time.Second / 60
+	if frameInterval > period {
+		period = frameInterval
+	}
+	return min(period, time.Second/10)
+}
+
+// echoBypassRate caps how many input echoes may publish ahead of the shared
+// window per connection. One per frame is not a bound on a 120/144Hz display,
+// so a token bucket keeps the bypass at 60/s while the window still serves
+// every non-echo stream.
+const echoBypassRate = 60
+
+// tokenBucket is a bounded-rate gate with capacity one. It is owned by the
+// pump goroutine, so it needs no locking.
+type tokenBucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func (b *tokenBucket) take(now time.Time) bool {
+	if b.last.IsZero() {
+		// Capacity one, starting full: a single burst is allowed, then the
+		// sustained rate is echoBypassRate.
+		b.tokens = 1
+	} else {
+		b.tokens = min(1, b.tokens+now.Sub(b.last).Seconds()*echoBypassRate)
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func outputPublicationDelay(published, now time.Time, frameInterval time.Duration) time.Duration {
 	if published.IsZero() {
 		return 0
 	}
-	return max(0, time.Second/60-now.Sub(published))
+	return max(0, publicationPeriod(frameInterval)-now.Sub(published))
 }
 
 // noteVisibleTerminals publishes the terminals this window is actually drawing.

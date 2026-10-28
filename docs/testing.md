@@ -193,6 +193,14 @@ WATER_CAT_BENCHMARK_FILE=/path/to/benchmark.data \
 
 supervisor 测试默认关闭 OPOST，对完整文件逐字节 SHA-256 校验；设置 `WATER_CAT_BENCHMARK_OPOST=1` 测量默认终端输出转换，此模式移除 CR 后校验其余字节及顺序，不验证 CR 的精确数量。日志的 `original_time` 是 shell `time cat` 结果，`elapsed` 包含测试端消费完成；两者都不是 GUI 呈现完成。完整链路验收必须重建 GUI 及其实际启动的相邻 server/supervisor 二进制，使用相同负载重复计时并另等 GUI 完成标记，同时验证持续输出和洪泛时交互。局部解析基准不能代替整链路、CPU 或内存压力测试。
 
+交互回显延迟可用 `TestEchoLatencyAfterInput` 单独观察（真实 PTY 与 supervisor，测写 1 字节到首个输出事件），它不需要显示器，但不覆盖 GUI 发布、绘制与呈现：
+
+```sh
+ go test ./internal/gosupervisor -run '^TestEchoLatencyAfterInput$' -count=3 -v
+```
+
+GUI 侧分段计时（`input.send`、`input.ime`、`input.echo_latency`、`publish.present`、`input.present`、`present.miss`）只在 `water_cpu_diagnostic` 构建中存在，用隔离实例与 `scripts/diagnose-gui-input.py --timings` 采集；`input.present` 是从输入到包含该回显的帧被绘制的端到端值。
+
 ## 文档与交付时机
 
 开发中的候选方案、调查与临时结果保留在会话上下文。用户确认代码实现并明确要求 commit 后，才依据最终代码和真实验证更新模块文档与必要的发布说明；用户单独要求修改文档时按该任务范围执行。测试通过不自动授权 commit、升版本、push、tag 或发布。完整流程见 [AGENTS.md](../AGENTS.md#文档更新时机)，签名与变体规则见 [构建与发布](build-and-release.md)。

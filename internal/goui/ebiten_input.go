@@ -1475,6 +1475,7 @@ func (w *EbitengineWindow) initComposer() {
 		}
 	}
 	w.composer.OnCommit = func(commit *textinput.Commit) {
+		w.imeCommitted = true
 		if c := w.active(); c != nil && commit.Text() != "" {
 			w.key(c, "text:"+commit.Text())
 		}
@@ -1516,7 +1517,7 @@ func (w *EbitengineWindow) updateComposer(c *WorkspaceClient) (bool, error) {
 	// Keep the session and only slide its caret rectangle.
 	if w.composition == "" {
 		if opts := w.composer.OnNewSession(); opts != nil {
-			repositionTextInput(opts.CaretBounds, w.scale)
+			repositionTextInput(opts.CaretBounds, w.scale, &w.imeFrame)
 		}
 	}
 	handled, err := w.composer.Update()

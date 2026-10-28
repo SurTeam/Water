@@ -158,6 +158,99 @@ type terminalClient struct {
 	cursorBlink             bool
 	inputPending            atomic.Bool
 	viewStale               atomic.Bool
+	// echoCredits/echoDeadline bound the post-input publication bypass. Only
+	// the terminal that just received input may publish its first output ahead
+	// of the shared 60Hz window, and only once per input (capped). The pump is
+	// the single consumer: it clears expired state and decrements credits after
+	// publishing. No queue and no per-input allocation is involved.
+	echoCredits  atomic.Int32
+	echoDeadline atomic.Int64
+	echoSignal   chan struct{}
+	// Smoothed write-to-publish latency for this terminal, used to size the
+	// bounded echo wait. Zero means "not measured yet".
+	echoLatency    atomic.Int64
+	lastInputBytes int64
+	// Output volume since the previous input. A terminal that was already
+	// streaming keeps the shared window: its echo is coalesced with the
+	// stream, and bypassing there would only split batches. A self-echo is a
+	// few bytes, so ordinary typing stays eligible.
+	echoQuietBytes atomic.Int64
+	outputBytes    atomic.Int64
+	lastInputAt    atomic.Int64
+	inputAt        atomic.Int64
+	publishedAt    atomic.Int64
+}
+
+// Input after which the first output event may bypass the publication window.
+const echoBypassWindow = 120 * time.Millisecond
+
+// Input into a terminal that produced more than this many bytes since the
+// previous input keeps the shared coalescing window instead of taking the echo
+// bypass. A keystroke echo is a handful of bytes; a streaming pane is not.
+const echoQuietByteLimit = 512
+
+// Upper bound on queued echo credits per terminal. Typing faster than the
+// shell can echo keeps at most this many bypasses pending; older inputs
+// coalesce into the same snapshot anyway.
+const maxEchoCredits = 4
+
+func (t *terminalClient) noteInputEcho(now time.Time) {
+	t.inputAt.Store(now.UnixNano())
+	total := t.outputBytes.Load()
+	previous := t.lastInputAt.Swap(now.UnixNano())
+	if previous == 0 {
+		// First input: do not treat replay/startup output as a stream.
+		t.echoQuietBytes.Store(0)
+	} else {
+		t.echoQuietBytes.Store(max(0, total-t.lastInputBytes))
+	}
+	t.lastInputBytes = total
+	t.echoDeadline.Store(now.Add(echoBypassWindow).UnixNano())
+	for {
+		credits := t.echoCredits.Load()
+		if credits >= maxEchoCredits || t.echoCredits.CompareAndSwap(credits, credits+1) {
+			return
+		}
+	}
+}
+
+// echoBypass reports whether this terminal may publish its first output ahead
+// of the shared window. Expired state is cleared so a late background event
+// cannot consume a stale bypass.
+func (t *terminalClient) echoBypass(now time.Time) bool {
+	deadline := t.echoDeadline.Load()
+	if deadline == 0 {
+		return false
+	}
+	if now.UnixNano() >= deadline {
+		t.clearEcho()
+		return false
+	}
+	if t.echoQuietBytes.Load() > echoQuietByteLimit {
+		return false
+	}
+	return t.echoCredits.Load() > 0
+}
+
+func (t *terminalClient) clearEcho() {
+	t.echoCredits.Store(0)
+	t.echoDeadline.Store(0)
+}
+
+// consumeEchoCredit records that the pump published one bypassed snapshot.
+func (t *terminalClient) consumeEchoCredit() {
+	for {
+		credits := t.echoCredits.Load()
+		if credits <= 0 {
+			return
+		}
+		if t.echoCredits.CompareAndSwap(credits, credits-1) {
+			if credits == 1 {
+				t.echoDeadline.Store(0)
+			}
+			return
+		}
+	}
 }
 
 func (t *terminalClient) close() {
@@ -220,6 +313,9 @@ type WorkspaceClient struct {
 	attaching       map[uuid.UUID]*terminalAttachAttempt
 	asyncOutput     atomic.Bool
 	outputWake      chan struct{}
+	// Terminal that just received a keystroke and is waiting for its echo.
+	// Consumed once per frame by the bounded echo wait.
+	echoWaitTerm atomic.Pointer[terminalClient]
 
 	layoutMu             sync.Mutex
 	frameSize            image.Point
@@ -440,21 +536,82 @@ func (c *WorkspaceClient) Run() {
 	}()
 	outstanding := false
 	var published time.Time
+	// Reused across bypass publishes so the input echo path does not allocate.
+	echoPending := make(map[*terminalClient]bool, 1)
+	var echoTokens tokenBucket
 	publication := time.NewTimer(time.Hour)
 	publication.Stop()
 	defer publication.Stop()
 	var publicationDue <-chan time.Time
 	publish := func() {
+		now := time.Now()
 		for term := range pending {
 			if term.closed.Load() {
 				delete(pending, term)
 			}
 		}
-		if outstanding && c.native.Load() != nil {
+		native := c.native.Load()
+		if native != nil {
+			// The first output after input may publish immediately. The shared
+			// window exists to coalesce continuous streams, not to defer the
+			// echo the user is waiting for. Only that terminal is published;
+			// everything else keeps coalescing, and expired state is cleared.
+			// Pick the input that has been waiting longest so no terminal can be
+			// starved when several panes receive input at once.
+			var echoTerm *terminalClient
+			var echoDeadline int64
+			for term := range pending {
+				if !term.echoBypass(now) {
+					if term.echoCredits.Load() > 0 && term.echoQuietBytes.Load() > echoQuietByteLimit {
+						countNativeWork("count.echo_stream_suppressed", 1)
+					}
+					continue
+				}
+				if deadline := term.echoDeadline.Load(); echoTerm == nil || deadline < echoDeadline {
+					echoTerm, echoDeadline = term, deadline
+				}
+			}
+			if echoTerm != nil && echoTokens.take(now) {
+				term := echoTerm
+				delete(pending, term)
+				clear(echoPending)
+				echoPending[term] = true
+				end := traceNativeWork("input.echo")
+				publishedSnapshot := c.publishTerminalSnapshots(echoPending)
+				if end != nil {
+					end()
+				}
+				if deadline := term.echoDeadline.Load(); deadline != 0 {
+					latency := now.Sub(time.Unix(0, deadline-echoBypassWindow.Nanoseconds()))
+					sampleNativeLatency("input.echo_latency", latency)
+					if previous := term.echoLatency.Load(); previous <= 0 {
+						term.echoLatency.Store(int64(latency))
+					} else {
+						term.echoLatency.Store((previous*3 + int64(latency)) / 4)
+					}
+				}
+				term.consumeEchoCredit()
+				countNativeWork("count.echo_bypass", 1)
+				select {
+				case term.echoSignal <- struct{}{}:
+				default:
+				}
+				if publishedSnapshot {
+					outstanding = true
+					published = now
+				}
+				return
+			}
+		}
+		if outstanding && native != nil {
 			return
 		}
-		if len(pending) > 0 && c.native.Load() != nil {
-			if delay := outputPublicationDelay(published, time.Now()); delay > 0 {
+		if len(pending) > 0 && native != nil {
+			period := time.Duration(0)
+			if native != nil {
+				period = native.frameInterval()
+			}
+			if delay := outputPublicationDelay(published, now, period); delay > 0 {
 				if publicationDue == nil {
 					publication.Reset(delay)
 					publicationDue = publication.C
@@ -464,7 +621,7 @@ func (c *WorkspaceClient) Run() {
 		}
 		outstanding = c.publishTerminalSnapshots(pending)
 		if outstanding {
-			published = time.Now()
+			published = now
 		}
 	}
 	for pushes != nil || events != nil {
@@ -1312,8 +1469,9 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 	term := &terminalClient{
 		id: summary.TerminalID, emu: emu, lastSeq: last, scrollbackOnClearScreen: scrollbackOnClearScreen,
 		cols: attached.Size.Columns, rows: attached.Size.Lines,
-		view:   view,
-		worker: terminalWorker{subscription: subscription},
+		view:       view,
+		worker:     terminalWorker{subscription: subscription},
+		echoSignal: make(chan struct{}, 1),
 	}
 	term.input = &TerminalInput{
 		OnShortcut:            c.dispatchWindowShortcut,
@@ -1324,6 +1482,16 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 			// Input must not wait for output parsing or allocate a screen copy on
 			// the frame thread. The terminal worker applies viewport follow-up.
 			term.inputPending.Store(true)
+			// The first output after this input may publish ahead of the shared
+			// 60Hz window. Bounded per input and expired by time so a late
+			// background event cannot inherit a stale bypass.
+			term.noteInputEcho(time.Now())
+			// Only a keystroke-sized write is worth synchronizing with; pastes are
+			// already batched by the PTY and would only add frame time.
+			if len(data) <= 64 {
+				c.echoWaitTerm.Store(term)
+				countNativeWork("count.echo_wait_marked", 1)
+			}
 			select {
 			case c.snapshotWake <- struct{}{}:
 			default:
@@ -1331,11 +1499,15 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 			if c.invalidate != nil {
 				c.invalidate()
 			}
+			end := traceNativeWork("input.send")
 			_ = c.session.DispatchAsync(map[string]any{
 				"type":        "terminal.send_bytes",
 				"terminal_id": summary.TerminalID,
 				"bytes":       bytesAsInts(data),
 			})
+			if end != nil {
+				end()
+			}
 		},
 		OnMouse: func(ev govt.MouseEvent) bool {
 			if !c.hyperlinkConfig().Features.MouseReporting {
@@ -1810,6 +1982,7 @@ func (term *terminalClient) publishSnapshotWith(build func(*govt.Emulator) govt.
 	term.mu.Lock()
 	term.snapshot = snapshot
 	term.viewStale.Store(false)
+	term.publishedAt.Store(time.Now().UnixNano())
 	// Preserve selection changes and new input arriving during construction.
 	term.mu.Unlock()
 }
@@ -1847,8 +2020,11 @@ func (c *WorkspaceClient) applyTerminalEventFor(term *terminalClient, push gocli
 		return nil
 	}
 	term.lastSeq = push.Event.Seq
-	emu := term.emu
 	term.mu.Unlock()
+	if push.Event.Kind == goprotocol.OutputEvent {
+		term.outputBytes.Add(int64(len(push.Event.Data)))
+	}
+	emu := term.emu
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
 		beforeTrim, beforeAlt := emu.HistoryState()

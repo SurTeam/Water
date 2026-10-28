@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,6 +37,12 @@ const (
 	// cost more to frame and forward than the bytes they carry.
 	batchIdle   = time.Millisecond
 	batchMaxAge = 5 * time.Millisecond
+	// A tiny read right after input is almost certainly the echo the user is
+	// waiting for. Flushing it immediately keeps the keystroke off the
+	// coalescing window; larger reads keep batching so bulk throughput is
+	// unchanged.
+	echoFlushWindow   = 100 * time.Millisecond
+	echoFlushMaxBytes = 64
 )
 
 // Server owns PTYs and their child processes. It is designed to outlive the
@@ -68,9 +75,10 @@ type terminal struct {
 	exitCode    int32
 	subs        map[*subscriber]struct{}
 
-	resize chan resizeRequest
-	closed chan struct{}
-	once   sync.Once
+	lastInput atomic.Int64 // UnixNano of the most recent input write
+	resize    chan resizeRequest
+	closed    chan struct{}
+	once      sync.Once
 }
 
 // connWriter serializes every frame on one connection. Control replies and
@@ -375,7 +383,9 @@ func (s *Server) write(id string, data []byte) {
 	if t == nil || len(data) == 0 {
 		return
 	}
-	_, _ = t.ptmx.Write(data)
+	if _, err := t.ptmx.Write(data); err == nil {
+		t.lastInput.Store(time.Now().UnixNano())
+	}
 }
 
 func (s *Server) resize(req resizeRequest) {
@@ -587,6 +597,9 @@ func (t *terminal) rawReadLoop(out chan<- []byte, free <-chan []byte, done <-cha
 				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
 					if n == 0 {
 						return false
+					}
+					if n <= echoFlushMaxBytes && time.Since(time.Unix(0, t.lastInput.Load())) < echoFlushWindow {
+						return true
 					}
 					deadline := time.Now().Add(batchIdle)
 					if maximum := started.Add(batchMaxAge); maximum.Before(deadline) {
