@@ -57,6 +57,8 @@ suite does not depend on a particular file in a user's Pictures directory.
 
 ## Native Windows verification
 
+Release validation follows the current host OS and architecture. On macOS, cross-build Windows and Linux packages without starting Colima, containers or VMs, and do not run or require separate verification for those cross targets. Test the native macOS target only; still compare release asset names, sizes and SHA256 digests before publication. The Windows procedures below apply when the current host is Windows or the user explicitly requests Windows verification.
+
 Build a native dev package first, then run from PowerShell:
 
 ```powershell

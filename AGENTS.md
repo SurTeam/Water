@@ -23,5 +23,6 @@
 - Go 与依赖以 `go.mod`/`go.sum` 为准，版本以 `VERSION` 为准；不因普通修改自动升版本、打 tag、push 或发布。
 - 只保留一个大小写正确的 `AGENTS.md`，新增文件前检查已有受跟踪路径。
 - 修复先运行最小相关检查，交付前按 [测试策略](docs/testing.md) 运行一次匹配范围的验证；通过后不无依据重复整套测试。纯文档变更检查事实、入口与链接，不启动无关 GUI 回归。
+- 发布时在当前主机交叉编译其他目标，只验证当前主机 OS/架构对应版本。Linux 一律使用 musl，不依赖 glibc；macOS 上 Linux/Windows 不启动 Colima、容器或虚拟机，不要求异平台验证；构建签名及上传文件摘要核对流程见 [构建与发布](docs/build-and-release.md)。
 - 不终止用户 GUI、server 或承载当前会话的终端。禁止 `pkill water`、`pkill -9 water`、`killall water`；清理必须证明 socket、实例和 PID 属于本次测试。
 - 交付说明实际修改、验证结果、未验证边界以及是否提交。用户未要求 commit 时保留工作区供审阅。

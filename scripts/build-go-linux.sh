@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Linux package build using native or target Linux C libraries.
+# Linux package build using dynamic musl and target-system X11/Mesa libraries.
+#
+#   GOARCH              amd64 or arm64 (default: host architecture)
+#   CC / CXX            explicit target Linux C/C++ compiler commands
+#   WATER_LINUX_SYSROOT Alpine musl target headers, CRT and shared libraries
+#   WATER_LINUX_LIBC    must be musl
+#   PKG_CONFIG          target-aware pkg-config for shared libraries
+#
+# On macOS, first run scripts/prepare-linux-sysroot.py <arch> and source
+# target/linux-musl-dynamic/<arch>/env.sh. No Linux executables are run.
+# The resulting package uses the target's standard /lib/ld-musl-*.so.1,
+# X11 libraries and Mesa EGL/GL runtime (install through Alpine apk).
+# Custom toolchains must likewise use dynamic musl and its matching CRT.
 #
 # Environment:
 #   WATER_APP_VARIANT   dev (default) or release
@@ -10,8 +22,26 @@ set -euo pipefail
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root_dir"
 
-if [[ "$(uname -s)" != "Linux" ]]; then
-  echo "error: the Ebitengine Linux package must be built natively on Linux" >&2
+if [[ "${WATER_LINUX_LIBC:-}" != "musl" ]]; then
+  echo "error: Linux packages require WATER_LINUX_LIBC=musl and a musl target toolchain" >&2
+  echo "Run scripts/prepare-linux-sysroot.py <amd64|arm64> and source its env.sh." >&2
+  exit 1
+fi
+if [[ -z "${CC:-}" || -z "${CXX:-}" || -z "${PKG_CONFIG:-}" || -z "${WATER_LINUX_SYSROOT:-}" ]]; then
+  echo "error: Linux packaging requires CC, CXX, PKG_CONFIG and WATER_LINUX_SYSROOT" >&2
+  echo "Run scripts/prepare-linux-sysroot.py <amd64|arm64> and source its env.sh." >&2
+  exit 1
+fi
+[[ -d "$WATER_LINUX_SYSROOT/usr/include" ]] || {
+  echo "error: WATER_LINUX_SYSROOT lacks usr/include" >&2; exit 1;
+}
+compiler_target="$($CC -dumpmachine)"
+case "$compiler_target" in
+  *linux-musl*) ;;
+  *) echo "error: Linux compiler must target musl, got: $compiler_target" >&2; exit 1 ;;
+esac
+if [[ "${CGO_LDFLAGS:-}" == *-static* ]]; then
+  echo "error: static libc is incompatible with the GUI's dynamic library loading" >&2
   exit 1
 fi
 
@@ -50,7 +80,7 @@ export GOOS=linux GOARCH="$target_arch" CGO_ENABLED=1
 
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"
 server_revision="$(bash "$root_dir/scripts/server-revision.sh")"
-ldflags="-X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version} -X ${identity_pkg}.ServerRevision=${server_revision}"
+ldflags="-linkmode=external -X ${identity_pkg}.Variant=${variant} -X ${identity_pkg}.Version=${version} -X ${identity_pkg}.ServerRevision=${server_revision}"
 if [[ "$variant" == "release" ]]; then
   ldflags="-s -w ${ldflags}"
 fi
@@ -65,7 +95,8 @@ mkdir -p "$binary_dir" "$dist_dir"
 WATER_APP_VARIANT="$variant" WATER_APP_VERSION="$version" \
   bash "$root_dir/scripts/build-go-embedded-servers.sh"
 
-go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water" ./cmd/water
+# Gio is used for offscreen screenshots; the window backend is Ebitengine X11.
+go build -trimpath -tags=novulkan,nowayland -ldflags="$ldflags" -o "$binary_dir/water" ./cmd/water
 go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water-server" ./cmd/water-server
 go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water-update" ./cmd/water-update
 
@@ -77,6 +108,9 @@ install -m 755 "$binary_dir/water-server" "$stage_dir/$server_installed_name"
 install -m 755 "$binary_dir/water-server" "$stage_dir/$supervisor_installed_name"
 install -m 755 "$binary_dir/water-update" "$stage_dir/$updater_installed_name"
 bash "$root_dir/scripts/package-licenses.sh" "$stage_dir/Licenses"
+if [[ -d "$WATER_LINUX_SYSROOT/usr/share/water-musl-licenses" ]]; then
+  cp -R "$WATER_LINUX_SYSROOT/usr/share/water-musl-licenses" "$stage_dir/Licenses/linux-musl"
+fi
 
 rm -f "$archive"
 tar -C "$stage_dir" -czf "$archive" "$gui_installed_name" "$server_installed_name" "$supervisor_installed_name" "$updater_installed_name" Licenses

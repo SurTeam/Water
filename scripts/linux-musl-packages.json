@@ -1,0 +1,457 @@
+{
+  "alpine": "3.22",
+  "packages": {
+    "x86_64": [
+      {
+        "name": "musl",
+        "version": "1.2.5-r13",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/musl-1.2.5-r13.apk",
+        "sha256": "359890bc7c4dc5fee7a85192de60a471c987e4664767288578beca60a44db2c8",
+        "license": "MIT"
+      },
+      {
+        "name": "musl-dev",
+        "version": "1.2.5-r13",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/musl-dev-1.2.5-r13.apk",
+        "sha256": "2ca496dd68c0b340b50cf9940bc2f3312eac8b56ec2d3284a621be6f0c09ffb1",
+        "license": "MIT"
+      },
+      {
+        "name": "libx11",
+        "version": "1.8.11-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libx11-1.8.11-r0.apk",
+        "sha256": "97663f719b7e182d628eb08af97d885b83c7b2cdda073f2afe1eb999641f8398",
+        "license": "X11"
+      },
+      {
+        "name": "libx11-dev",
+        "version": "1.8.11-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libx11-dev-1.8.11-r0.apk",
+        "sha256": "e3a665c0f698f6f983141a9a2437279e403f1efcf2271269a48907a4d1a0de11",
+        "license": "X11"
+      },
+      {
+        "name": "libxcb",
+        "version": "1.17.0-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxcb-1.17.0-r0.apk",
+        "sha256": "b46b8cbf0098fc320ebb6d29ed3df47516b5b45c06a5aeee363078c5b7781447",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcb-dev",
+        "version": "1.17.0-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxcb-dev-1.17.0-r0.apk",
+        "sha256": "af6b372f28fa01b22e49f3e2eeda903b12958a8a57bb8b3010f07ca06e1405bd",
+        "license": "MIT"
+      },
+      {
+        "name": "libxau",
+        "version": "1.0.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxau-1.0.12-r0.apk",
+        "sha256": "cc1cb2d10587aa1ab850ac881f3223574555bf7acf7bce5e3c46d2c95534e95c",
+        "license": "MIT"
+      },
+      {
+        "name": "libxau-dev",
+        "version": "1.0.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxau-dev-1.0.12-r0.apk",
+        "sha256": "357674c932d4be9a9d7a31065f5ffba1f8acd402b855ef661af681aec68bfeb7",
+        "license": "MIT"
+      },
+      {
+        "name": "libxdmcp",
+        "version": "1.1.5-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxdmcp-1.1.5-r1.apk",
+        "sha256": "2d26da8177d27a870067eba372ef0c01b0229e10a084b5d58449f094068255e7",
+        "license": "MIT"
+      },
+      {
+        "name": "libxdmcp-dev",
+        "version": "1.1.5-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxdmcp-dev-1.1.5-r1.apk",
+        "sha256": "ba70021d0c95ab727a61382491160cd1b8d7d902d5b21e4c891c4e6362a15de2",
+        "license": "MIT"
+      },
+      {
+        "name": "xorgproto",
+        "version": "2024.1-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/xorgproto-2024.1-r0.apk",
+        "sha256": "a2867ed1f059055ca06e97a3254a38658624137469d87cbbca8b591502f14655",
+        "license": "BSD-2-Clause AND MIT AND X11"
+      },
+      {
+        "name": "xtrans",
+        "version": "1.5.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/xtrans-1.5.2-r0.apk",
+        "sha256": "c319342f34edca1cbf238507c2c6a8b045a3b5fb5b56764de8b62dfea489166f",
+        "license": "MIT"
+      },
+      {
+        "name": "libxext",
+        "version": "1.3.6-r2",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxext-1.3.6-r2.apk",
+        "sha256": "a810d2fe785927bdee31c2b2610920925ebb9a6480f0f5e397b959695296a819",
+        "license": "MIT"
+      },
+      {
+        "name": "libxext-dev",
+        "version": "1.3.6-r2",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxext-dev-1.3.6-r2.apk",
+        "sha256": "f39638847b34fbe78d2bb016f6d73d123837a1a50f521d0f9ba570b2452dead8",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrandr",
+        "version": "1.5.4-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxrandr-1.5.4-r1.apk",
+        "sha256": "523a9bec4367b0838a718eaf611b431fbab993bb6247bf76ff32f87e11482220",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrandr-dev",
+        "version": "1.5.4-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxrandr-dev-1.5.4-r1.apk",
+        "sha256": "2e694f5974674a1e4a51bdd64e026a0e428d469d45712018ddeb0c392722a8ec",
+        "license": "MIT"
+      },
+      {
+        "name": "libxinerama",
+        "version": "1.1.5-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxinerama-1.1.5-r4.apk",
+        "sha256": "88583bca030e73a27ff36d607f891a54ae9fd86eeb5300172b5fe4119eab2289",
+        "license": "MIT"
+      },
+      {
+        "name": "libxinerama-dev",
+        "version": "1.1.5-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxinerama-dev-1.1.5-r4.apk",
+        "sha256": "3dffb9b074221834d651c9ef8484486a149d265235f21d8b381990062578b9b1",
+        "license": "MIT"
+      },
+      {
+        "name": "libxi",
+        "version": "1.8.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxi-1.8.2-r0.apk",
+        "sha256": "283af7eccec2b5340794461acfe82709ac7d7009aa2c9a43e6f3d0643cc45f68",
+        "license": "MIT AND X11"
+      },
+      {
+        "name": "libxi-dev",
+        "version": "1.8.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxi-dev-1.8.2-r0.apk",
+        "sha256": "d3fee9e64d2928ac35698d0ee0c4d5a335e6a046f0c00a85eaeb66540d47b533",
+        "license": "MIT AND X11"
+      },
+      {
+        "name": "libxrender",
+        "version": "0.9.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxrender-0.9.12-r0.apk",
+        "sha256": "f3f8b79c792c27301ec0059ae13e9043c6d829e81bc1466c68c10c39a6a61490",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrender-dev",
+        "version": "0.9.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxrender-dev-0.9.12-r0.apk",
+        "sha256": "a7362ca20b2b0b2e516d56f88546ae8bbfb3bc3ddeec5342ce254512a0f3a5f1",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcursor",
+        "version": "1.2.3-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxcursor-1.2.3-r0.apk",
+        "sha256": "4ddd38c0a03c051d2ab5ddb9e7ea5e5a7233aa0998d85de58c0becf5da366918",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcursor-dev",
+        "version": "1.2.3-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxcursor-dev-1.2.3-r0.apk",
+        "sha256": "90e917d8813296d819f06d01463dd0614805fa75f099515fe9334b6e3eca6c2d",
+        "license": "MIT"
+      },
+      {
+        "name": "libxfixes",
+        "version": "6.0.1-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxfixes-6.0.1-r4.apk",
+        "sha256": "f890b8e6b55956484fe6f170037e79f0fd71447a4b38ad115ca4d437c114e04d",
+        "license": "MIT"
+      },
+      {
+        "name": "libxfixes-dev",
+        "version": "6.0.1-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxfixes-dev-6.0.1-r4.apk",
+        "sha256": "628964f399fe79096970042892c3deddccd4f41ed1b49e47048cd33c64cf29c7",
+        "license": "MIT"
+      },
+      {
+        "name": "mesa-egl",
+        "version": "25.1.9-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/mesa-egl-25.1.9-r0.apk",
+        "sha256": "76ba18b4f3ca231c59f8afd3978caaeb0c6587b7741575bdf868271b1ce81b7b",
+        "license": "MIT AND SGI-B-2.0 AND BSL-1.0"
+      },
+      {
+        "name": "mesa-dev",
+        "version": "25.1.9-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/mesa-dev-25.1.9-r0.apk",
+        "sha256": "f8fd6dd4c0d014dccd13c7a80a6746bd009162724d7626751f78c9f069258e81",
+        "license": "MIT AND SGI-B-2.0 AND BSL-1.0"
+      },
+      {
+        "name": "libxxf86vm",
+        "version": "1.1.7-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxxf86vm-1.1.7-r0.apk",
+        "sha256": "1c2667811094b57a2e2e81d068f207071695559163d2e955027c72a26db53385",
+        "license": "MIT"
+      },
+      {
+        "name": "libxxf86vm-dev",
+        "version": "1.1.7-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libxxf86vm-dev-1.1.7-r0.apk",
+        "sha256": "d16d8cc343238516cf53a352631707b3d54bfa21f5363ab9818bd90212b987a5",
+        "license": "MIT"
+      },
+      {
+        "name": "libdrm",
+        "version": "2.4.124-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libdrm-2.4.124-r0.apk",
+        "sha256": "ca2beab3bf4cc373f2e1e3e24d9897326b6859cdc7dfa747c9278076c1be38da",
+        "license": "MIT"
+      },
+      {
+        "name": "libdrm-dev",
+        "version": "2.4.124-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/x86_64/libdrm-dev-2.4.124-r0.apk",
+        "sha256": "fbadd414b1cea79ee4e749c58efe28f9c79069730a6eb9db5f1579f5833c2219",
+        "license": "MIT"
+      }
+    ],
+    "aarch64": [
+      {
+        "name": "musl",
+        "version": "1.2.5-r13",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/musl-1.2.5-r13.apk",
+        "sha256": "d616c430bcbe0bf452b7f6ea2669f2cad14e85644a7599f4f495115d021742ef",
+        "license": "MIT"
+      },
+      {
+        "name": "musl-dev",
+        "version": "1.2.5-r13",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/musl-dev-1.2.5-r13.apk",
+        "sha256": "9d100736f645f15c01da723c9bafd8a843ae847ef4334aa4c0f53405dcfa4dff",
+        "license": "MIT"
+      },
+      {
+        "name": "libx11",
+        "version": "1.8.11-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libx11-1.8.11-r0.apk",
+        "sha256": "727ebb88fd3162b667dfd8a0cf3c33034329b6549cf80d52cfccf6acf349ca2a",
+        "license": "X11"
+      },
+      {
+        "name": "libx11-dev",
+        "version": "1.8.11-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libx11-dev-1.8.11-r0.apk",
+        "sha256": "95638f775f815b0589c699ed91aab8ec2f9903144cf8feccbaac695485f27c14",
+        "license": "X11"
+      },
+      {
+        "name": "libxcb",
+        "version": "1.17.0-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxcb-1.17.0-r0.apk",
+        "sha256": "c7d7f55f5ea61eefc749201a041e774ad60a5e0ca4d59acc89eb56f6c201b08f",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcb-dev",
+        "version": "1.17.0-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxcb-dev-1.17.0-r0.apk",
+        "sha256": "5e1ea3af957f708666a6b357f481fee495954c8bcfca3ab7a35d3daae560b2e4",
+        "license": "MIT"
+      },
+      {
+        "name": "libxau",
+        "version": "1.0.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxau-1.0.12-r0.apk",
+        "sha256": "1dcbaf3a2995c60ba9f442e580eea9e03a1d68898b54bdc9eeba25a68124888b",
+        "license": "MIT"
+      },
+      {
+        "name": "libxau-dev",
+        "version": "1.0.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxau-dev-1.0.12-r0.apk",
+        "sha256": "849119d0b835fa1800e2c8e6992fb2743c7939f6435ad945da78fd149ff73e92",
+        "license": "MIT"
+      },
+      {
+        "name": "libxdmcp",
+        "version": "1.1.5-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxdmcp-1.1.5-r1.apk",
+        "sha256": "6988bfc23df3e551de62de498bbe661963f13bac2c48b501d82ddd0a3d3eafe5",
+        "license": "MIT"
+      },
+      {
+        "name": "libxdmcp-dev",
+        "version": "1.1.5-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxdmcp-dev-1.1.5-r1.apk",
+        "sha256": "d1fd95867780e8aacdb4b55c73064d04ad5000adab28e52f158ae3d9312ac176",
+        "license": "MIT"
+      },
+      {
+        "name": "xorgproto",
+        "version": "2024.1-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/xorgproto-2024.1-r0.apk",
+        "sha256": "0fc0bd548f73f5036d50d650ef35c410e20f9b4f7a1649a1f0ba48aad84627fb",
+        "license": "BSD-2-Clause AND MIT AND X11"
+      },
+      {
+        "name": "xtrans",
+        "version": "1.5.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/xtrans-1.5.2-r0.apk",
+        "sha256": "d7531feb0b19fa5dcd9d0c802075be0c2159311a8ac08042a711e3dab3bef161",
+        "license": "MIT"
+      },
+      {
+        "name": "libxext",
+        "version": "1.3.6-r2",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxext-1.3.6-r2.apk",
+        "sha256": "350f7644ff73f655f448f3df8c8ef98310fbcdeb64ddf22672b75dab66d4efc0",
+        "license": "MIT"
+      },
+      {
+        "name": "libxext-dev",
+        "version": "1.3.6-r2",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxext-dev-1.3.6-r2.apk",
+        "sha256": "a0710e11ef311ee28b44432d2e4294568e7d49135787e61b85bd6ba515d1b7fd",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrandr",
+        "version": "1.5.4-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxrandr-1.5.4-r1.apk",
+        "sha256": "beaea9d9205a594c10a561fb3f85c08d313a19cc1701b2acf7414adbdd7a3571",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrandr-dev",
+        "version": "1.5.4-r1",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxrandr-dev-1.5.4-r1.apk",
+        "sha256": "b90b662e2375d850dc0fe42d9f47f2e6fff50c2051573d4945d4ec9739ed19d8",
+        "license": "MIT"
+      },
+      {
+        "name": "libxinerama",
+        "version": "1.1.5-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxinerama-1.1.5-r4.apk",
+        "sha256": "fdee340b621e701fb45d5479ecbc40cad41cbeabd7aca2a854e0a8bce82b8614",
+        "license": "MIT"
+      },
+      {
+        "name": "libxinerama-dev",
+        "version": "1.1.5-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxinerama-dev-1.1.5-r4.apk",
+        "sha256": "b871cf80d65a4bdb0aa163859c1df0c8dba2d9096a498814230d1457f77cb439",
+        "license": "MIT"
+      },
+      {
+        "name": "libxi",
+        "version": "1.8.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxi-1.8.2-r0.apk",
+        "sha256": "867c8aeb130538e4576b69767aecb8cf20d52177b377ab6f521e485bdf4e59ea",
+        "license": "MIT AND X11"
+      },
+      {
+        "name": "libxi-dev",
+        "version": "1.8.2-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxi-dev-1.8.2-r0.apk",
+        "sha256": "ea77641e163833a23c8e67cbdc2b32b3d2fe366b240fbe308ba2c80683f19aa1",
+        "license": "MIT AND X11"
+      },
+      {
+        "name": "libxrender",
+        "version": "0.9.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxrender-0.9.12-r0.apk",
+        "sha256": "c5ca01bcebe58393b17257251b4a36d7c4363052e780f3cb966365d9208a51ce",
+        "license": "MIT"
+      },
+      {
+        "name": "libxrender-dev",
+        "version": "0.9.12-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxrender-dev-0.9.12-r0.apk",
+        "sha256": "e04298d9750ff6397d9b6bd36595c99da4b3d6afa5eb1576e83be9c0da6aa9d9",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcursor",
+        "version": "1.2.3-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxcursor-1.2.3-r0.apk",
+        "sha256": "f16f84a6f7d9f0e13130a4b35a7d2121d56db58415a9bf883a746161c3825152",
+        "license": "MIT"
+      },
+      {
+        "name": "libxcursor-dev",
+        "version": "1.2.3-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxcursor-dev-1.2.3-r0.apk",
+        "sha256": "f549fbf4f30a43795476f8482997b3be9eb37bbf6f2d91d131185e28f2c61697",
+        "license": "MIT"
+      },
+      {
+        "name": "libxfixes",
+        "version": "6.0.1-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxfixes-6.0.1-r4.apk",
+        "sha256": "45ec3d736c846080d95056215924c16589d010a39a46468507834ab5cf42a833",
+        "license": "MIT"
+      },
+      {
+        "name": "libxfixes-dev",
+        "version": "6.0.1-r4",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxfixes-dev-6.0.1-r4.apk",
+        "sha256": "04a4adf3743dd9c3d78e66c59a9f6f88c340d3f082b537576440610d8e9e67f7",
+        "license": "MIT"
+      },
+      {
+        "name": "mesa-egl",
+        "version": "25.1.9-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/mesa-egl-25.1.9-r0.apk",
+        "sha256": "daee69c5dc89c3b96f177fbf30f0b5df6f171ef7bfb580c7711f5e4009a6e1f6",
+        "license": "MIT AND SGI-B-2.0 AND BSL-1.0"
+      },
+      {
+        "name": "mesa-dev",
+        "version": "25.1.9-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/mesa-dev-25.1.9-r0.apk",
+        "sha256": "7301a9ef2d3b8ea983c201c04d33c0b0617ca53655614ceeafa8faf78ee05a6d",
+        "license": "MIT AND SGI-B-2.0 AND BSL-1.0"
+      },
+      {
+        "name": "libxxf86vm",
+        "version": "1.1.7-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxxf86vm-1.1.7-r0.apk",
+        "sha256": "d0a5c5b6ff85adc945a5642f233465f131d47e4d09f53bb7d0fc23be5889411b",
+        "license": "MIT"
+      },
+      {
+        "name": "libxxf86vm-dev",
+        "version": "1.1.7-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libxxf86vm-dev-1.1.7-r0.apk",
+        "sha256": "8c084e14c2f16325f19da381e8dbe381e6a92383d8f9cac2b60fb78a51d839b4",
+        "license": "MIT"
+      },
+      {
+        "name": "libdrm",
+        "version": "2.4.124-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libdrm-2.4.124-r0.apk",
+        "sha256": "e966fb3fc167255ed3de436134425e6207a38438e4df2e54ee807431ab4230f3",
+        "license": "MIT"
+      },
+      {
+        "name": "libdrm-dev",
+        "version": "2.4.124-r0",
+        "url": "https://dl-cdn.alpinelinux.org/alpine/v3.22/main/aarch64/libdrm-dev-2.4.124-r0.apk",
+        "sha256": "5794a2582947f899036006a77a2aff14dfaee230a4427a0e8e9208b276157ec5",
+        "license": "MIT"
+      }
+    ]
+  }
+}

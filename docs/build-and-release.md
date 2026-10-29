@@ -9,7 +9,8 @@
 - 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 构建产物分别在 `target/go-app/<variant>/<arch>` 和 `target/go-linux/<variant>/<arch>`；Windows 在 `target/go-windows/<variant>/<arch>/package`。
 - dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/.config/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server/PTY supervisor 进程 `water-dev`/`water-srv-dev`/`water-pty-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/.config/water/config.json`、Bundle ID `dev.water.terminal`、GUI/server/PTY supervisor 进程 `water`/`water-server`/`water-pty`。
 - 默认配置根目录依次采用绝对路径 `$XDG_CONFIG_HOME`、兼容变量 `$XDG_CONFIG`、`~/.config`。macOS 首次读取新路径时复制旧 Application Support 配置，保留旧文件；目标已存在时不覆盖。
-- Windows GUI/server/updater 可在 macOS 或 Linux 以 `CGO_ENABLED=0` 交叉编译打包。macOS GUI 使用本机 Apple SDK，可用 `GOARCH=amd64` 或 `arm64` 跨架构构建；Linux GUI 需要目标 Linux C 编译器及 X11/Wayland、EGL/OpenGL、xkbcommon 和 Vulkan 开发库，可在本机 Linux 容器内构建。headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
+- Windows GUI/server/updater 可在 macOS 或 Linux 以 `CGO_ENABLED=0` 交叉编译打包。macOS GUI 使用本机 Apple SDK，可用 `GOARCH=amd64` 或 `arm64` 跨架构构建；Linux GUI 使用 Zig 和 Alpine 3.22 的动态 musl sysroot 在 macOS 交叉编译，禁止引入 glibc 依赖。`scripts/prepare-linux-sysroot.py` 按 `scripts/linux-musl-packages.json` 的固定版本、URL 和 SHA256 下载并解包目标 APK，生成编译器与 pkg-config wrappers；不安装或运行目标软件。动态 musl 保留 GLFW 的 `dlopen` 路径，不能改为使用不支持该路径的静态 musl 构建。headless server payload 使用 Go 交叉编译。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
+- 发布在当前主机完成各目标交叉编译，不为 Linux/Windows 构建或验证启动 Colima、容器或虚拟机。只对当前主机 OS 与架构对应版本运行测试和运行时验收；其他目标只构建、打包和签名，不另做异平台验证，也不因缺少异平台运行证据阻塞发布。发布仍核对待上传文件集合及本地/GitHub API 的 SHA256 digest 和大小，避免上传错误。交叉编译成功不等于异平台原生运行验证。
 
 macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。Go 运行库 LICENSE 为必需文件；收集器兼容标准 GOROOT 和 Homebrew 的上级目录布局，缺少该文件时中止组包。
 
@@ -40,8 +41,11 @@ bash scripts/build-go-macos-app.sh
 # Assemble a release app explicitly.
 WATER_APP_VARIANT=release bash scripts/build-go-macos-app.sh
 
-# Linux package, on a Linux host/container with target C libraries.
+# Cross-build Linux on macOS using host Zig/pkg-config and target libraries.
+python3 scripts/prepare-linux-sysroot.py arm64
+source target/linux-musl-dynamic/arm64/env.sh
 WATER_APP_VARIANT=release bash scripts/build-go-linux.sh
+# Repeat with amd64 for the other Linux archive.
 
 # Cross-build both Windows architectures on macOS or Linux (no Windows host).
 WATER_APP_VARIANT=release bash scripts/build-go-windows.sh all
@@ -67,7 +71,7 @@ For Authenticode signing, provide `WINDOWS_SIGN_P12`, `WINDOWS_SIGN_PASSWORD_FIL
 
 The native Windows alternative is `scripts/build-go-windows.ps1 -Arch amd64` (or `arm64`), with optional `-Python`. It builds the same package layout. Windows update checking/download uses the release metadata, but in-app installation remains explicitly unsupported despite the packaged helper.
 
-For local multi-platform builds, run Windows and macOS scripts on the Mac; run the Linux script in a local Linux container with the selected architecture's C compiler and development libraries. `GOARCH` selects `amd64`/`arm64` for macOS and Linux; when cross-building Linux inside a container, also provide the target `CC`/`CXX` and `PKG_CONFIG_LIBDIR`. Build sequentially because the embedded payload set is shared. Cross-compilation is separate from runtime acceptance, including Windows ConPTY, clipboard, native dialogs and IME.
+For local multi-platform releases on macOS, run Windows, macOS and Linux builds on the Mac. Prepare each Linux target with `python3 scripts/prepare-linux-sysroot.py <amd64|arm64>` and source its generated `env.sh` before `build-go-linux.sh`; the host needs Python 3.12+, Zig and pkg-config. The downloaded sysroot and generated wrappers remain under ignored `target/linux-musl-dynamic/` (override with `WATER_LINUX_SYSROOT_CACHE`); no target executable is run. Linux release packages always use dynamic musl, including when built on Linux. Their standard `/lib/ld-musl-*.so.1` loader, X11 and Mesa EGL/GL libraries come from the target system (on Alpine, install the X11 runtime plus `mesa-egl`, `mesa-gl` and `mesa-gles` through `apk`). The GUI uses the X11 backend and builds Gio screenshot support with `novulkan,nowayland`; glibc is not required. Build sequentially because the embedded payload set is shared. Only the current host OS/architecture receives runtime validation; cross targets do not require separate platform verification for publication.
 
 A release may additionally publish `SHA256SUMS`, its detached SHA256/RSA signature `SHA256SUMS.sig`, and the public signing certificate `release-signing-certificate.pem`. This binds the archive bytes, including Linux archives, to the signer. Verify the manifest signature using the public key extracted from a separately trusted copy of the certificate, then verify archive hashes. This supplements platform signatures; it is not an OS trust-store installation or notarization claim.
 
