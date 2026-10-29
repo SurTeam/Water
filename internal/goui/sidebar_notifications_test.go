@@ -2,13 +2,16 @@ package goui
 
 import (
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/color"
 	"testing"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
+	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/google/uuid"
 )
@@ -181,6 +184,38 @@ func TestAgentProgressNotificationsDistinguishAttentionCompletionAndErrors(t *te
 	}
 }
 
+func TestAgentInteractionOSCNotifications(t *testing.T) {
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	terminal, pane := uuid.New(), uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer func() { delete(view.terminals, terminal); emu.Close() }()
+	view.terminals[terminal] = &terminalClient{id: terminal, emu: emu}
+	view.state.Agents = []any{map[string]any{"kind": "pi", "label": "Pi", "pane_id": pane, "terminal_id": terminal, "status": "running"}}
+	if err := manager.AddConnection(ConnectionEntry{ID: uuid.New(), Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	window.processNotifications(view)
+	emu.Write([]byte("\x1b]7501;state=blocked:app=codex:kind=question\x1b\\"))
+	window.processNotifications(view)
+	if len(platform.messages) != 0 {
+		t.Fatalf("wrong Agent notified: %v", platform.messages)
+	}
+	for i, kind := range []string{"permission", "question"} {
+		emu.Write([]byte("\x1b]7501;state=working:app=pi\x1b\\"))
+		window.processNotifications(view)
+		emu.Write([]byte("\x1b]7501;state=blocked:app=pi:kind=" + kind + "\x1b\\"))
+		window.processNotifications(view)
+		window.processNotifications(view)
+		if len(platform.messages) != i+1 || platform.messages[i] != "Water: Agent paused; it may need your attention: Pi" {
+			t.Fatalf("%s: %v", kind, platform.messages)
+		}
+	}
+}
+
 func TestSidebarFooterIndependentHeights(t *testing.T) {
 	cfg := goconfig.Default()
 	cfg.UI.SidebarRemoteButtonHeight, cfg.UI.SidebarWorkspaceButtonHeight = 40, 22
@@ -232,7 +267,7 @@ func TestAgentStartNotificationIsEmittedOnceAfterBaseline(t *testing.T) {
 	}
 }
 
-func TestAgentLongRunNotificationUsesConfiguredThreshold(t *testing.T) {
+func TestAgentLongRunDoesNotNotify(t *testing.T) {
 	cfg := goconfig.Default()
 	cfg.UI.AgentLongRunNotificationSeconds = 3
 	manager := NewMultiWorkspaceClient(nil)
@@ -264,7 +299,7 @@ func TestAgentLongRunNotificationUsesConfiguredThreshold(t *testing.T) {
 	view.state.FocusedPane = &otherPane
 	window.processNotificationsAt(view, false, start.Add(6*time.Second))
 	window.processNotificationsAt(view, false, start.Add(7*time.Second))
-	if len(platform.messages) != 1 || platform.messages[0] != "Water: Agent is still running: Codex" {
+	if len(platform.messages) != 0 {
 		t.Fatalf("Agent long-run notifications=%v", platform.messages)
 	}
 }
@@ -370,20 +405,33 @@ func TestNotificationsBaselineDeduplicateAndHonorSetting(t *testing.T) {
 	}
 }
 
-func TestBellNotificationCoalescesPerTerminal(t *testing.T) {
-	cfg := goconfig.Default()
-	cfg.UI.SystemNotifications = true
-	manager := NewMultiWorkspaceClient(nil)
-	defer manager.Close()
-	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
-	platform := &recordingNotifications{}
-	window := &EbitengineWindow{multi: manager, platform: platform, bellNotifications: make(chan uuid.UUID, 32)}
-	terminal := uuid.New()
-	window.bellNotifications <- terminal
-	window.bellNotifications <- terminal
-	window.processNotifications(view)
-	if len(platform.messages) != 1 {
-		t.Fatalf("bell burst emitted %d notifications", len(platform.messages))
+func TestBellDoesNotNotify(t *testing.T) {
+	for _, agent := range []bool{false, true} {
+		t.Run(fmt.Sprint("agent=", agent), func(t *testing.T) {
+			manager := NewMultiWorkspaceClient(nil)
+			defer manager.Close()
+			view := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+			terminal, pane := uuid.New(), uuid.New()
+			emu := govt.New(80, 24, 10)
+			defer func() { delete(view.terminals, terminal); emu.Close() }()
+			term := &terminalClient{id: terminal, emu: emu}
+			view.terminals[terminal] = term
+			if agent {
+				view.state.Agents = []any{map[string]any{"kind": "codex", "label": "Codex", "pane_id": pane, "terminal_id": terminal, "status": "running"}}
+			}
+			if err := manager.AddConnection(ConnectionEntry{ID: uuid.New(), Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+				t.Fatal(err)
+			}
+			platform := &recordingNotifications{}
+			window := &EbitengineWindow{multi: manager, platform: platform}
+			view.native.Store(window)
+			window.processNotifications(view)
+			view.applyTerminalEventFor(term, goclient.TerminalPush{Event: goprotocol.TerminalEvent{Seq: 1, Kind: goprotocol.OutputEvent, Data: []byte("\x07\x07")}})
+			window.processNotifications(view)
+			if emu.BellCount() != 2 || len(platform.messages) != 0 {
+				t.Fatalf("bells=%d notifications=%v", emu.BellCount(), platform.messages)
+			}
+		})
 	}
 }
 

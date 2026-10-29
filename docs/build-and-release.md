@@ -71,6 +71,18 @@ For local multi-platform builds, run Windows and macOS scripts on the Mac; run t
 
 A release may additionally publish `SHA256SUMS`, its detached SHA256/RSA signature `SHA256SUMS.sig`, and the public signing certificate `release-signing-certificate.pem`. This binds the archive bytes, including Linux archives, to the signer. Verify the manifest signature using the public key extracted from a separately trusted copy of the certificate, then verify archive hashes. This supplements platform signatures; it is not an OS trust-store installation or notarization claim.
 
+## 上传后的发布资产验证
+
+上传完成后通过 GitHub release-assets API 查询资产元数据，将每个资产的 `digest`（`sha256:<hex>`）和 `size` 与本地待发布文件的 SHA256、字节数逐项比较；同时核对完整文件名集合及 `state=uploaded`。不重新下载 GitHub 发布资产计算哈希。摘要缺失或不一致时不得把 release 标记为验证通过，应等待摘要生成或调查上传问题。
+
+先在 draft release 完成上述检查，再公开发布；发布后再次核对 tag、draft/prerelease 状态、latest 指向及资产元数据。本地归档完整性、平台签名和签名校验清单仍须在上传前验证，API 哈希比较只证明 GitHub 持有的资产与本地文件一致。
+
+```sh
+gh api repos/SurTeam/Water/releases/tags/vVERSION \
+  --jq '.assets[] | {name, size, state, digest}'
+shasum -a 256 dist/ARCHIVE
+```
+
 ## In-app updates (macOS and Linux)
 Open **Settings → Software update**, or the macOS application menu's
 **Software update** item. Water checks its public GitHub Releases, offers a

@@ -123,13 +123,10 @@ type EbitengineWindow struct {
 	platform                nativePlatform
 	notificationAgents      map[string]nativeAgent
 	notificationConnections map[uuid.UUID]string
-	notificationAgentRuns   map[string]notificationRun
 	notificationShellRuns   map[string]notificationRun
 	longRunObservations     map[longRunKey]longRunObservation
 	longRunTabs             map[longRunLocation]int
 	longRunWorkspaces       map[longRunLocation]int
-	bellNotifications       chan uuid.UUID
-	lastBellNotification    map[uuid.UUID]time.Time
 	menuEvents              chan string
 	quitServer              func() error
 	newWindow               func() error
@@ -357,7 +354,6 @@ func NewEbitengineWindow(multi *MultiWorkspaceClient, cfg goconfig.AppConfig) *E
 	w := &EbitengineWindow{multi: multi, cfg: cfg, queue: make(chan nativeRequest, 128), done: make(chan struct{}), menuEvents: make(chan string, 16), views: map[*WorkspaceClient]*nativeView{}, textures: map[uuid.UUID]*nativeTerminalTexture{}, scale: 1}
 	w.fonts = newNativeFonts(cfg)
 	w.frameWake = make(chan struct{}, 1)
-	w.bellNotifications = make(chan uuid.UUID, 32)
 	w.clipboardReady = clipboard.Init() == nil
 	w.initComposer()
 	w.Invalidate()

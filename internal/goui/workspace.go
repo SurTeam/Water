@@ -2028,7 +2028,6 @@ func (c *WorkspaceClient) applyTerminalEventFor(term *terminalClient, push gocli
 	switch push.Event.Kind {
 	case goprotocol.OutputEvent:
 		beforeTrim, beforeAlt := emu.HistoryState()
-		bells := emu.BellCount()
 		end := traceNativeWork("terminal.parse")
 		for data := push.Event.Data; len(data) > 0; {
 			if term.closed.Load() {
@@ -2042,14 +2041,6 @@ func (c *WorkspaceClient) applyTerminalEventFor(term *terminalClient, push gocli
 			end()
 		}
 		countNativeWork("count.output_bytes", len(push.Event.Data))
-		if emu.BellCount() > bells {
-			if window := c.native.Load(); window != nil {
-				select {
-				case window.bellNotifications <- term.id:
-				default:
-				}
-			}
-		}
 		term.mu.Lock()
 		afterTrim, afterAlt := emu.HistoryState()
 		if beforeAlt != afterAlt {

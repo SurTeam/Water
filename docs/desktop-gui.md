@@ -35,6 +35,8 @@ IME composition/caret 使用统一坐标变换，平台缩放只应用一次。�
 
 字体按配置的逗号分隔 family 顺序逐字形 fallback；字体元数据和 collection index 由实际字体文件读取。普通 Unicode 保留字体原点与共同基线，emoji/私用图标走专用适配；字形与选择的列宽语义统一由 [终端输出与渲染](terminal-rendering.md) 维护。
 
+系统通知中的 Agent 注意提示来自已识别 Agent 的 OSC 状态变化，普通 BEL 不触发通知。Agent 持续运行不再产生“仍在运行”通知；长时间 shell 命令仍在完成或切换前台命令时按原规则通知。
+
 ## Settings 与配置生效
 
 Settings 是客户端草稿，保存成功更新基线并保持面板打开；重连保留草稿。Cancel、Escape 和设置快捷键退出脏草稿时需要明确丢弃；关闭整个窗口或 Quit GUI 不走同一草稿确认流程。异步结果必须核验当前 pane、connection 与面板生命周期。

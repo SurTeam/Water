@@ -21,8 +21,8 @@ loaded; cancel and reopen to load the current version. Saving first samples
 live foreground processes; a sampling or persistence failure leaves the saved
 configuration and its revision unchanged and reports an error.
 
-Names, colors, recognition rules, OSC interpretation, clear-screen history and
-long-run thresholds apply to existing terminals. Sampling runs in the server
+Names, colors, recognition rules, OSC interpretation and clear-screen history
+settings apply to existing terminals. Sampling runs in the server
 background every 500 ms. Recognition is independent of OSC titles and output
 text. Existing custom pane names and OSC titles retain their normal display
 precedence over the profile's default name. Automatic tab titles use the
@@ -120,8 +120,7 @@ as an Agent state event.
 
 Agent-specific interrupt, exit and force-stop actions are unavailable in the GUI, CLI, TUI and server dispatcher. Ordinary terminal input and terminal/pane lifecycle actions retain their normal semantics. Legacy `interrupt` and `exit` profile fields remain accepted for configuration compatibility but have no Agent control effect.
 
-**Long-run seconds** overrides the Agent notification threshold;
-`0` inherits the global Agent threshold. Recognized Agents do not contribute to
+Agent attention notifications follow OSC status transitions from a recognized Agent, including matching-app OSC 7501 `blocked` reports for permission requests or questions. Ordinary terminal BEL never generates a system notification, even inside an Agent terminal. OSC 9;4 Paused still means only that attention may be needed; it does not identify a permission request. Agents do not generate elapsed-time “still running” notifications. Legacy global and per-profile Agent long-run threshold fields remain readable for configuration compatibility but no longer trigger notifications. Recognized Agents do not contribute to
 ordinary long-running command dots/counts, regardless of Agent state. Recognition
 clears any previous shell timer without treating it as command completion; Agent
 status icons and Agent-specific notifications remain independent. **Keep history on clear** selects the

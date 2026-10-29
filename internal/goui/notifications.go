@@ -2,7 +2,6 @@ package goui
 
 import (
 	"encoding/json"
-	"fmt"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,9 +42,6 @@ func (w *EbitengineWindow) processNotifications(c *WorkspaceClient) {
 }
 
 func (w *EbitengineWindow) processNotificationsAt(c *WorkspaceClient, windowFocused bool, now time.Time) {
-	if w.lastBellNotification == nil {
-		w.lastBellNotification = map[uuid.UUID]time.Time{}
-	}
 	hosts := w.hosts()
 	w.updateLongRunIndicators(hosts, now)
 	agents := map[string]nativeAgent{}
@@ -71,28 +67,6 @@ func (w *EbitengineWindow) processNotificationsAt(c *WorkspaceClient, windowFocu
 		platform.Notify("Water", body)
 		return true
 	}
-	for i := 0; i < 32; i++ {
-		select {
-		case terminal := <-w.bellNotifications:
-			if config.SystemNotifications && now.Sub(w.lastBellNotification[terminal]) >= 5*time.Second {
-				body := c.tr("Terminal needs attention")
-				if agent, ok := agentsByTerminal[terminal]; ok {
-					body = c.trf("Agent paused; it may need your attention: %s", agent.label)
-				}
-				if notify(body) {
-					w.lastBellNotification[terminal] = now
-				}
-			}
-		default:
-			i = 32
-		}
-	}
-	for terminal, last := range w.lastBellNotification {
-		if now.Sub(last) > time.Minute {
-			delete(w.lastBellNotification, terminal)
-		}
-	}
-
 	baseline := w.notificationAgents != nil
 	if baseline && config.SystemNotifications {
 		for key, current := range agents {
@@ -147,49 +121,11 @@ func (w *EbitengineWindow) processNotificationsAt(c *WorkspaceClient, windowFocu
 	}
 
 	activeConnection := w.multi.ActiveConnectionID()
-	w.notificationAgentRuns = updateAgentLongRunNotifications(
-		w, c, hosts, agents, activeConnection, windowFocused, now, config.AgentLongRunNotificationSeconds, notify,
-	)
 	w.notificationShellRuns = updateShellLongRunNotifications(
 		w, c, hosts, agentsByTerminal, activeConnection, windowFocused, now, config.ShellLongRunNotificationSeconds, notify,
 	)
 	w.notificationAgents = agents
 	w.notificationConnections = connections
-}
-
-func updateAgentLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, hosts []nativeHost, agents map[string]nativeAgent, activeConnection uuid.UUID, windowFocused bool, now time.Time, thresholdSeconds int, notify func(string) bool) map[string]notificationRun {
-	next := make(map[string]notificationRun)
-	for key, agent := range agents {
-		if !agent.running || agent.status != "Running" {
-			continue
-		}
-		run := w.notificationAgentRuns[key]
-		name := agent.kind
-		if agent.run != nil {
-			name += fmt.Sprintf(":%d:%s", agent.run.PID, agent.run.Started)
-		}
-		if run.startedAt.IsZero() || run.name != name {
-			run = notificationRun{name: name, startedAt: now}
-		}
-		next[key] = run
-		threshold := thresholdSeconds
-		if agent.profile != nil && agent.profile.LongRunSeconds > 0 {
-			threshold = agent.profile.LongRunSeconds
-		}
-		if threshold <= 0 || run.notified || now.Sub(run.startedAt) < time.Duration(threshold)*time.Second || windowFocused {
-			continue
-		}
-		connection, _, _ := strings.Cut(key, ":")
-		connectionID := nativeUUID(connection)
-		if !agentConnectionConnected(hosts, connectionID) || paneIsFocused(hosts, connectionID, agent.pane, activeConnection) {
-			continue
-		}
-		if notify(c.trf("Agent is still running: %s", agent.label)) {
-			run.notified = true
-			next[key] = run
-		}
-	}
-	return next
 }
 
 func updateShellLongRunNotifications(w *EbitengineWindow, c *WorkspaceClient, hosts []nativeHost, agents map[uuid.UUID]nativeAgent, activeConnection uuid.UUID, windowFocused bool, now time.Time, thresholdSeconds int, notify func(string) bool) map[string]notificationRun {
