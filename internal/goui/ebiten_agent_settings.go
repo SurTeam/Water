@@ -23,9 +23,17 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 	muted := mixColor(configColor(cfg.Theme.ChromeBackground, 0), fg, .55)
 	left := r.Min.X + w.dp(24)
 	right := r.Max.X - w.dp(24)
-	listWidth := w.dp(156)
+	listWidth := w.dp(180)
+	chrome := configColor(cfg.Theme.ChromeBackground, 0x171b20)
+	panel := mixColor(chrome, fg, .035)
+	border := mixColor(chrome, fg, .12)
 	button := func(x, y, width int, title, action string, selected bool) {
-		w.button(dst, c, image.Rect(x, y, x+width, y+w.dp(28)), title, hitSettingsControl, uuid.Nil, selected)
+		br := image.Rect(x, y, x+width, y+w.dp(28))
+		if action == "save" {
+			w.settingsPrimaryButton(dst, c, br, title)
+		} else {
+			w.buttonWithFontSize(dst, c, br, title, hitSettingsControl, uuid.Nil, selected, 11)
+		}
 		c.hitRegions[len(c.hitRegions)-1].Label = "agent:" + action
 	}
 	connection := "Local"
@@ -43,7 +51,11 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 		return
 	}
 	profiles := goagent.Profiles(a.config)
-	rows := max(1, (footer-top-w.dp(100))/w.dp(28))
+	// Separate the profile navigator from the editor with quiet theme surfaces.
+	listRect := image.Rect(left-w.dp(10), top-w.dp(8), left+listWidth+w.dp(10), footer-w.dp(12))
+	w.round(dst, listRect, w.dp(8), border)
+	w.round(dst, listRect.Inset(max(1, w.dp(1))), w.dp(7), panel)
+	rows := max(1, (footer-top-w.dp(110))/w.dp(34))
 	offset, end := a.agentListPage(rows)
 	for i := offset; i < end; i++ {
 		p := profiles[i]
@@ -51,31 +63,34 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 		if !p.Enabled {
 			name = "○ " + name
 		}
-		button(left, top+(i-offset)*w.dp(28), listWidth, name, "select:"+string(p.ID), p.ID == a.selected)
+		button(left, top+(i-offset)*w.dp(34), listWidth, name, "select:"+string(p.ID), p.ID == a.selected)
 	}
 	bottom := footer - w.dp(88)
 	button(left, bottom, listWidth/2-w.dp(2), "Previous page", "previous", false)
 	button(left+listWidth/2, bottom, listWidth/2, "Next page", "next", false)
 	button(left, bottom+w.dp(32), listWidth/2-w.dp(2), "New", "new", false)
 	button(left+listWidth/2, bottom+w.dp(32), listWidth/2, "Duplicate", "duplicate", false)
-	editorLeft := left + listWidth + w.dp(20)
-	labelWidth := min(w.dp(200), max(w.dp(100), (right-editorLeft)*45/100))
+	editorLeft := left + listWidth + w.dp(32)
+	labelWidth := min(w.dp(180), max(w.dp(100), (right-editorLeft)*42/100))
 	testY := footer - w.dp(74)
-	visible := max(1, (testY-w.dp(42)-top)/w.dp(30))
+	viewport := image.Rect(editorLeft, top, right-w.dp(16), max(top, testY-w.dp(46)))
 	var fields []int
 	for i, f := range s.fields {
 		if f.group == "Agents" {
 			fields = append(fields, i)
 		}
 	}
-	view := w.view(c)
-	view.settingsScroll = min(max(0, view.settingsScroll), max(0, len(fields)-visible))
+	originalDst := dst
+	dst, scroll := w.beginSettingsScroll(c, dst, viewport, len(fields)*w.dp(38))
 	y := top
-	for row := view.settingsScroll; row < len(fields) && row < view.settingsScroll+visible; row++ {
-		i := fields[row]
+	for row, i := range fields {
+		y = top + row*w.dp(38) - scroll
+		if y+w.dp(30) <= viewport.Min.Y || y >= viewport.Max.Y {
+			continue
+		}
 		f := &s.fields[i]
-		fr := image.Rect(editorLeft+labelWidth, y, right, y+w.dp(29))
-		w.label(dst, c, image.Rect(editorLeft, y+w.dp(6), fr.Min.X-w.dp(8), fr.Max.Y), c.tr(f.label), 10, fg, false)
+		fr := image.Rect(editorLeft+labelWidth, y, right-w.dp(14), y+w.dp(30))
+		w.label(dst, c, image.Rect(editorLeft, y+w.dp(6), fr.Min.X-w.dp(12), fr.Max.Y), c.tr(f.label), 11, fg, false)
 		if f.kind == reflect.Bool {
 			w.drawSettingsToggle(c, dst, fr, f.toggle.Value)
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:Agents."+f.name)
@@ -89,8 +104,9 @@ func (w *EbitengineWindow) drawAgentSettings(c *WorkspaceClient, dst *ebiten.Ima
 			w.field(c, dst, fr, f.editor.Text(), s.focus == i, &f.editor)
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:Agents."+f.name)
 		}
-		y += w.dp(30)
 	}
+	w.endSettingsScroll(c, originalDst)
+	dst = originalDst
 	y = testY - w.dp(42)
 	w.label(dst, c, image.Rect(editorLeft, y, right, y+w.dp(20)), c.tr("Edit recognition rules to choose which programs match this Agent."), 9, muted, false)
 	y += w.dp(20)

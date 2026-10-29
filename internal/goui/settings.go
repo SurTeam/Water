@@ -123,6 +123,10 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 	if c.settings.saving {
 		return
 	}
+	if w := c.native.Load(); w != nil {
+		v := w.view(c)
+		v.settingsScroll, v.settingsScrollRow, v.settingsOffset = 0, 0, 0
+	}
 	c.settings.agents = agentPanel{}
 	c.settings.visible = true
 	c.settings.confirmDiscard = false

@@ -77,7 +77,8 @@ def agents(test):
 
 
 with WaterGUI("water-agent-settings.", config={"startup": {"window_columns": 100, "window_rows": 28},
-                                               "ui": {"system_notifications": False}}) as test:
+                                               "ui": {"system_notifications": False},
+                                               "server": {"detached": True}}) as test:
     pane = snapshot(test)["frame_focused_pane"]
     test.ctl("ui", "key", "cmd-,")
     click(test, "category:Agents")

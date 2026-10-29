@@ -107,6 +107,12 @@ selection, viewport hold or the clipboard and belong only in tests of those
 features. Ordinary content tests must assert that selection and scroll position
 are unchanged by their queries.
 
+### Settings scrolling and appearance
+
+Settings scrolling checks must cover accumulated fractional wheel input, top/bottom clamping, proportional thumb geometry, dragging with the original grab offset, track paging, and matching draw/hit clipping. Include ordinary Settings, Agent fields, Web configuration and paired-device lists where they overflow; fixed actions must remain reachable. Keyboard focus must reveal the target field at its actual row height.
+
+`internal/goui/ebiten_settings_scroll_test.go` covers scroll math and handler/clipping behavior. `scripts/go-ui-settings-visual-smoke.py` checks fractional wheel movement and thumb dragging to both ends through the owned GUI, and captures Agent, Web service, HTTP/TLS configuration and scrolled Web views. Those screenshots provide review evidence, not an automated guarantee of every visual detail or physical trackpad behavior. `scripts/go-ui-agent-settings-smoke.py` uses pixel wheel distances to reach Agent fields. The presence of these checks does not establish that they passed for a release; record actual execution separately.
+
 ## Reuse the owned GUI fixture
 
 New Python GUI checks should use `scripts/water_test.py`:

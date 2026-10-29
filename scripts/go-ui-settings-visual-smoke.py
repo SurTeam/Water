@@ -33,7 +33,8 @@ variant = os.environ.get("WATER_TEST_VARIANT", "dev")
 unfocused = os.environ.get("WATER_TEST_UNFOCUSED", "") == "1"
 config = {"startup": {"window_columns": 100, "window_rows": 36},
           "theme": {"chrome_background": "#808080", "terminal_background": "#808080", "pane_background": "#808080"},
-          "ui": {"language": "zh-Hans"}}
+          "ui": {"language": "zh-Hans"},
+          "server": {"detached": True}}
 with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
     if unfocused:
         initial = test.wait(lambda: (lambda s: s if not s.get("window_focused") and s.get("native_menu", {}).get("ready") else None)(snapshot(test)), "unfocused native GUI")
@@ -59,6 +60,32 @@ with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
     click(test, "update:close")
     test.wait(lambda: (lambda s: s["settings_visible"] and not s["update_visible"])(snapshot(test)), "return to settings")
     click(test, "category:Theme")
+    initial_scroll = snapshot(test)
+    field = next(h for h in initial_scroll["automation_hits"] if h.get("label", "").startswith("field:Theme."))
+    field_label, field_rect = field["label"], field["rect"]
+    width, height = initial_scroll["frame_size"]
+    for _ in range(4):
+        test.ctl("ui", "wheel", "--x", width*.65, "--y", height*.5, "--dy", .125)
+    precise = snapshot(test)["settings_scroll"]["offset"]
+    assert abs(precise-.5) < .001, precise
+    test.ctl("ui", "wheel", "--x", width*.65, "--y", height*.5, "--dy", 2.5)
+    shifted = test.wait(lambda: (lambda s: s if any(h.get("label") == field_label and h["rect"][1] != field_rect[1]
+                                                    for h in s["automation_hits"]) else None)(snapshot(test)), "fractional settings wheel moves content")
+    shifted_rect = next(h["rect"] for h in shifted["automation_hits"] if h.get("label") == field_label)
+    assert 0 < field_rect[1]-shifted_rect[1] < field_rect[3]-field_rect[1], (field_rect, shifted_rect)
+    thumb = next(h["rect"] for h in shifted["automation_hits"] if h.get("label") == "scroll:thumb")
+    track = next(h["rect"] for h in shifted["automation_hits"] if h.get("label") == "scroll:track")
+    x, y = (thumb[0]+thumb[2])/2, (thumb[1]+thumb[3])/2
+    assert test.ctl("ui", "drag", "--x", x, "--y", y, "--to-x", x, "--to-y", track[3])["handled"]
+    bottom = test.wait(lambda: (lambda s: s if next(h["rect"] for h in s["automation_hits"]
+                                                  if h.get("label") == "scroll:thumb")[3] >= track[3]-1 else None)(snapshot(test)), "scrollbar dragged to bottom")
+    test.save("scroll-bottom.json", bottom)
+    image(test, "scroll-bottom.png")
+    bottom_thumb = next(h["rect"] for h in bottom["automation_hits"] if h.get("label") == "scroll:thumb")
+    assert test.ctl("ui", "drag", "--x", x, "--y", (bottom_thumb[1]+bottom_thumb[3])/2,
+                    "--to-x", x, "--to-y", track[1])["handled"]
+    test.wait(lambda: any(h.get("label") == field_label and h["rect"] == field_rect
+                         for h in snapshot(test)["automation_hits"]), "scrollbar dragged to top")
     def host_field():
         state = snapshot(test)
         label = "field:Theme.SidebarConnectionBackground"
@@ -68,6 +95,23 @@ with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
         test.ctl("ui", "wheel", "--x", width*.65, "--y", height*.5, "--dy", 176)
         return None
     test.save("host-background-visible.json", test.wait(host_field, "host card background rendered in settings"))
+    click(test, "category:Agents")
+    test.wait(lambda: snapshot(test).get("agent_settings", {}).get("loaded"), "Agent settings loaded")
+    image(test, "agent-settings.png")
+    click(test, "category:Server")
+    click(test, "server:web-open")
+    image(test, "web-service.png")
+    click(test, "server:web-settings")
+    test.wait(lambda: any(h.get("label", "").startswith("field:Web.") for h in snapshot(test)["automation_hits"]), "Web settings visible")
+    image(test, "web-settings.png")
+    click(test, "field:Web.TLS")
+    image(test, "web-settings-tls.png")
+    web = snapshot(test)
+    if any(h.get("label") == "scroll:thumb" for h in web["automation_hits"]):
+        width, height = web["frame_size"]
+        test.ctl("ui", "wheel", "--x", width*.65, "--y", height*.5, "--dy", 176)
+        image(test, "web-settings-scrolled.png")
+    assert test.ctl("ui", "key", "escape")["handled"]
     assert test.ctl("ui", "key", "escape")["handled"]
     test.wait(lambda: not snapshot(test)["settings_visible"], "settings closed")
     test.ctl("ui", "menu", "check-updates")
@@ -109,4 +153,4 @@ with WaterGUI("water-settings-visual.", config=config, variant=variant) as test:
             assert restored == focused, (restored, focused)
     test.save("assertions.json", {"settings_fields": len(fields), "baseline": baseline, "settings_dimmed": dimmed,
                                   "update_near_edge": near, "update_far_edge": far})
-    print("PASS settings reachability, localized host backgrounds, settings dimming, shadowless update and native focus colors; artifacts="+str(test.directory), flush=True)
+    print("PASS fractional settings wheel, draggable scrollbar, settings reachability, localized host backgrounds, settings dimming, shadowless update and native focus colors; artifacts="+str(test.directory), flush=True)

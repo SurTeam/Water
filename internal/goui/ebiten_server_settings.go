@@ -18,7 +18,20 @@ func (w *EbitengineWindow) drawServerSettings(c *WorkspaceClient, dst *ebiten.Im
 }
 
 func (w *EbitengineWindow) drawWebService(c *WorkspaceClient, dst *ebiten.Image) {
-	r := w.overlayPanel(c, dst, w.dp(560), w.dp(440), true)
+	state := c.ServerPanelState()
+	height := 400
+	if state.WebConfigVisible {
+		height = 350
+		for _, f := range c.settings.fields {
+			if f.group == "Web" && f.name == "TLS" && f.toggle.Value {
+				height = 490
+				break
+			}
+		}
+	} else if state.PairingExpiresAt != nil || state.DevicesVisible || state.CapabilitiesVisible {
+		height = 540
+	}
+	r := w.overlayPanel(c, dst, w.dp(660), w.dp(float64(height)), true)
 	w.label(dst, c, image.Rect(r.Min.X+w.dp(24), r.Min.Y+w.dp(16), r.Max.X-w.dp(24), r.Min.Y+w.dp(40)), c.tr("Web service"), 16, configColor(c.currentConfig().Theme.UIForeground, 0xe6eaea), true)
 	w.drawServerContent(c, dst, r, r.Min.Y+w.dp(52), r.Max.Y-w.dp(72), true)
 }
@@ -45,12 +58,18 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 	}
 	cfg := c.currentConfig()
 	fg := configColor(cfg.Theme.UIForeground, 0xe6eaea)
+	chrome := configColor(cfg.Theme.ChromeBackground, 0x171b20)
+	muted := mixColor(chrome, fg, .65)
 	label := func(y int, text string, small bool) {
 		size := 11.
 		if small {
 			size = 10
 		}
-		w.label(dst, c, image.Rect(r.Min.X+w.dp(24), y, r.Max.X-w.dp(24), y+w.dp(22)), text, size, fg, false)
+		clr := fg
+		if small {
+			clr = muted
+		}
+		w.label(dst, c, image.Rect(r.Min.X+w.dp(24), y, r.Max.X-w.dp(24), y+w.dp(22)), text, size, clr, false)
 	}
 	button := func(x, y, width int, title, action string) {
 		br := image.Rect(x, y, x+width, y+w.dp(30))
@@ -149,14 +168,22 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 			label(y, c.tr("HTTP service: enter a listen IP/hostname and a fixed port separately."), true)
 			y += w.dp(28)
 		}
-		step := min(w.dp(32), (footer-w.dp(30)-y)/max(1, count))
+		step := w.dp(40)
+		viewport := image.Rect(left, y, r.Max.X-w.dp(40), max(y, footer-w.dp(34)))
+		originalDst := dst
+		dst, scroll := w.beginSettingsScroll(c, dst, viewport, count*step)
+		y -= scroll
 		for i := range c.settings.fields {
 			f := &c.settings.fields[i]
 			if !webSettingsFieldVisible(c.settings.fields, i) {
 				continue
 			}
-			fr := image.Rect(r.Min.X+r.Dx()*40/100, y, r.Max.X-w.dp(24), y+step-w.dp(4))
-			w.label(dst, c, image.Rect(left, y, fr.Min.X-w.dp(8), fr.Max.Y), localizedField(c.language(), *f), 11, fg, false)
+			if y+step <= viewport.Min.Y || y >= viewport.Max.Y {
+				y += step
+				continue
+			}
+			fr := image.Rect(r.Min.X+r.Dx()*40/100, y, viewport.Max.X-w.dp(14), y+w.dp(32))
+			w.label(dst, c, image.Rect(left, y+w.dp(6), fr.Min.X-w.dp(12), fr.Max.Y), localizedField(c.language(), *f), 11, fg, false)
 			if f.kind == reflect.Bool {
 				w.drawSettingsToggle(c, dst, fr, f.toggle.Value)
 			} else {
@@ -177,24 +204,31 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:Web."+f.name)
 			y += step
 		}
+		w.endSettingsScroll(c, originalDst)
+		dst = originalDst
 	} else if state.DevicesVisible {
 		label(y, c.tr("Paired browsers"), false)
 		y += w.dp(26)
-		maxRows := max(1, (footer-y-w.dp(76))/w.dp(34))
-		scroll := w.view(c).settingsScroll
-		scroll = min(max(0, scroll), max(0, len(state.Devices)-maxRows))
-		w.view(c).settingsScroll = scroll
+		viewport := image.Rect(left, y, r.Max.X-w.dp(40), max(y, footer-w.dp(38)))
+		originalDst := dst
+		dst, scroll := w.beginSettingsScroll(c, dst, viewport, len(state.Devices)*w.dp(42))
+		startY := y
 		if len(state.Devices) == 0 {
 			label(y, c.tr("No paired browsers"), true)
 		}
-		for i := scroll; i < len(state.Devices) && i < scroll+maxRows; i++ {
-			d := state.Devices[i]
-			w.label(dst, c, image.Rect(left, y, r.Max.X-w.dp(120), y+w.dp(30)), d.Name, 10, fg, false)
-			if !state.Busy {
-				button(r.Max.X-w.dp(112), y, w.dp(88), "Revoke", "web-revoke:"+d.ID)
+		for i, d := range state.Devices {
+			y = startY + i*w.dp(42) - scroll
+			if y+w.dp(34) <= viewport.Min.Y || y >= viewport.Max.Y {
+				continue
 			}
-			y += w.dp(34)
+			w.round(dst, image.Rect(left, y, viewport.Max.X-w.dp(14), y+w.dp(34)), w.dp(5), mixColor(chrome, fg, .04))
+			w.label(dst, c, image.Rect(left+w.dp(10), y+w.dp(6), r.Max.X-w.dp(140), y+w.dp(30)), d.Name, 11, fg, false)
+			if !state.Busy {
+				button(viewport.Max.X-w.dp(110), y+w.dp(2), w.dp(88), "Revoke", "web-revoke:"+d.ID)
+			}
 		}
+		w.endSettingsScroll(c, originalDst)
+		dst = originalDst
 		if !state.Busy && !web {
 			button(left, footer-w.dp(72), w.dp(90), "Back", "web-close")
 		}
@@ -218,8 +252,15 @@ func (w *EbitengineWindow) drawServerContent(c *WorkspaceClient, dst *ebiten.Ima
 					text += " · " + webStatus.PublicURL
 				}
 			}
-			label(y, text, true)
-			y += w.dp(26)
+			statusRect := image.Rect(left, y, r.Max.X-w.dp(24), y+w.dp(44))
+			w.round(dst, statusRect, w.dp(7), mixColor(chrome, fg, .06))
+			statusColor := muted
+			if running {
+				statusColor = configColor(cfg.Theme.Accent, 0x72d6ab)
+			}
+			w.round(dst, image.Rect(left+w.dp(12), y+w.dp(17), left+w.dp(22), y+w.dp(27)), w.dp(5), statusColor)
+			w.label(dst, c, image.Rect(left+w.dp(34), y+w.dp(12), statusRect.Max.X-w.dp(12), statusRect.Max.Y), text, 11, fg, true)
+			y += w.dp(56)
 			if !state.Busy {
 				action, title := "web-start", "Start Web"
 				if running {

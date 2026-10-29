@@ -125,6 +125,23 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 		case hitRemoteField:
 			w.view(c).remoteFocused = true
 		case hitSettingsControl:
+			if h.Label == "scroll:thumb" || h.Label == "scroll:track" {
+				v := w.view(c)
+				grab := p.Y - v.settingsThumb.Min.Y
+				if h.Label == "scroll:track" {
+					direction := 1.0
+					if p.Y < v.settingsThumb.Min.Y {
+						direction = -1
+					}
+					v.settingsOffset = settingsScrollClamp(v.settingsOffset+direction*float64(v.settingsViewport.Dy()), v.settingsContentHeight, v.settingsViewport.Dy())
+					v.settingsThumb = settingsScrollThumb(v.settingsTrack, v.settingsContentHeight, v.settingsViewport.Dy(), w.dp(24), v.settingsOffset)
+					w.pressed = nil
+					return true
+				}
+				w.drag = &nativeDrag{kind: hitSettingsControl, hit: h, start: image.Pt(0, grab)}
+				w.pressed = nil
+				return true
+			}
 			if c.settings.saving {
 				return true
 			}
@@ -223,6 +240,12 @@ func (w *EbitengineWindow) pointerMove(c *WorkspaceClient, p image.Point) {
 		delta := p.Sub(d.start)
 		d.moved = d.moved || delta.X*delta.X+delta.Y*delta.Y > w.dp(5)*w.dp(5)
 	case hitSettingsControl:
+		if strings.HasPrefix(d.hit.Label, "scroll:") {
+			if c.settings.visible {
+				w.settingsScrollPointer(c, p.Y-d.start.Y)
+			}
+			return
+		}
 		if d.editor != nil {
 			_, anchor := d.editor.Selection()
 			d.editor.SetCaret(w.fieldCaretAt(c, d.hit.Rect, d.editor, p.X), anchor)
@@ -381,6 +404,7 @@ func (w *EbitengineWindow) pointerUp(c *WorkspaceClient, p image.Point) {
 		c.layoutMu.Lock()
 		c.openSettings()
 		w.view(c).settingsScroll = 0
+		w.view(c).settingsOffset = 0
 		c.layoutMu.Unlock()
 	case hitNewRemote:
 		c.connectionMu.Lock()
@@ -538,15 +562,7 @@ func (w *EbitengineWindow) wheel(c *WorkspaceClient, p image.Point, dx, dy float
 	defer c.layoutMu.Unlock()
 	v := w.view(c)
 	if c.settings.visible {
-		delta := int(dy / 40)
-		if delta == 0 {
-			if dy > 0 {
-				delta = 1
-			} else if dy < 0 {
-				delta = -1
-			}
-		}
-		v.settingsScroll = max(0, v.settingsScroll+delta)
+		v.settingsOffset = settingsScrollClamp(v.settingsOffset+dy, v.settingsContentHeight, v.settingsViewport.Dy())
 		return true
 	}
 	c.connectionMu.RLock()
@@ -701,6 +717,7 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 		c.openSettingsConfig(goconfig.Default())
 		s.initial = initial
 		w.view(c).settingsScroll = 0
+		w.view(c).settingsOffset = 0
 	case "save":
 		w.saveSettings(c)
 	default:
@@ -746,6 +763,7 @@ func (w *EbitengineWindow) settingsAction(c *WorkspaceClient, label string) {
 					}
 					s.focus = -1
 					w.view(c).settingsScroll = 0
+					w.view(c).settingsOffset = 0
 				}
 			}
 		}
@@ -1029,10 +1047,11 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 						indices = append(indices, i)
 					}
 				}
-			}
-			for _, row := range settingsRows(&c.settings) {
-				if row.field >= 0 {
-					indices = append(indices, row.field)
+			} else {
+				for _, row := range settingsRows(&c.settings) {
+					if row.field >= 0 {
+						indices = append(indices, row.field)
+					}
 				}
 			}
 			if len(indices) > 0 {
@@ -1049,9 +1068,25 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 				}
 				at = (at + delta + len(indices)) % len(indices)
 				c.settings.focus = indices[at]
-				for row, item := range settingsRows(&c.settings) {
+				focusRows := settingsRows(&c.settings)
+				pitch := w.dp(44)
+				if webState.WebVisible && webState.WebConfigVisible {
+					focusRows = nil
+					pitch = w.dp(40)
+					for _, index := range indices {
+						focusRows = append(focusRows, settingsRow{field: index})
+					}
+				}
+				for row, item := range focusRows {
 					if item.field == indices[at] {
-						v.settingsScroll = row
+						top := float64(row * pitch)
+						bottom := top + float64(pitch)
+						if top < v.settingsOffset {
+							v.settingsOffset = top
+						} else if bottom > v.settingsOffset+float64(v.settingsViewport.Dy()) {
+							v.settingsOffset = bottom - float64(v.settingsViewport.Dy())
+						}
+						v.settingsOffset = settingsScrollClamp(v.settingsOffset, v.settingsContentHeight, v.settingsViewport.Dy())
 						break
 					}
 				}

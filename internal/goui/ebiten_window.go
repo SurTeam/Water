@@ -49,20 +49,24 @@ type nativePane struct {
 	cw, lh int
 }
 type nativeView struct {
-	tabTitles                                map[uuid.UUID]string
-	tabTitleRevision                         uint64
-	panes                                    map[uuid.UUID]nativePane
-	splits                                   map[string]nativeSplit
-	settingsScroll, sidebarScroll, tabScroll int
-	agentShelfScroll                         int
-	agentShelfRect                           image.Rectangle
-	remoteFocused                            bool
-	lastActiveTab                            uuid.UUID
-	sidebarWidth                             float32
-	lastUI                                   goconfig.UIConfig
-	sidebarRect, tabRect                     image.Rectangle
-	sidebarContentHeight                     int
-	rename                                   *nativeRename
+	tabTitles                                      map[uuid.UUID]string
+	tabTitleRevision                               uint64
+	panes                                          map[uuid.UUID]nativePane
+	splits                                         map[string]nativeSplit
+	settingsScroll, sidebarScroll, tabScroll       int
+	settingsOffset                                 float64
+	settingsScrollRow, settingsScrollGroup         int
+	settingsViewport, settingsTrack, settingsThumb image.Rectangle
+	settingsContentHeight, settingsHitStart        int
+	agentShelfScroll                               int
+	agentShelfRect                                 image.Rectangle
+	remoteFocused                                  bool
+	lastActiveTab                                  uuid.UUID
+	sidebarWidth                                   float32
+	lastUI                                         goconfig.UIConfig
+	sidebarRect, tabRect                           image.Rectangle
+	sidebarContentHeight                           int
+	rename                                         *nativeRename
 }
 
 // The last geometry applied to the platform IME view. Repositioning is a
@@ -417,6 +421,9 @@ func (w *EbitengineWindow) active() *WorkspaceClient {
 	return nil
 }
 func (w *EbitengineWindow) view(c *WorkspaceClient) *nativeView {
+	if w.views == nil {
+		w.views = make(map[*WorkspaceClient]*nativeView)
+	}
 	v := w.views[c]
 	if v == nil {
 		v = &nativeView{panes: map[uuid.UUID]nativePane{}, splits: map[string]nativeSplit{}}
@@ -1016,6 +1023,8 @@ func (w *EbitengineWindow) handleRequest(r nativeRequest) {
 		state["server_status"] = c.ServerPanelState()
 		if c.settings.visible {
 			state["settings_category"] = settingsGroups[c.settings.group]
+			v := w.view(c)
+			state["settings_scroll"] = map[string]any{"offset": v.settingsOffset, "content_height": v.settingsContentHeight, "viewport": v.settingsViewport, "track": v.settingsTrack, "thumb": v.settingsThumb}
 			a := &c.settings.agents
 			state["agent_settings"] = map[string]any{"loaded": a.loaded, "busy": a.busy, "message": a.message, "selected": a.selected, "diagnostic": a.diagnostic, "dirty": c.settings.agentDirty(), "rules": cloneAgentRules(a.rules)}
 			if e := a.rulesEditor; e != nil {

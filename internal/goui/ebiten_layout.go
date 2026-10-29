@@ -633,7 +633,6 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 }
 func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	s := &c.settings
-	v := w.view(c)
 	width, height := 680., 540.
 	if s.group == 6 {
 		width, height = 820, 660
@@ -672,10 +671,14 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 	}
 	rowHeight := w.dp(44)
 	rows := settingsRows(s)
-	visible := max(1, (footer-listTop-w.dp(20))/rowHeight)
-	v.settingsScroll = min(max(0, v.settingsScroll), max(0, len(rows)-visible))
-	for j := v.settingsScroll; j < len(rows) && j < v.settingsScroll+visible; j++ {
-		y := listTop + (j-v.settingsScroll)*rowHeight
+	original := dst
+	viewport := image.Rect(r.Min.X+w.dp(24), listTop, r.Max.X-w.dp(36), footer-w.dp(20))
+	dst, offset := w.beginSettingsScroll(c, dst, viewport, len(rows)*rowHeight)
+	for j := max(0, offset/rowHeight); j < len(rows); j++ {
+		y := listTop + j*rowHeight - offset
+		if y >= viewport.Max.Y {
+			break
+		}
 		row := rows[j]
 		if row.field < 0 {
 			heading := image.Rect(r.Min.X+w.dp(24), y+w.dp(8), r.Max.X-w.dp(36), y+w.dp(32))
@@ -713,13 +716,8 @@ func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {
 			w.hit(c, fr, hitSettingsControl, uuid.Nil, "field:"+f.group+"."+f.name)
 		}
 	}
-	if len(rows) > visible {
-		track := image.Rect(r.Max.X-w.dp(23), listTop, r.Max.X-w.dp(20), footer-w.dp(20))
-		nativeRect(dst, track, mixColor(configColor(cfg.Theme.ChromeBackground, 0x171b20), fg, .08))
-		h := max(w.dp(24), track.Dy()*visible/len(rows))
-		y := track.Min.Y + (track.Dy()-h)*v.settingsScroll/max(1, len(rows)-visible)
-		w.round(dst, image.Rect(track.Min.X, y, track.Max.X, y+h), w.dp(2), muted)
-	}
+	dst = original
+	w.endSettingsScroll(c, dst)
 	message := s.message
 	messageColor := configColor("#ef766f", 0)
 	if message == "Settings saved" {
