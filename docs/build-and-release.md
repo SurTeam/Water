@@ -11,7 +11,7 @@
 - 默认配置根目录依次采用绝对路径 `$XDG_CONFIG_HOME`、兼容变量 `$XDG_CONFIG`、`~/.config`。macOS 首次读取新路径时复制旧 Application Support 配置，保留旧文件；目标已存在时不覆盖。
 - Windows GUI/server/updater 可在 macOS 或 Linux 以 `CGO_ENABLED=0` 交叉编译打包。macOS GUI 使用本机 Apple SDK，可用 `GOARCH=amd64` 或 `arm64` 跨架构构建；Linux GUI 需要目标 Linux C 编译器及 X11/Wayland、EGL/OpenGL、xkbcommon 和 Vulkan 开发库，可在本机 Linux 容器内构建。headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 
-macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。
+macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。Go 运行库 LICENSE 为必需文件；收集器兼容标准 GOROOT 和 Homebrew 的上级目录布局，缺少该文件时中止组包。
 
 控制命令见 [控制 API](control-api.md)，回归流程见 [测试策略](testing.md)。
 

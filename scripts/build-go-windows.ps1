@@ -36,6 +36,8 @@ $goRoot = (& go env GOROOT).Trim()
 if ($LASTEXITCODE) { throw 'Cannot locate Go toolchain licenses' }
 foreach ($name in @('LICENSE','PATENTS')) {
     $source = Join-Path $goRoot $name
+    if (!(Test-Path -LiteralPath $source -PathType Leaf)) { $source = Join-Path (Split-Path $goRoot -Parent) $name }
+    if ($name -eq 'LICENSE' -and !(Test-Path -LiteralPath $source -PathType Leaf)) { throw 'Go toolchain LICENSE not found' }
     if (Test-Path -LiteralPath $source -PathType Leaf) {
         $destination = Join-Path $stage 'Licenses/go-stdlib'
         New-Item -ItemType Directory -Force $destination | Out-Null

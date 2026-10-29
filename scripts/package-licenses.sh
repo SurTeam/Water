@@ -22,6 +22,10 @@ destination = Path(sys.argv[1])
 toolchain = Path(subprocess.check_output(['go', 'env', 'GOROOT'], text=True).strip())
 for name in ('LICENSE', 'PATENTS'):
     source = toolchain / name
+    if not source.is_file():
+        source = toolchain.parent / name  # Homebrew keeps LICENSE beside libexec.
+    if name == 'LICENSE' and not source.is_file():
+        raise SystemExit('Go toolchain LICENSE not found')
     if source.is_file():
         target = destination / 'go-stdlib' / name
         target.parent.mkdir(parents=True, exist_ok=True)
