@@ -3,6 +3,8 @@ package goui
 import (
 	"image"
 	"testing"
+
+	"github.com/SurTeam/Water/internal/goconfig"
 )
 
 func TestTextCommandSpecCoversEditingKeys(t *testing.T) {
@@ -69,5 +71,43 @@ func TestTextCommandQueuePreservesBurstOrder(t *testing.T) {
 	}
 	if again := takeTextCommands(); again != nil {
 		t.Fatalf("queue not drained: %v", again)
+	}
+}
+
+// Editing keys consumed by the IME view never reach GLFW's pressed-key
+// sampling, so applying them must wake a frame on its own. Without the
+// invalidation the stale screen (deleted text, old caret) persists until an
+// unrelated commit.
+func TestFinishFrameInputInvalidatesLocalFieldEdit(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	w := &EbitengineWindow{views: map[*WorkspaceClient]*nativeView{}}
+	w.view(c)
+	w.view(c).remoteFocused = true
+	c.connectionMu.Lock()
+	c.remoteFormVisible = true
+	c.connectionMu.Unlock()
+	c.remoteEditor.SetText("abc")
+	c.remoteEditor.SetCaret(3, 3)
+
+	takeTextCommands()
+	noteTextCommand("deleteBackward:")
+	before := w.frameRevision.Load()
+	if err := w.finishFrameInput(c, false, "", nil); err != nil {
+		t.Fatalf("finishFrameInput: %v", err)
+	}
+	if got := c.remoteEditor.Text(); got != "ab" {
+		t.Fatalf("text after backspace: %q", got)
+	}
+	if got := w.frameRevision.Load(); got != before+1 {
+		t.Fatalf("local edit did not wake a frame: before=%d after=%d", before, got)
+	}
+
+	// An empty queue must not wake a frame on its own.
+	before = w.frameRevision.Load()
+	if err := w.finishFrameInput(c, false, "", nil); err != nil {
+		t.Fatalf("finishFrameInput: %v", err)
+	}
+	if got := w.frameRevision.Load(); got != before {
+		t.Fatalf("empty queue changed the revision: before=%d after=%d", before, got)
 	}
 }

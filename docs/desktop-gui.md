@@ -35,6 +35,8 @@ Cmd+V 对 Excel 等同时提供文本和图片的富剪贴板优先读取纯文�
 
 IME composition/caret 使用统一坐标变换，平台缩放只应用一次。控制 API 注入用于验证共享处理器，真实系统键盘、IME 候选窗口仍需人工验收。
 
+编辑字段（远程连接表单、Settings 行、rename、Agent rules）的光标与终端光标一致：形状跟随 `cursor_style`（block 反转覆盖字符、bar、underline），颜色使用 `cursor_background`/`cursor_foreground`，闪烁跟随 `cursor_blink` 并与终端光标共享同一相位；空闲窗口在相位边界为聚焦字段唤醒帧。macOS 上 IME 视图先于 GLFW 键采样消费编辑键（Backspace、方向键等），应用这些文本命令后立即触发一次帧失效，空队列不触发；本地编辑因此当帧呈现，不再等待下一次 IME 字符提交。
+
 字体按配置的逗号分隔 family 顺序逐字形 fallback；字体元数据和 collection index 由实际字体文件读取。普通 Unicode 保留字体原点与共同基线，emoji/私用图标走专用适配；字形与选择的列宽语义统一由 [终端输出与渲染](terminal-rendering.md) 维护。
 
 系统通知中的 Agent 注意提示来自已识别 Agent 的 OSC 状态变化，普通 BEL 不触发通知。Agent 持续运行不再产生“仍在运行”通知；长时间 shell 命令仍在完成或切换前台命令时按原规则通知。

@@ -102,6 +102,12 @@ func (w *EbitengineWindow) focusedCursorBlinks(c *WorkspaceClient) bool {
 	if v == nil {
 		return false
 	}
+	// Editor fields (rename, settings, remote form) share the terminal
+	// cursor's blink preference and phase, so their phase boundary must
+	// also wake the frame scheduler while the field is focused.
+	if w.fieldCursorBlinks(c) {
+		return c.currentConfig().Terminal.CursorBlink
+	}
 	id, ok := c.activeTerminalID()
 	if !ok {
 		return false
@@ -116,6 +122,28 @@ func (w *EbitengineWindow) focusedCursorBlinks(c *WorkspaceClient) bool {
 		return blink
 	}
 	return false
+}
+
+// fieldCursorBlinks reports whether the focused input is an editor field
+// (rename, settings row, remote form) rather than a terminal.
+func (w *EbitengineWindow) fieldCursorBlinks(c *WorkspaceClient) bool {
+	v := w.views[c]
+	if v == nil {
+		return false
+	}
+	if v.rename != nil {
+		return true
+	}
+	c.layoutMu.Lock()
+	focused := c.settings.visible && c.settings.focus >= 0
+	c.layoutMu.Unlock()
+	if focused {
+		return true
+	}
+	c.connectionMu.RLock()
+	remoteVisible := c.remoteFormVisible
+	c.connectionMu.RUnlock()
+	return remoteVisible && v.remoteFocused
 }
 
 func ensureTerminalView(term *terminalClient) {

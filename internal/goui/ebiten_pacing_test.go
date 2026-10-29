@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/govt"
 	"github.com/hajimehoshi/ebiten/v2"
 )
@@ -113,5 +114,36 @@ func TestIMEConsumedKeysStaySuppressedUntilRelease(t *testing.T) {
 		if !r.ready(k, true, now.Add(2*time.Second)) {
 			t.Fatalf("fresh press %v was suppressed", k)
 		}
+	}
+}
+
+func TestFieldCursorBlinksCoversEditorFields(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	w := &EbitengineWindow{views: map[*WorkspaceClient]*nativeView{}}
+	v := w.view(c)
+	if w.fieldCursorBlinks(c) {
+		t.Fatal("no focused field would blink")
+	}
+	v.remoteFocused = true
+	if w.fieldCursorBlinks(c) {
+		t.Fatal("remote field without an open form would blink")
+	}
+	c.connectionMu.Lock()
+	c.remoteFormVisible = true
+	c.connectionMu.Unlock()
+	if !w.fieldCursorBlinks(c) {
+		t.Fatal("focused remote field would not blink")
+	}
+	v.remoteFocused = false
+	c.layoutMu.Lock()
+	c.settings.visible = true
+	c.settings.focus = 1
+	c.layoutMu.Unlock()
+	if !w.fieldCursorBlinks(c) {
+		t.Fatal("focused settings field would not blink")
+	}
+	v.rename = &nativeRename{}
+	if !w.fieldCursorBlinks(c) {
+		t.Fatal("rename field would not blink")
 	}
 }

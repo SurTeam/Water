@@ -532,6 +532,19 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 		dst = dst.SubImage(image.Rect(content.Min.X, r.Min.Y, content.Max.X, r.Max.Y).Intersect(dst.Bounds())).(*ebiten.Image)
 	}
 	offset := 0.0
+	// Caret geometry is computed while focused and drawn after the text so
+	// the block style can invert the covered glyph, like the terminal.
+	var (
+		caretOn   bool
+		caretX    int
+		caretTop  int
+		caretBot  int
+		caretW    float64
+		caretAdv  float64
+		caretY    float64
+		caretFace text.Face
+		caretChar string
+	)
 	if focused && len(editors) > 0 {
 		editor := editors[0]
 		runes := []rune(editor.Text())
@@ -567,9 +580,28 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 			nativeRect(dst, image.Rect(x+int(before), r.Max.Y-w.dp(5), min(r.Max.X-w.dp(8), x+int(before+preeditWidth)), r.Max.Y-w.dp(5)+1), fg)
 			prefix = before + preeditWidth
 		}
-		if time.Now().UnixMilli()%1000 < 600 {
-			cx := min(r.Max.X-w.dp(8), x+int(prefix))
-			nativeRect(dst, image.Rect(cx, r.Min.Y+w.dp(6), cx+1, r.Max.Y-w.dp(6)), fg)
+		// Editor fields follow the same cursor_style and cursor_blink
+		// preferences as the terminal cursor, in the shared blink phase.
+		if !cfg.Terminal.CursorBlink || time.Now().UnixMilli()%1000 < 600 {
+			caretOn = true
+			caretX = min(r.Max.X-w.dp(8), x+int(prefix))
+			caretAdv = float64(x) + prefix
+			metrics := face.Metrics()
+			// text.Draw anchors the line box's upper-left at the origin, so
+			// reuse the main text's translate value; the block spans the full
+			// line box, the same way the terminal block spans its cell.
+			caretY = float64(r.Min.Y) + (float64(r.Dy())-metrics.HAscent-metrics.HDescent)/2
+			caretTop = int(caretY)
+			caretBot = int(caretY + metrics.HAscent + metrics.HDescent)
+			caretFace = face
+			if w.composition == "" && caret < len(runes) {
+				caretChar = string(runes[caret : caret+1])
+				caretW, _ = text.Measure(caretChar, face, 0)
+			} else if len(runes) > 0 {
+				caretW, _ = text.Measure(string(runes[len(runes)-1:]), face, 0)
+			} else {
+				caretW, _ = text.Measure("0", face, 0)
+			}
 		}
 	}
 	if dst != nil && value != "" {
@@ -580,6 +612,23 @@ func (w *EbitengineWindow) field(c *WorkspaceClient, dst *ebiten.Image, r image.
 		op.GeoM.Translate(float64(content.Min.X)-offset, y)
 		op.ColorScale.ScaleWithColor(fg)
 		text.Draw(dst, value, face, op)
+	}
+	if caretOn && dst != nil {
+		clr := configColor(cfg.Theme.CursorBackground, 0xe4e4e4)
+		switch cfg.Terminal.CursorStyle {
+		case "bar":
+			nativeRect(dst, image.Rect(caretX, caretTop, min(caretX+w.dp(2), r.Max.X-w.dp(4)), caretBot), clr)
+		case "underline":
+			nativeRect(dst, image.Rect(caretX, caretBot-w.dp(2), min(caretX+int(caretW), r.Max.X-w.dp(4)), caretBot), clr)
+		default:
+			nativeRect(dst, image.Rect(caretX, caretTop, min(caretX+int(caretW), r.Max.X-w.dp(4)), caretBot), clr)
+			if caretChar != "" {
+				op := &text.DrawOptions{}
+				op.GeoM.Translate(caretAdv, caretY)
+				op.ColorScale.ScaleWithColor(configColor(cfg.Theme.CursorForeground, 0x2c2c2c))
+				text.Draw(dst, caretChar, caretFace, op)
+			}
+		}
 	}
 }
 func (w *EbitengineWindow) drawSettings(c *WorkspaceClient, dst *ebiten.Image) {

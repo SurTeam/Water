@@ -761,9 +761,17 @@ func (w *EbitengineWindow) finishFrameInput(c *WorkspaceClient, handled bool, pr
 	// while a composition is still marked.
 	ensureTextCommandHook()
 	if w.composition == "" {
-		for _, spec := range takeTextCommands() {
-			w.key(c, spec)
+		if specs := takeTextCommands(); len(specs) > 0 {
+			for _, spec := range specs {
+				w.key(c, spec)
+			}
 			handled = true
+			// The IME view consumed these editing keys before GLFW, so the
+			// pressed-key sampling in Update never sees them and cannot wake a
+			// frame. Invalidate, or a purely local edit (caret move, backspace
+			// in a dialog or settings field) stays on the stale screen until
+			// the next unrelated keystroke.
+			w.Invalidate()
 		}
 	} else {
 		takeTextCommands()
