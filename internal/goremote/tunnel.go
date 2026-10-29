@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"hash/fnv"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +29,7 @@ const (
 )
 
 type Tunnel struct {
+	portable      *portableTunnel
 	destination   string
 	localSocket   string
 	controlSocket string
@@ -73,10 +76,18 @@ func ConnectInteractive(destination string, prompt Prompt) (*Tunnel, error) {
 }
 
 func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error) {
+	validated, validateErr := ValidateDestination(destination)
+	if validateErr != nil {
+		return nil, validateErr
+	}
+	if portableRequested(os.Getenv("WATER_REMOTE_CONTROL_SOCKET")) || remoteWindows(validated) {
+		return connectPortable(validated, prompt, "", false)
+	}
+
 	diagnostics := &sshDiagnostics{}
 	defer func() {
 		if result != nil {
-			result.warnings = diagnostics.String()
+			result.warnings = strings.TrimSpace(result.warnings + "\n" + diagnostics.String())
 			result.diagnostics = nil
 		}
 		if resultErr != nil && diagnostics.String() != "" {
@@ -98,6 +109,9 @@ func connect(destination string, prompt Prompt) (result *Tunnel, resultErr error
 	_, err = ensureControlMasterInteractive(destination, control, prompt, diagnostics)
 	if err != nil {
 		return nil, err
+	}
+	if remoteWindows(destination) {
+		return connectPortable(destination, prompt, "", false)
 	}
 	spec := local + ":" + remote
 	if err := diagnostics.run("-S", control, "-O", "forward", "-o", "ExitOnForwardFailure=yes", "-L", spec, destination); err != nil {
@@ -222,6 +236,9 @@ func (t *Tunnel) compatible() bool {
 }
 
 func (t *Tunnel) Close() error {
+	if t.portable != nil {
+		return t.portable.close()
+	}
 	if t.diagnostics != nil {
 		_ = t.diagnostics.run("-S", t.controlSocket, "-O", "cancel", "-L", t.forwardSpec, t.destination)
 	} else {
@@ -252,6 +269,9 @@ func remoteControlSocket(destination string) string {
 
 // OpenSSH adds a random suffix to ControlPath; Darwin permits only 104 bytes.
 func sshSocketDirectory() string {
+	if runtime.GOOS == "windows" {
+		return goplatform.RuntimeDirectory()
+	}
 	if directory := os.TempDir(); len(directory) <= 24 {
 		return directory
 	}
@@ -423,12 +443,17 @@ func sshOutput(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
 	defer cancel()
 	bounded := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	bounded.Stdin, bounded.Env, bounded.Dir = cmd.Stdin, cmd.Env, cmd.Dir
+	bounded.SysProcAttr = cmd.SysProcAttr
 	return bounded.CombinedOutput()
 }
 
 func command(name string, args ...string) *exec.Cmd {
-	if name == "ssh" {
-		if custom := os.Getenv("WATER_SSH_PROGRAM"); custom != "" {
+	if name == "ssh" || name == "scp" {
+		original := name
+		if custom := os.Getenv("WATER_SSH_PROGRAM"); custom != "" && original == "ssh" {
+			name = custom
+		}
+		if custom := os.Getenv("WATER_SCP_PROGRAM"); custom != "" && original == "scp" {
 			name = custom
 		}
 		if config := os.Getenv("WATER_SSH_CONFIG"); config != "" {

@@ -18,15 +18,15 @@ Water 由共享会话服务与独立客户端组成。server 管理 workspace/ta
 | --- | --- | --- |
 | 整体 UI 布局、主题、弹窗与操作语义 | [界面布局与交互](ui-design.md) | `internal/goui/ebiten_layout.go` |
 | Go GUI、窗口、输入与配置 | [Go 桌面界面与配置](desktop-gui.md) | `internal/gouiapp/`、`internal/goui/`、`internal/goconfig/` |
-| 终端流、网格、滚动、选区与图形 | [终端输出与渲染](terminal-rendering.md) | `internal/goterminal/`、`internal/govt/`、`internal/xterm/` |
+| 终端流、网格、滚动、选区与图形 | [终端输出与渲染](terminal-rendering.md) | `internal/gopty/`、`internal/goterminal/`、`internal/govt/`、`internal/xterm/` |
 | 调度、背压、缓存与性能验收 | [性能与资源管理](performance.md) | GUI、client、PTY 管线 |
-| 模型、协议、连接、多窗口与 SSH | [服务端与远程连接](remote-connections.md) | `internal/goserver/`、`internal/gomodel/`、`internal/goclient/`、`internal/goremote/` |
+| 模型、协议、连接、多窗口与 SSH | [服务端与远程连接](remote-connections.md) | `internal/goplatform/`、`internal/goserver/`、`internal/gomodel/`、`internal/goclient/`、`internal/goremote/` |
 | 兼容性与受保护的恢复 | [服务端兼容与恢复](server-recovery.md) | session、recovery 与 Server Settings |
 | Web listener、配对与浏览器权限 | [浏览器访问与配对](browser-access.md) | `internal/goserver/web.go`、`webassets/` |
 | Agent 识别、状态与控制 | [Agent 识别与控制](agent-integration.md) | `internal/goagent/` |
 | 终端内前端 | [TUI 终端界面](terminal-ui.md) | `internal/gotui/` |
 | 控制命令与自动化 | [控制命令与自动化](control-api.md) | `cmd/water/ctl.go`、dispatcher |
 | 构建、变体、更新、签名与发布 | [构建打包与发布](build-and-release.md) | `internal/gobuild/`、`internal/goupdate/`、`scripts/` |
-| 回归选择、证据与实例所有权 | [测试与验证](testing.md) | `scripts/run-go-regression.py`、`scripts/water_test.py` |
+| 回归选择、证据与实例所有权 | [测试与验证](testing.md) | `scripts/run-go-regression.py`、`scripts/run-go-regression-windows.ps1`、`scripts/water_test.py` |
 
 完整配置字段见 [config.example.json](../config.example.json)，已发布版本说明见 [releases](releases/)。模块中的命令用于落实与验证相应规则，不再维护另一份全局操作手册。

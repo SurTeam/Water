@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"os"
 	"strconv"
 	"strings"
@@ -1102,10 +1103,7 @@ func resolveControlSocket(cfg goconfig.AppConfig) string {
 	if cfg.Startup.ControlSocket != nil && strings.TrimSpace(*cfg.Startup.ControlSocket) != "" {
 		return strings.TrimSpace(*cfg.Startup.ControlSocket)
 	}
-	if buildVariant == "release" {
-		return "/tmp/water.sock"
-	}
-	return "/tmp/water-dev.sock"
+	return goplatform.DefaultSocket(buildVariant)
 }
 
 func option(args []string, name string) (string, bool) {

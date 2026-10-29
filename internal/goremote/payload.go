@@ -52,6 +52,9 @@ func detectRemoteTarget(destination, control string, collectors ...*sshDiagnosti
 
 func embeddedServerPayload(target RemoteTarget) ([]byte, bool) {
 	name := fmt.Sprintf("payloads/water-server-%s-%s", target.OS, target.Arch)
+	if target.OS == "windows" {
+		name += ".exe"
+	}
 	data, err := embeddedServers.ReadFile(name)
 	return data, err == nil && len(data) > 0
 }

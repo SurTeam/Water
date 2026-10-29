@@ -3,6 +3,7 @@ package gosupervisor
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 // TestOutputThroughputKeepsUpWithFastProducer guards the hot path: a program that
 // floods the PTY must not lose bytes or fall behind through the supervisor.
 func TestOutputThroughputKeepsUpWithFastProducer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)

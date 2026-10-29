@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -159,14 +158,18 @@ func TestNativeInstallerRestartAndRollback(t *testing.T) {
 			defer func() {
 				if data, e := os.ReadFile(pidFile); e == nil {
 					if pid, e := strconv.Atoi(string(data)); e == nil && pid > 1 {
-						_ = syscall.Kill(pid, syscall.SIGTERM)
+						if process, err := os.FindProcess(pid); err == nil {
+							_ = process.Kill()
+						}
 					}
 				}
 				// Only the helper PID recorded in this test's private directory
 				// may be cleaned if a failing test leaves it waiting.
 				if data, e := os.ReadFile(filepath.Join(stage, "installer.pid")); e == nil {
 					if pid, e := strconv.Atoi(string(data)); e == nil && pid > 1 {
-						_ = syscall.Kill(pid, syscall.SIGTERM)
+						if process, err := os.FindProcess(pid); err == nil {
+							_ = process.Kill()
+						}
 					}
 				}
 			}()

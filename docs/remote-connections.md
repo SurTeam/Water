@@ -9,8 +9,8 @@
 - 实体、connection、operation 使用 typed ID 与完整 UUIDv4；JSON/CLI 使用 UUID 字符串，二进制保留全部 16 字节。禁止集合下标、计数器、截断和浮点身份。命令路由到目标对象所属 connection。
 - 协议版本、API signature、能力与构建 revision 以 `internal/goprotocol`、`internal/gobuild` 为准。产品版本不是兼容性判断条件。不兼容时保留诊断入口并阻止普通操作。
 - 每个窗口独立保留 workspace/tab/pane 选择。共享快照不得覆盖其他窗口选择；仅焦点 session 自动修改共享 PTY 网格。获得焦点时重新提交当前几何，客户端像素度量不能因未聚焦而停止更新。
-- listener 整个生命周期持有锁，不能替换活跃 socket；删除时校验自己创建的 inode。退出和共享 server 生命周期使用已有 session，Web listener 的存活也纳入判断。
-- SSH 使用系统 OpenSSH ControlMaster 与 Unix socket forwarding。远端 endpoint 稳定发现，payload 按变体、平台、版本、协议与 server revision 隔离；可诊断的旧实例优先复用并提示升级，完全不可兼容时在旁边启动本版本实例并明确告知，旧实例原样保留，不得删除、替换或用空 server 冒充。
+- listener 整个生命周期持有锁，不能替换活跃 endpoint；Unix socket 删除时校验自己创建的 inode，Windows 使用平台私有 endpoint 与访问控制。退出和共享 server 生命周期使用已有 session，Web listener 的存活也纳入判断。
+- Unix 到 Unix 的默认 SSH 路径使用系统 OpenSSH ControlMaster 与 Unix socket forwarding；Windows 客户端使用原生 Go SSH，Windows 目标使用 portable stdio bridge。远端 endpoint 稳定发现，payload 按变体、平台、版本、协议与 server revision 隔离；可诊断的旧实例优先复用并提示升级，完全不可兼容时在旁边启动本版本实例并明确告知，旧实例原样保留，不得删除、替换或用空 server 冒充。
 - GUI 远端重连保留 connection/pane 身份与设置草稿，健康检查和显式 server 操作按 connection 串行；RPC、SSH 与关闭等待均须有界。
 
 ## 当前命令与连接逻辑
@@ -21,19 +21,27 @@
 
 `tab.new`、`tab.new_in_workspace` 和 `pane.split` 创建模型对象后若 shell 启动失败，必须撤销新 tab/pane 并恢复原 workspace/tab/pane 选择，不能遗留空窗格。回滚只恢复选择，不导入整份旧模型，以保留启动等待期间积累的终端元数据。
 
-启动探测发现正在监听的 socket 时，不因暂时超时就 unlink 或替换；listener 持锁并按 inode 清理自己的路径。SSH 先发现稳定 endpoint，复用可诊断旧实例，避免产品升级新建一套空工作区；缓存 payload 与 endpoint 身份分开管理。
+启动探测发现正在监听的 endpoint 时，不因暂时超时就删除或替换；Unix listener 持锁并按 inode 清理自己的路径。SSH 先发现稳定 endpoint，复用可诊断旧实例，避免产品升级新建一套空工作区；缓存 payload 与 endpoint 身份分开管理。
 
-远端存在两套 endpoint：稳定 endpoint 用于跨版本复用，side endpoint 在路径中带协议与 API signature 身份，仅在稳定 endpoint 被不可兼容实例占用时使用。占用判定用 `test -S` 区分"尚无 server"（照常在稳定 endpoint 启动）与"有但无法通信"（转 side endpoint）；再次连接复用已存在的 side 实例，不重复启动。
+远端存在两套 endpoint：稳定 endpoint 用于跨版本复用，side endpoint 在路径中带协议与 API signature 身份，仅在稳定 endpoint 被不可兼容实例占用时使用。Unix forwarding 路径的占用判定用 `test -S` 区分"尚无 server"（照常在稳定 endpoint 启动）与"有但无法通信"（转 side endpoint）；再次连接复用已存在的 side 实例，不重复启动。
 
 GUI 多窗口按 focus 决定自动 PTY resize。TUI 也声明焦点；浏览器使用受限 session，不具备恢复、管理或 GUI 自动化权限。Go 桌面/TUI 正常 socket 路径的终端流独立于控制 RPC；GUI 进一步按 terminal 实例拥有独立订阅与 worker，满队列只背压该流。GUI 订阅按连接句柄持有和取消，迟到旧 attach 的取消不会 detach 同 UUID 的新订阅；初次 attach/replay 不占用共享模型消费循环。浏览器复用 WebSocket。具体背压与已知缺口见 [性能与资源管理](performance.md)。原始 replay 的行预算与单帧 attach 边界见 [终端输出与渲染](terminal-rendering.md)。
 
 ## SSH 认证与诊断
 
-GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 OpenSSH 返回认证拒绝时通过私有 askpass helper 请求密码或 keyboard-interactive 输入；网络、主机密钥、配置和部署错误直接展示诊断，不误报为密码问题。密码输入遮蔽，凭据通过当前尝试的私有 Unix socket 传递，不放入命令参数或环境变量。认证支持取消并有超时。后台自动重连以及 GUI 启动前处理的 `--ssh` 保持非交互，不反复弹出认证框。
+Unix forwarding 路径的 GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 OpenSSH 返回认证拒绝时通过私有 askpass helper 请求密码或 keyboard-interactive 输入；网络、主机密钥、配置和部署错误直接展示诊断，不误报为密码问题。密码输入遮蔽，凭据通过当前尝试的私有 Unix socket 传递，不放入命令参数或环境变量。认证支持取消并有超时。后台自动重连以及 GUI 启动前处理的 `--ssh` 保持非交互，不反复弹出认证框。
 
 连接尝试独立收集 SSH stderr，机器可读探测仅解析 stdout；成功命令的 warning 不得丢弃或污染平台、socket 和 descriptor 解析。但 OpenSSH 控制命令的结果也写 stderr：`-O check` 成功时打印 `Master running (pid=N)` 并返回 0，这类状态行描述的是控制操作本身，不是连接诊断，不得作为 warning 展示；其余成功命令的 stderr 仍按 warning 保留。连接失败保留此前收集的诊断，成功后在新 connection 的远程面板显示 warning。完整错误的换行与滚动交互见 [界面布局与交互](ui-design.md)。
 
-远端命令由远端登录 shell 解释执行，探测命令不能依赖其 glob 语义：zsh 在未匹配时直接以 `no matches found` 失败，而 sh/bash 会把 pattern 原样传入。旧实例探测固定用显式 `sh -c` 包裹，避免 shell 差异变成连接失败。
+Unix 远端命令由远端登录 shell 解释执行，探测命令不能依赖其 glob 语义：zsh 在未匹配时直接以 `no matches found` 失败，而 sh/bash 会把 pattern 原样传入。旧实例探测固定用显式 `sh -c` 包裹，避免 shell 差异变成连接失败。
+
+## Portable SSH 与 Windows 边界
+
+`WATER_SSH_TRANSPORT=stdio` 显式选择 portable transport，`=go` 选择原生 Go SSH；Windows 客户端默认使用后者。stdio bridge 在 SSH channel 上承载已有服务协议，不依赖 Unix socket forwarding。关闭连接视图只清理该 tunnel 拥有的连接，远端 server 的生命周期独立。原生认证连接按解析后的配置复用，最后一个引用释放后保留最多 10 分钟，连接失效即从池移除；不保存密码供后台重新认证。
+
+原生 SSH 读取用户 SSH config 的 `Host`（含否定 pattern）、`Include`、HostName/User/Port、IdentityFile、IdentitiesOnly、UserKnownHostsFile 与 ProxyJump，支持私钥、agent、密码和 keyboard-interactive。它不是完整 OpenSSH 配置解释器：`Match` 和 `ProxyCommand` 明确拒绝，多跳使用嵌套 Host 的 ProxyJump，不接受逗号分隔列表。主机密钥按 known_hosts 校验，未知密钥按配置与交互确认策略处理，已变更密钥不能由密码重试绕过。
+
+原生上传通过 SFTP，远端 SSH 服务必须启用 SFTP subsystem。Windows 平台探测、部署和启动使用编码的 PowerShell 命令，payload 仍按平台、架构、变体与构建身份隔离；Unix 命令和 `test -S` 不能直接套用到 Windows。
 
 ## 远端 server 版本不一致
 
@@ -46,9 +54,10 @@ GUI 手动连接先复用 ControlMaster，再尝试非交互认证。仅在 Open
 
 ## PTY 所有权与升级不断行
 
-PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervisor`），server 通过 unix socket 成为它的客户端。经过 recovery 校验并导出布局的升级重启会保留程序，新 server 按 pane id 重新 attach，并用 supervisor 保留的输出历史重建 replay。普通关闭 server 则终止其终端程序并关闭独占 supervisor；仅关闭 GUI 而保留 server 不触发清理。
+PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervisor`），server 通过平台控制 transport 成为它的客户端。经过 recovery 校验并导出布局的升级重启会保留程序，新 server 按 pane id 重新 attach，并用 supervisor 保留的输出历史重建 replay。普通关闭 server 则终止其终端程序并关闭独占 supervisor；仅关闭 GUI 而保留 server 不触发清理。
 
-- 本地打包将 server 二进制另装为 `water-pty`（release）或 `water-pty-dev`（dev），优先以该名称启动 supervisor；旧安装包及仅携带 server 的远端 payload 回退到原 server 名称。`--pty-supervisor` 角色以新 session 启动，生命周期不跟随 server。默认启用，`WATER_PTY_SUPERVISOR=off` 退回进程内模式。
+- 本地打包将 server 二进制另装为 `water-pty`（release）或 `water-pty-dev`（dev），优先以该名称启动 supervisor；旧安装包及仅携带 server 的远端 payload 回退到原 server 名称。`--pty-supervisor` 角色以平台 detached 方式启动（Unix 为新 session），生命周期不跟随 server。默认启用，`WATER_PTY_SUPERVISOR=off` 退回进程内模式。
+- PTY 后端统一由 `internal/gopty` 持有。Windows 使用 ConPTY 与注册到 Go poller 的 overlapped 管道，支持读写 deadline 和 resize 顺序屏障；每个 terminal 拥有独立 kill-on-close Job。根进程以 suspended 状态创建，成功加入 Job 后才恢复执行；Job 分配失败则终止启动，不能让用户代码先运行。关闭 pane、替换 terminal 和普通关闭 server 终止该 Job 内的进程树，不能套用 Unix PID/进程组信号规则。Windows 前台进程查询依据该 terminal 的 Job，PowerShell prompt 目录报告带进程启动身份，避免 PID 复用污染目录继承。
 - GUI 内嵌 server 与独立 server 都必须调用同一个启用入口；否则本地重启会重新 spawn pane，而远端升级却能接回。
 - supervisor 的键是 pane id（跨 server 重启稳定），terminal 实例 id 每次 spawn 都新建。两者必须分开：客户端按实例 id 订阅，替换 pane 的 terminal 时才会重新 attach；若让实例 id 等于 pane id，GUI 会继续挂在已退役的流上，OSC 标题、Agent 状态都会停在旧值。
 - 普通 spawn 用 `Replace` 关闭该键上的旧程序；只有 recovery 导入时传 `resume`，才接回上一个 server 留下的程序。旧代的事件按 generation 丢弃，被替换的 terminal 从 registry 移除后其 Exit 不再关闭 pane。
@@ -57,15 +66,15 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - resize 由 supervisor 的读循环串行处理：先 flush 已观察输出，再应用几何并发布 resize 事件，保证 server 不会先看到新几何。
 - 每个连接一个写协程串行化所有帧（控制回复与终端输出共用 socket，不串行会交叉破坏帧）；订阅者队列满时只丢弃该订阅，不阻塞 PTY 读循环，也不关闭承载控制流量的连接。
 - 只有已确认的 `recovery.shutdown` 才 detach 并保留程序；普通 `Close` 关闭 supervisor 并等待连接结束。supervisor 收到关闭请求后终止程序并退出进程。默认按控制 socket 隔离 supervisor；升级时发现旧版共享 socket 则兼容接回，普通关闭只清理自己的 pane，共享 supervisor 无剩余终端时才关闭。异常强制终止不能保证执行清理。
-- 关闭 pane、替换 terminal 和普通关闭 server 时，进程内终端与新版 supervisor 共用 `internal/ptyprocess` 清理：spawn 后、启动 Wait 前保存根进程的原生启动身份，关闭时在终止 shell 前枚举同一 PTY 会话成员及仍可追溯的后代，并发送 `SIGKILL`，包括独立任务进程组和仍保有亲缘关系的另建会话子进程。此操作强制终止程序，不执行优雅退出。
-- 进程枚举使用 750 ms 预算和 4 MiB 输出上限；信号前复核根进程与目标身份，避免历史 PID 复用建立错误的清理归属。枚举失败时只回退到身份已确认的原进程组及直接子进程；根进程已回收或身份无法确认时只尝试由 `os.Process` 持有的直接子进程。清理为尽力执行，快照之后新建的后代，以及已经脱离会话且失去可追溯关系的进程，不保证被终止。预算不代表整个关闭操作的硬性时限。
+- Unix 关闭 pane、替换 terminal 和普通关闭 server 时，进程内终端与新版 supervisor 共用 `internal/ptyprocess` 清理：spawn 后、启动 Wait 前保存根进程的原生启动身份，关闭时在终止 shell 前枚举同一 PTY 会话成员及仍可追溯的后代，并发送 `SIGKILL`，包括独立任务进程组和仍保有亲缘关系的另建会话子进程。此操作强制终止程序，不执行优雅退出。
+- Unix 进程枚举使用 750 ms 预算和 4 MiB 输出上限；信号前复核根进程与目标身份，避免历史 PID 复用建立错误的清理归属。枚举失败时只回退到身份已确认的原进程组及直接子进程；根进程已回收或身份无法确认时只尝试由 `os.Process` 持有的直接子进程。清理为尽力执行，快照之后新建的后代，以及已经脱离会话且失去可追溯关系的进程，不保证被终止。预算不代表整个关闭操作的硬性时限。
 - 升级后保留的旧 supervisor 继续使用旧清理实现；仅更新 GUI 或通过 recovery 接回已有 PTY，不会替换该 supervisor 的代码。
 - 显式替换 pane 的 terminal 走 supervisor 的 `Replace`：先注册新 terminal 并把回复写到线上，再关闭旧程序，server 因此能在旧 Exit 到达前完成安装。
-- supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
+- Unix supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
 - 客户端须在发送请求前登记响应等待项，登记顺序与帧写入顺序共用同一个可取消的门；带终端身份的响应还须校验目标，避免后台采样与手动诊断并发时丢失或错配回复。请求写入与等待均受截止时间约束。
 - 当前 supervisor 协议没有请求关联 ID；已发送请求取消后保留 FIFO 占位，迟到响应只消费原请求的位置。不能直接删除等待项而让旧响应满足新请求。永不返回的响应占位保留至连接关闭；协议字段保持兼容已有 supervisor。
 
-性能边界：多一跳 unix socket，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
+性能边界：多一跳平台控制 transport，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
 
 ## 验证
 

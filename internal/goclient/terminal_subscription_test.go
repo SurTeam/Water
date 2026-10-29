@@ -32,7 +32,7 @@ func (c *subscriptionTestConn) event(id uuid.UUID, seq uint64, data string) erro
 
 func subscriptionTestServer(t *testing.T, attach func(*subscriptionTestConn, goprotocol.WireMessage, <-chan struct{})) string {
 	t.Helper()
-	socket := filepath.Join("/tmp", "water-sub-"+uuid.NewString()+".sock")
+	socket := filepath.Join(testSocketDirectory(t), "water-sub-"+uuid.NewString()+".sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)

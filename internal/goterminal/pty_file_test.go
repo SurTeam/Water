@@ -1,7 +1,10 @@
+//go:build !windows
+
 package goterminal
 
 import (
 	"bytes"
+	"github.com/SurTeam/Water/internal/gopty"
 	"os"
 	"syscall"
 	"testing"
@@ -43,7 +46,7 @@ func TestRawReaderFlushesSparseOutputWithoutBusyRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	term := &Terminal{ptmx: reader, closed: make(chan struct{}), rawFlushRequests: make(chan rawFlushRequest, 1)}
+	term := &Terminal{ptmx: &gopty.Session{File: reader}, closed: make(chan struct{}), rawFlushRequests: make(chan rawFlushRequest, 1)}
 	out := make(chan []byte, 2)
 	free := make(chan []byte, 2)
 	done := make(chan struct{})
@@ -87,7 +90,7 @@ func TestRawReaderBarrierPausesBeforeFurtherReads(t *testing.T) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	term := &Terminal{ptmx: reader, closed: make(chan struct{}), rawFlushRequests: make(chan rawFlushRequest, 1)}
+	term := &Terminal{ptmx: &gopty.Session{File: reader}, closed: make(chan struct{}), rawFlushRequests: make(chan rawFlushRequest, 1)}
 	defer close(term.closed)
 	out := make(chan []byte, 2)
 	free := make(chan []byte, 2)

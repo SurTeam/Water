@@ -23,7 +23,15 @@ func TestXDGPathPrecedence(t *testing.T) {
 	}
 	t.Setenv("XDG_CONFIG_HOME", "relative")
 	t.Setenv("XDG_CONFIG", "relative")
-	if got := DefaultPath("release"); got != filepath.Join(os.Getenv("HOME"), ".config", "water", "config.json") {
+	expected := filepath.Join(os.Getenv("HOME"), ".config", "water", "config.json")
+	if runtime.GOOS == "windows" {
+		root, err := os.UserConfigDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		expected = filepath.Join(root, "water", "config.json")
+	}
+	if got := DefaultPath("release"); got != expected {
 		t.Fatal(got)
 	}
 }

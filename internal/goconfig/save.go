@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/SurTeam/Water/internal/goagent"
-	"golang.org/x/sys/unix"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"net"
 	"os"
 	"path/filepath"
@@ -34,10 +34,10 @@ func saveConfig(path string, cfg AppConfig, preferencesOnly bool, sectionOnly st
 		return err
 	}
 	defer lock.Close()
-	if err = unix.Flock(int(lock.Fd()), unix.LOCK_EX); err != nil {
+	if err = goplatform.LockFile(lock, false); err != nil {
 		return err
 	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	defer goplatform.UnlockFile(lock)
 
 	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {

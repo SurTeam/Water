@@ -3,6 +3,7 @@ package gosupervisor
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 )
 
 func TestClientCloseKillsSignalIgnoringShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	server, socket := startSupervisor(t)
 	client, err := Dial(socket)
 	if err != nil {

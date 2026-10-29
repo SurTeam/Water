@@ -7,10 +7,11 @@ import (
 )
 
 func TestPaneResizeDefaultsMigrationAndRoundTrip(t *testing.T) {
+	defaults := Default().Shortcuts
 	for _, tc := range []struct{ raw, remote, taller string }{
-		{`{}`, "cmd-alt-k", "cmd-shift-k"},
-		{`{"shortcuts":{"connect_remote":"cmd-shift-k"}}`, "cmd-alt-k", "cmd-shift-k"},
-		{`{"overrides":{"shortcuts":{"connect_remote":"cmd-shift-k"}}}`, "cmd-alt-k", "cmd-shift-k"},
+		{`{}`, defaults.ConnectRemote, defaults.PaneTaller},
+		{`{"shortcuts":{"connect_remote":"cmd-shift-k"}}`, "cmd-alt-k", defaults.PaneTaller},
+		{`{"overrides":{"shortcuts":{"connect_remote":"cmd-shift-k"}}}`, "cmd-alt-k", defaults.PaneTaller},
 		{`{"shortcuts":{"connect_remote":"ctrl-r","pane_taller":"ctrl-up"}}`, "ctrl-r", "ctrl-up"},
 		{`{"shortcuts":{"connect_remote":"cmd-shift-k","pane_taller":""}}`, "cmd-shift-k", ""},
 	} {
@@ -23,7 +24,7 @@ func TestPaneResizeDefaultsMigrationAndRoundTrip(t *testing.T) {
 			t.Fatal(err)
 		}
 		s := cfg.Shortcuts
-		if s.ConnectRemote != tc.remote || s.PaneTaller != tc.taller || s.PaneNarrower != "cmd-shift-h" || s.PaneWider != "cmd-shift-l" || s.PaneShorter != "cmd-shift-j" {
+		if s.ConnectRemote != tc.remote || s.PaneTaller != tc.taller || s.PaneNarrower != defaults.PaneNarrower || s.PaneWider != defaults.PaneWider || s.PaneShorter != defaults.PaneShorter {
 			t.Fatalf("incorrect defaults/migration: %+v", s)
 		}
 		cfg.Shortcuts.PaneNarrower = "ctrl-left"

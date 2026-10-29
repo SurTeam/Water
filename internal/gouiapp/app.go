@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"net"
 	"os"
 	"os/exec"
@@ -402,7 +403,7 @@ func resolveSiblingServer(executable, variant string) (string, error) {
 	}
 	var candidates []string
 	for _, name := range names {
-		candidates = append(candidates, filepath.Join(filepath.Dir(executable), name))
+		candidates = append(candidates, filepath.Join(filepath.Dir(executable), goplatform.ExecutableName(name)))
 	}
 	// PATH fallback is variant-specific and must pass the same full descriptor check.
 	pathName := "water-server"
@@ -463,8 +464,5 @@ func resolveGUISocket(explicit string, cfg goconfig.AppConfig, buildVariant stri
 	if cfg.Startup.ControlSocket != nil && strings.TrimSpace(*cfg.Startup.ControlSocket) != "" {
 		return strings.TrimSpace(*cfg.Startup.ControlSocket)
 	}
-	if buildVariant == "release" {
-		return "/tmp/water.sock"
-	}
-	return "/tmp/water-dev.sock"
+	return goplatform.DefaultSocket(buildVariant)
 }

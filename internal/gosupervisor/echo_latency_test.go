@@ -2,6 +2,7 @@ package gosupervisor
 
 import (
 	"bytes"
+	"runtime"
 	"testing"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 // event for a 1-byte echo, the same quantity the GUI's input.echo_latency
 // observes, without needing a display.
 func TestEchoLatencyAfterInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	client, err := Dial(socket)
 	if err != nil {

@@ -1,3 +1,5 @@
+//go:build !windows
+
 package goterminal
 
 import (
@@ -16,7 +18,7 @@ func TestResizePublishesPixelGeometryToPTY(t *testing.T) {
 	if err := term.ResizeWithCells(goprotocol.TerminalSize{Columns: 90, Lines: 26}, 16, 44); err != nil {
 		t.Fatal(err)
 	}
-	ws, err := pty.GetsizeFull(term.ptmx)
+	ws, err := pty.GetsizeFull(term.ptmx.File)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +28,7 @@ func TestResizePublishesPixelGeometryToPTY(t *testing.T) {
 	if err := term.Resize(goprotocol.TerminalSize{Columns: 80, Lines: 24}); err != nil {
 		t.Fatal(err)
 	}
-	ws, err = pty.GetsizeFull(term.ptmx)
+	ws, err = pty.GetsizeFull(term.ptmx.File)
 	if err != nil || ws.X != 1280 || ws.Y != 1056 {
 		t.Fatalf("grid-only resize lost cells: %+v %v", ws, err)
 	}

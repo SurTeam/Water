@@ -4,10 +4,11 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
+	"runtime"
 	"time"
 
 	"github.com/SurTeam/Water/internal/gobuild"
@@ -20,11 +21,11 @@ func supervisorSocketPath() string {
 	if explicit := os.Getenv("WATER_PTY_SUPERVISOR_SOCKET"); explicit != "" {
 		return explicit
 	}
-	dir := os.TempDir()
-	if len(dir) > 24 {
+	dir := goplatform.RuntimeDirectory()
+	if len(dir) > 24 && runtime.GOOS != "windows" {
 		dir = "/tmp"
 	}
-	return filepath.Join(dir, fmt.Sprintf("water-go-pty-%s-%d.sock", gobuild.Variant, os.Geteuid()))
+	return filepath.Join(dir, fmt.Sprintf("water-go-pty-%s-%s.sock", gobuild.Variant, goplatform.UserToken()))
 }
 
 // EnableSupervisor makes this server own terminals through a PTY supervisor.
@@ -36,7 +37,7 @@ func (s *Server) EnableSupervisor() error {
 		// Independent servers must never terminate each other's terminals.
 		identity := sha256.Sum256([]byte(s.SocketPath))
 		legacy := socket
-		socket = filepath.Join(filepath.Dir(socket), fmt.Sprintf("water-pty-%s-%d-%x.sock", gobuild.Variant, os.Geteuid(), identity[:8]))
+		socket = filepath.Join(filepath.Dir(socket), fmt.Sprintf("water-pty-%s-%s-%x.sock", gobuild.Variant, goplatform.UserToken(), identity[:8]))
 		// Preserve upgrades from the legacy shared supervisor. Close only this
 		// server's panes there; another old server may still own other panes.
 		if client, err := gosupervisor.Dial(legacy); err == nil {
@@ -88,7 +89,7 @@ func ensureSupervisor(socket string) error {
 	command.Stderr = nil
 	// A new session detaches the supervisor from this server's process group, so
 	// stopping the server cannot signal the programs it is holding.
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	goplatform.Detach(command)
 	if err := command.Start(); err != nil {
 		return err
 	}
@@ -132,9 +133,9 @@ func supervisorExecutable() (string, error) {
 		names = []string{"water-pty-dev", "water-srv-dev", "water-server"}
 	}
 	for _, name := range names {
-		candidate := filepath.Join(filepath.Dir(self), name)
+		candidate := filepath.Join(filepath.Dir(self), goplatform.ExecutableName(name))
 		info, statErr := os.Stat(candidate)
-		if statErr == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+		if statErr == nil && !info.IsDir() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0) {
 			return candidate, nil
 		}
 	}

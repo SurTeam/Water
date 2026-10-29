@@ -49,10 +49,10 @@ esac
 
 version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
-case "$(uname -m)" in
+case "${GOARCH:-$(go env GOHOSTARCH)}" in
   arm64) archive_arch=arm64 ;;
-  x86_64) archive_arch=amd64 ;;
-  *) echo "error: unsupported macOS architecture" >&2; exit 1 ;;
+  amd64) archive_arch=amd64 ;;
+  *) echo 'error: unsupported macOS target architecture' >&2; exit 1 ;;
 esac
 asset="${app_name}-${version}-macOS-${archive_arch}.zip"
 # GitHub normalizes spaces in release asset names to periods. Keep the local

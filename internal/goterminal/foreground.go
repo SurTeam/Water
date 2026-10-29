@@ -11,7 +11,6 @@ import (
 
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/google/uuid"
-	"golang.org/x/sys/unix"
 )
 
 func (t *Terminal) ForegroundGroup() (int, error) {
@@ -28,18 +27,9 @@ func (t *Terminal) ForegroundGroupContext(ctx context.Context) (int, error) {
 		// The supervisor owns the PTY master, so only it can read TIOCGPGRP.
 		return t.supervised.ForegroundContext(ctx, t.supervisedKeyUUID())
 	}
-	var group int
-	raw, err := t.ptmx.SyscallConn()
+	group, err := t.ptmx.ForegroundGroup()
 	if err != nil {
 		return 0, err
-	}
-	var queryErr error
-	err = raw.Control(func(fd uintptr) { group, queryErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP) })
-	if err != nil {
-		return 0, err
-	}
-	if queryErr != nil {
-		return 0, queryErr
 	}
 	if group <= 1 {
 		return 0, errors.New("no live foreground group")

@@ -1,7 +1,10 @@
+//go:build !windows
+
 package gosupervisor
 
 import (
 	"bytes"
+	"github.com/SurTeam/Water/internal/gopty"
 	"os"
 	"testing"
 	"time"
@@ -14,7 +17,7 @@ func TestRawReadDrainPreservesFragmentedOutput(t *testing.T) {
 	}
 	defer reader.Close()
 	defer writer.Close()
-	term := &terminal{ptmx: reader}
+	term := &terminal{ptmx: &gopty.Session{File: reader}}
 	out := make(chan []byte, 64)
 	free := make(chan []byte, 2)
 	done := make(chan struct{})
@@ -75,7 +78,7 @@ func TestRawReadPartialBlockFlushesWhileWriterRemainsOpen(t *testing.T) {
 	out := make(chan []byte, 1)
 	done := make(chan struct{})
 	defer close(done)
-	go (&terminal{ptmx: reader}).rawReadLoop(out, make(chan []byte, 2), done)
+	go (&terminal{ptmx: &gopty.Session{File: reader}}).rawReadLoop(out, make(chan []byte, 2), done)
 	if _, err := writer.Write([]byte("prompt> ")); err != nil {
 		t.Fatal(err)
 	}

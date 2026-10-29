@@ -1,3 +1,5 @@
+//go:build !windows
+
 // Package ptyprocess cleans up processes owned by a PTY session.
 package ptyprocess
 

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goplatform"
 )
 
 func TestWebTLSImportValidatesBeforeSavingAndRestartsWithPair(t *testing.T) {
@@ -42,7 +43,7 @@ func TestWebTLSImportValidatesBeforeSavingAndRestartsWithPair(t *testing.T) {
 	}
 	for _, name := range []string{saved.Web.TLSCertFile, saved.Web.TLSKeyFile} {
 		info, err := os.Stat(name)
-		if err != nil || info.Mode().Perm() != 0600 {
+		if err != nil || !goplatform.IsPrivate(name, info) {
 			t.Fatalf("TLS asset permissions: %v %v", info, err)
 		}
 	}

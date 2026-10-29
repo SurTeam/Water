@@ -3,22 +3,16 @@ package gosupervisor
 import (
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/SurTeam/Water/internal/ptyprocess"
-	"io"
+	"github.com/SurTeam/Water/internal/gopty"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
 
@@ -57,13 +51,15 @@ type Server struct {
 	once       sync.Once
 }
 
+type rawFlushRequest struct{ ready, resume chan struct{} }
+
 type terminal struct {
-	id             string
-	generation     uint64
-	ptmx           *os.File
-	cmd            *exec.Cmd
-	processSession *ptyprocess.Session
-	pid            int
+	readerDone       chan struct{}
+	rawFlushRequests chan rawFlushRequest
+	id               string
+	generation       uint64
+	ptmx             *gopty.Session
+	pid              int
 
 	mu          sync.Mutex
 	restore     historyRestore
@@ -289,33 +285,24 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 		cmd.Dir = req.Cwd
 	}
 	cmd.Env = append(append([]string{}, req.Env...), "TERM=xterm-256color", "COLORTERM=truecolor")
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: req.Lines, Cols: req.Columns})
+	ptmx, err := gopty.Start(cmd, &gopty.Size{Rows: req.Lines, Cols: req.Columns})
 	if err != nil {
 		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
 	}
-	processSession := ptyprocess.Capture(cmd.Process)
-	pollable, err := makePollablePTY(ptmx)
-	if err != nil {
-		_ = ptmx.Close()
-		_ = processSession.Kill()
-		_ = cmd.Wait()
-		return spawnedResponse{ID: req.ID, Error: err.Error()}, nil
-	}
-	ptmx = pollable
 	s.mu.Lock()
 	s.generation[req.ID]++
 	generation := s.generation[req.ID]
 	s.mu.Unlock()
 	t := &terminal{
-		id:             req.ID,
-		generation:     generation,
-		ptmx:           ptmx,
-		cmd:            cmd,
-		processSession: processSession,
-		pid:            cmd.Process.Pid,
-		subs:           make(map[*subscriber]struct{}),
-		resize:         make(chan resizeRequest, 8),
-		closed:         make(chan struct{}),
+		readerDone:       make(chan struct{}),
+		rawFlushRequests: make(chan rawFlushRequest, 1),
+		id:               req.ID,
+		generation:       generation,
+		ptmx:             ptmx,
+		pid:              ptmx.PID(),
+		subs:             make(map[*subscriber]struct{}),
+		resize:           make(chan resizeRequest, 8),
+		closed:           make(chan struct{}),
 	}
 	s.mu.Lock()
 	s.terms[req.ID] = t
@@ -423,19 +410,9 @@ func (s *Server) foreground(id string) foregroundResponse {
 	if t == nil {
 		return foregroundResponse{ID: id, Error: "unknown terminal"}
 	}
-	var group int
-	var queryErr error
-	raw, err := t.ptmx.SyscallConn()
+	group, err := t.ptmx.ForegroundGroup()
 	if err != nil {
 		return foregroundResponse{ID: id, Error: err.Error()}
-	}
-	if err := raw.Control(func(fd uintptr) {
-		group, queryErr = unix.IoctlGetInt(int(fd), unix.TIOCGPGRP)
-	}); err != nil {
-		return foregroundResponse{ID: id, Error: err.Error()}
-	}
-	if queryErr != nil {
-		return foregroundResponse{ID: id, Error: queryErr.Error()}
 	}
 	if group <= 1 {
 		return foregroundResponse{ID: id, Error: "no live foreground group"}
@@ -462,6 +439,9 @@ func (t *terminal) isExited() bool {
 // readLoop reads the PTY and coalesces micro-bursts before publishing, so the
 // server receives a few large frames instead of one frame per read.
 func (t *terminal) readLoop(s *Server) {
+	if t.readerDone != nil {
+		defer close(t.readerDone)
+	}
 	raw := make(chan []byte, 64)
 	done := make(chan struct{})
 	defer close(done)
@@ -514,6 +494,14 @@ func (t *terminal) readLoop(s *Server) {
 			case free <- chunk[:readBlock]:
 			default:
 			}
+			// The raw reader already identifies small interactive echoes. Do not
+			// impose a second coalescing timer after that immediate handoff.
+			if len(pending) <= echoFlushMaxBytes && time.Since(time.Unix(0, t.lastInput.Load())) < echoFlushWindow {
+				stop(idle, &idleC)
+				stop(maxAge, &maxC)
+				flush()
+				continue
+			}
 			if len(pending) >= readBlock {
 				stop(idle, &idleC)
 				stop(maxAge, &maxC)
@@ -541,12 +529,50 @@ func (t *terminal) readLoop(s *Server) {
 			stop(idle, &idleC)
 			flush()
 		case req := <-t.resize:
+			barrier := rawFlushRequest{ready: make(chan struct{}), resume: make(chan struct{})}
+			select {
+			case t.rawFlushRequests <- barrier:
+			case <-done:
+			}
+			t.ptmx.SetReadDeadline(time.Now())
+		waiting:
+			for {
+				select {
+				case chunk, ok := <-raw:
+					if !ok {
+						break waiting
+					}
+					pending = append(pending, chunk...)
+					select {
+					case free <- chunk[:readBlock]:
+					default:
+					}
+				case <-barrier.ready:
+					break waiting
+				}
+			}
+		draining:
+			for {
+				select {
+				case chunk, ok := <-raw:
+					if !ok {
+						break draining
+					}
+					pending = append(pending, chunk...)
+					select {
+					case free <- chunk[:readBlock]:
+					default:
+					}
+				default:
+					break draining
+				}
+			}
 			// Ordering: every byte already read keeps the old geometry, then the
 			// resize is applied and announced, then new output follows.
 			stop(idle, &idleC)
 			stop(maxAge, &maxC)
 			flush()
-			err := pty.Setsize(t.ptmx, &pty.Winsize{
+			err := t.ptmx.Resize(&gopty.Size{
 				Rows: req.Lines,
 				Cols: req.Columns,
 				X:    uint16(minInt(65535, int(req.CellW)*int(req.Columns))),
@@ -555,89 +581,7 @@ func (t *terminal) readLoop(s *Server) {
 			if err == nil {
 				t.announceResize(req)
 			}
-		}
-	}
-}
-
-// rawReadLoop drains small kernel fragments into reader-owned blocks before
-// handing them off. Runtime-poller waits yield the thread and a partial block
-// waits at most batchIdle since its last read or batchMaxAge since its first.
-func (t *terminal) rawReadLoop(out chan<- []byte, free <-chan []byte, done <-chan struct{}) {
-	defer close(out)
-	raw, err := t.ptmx.SyscallConn()
-	if err != nil {
-		return
-	}
-	for {
-		var buffer []byte
-		select {
-		case <-done:
-			return
-		case buffer = <-free:
-		default:
-			buffer = make([]byte, readBlock)
-		}
-		buffer = buffer[:readBlock]
-		n := 0
-		var readErr error
-		var started time.Time
-		waiting := false
-		err := raw.Read(func(fd uintptr) bool {
-			for n < len(buffer) {
-				count, callErr := syscall.Read(int(fd), buffer[n:])
-				if count > 0 {
-					n += count
-					if started.IsZero() {
-						started = time.Now()
-					}
-				}
-				if errors.Is(callErr, syscall.EINTR) {
-					continue
-				}
-				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
-					if n == 0 {
-						return false
-					}
-					if n <= echoFlushMaxBytes && time.Since(time.Unix(0, t.lastInput.Load())) < echoFlushWindow {
-						return true
-					}
-					deadline := time.Now().Add(batchIdle)
-					if maximum := started.Add(batchMaxAge); maximum.Before(deadline) {
-						deadline = maximum
-					}
-					_ = t.ptmx.SetReadDeadline(deadline)
-					waiting = true
-					return false
-				}
-				if callErr != nil {
-					readErr = callErr
-					return true
-				}
-				if count == 0 {
-					readErr = io.EOF
-					return true
-				}
-				if time.Since(started) >= batchMaxAge {
-					return true
-				}
-			}
-			return true
-		})
-		if waiting {
-			_ = t.ptmx.SetReadDeadline(time.Time{})
-		}
-		if n > 0 {
-			select {
-			case out <- buffer[:n]:
-			case <-done:
-				return
-			}
-		}
-		if err != nil || readErr != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
-			}
-			return
+			close(barrier.resume)
 		}
 	}
 }
@@ -689,15 +633,11 @@ func (t *terminal) publish(data []byte) {
 }
 
 func (t *terminal) waitLoop(s *Server) {
-	err := t.cmd.Wait()
-	code := int32(0)
-	if t.cmd.ProcessState != nil {
-		code = int32(t.cmd.ProcessState.ExitCode())
-	} else if err == nil {
-		code = 0
-	} else {
-		code = -1
+	_ = t.ptmx.Wait()
+	if t.readerDone != nil {
+		<-t.readerDone
 	}
+	code := int32(t.ptmx.ExitCode())
 	t.mu.Lock()
 	t.exited = true
 	t.exitCode = code
@@ -718,7 +658,7 @@ func (t *terminal) waitLoop(s *Server) {
 func (t *terminal) close() {
 	t.once.Do(func() {
 		close(t.closed)
-		_ = t.processSession.Kill()
+		_ = t.ptmx.Kill()
 		_ = t.ptmx.Close()
 	})
 }

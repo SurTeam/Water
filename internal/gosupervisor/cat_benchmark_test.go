@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"os"
+	"runtime"
 	"testing"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 
 // Opt-in real cat benchmark shared with the GUI's testTermCat workload.
 func TestCatBenchmark(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	path := os.Getenv("WATER_CAT_BENCHMARK_FILE")
 	if path == "" {
 		t.Skip("set WATER_CAT_BENCHMARK_FILE to the testTermCat fixture")

@@ -37,6 +37,10 @@ func NewManager(version, variant string, args []string, invalidate func()) *Mana
 	executable, _ := os.Executable()
 	executable, _ = filepath.EvalSymlinks(executable)
 	m := &Manager{state: State{Phase: "idle", Current: version}, variant: variant, executable: executable, args: append([]string(nil), args...), ctx: ctx, cancel: cancel, invalidate: invalidate}
+	if runtime.GOOS == "windows" {
+		m.state.Phase = "unsupported"
+		m.state.Error = "In-app updates are not yet available on Windows. Install a new Windows package manually."
+	}
 	if message := os.Getenv("WATER_UPDATE_ERROR"); message != "" {
 		m.state.Phase = "error"
 		m.state.Error = message
@@ -54,7 +58,7 @@ func (m *Manager) notify() {
 
 func (m *Manager) Check() {
 	m.mu.Lock()
-	if m.busy || m.closed || m.plan != nil {
+	if runtime.GOOS == "windows" || m.busy || m.closed || m.plan != nil {
 		m.mu.Unlock()
 		return
 	}

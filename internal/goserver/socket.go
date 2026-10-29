@@ -3,9 +3,9 @@ package goserver
 import (
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"net"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -16,11 +16,11 @@ func listenOwnedSocket(path string) (net.Listener, func(), error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err = goplatform.LockFile(lock, true); err != nil {
 		lock.Close()
 		return nil, nil, fmt.Errorf("socket %s already has an owner: %w", path, err)
 	}
-	release := func() { _ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN); _ = lock.Close() }
+	release := func() { _ = goplatform.UnlockFile(lock); _ = lock.Close() }
 	if info, statErr := os.Lstat(path); statErr == nil {
 		if info.Mode()&os.ModeSocket == 0 {
 			release()
@@ -32,7 +32,7 @@ func listenOwnedSocket(path string) (net.Listener, func(), error) {
 			release()
 			return nil, nil, fmt.Errorf("socket %s is already listening", path)
 		}
-		if !errors.Is(dialErr, syscall.ECONNREFUSED) {
+		if !goplatform.ConnectionRefused(dialErr) {
 			release()
 			return nil, nil, dialErr
 		}

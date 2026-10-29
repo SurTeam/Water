@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -242,7 +243,7 @@ type ThemeConfig struct {
 
 func Default() AppConfig {
 	cwd := "~"
-	return AppConfig{
+	cfg := AppConfig{
 		Startup: StartupConfig{
 			DefaultCWD:       &cwd,
 			InitialWorkspace: true,
@@ -342,11 +343,26 @@ func Default() AppConfig {
 			SidebarBackground:  "#252528",
 		},
 	}.Normalized()
+	if runtime.GOOS == "windows" {
+		cfg.Shortcuts = windowsDefaultShortcuts()
+	}
+	return cfg
 }
 
 func DefaultShellProgram() string {
 	if p := strings.TrimSpace(os.Getenv("WATER_SHELL")); p != "" {
 		return p
+	}
+	if runtime.GOOS == "windows" {
+		for _, candidate := range []string{"pwsh.exe", "powershell.exe"} {
+			if path, err := exec.LookPath(candidate); err == nil {
+				return path
+			}
+		}
+		if p := strings.TrimSpace(os.Getenv("COMSPEC")); p != "" {
+			return p
+		}
+		return "cmd.exe"
 	}
 	// SSH supplies the remote account's login shell in SHELL. Prefer it to
 	// installed-shell discovery so a server does not silently switch to zsh.
@@ -362,6 +378,12 @@ func DefaultShellProgram() string {
 }
 
 func DefaultShellArgs(program string) []string {
+	if runtime.GOOS == "windows" {
+		switch strings.ToLower(filepath.Base(program)) {
+		case "pwsh", "pwsh.exe", "powershell", "powershell.exe":
+			return []string{"-NoLogo"}
+		}
+	}
 	if filepath.Base(program) == "zsh" {
 		return []string{"-l"}
 	}
@@ -540,6 +562,12 @@ func StandardPath(buildVariant string) string {
 			return filepath.Join(base, dir, "config.json")
 		}
 	}
+	if runtime.GOOS == "windows" {
+		if root, err := os.UserConfigDir(); err == nil {
+			return filepath.Join(root, dir, "config.json")
+		}
+	}
+
 	home, _ := os.UserHomeDir()
 	if home != "" {
 		return filepath.Join(home, ".config", dir, "config.json")
@@ -656,4 +684,21 @@ func ParseColor(value string, fallback uint32) uint32 {
 		return fallback
 	}
 	return uint32(parsed)
+}
+
+// Windows defaults avoid Windows-logo shortcuts and preserve Ctrl+C/Ctrl+D for
+// terminal interrupt/EOF. Explicit saved shortcut overrides still win on load.
+func windowsDefaultShortcuts() ShortcutConfig {
+	return ShortcutConfig{
+		NewWindow: "ctrl-shift-n", ConnectRemote: "ctrl-alt-r", RenameWorkspace: "ctrl-shift-e", RenameTab: "ctrl-alt-t",
+		HideWindow: "ctrl-alt-shift-h", MinimizeWindow: "ctrl-alt-m", IgnoreQuit: "ctrl-alt-q",
+		SwitchTab: "alt-#", NextWorkspace: "ctrl-tab", PreviousWorkspace: "ctrl-shift-tab",
+		OpenSettings: "ctrl-,", SplitRight: "ctrl-shift-\\", SplitDown: "ctrl-shift--",
+		NextTab: "ctrl-pagedown", PreviousTab: "ctrl-pageup", ToggleSidebar: "ctrl-shift-b",
+		NewTerminalTab: "ctrl-shift-t", NewWorkspace: "ctrl-alt-n", CloseWorkspace: "ctrl-alt-w",
+		ClosePane: "ctrl-shift-w", PromotePaneToTab: "ctrl-shift-enter",
+		PaneNarrower: "ctrl-shift-h", PaneWider: "ctrl-shift-l", PaneShorter: "ctrl-shift-j", PaneTaller: "ctrl-shift-k",
+		FocusLeft: "ctrl-alt-h", FocusRight: "ctrl-alt-l", FocusUp: "ctrl-alt-k", FocusDown: "ctrl-alt-j",
+		Paste: "ctrl-shift-v", CopyOrInterrupt: "ctrl-shift-c", EOF: "ctrl-d", ScrollPageUp: "shift-pageup", ScrollPageDown: "shift-pagedown",
+	}
 }

@@ -3,10 +3,14 @@ package goconfig
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
 func TestDefaultShellRespectsUserShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix login shell discovery; Windows native defaults covered separately")
+	}
 	for _, shell := range []string{"/bin/bash", "/usr/bin/fish", "/bin/zsh"} {
 		t.Run(filepath.Base(shell), func(t *testing.T) {
 			t.Setenv("WATER_SHELL", "")

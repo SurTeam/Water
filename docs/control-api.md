@@ -72,9 +72,9 @@ water ctl pane execute --pane PANE_UUID \
 
 先检查目标 connection 的 `server info` 是否含 `pane-execute/v1` capability。旧的 detached/remote server 可能继续运行旧代码；升级 GUI 不会自动替换它，也不得为获得此接口擅自重启用户 server。
 
-RPC 为 `pane.execute`，参数是 `pane_id`、`command`、`timeout_ms`、`max_rows`、`max_bytes`。必须显式指定终端 pane，且处于空闲交互式 `sh`、`bash`、`dash`、`ksh` 或 `zsh` 的空输入行。只能检测前台进程组，无法证明输入行为空；调用方须先检查目标，执行期间避免并发输入。每个终端仅允许一个 execute，其他连接的模型命令不受执行等待阻塞。 本地及 supervised/resumed 终端使用独立保存的启动参数检查 shell 资格，不依赖仅本地进程才有的 `exec.Cmd`；仍拒绝 `-c` 和脚本参数等非交互启动方式。
+RPC 为 `pane.execute`，参数是 `pane_id`、`command`、`timeout_ms`、`max_rows`、`max_bytes`。必须显式指定终端 pane，且处于空闲交互式 shell；Unix 支持 `sh`、`bash`、`dash`、`ksh` 或 `zsh`，Windows 支持 `powershell.exe` / `pwsh.exe`。调用时必须处于空输入行。只能检测前台进程归属，无法证明输入行为空；调用方须先检查目标，执行期间避免并发输入。每个终端仅允许一个 execute，其他连接的模型命令不受执行等待阻塞。 本地及 supervised/resumed 终端使用独立保存的启动参数检查 shell 资格，不依赖仅本地进程才有的 `exec.Cmd`；仍拒绝 `-c` 和脚本参数等非交互启动方式。
 
-命令通过当前 pane 的交互 shell 启动前台 `/bin/sh` 子进程，继承当前工作目录与导出环境；不承诺父 shell 的 alias/function，`cd` 和变量赋值不会持久化到交互 shell。传输依赖系统 `base64 -d`，命令通过编码传入以避免 PTY 控制字符和 canonical 长行限制。
+Unix 命令通过当前 pane 的交互 shell 启动前台 `/bin/sh` 子进程，继承当前工作目录与导出环境；不承诺父 shell 的 alias/function，`cd` 和变量赋值不会持久化到交互 shell。传输依赖系统 `base64 -d`，命令通过编码传入以避免 PTY 控制字符和 canonical 长行限制。
 
 | 参数 | 默认与范围 |
 | --- | --- |
@@ -85,6 +85,8 @@ RPC 为 `pane.execute`，参数是 `pane_id`、`command`、`timeout_ms`、`max_r
 
 响应包含 `pane_id`、`terminal_id`、`status`、`text`、`lines`、可选 `exit_code`、`timed_out`、`signals`、`truncated`、`alt_screen` 和失败时的 `error`。`completed` 表示命令已结束，`exit_code` 仍可能非零；`timed_out` 表示超时；`failed` 表示执行或清理失败，仍尽量携带屏幕文本。CLI 对 `completed`（包括非零命令退出码）和 `timed_out` 返回 0，仅 `failed` 或 RPC/参数错误返回非零。Agent 必须同时检查状态、超时与退出码。
 
-输出来自保留 replay 和本次有序 PTY 流构建的临时终端模拟器，通过唯一 OSC 标记记录开始/结束行，在范围有效时提取其中的最终屏幕文本，排除输入回显。它不是 stdout/stderr 字节日志，也不是 GUI viewport，不应用 GUI 的 Agent clear policy。重绘覆盖或历史裁剪的内容无法恢复；行/字节上限、resize、备用屏幕和部分光标定位会触发截断或退化为有界活动屏幕，检查 `truncated`、`alt_screen`；退化屏幕可能包含执行前内容或输入回显。若模拟器读取本身超过 1 MiB cell-text 预算，可能返回 `failed` 且没有文本，而不是截断结果。标记用于同步，不是对恶意终端程序的安全边界。
+输出来自保留 replay 和本次有序 PTY 流构建的临时终端模拟器，Unix 通过唯一 OSC 标记、Windows 通过可见随机标记记录开始/结束行，在范围有效时提取其中的最终屏幕文本，排除输入回显。它不是 stdout/stderr 字节日志，也不是 GUI viewport，不应用 GUI 的 Agent clear policy。重绘覆盖或历史裁剪的内容无法恢复；行/字节上限、resize、备用屏幕和部分光标定位会触发截断或退化为有界活动屏幕，检查 `truncated`、`alt_screen`；退化屏幕可能包含执行前内容或输入回显。若模拟器读取本身超过 1 MiB cell-text 预算，可能返回 `failed` 且没有文本，而不是截断结果。标记用于同步，不是对恶意终端程序的安全边界。
 
-超时先校验本次包装进程的 PID、PGID、开始身份和前台所有权，再向其进程组发送 SIGTERM，250ms 后必要时 SIGKILL；绝不把 pane shell 当作取消目标。包装进程收到 TERM 后保留到宽限期结束以便清理忽略 TERM 的后代，因此通常会记录两种信号，不能据此判断用户命令是否忽略 TERM。执行计时从 replay 重建之后开始，覆盖命令提交与运行；清理最多额外等待约 2s，CLI 给 RPC 额外 5s，因此该时限不保证整个请求的严格墙钟耗时。后台或脱离进程组的后代、SSH 远端任务不保证终止；身份不明时拒绝发信号并报告清理失败。调用方断开连接不构成取消请求，服务端仍受原执行时限约束。
+Unix 超时先校验本次包装进程的 PID、PGID、开始身份和前台所有权，再向其进程组发送 SIGTERM，250ms 后必要时 SIGKILL；绝不把 pane shell 当作取消目标。包装进程收到 TERM 后保留到宽限期结束以便清理忽略 TERM 的后代，因此通常会记录两种信号，不能据此判断用户命令是否忽略 TERM。执行计时从 replay 重建之后开始，覆盖命令提交与运行；清理最多额外等待约 2s，CLI 给 RPC 额外 5s，因此该时限不保证整个请求的严格墙钟耗时。后台或脱离进程组的后代、SSH 远端任务不保证终止；身份不明时拒绝发信号并报告清理失败。调用方断开连接不构成取消请求，服务端仍受原执行时限约束。
+
+Windows execute 使用 pane 当前 PowerShell 可执行文件启动 `-NoLogo -NoProfile -NonInteractive` 子进程，继承导出环境与 `$PWD.ProviderPath` 文件系统目录；父 shell 的变量、函数及子进程中的目录修改不持久化。仅接受无脚本/命令参数的交互启动（允许 `-NoLogo`、`-NoProfile`、`-NoExit`）。子进程 suspended 创建后加入独立嵌套 Job，再恢复运行；取消或超时通过私有 cancel 文件请求包装器清理该 Job，`signals` 记录 `JOB_KILL`，不是 POSIX 信号。取消后额外等待最多约 3s，清理失败返回错误；这不是整个 RPC 的严格墙钟上限。ConPTY 会重绘、合并输出，因此等待可见开始/结束标记进入模拟器后提取文本，输出仍受行/字节预算和终端显示语义限制。

@@ -3,6 +3,7 @@ package goterminal
 import (
 	"bytes"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -105,6 +106,9 @@ func TestExitedReplayCacheCountLimit(t *testing.T) {
 }
 
 func TestNaturalExitRetiresAndExplicitRemovalDoesNotResurrect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	r := NewRegistry()
 	defer r.CloseAll()
 	term, err := r.Spawn("/bin/sh", []string{"-c", "printf final-output"}, goprotocol.TerminalSize{Columns: 80, Lines: 24})

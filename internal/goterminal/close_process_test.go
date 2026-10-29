@@ -3,6 +3,7 @@ package goterminal
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -10,6 +11,9 @@ import (
 )
 
 func TestCloseKillsSignalIgnoringShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	ready := filepath.Join(t.TempDir(), "ready")
 	r := NewRegistry()
 	defer r.CloseAll()

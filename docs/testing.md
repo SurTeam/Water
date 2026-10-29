@@ -15,6 +15,8 @@ Before delivery, run the matching profile once against the final code:
 ~/.venv/bin/python scripts/run-go-regression.py --profile full
 ```
 
+The following Python profiles use the existing Unix desktop/shell fixtures. They do not establish Windows native coverage.
+
 | Profile | Checks |
 | --- | --- |
 | `unit` | Python test-harness fault checks, full Go tests, vet, race checks for transport/PTY/VT/UI |
@@ -28,13 +30,13 @@ GUI/clipboard test lifetimes use the shared per-user advisory lock in `scripts/w
 
 Cleanup verifies owned GUI/server exit, socket removal and preservation of pre-existing Water processes. Ownership failures refuse shutdown; ordinary transport or evidence failures still clean up directly owned processes. Cleanup errors do not replace the original test failure. Clipboard backups are deleted after successful restoration and excluded from evidence exports, including failure paths.
 
-Regression launchers must preserve the default SIGHUP disposition. `nohup` passes
+Unix regression launchers must preserve the default SIGHUP disposition. `nohup` passes
 ignored SIGHUP into test shells and invalidates process-group close tests. For
 background runs use a new session with SIGHUP restored to its default. Process
 termination checks distinguish a running descendant from an exited zombie still
 awaiting OS reaping, and report process state on failure.
 
-PTY close regression checks must exercise ignored HUP/TERM, separate job process
+Unix PTY close regression checks must exercise ignored HUP/TERM, separate job process
 groups, traceable descendants that create another session, and neighboring PTY
 isolation. Cover both in-process and supervisor close paths, bounded enumeration
 failure, and reaped/replaced root identities. A historical PID must never grant
@@ -52,6 +54,22 @@ used to invoke it. GUI profiles require native desktop access, zsh, Pillow,
 `kitten`, and the installed Agent CLIs exercised by the scripts. Pi discovery
 loads the fnm environment. A generated PNG supplies the image fixture so the
 suite does not depend on a particular file in a user's Pictures directory.
+
+## Native Windows verification
+
+Build a native dev package first, then run from PowerShell:
+
+```powershell
+.\scripts\run-go-regression-windows.ps1
+.\scripts\run-go-regression-windows.ps1 -Desktop
+.\scripts\run-windows-desktop-test.ps1 -Binary <owned-water.exe> -Output <evidence-directory>
+```
+
+The native regression runner currently expects the dev amd64 package in `target/go-windows/dev/amd64/package`. It runs complete portable package suites and selected Windows SSH/server/GUI/update tests, each with a 60-second Go test timeout. Per-package JSONL/stderr and `summary.json` record pass/skip counts; a failed package or one with no passing tests stops the run. This selected suite is not a claim that unrestricted Windows `go test ./...`, Unix fixtures, vet or race checks pass.
+
+Windows lifecycle assertions cover ConPTY input/output/resize, per-terminal Job isolation and descendant cleanup, supervisor recovery, and PowerShell execute completion/cancellation. Unix signal/session cleanup assertions remain in the Unix suite. SSH stdio/SFTP tests must identify client and server platforms; cross-compilation and a local transport fixture do not prove native cross-host recovery.
+
+Desktop checks require a logged-on interactive session; Session 0 is rejected. The launcher records session metadata and exit status. `-CoreOnly` selects reduced desktop coverage and must be reported explicitly. Clipboard and file-picker checks use owned fixtures and preserve user state. Automated CJK output or clipboard paste establishes Unicode transport/rendering only. Physical Chinese IME composition, candidate selection and commit require separate manual evidence on the actual Windows desktop; control-API text/key injection does not establish those behaviors.
 
 ## Match the evidence source to the assertion
 

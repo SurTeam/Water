@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"net"
 	"os"
 	"os/exec"
@@ -83,7 +84,7 @@ func Run(o Options) error {
 		cmd := exec.Command(exe, "tui", "--serve", "--socket", o.Socket, "--config", o.Config)
 		cmd.Stdout = log
 		cmd.Stderr = log
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		goplatform.Detach(cmd)
 		if e = cmd.Start(); e != nil {
 			return e
 		}
@@ -648,7 +649,7 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 	a.command(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": ints})
 }
 
-func isRefused(err error) bool { return errors.Is(err, syscall.ECONNREFUSED) }
+func isRefused(err error) bool { return goplatform.ConnectionRefused(err) }
 
 func (a *app) executeCommand(c map[string]any) error {
 	if c["type"] == "tui.shutdown" {

@@ -60,6 +60,9 @@ func legacyDiscoveryCommand(destination string) string {
 // AttachExisting creates a fresh forward when replacing a disconnected GUI
 // view; cancelling the old forward cannot remove the replacement's endpoint.
 func AttachExisting(destination, remote string) (*Tunnel, error) {
+	if portableRequested(remote) {
+		return connectPortable(destination, nil, remote, true)
+	}
 	control := controlMasterSocket(destination)
 	if err := ensureControlMaster(destination, control); err != nil {
 		return nil, err
@@ -70,6 +73,17 @@ func AttachExisting(destination, remote string) (*Tunnel, error) {
 // StartReplacement keeps the discovered socket, including a migrated legacy
 // socket, so other clients can find the restored workspace on reconnect.
 func StartReplacement(destination, remote string) (*Tunnel, error) {
+	if portableRequested(remote) {
+		t, err := connectPortable(destination, nil, remote, true)
+		if err != nil {
+			return nil, err
+		}
+		if err = t.Restart(); err != nil {
+			t.Close()
+			return nil, err
+		}
+		return t, nil
+	}
 	control := controlMasterSocket(destination)
 	if err := ensureControlMaster(destination, control); err != nil {
 		return nil, err
@@ -86,6 +100,9 @@ func StartReplacement(destination, remote string) (*Tunnel, error) {
 }
 
 func WaitForShutdown(destination, remote string, timeout time.Duration) error {
+	if portableRequested(remote) {
+		return portableWaitForShutdown(destination, remote, timeout)
+	}
 	control := controlMasterSocket(destination)
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -104,6 +121,19 @@ func WaitForShutdown(destination, remote string, timeout time.Duration) error {
 
 // Restart is called only after an acknowledged guarded recovery shutdown.
 func (t *Tunnel) Restart() error {
+	if t.portable != nil {
+		if err := t.portable.start(); err != nil {
+			return err
+		}
+		info, err := t.Client().Inspect(8 * time.Second)
+		if err != nil {
+			return err
+		}
+		if info.BuildVariant != gobuild.Variant || info.ServerRevision != gobuild.ServerRevision || info.ProtocolVersion != goprotocol.ProtocolVersion || info.APISignature != goprotocol.APISignature {
+			return errors.New("replacement remote server does not match bundled server")
+		}
+		return nil
+	}
 	if err := startRemoteServer(t.destination, t.controlSocket, t.remoteSocket); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@
 /dist
 /.tmp
 /internal/goremote/payloads/water-server-*
+/internal/goremote/payloads/manifest.json
 .DS_Store
 *.sock
 .pi/

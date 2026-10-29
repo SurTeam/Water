@@ -3,11 +3,12 @@ package goupdate
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
+	"runtime"
 	"time"
 )
 
@@ -20,6 +21,9 @@ func lockPath(plan *Plan) string {
 // StartInstaller transfers ownership of the staging directory to a separate
 // process. Installation starts only after the GUI has exited normally.
 func StartInstaller(plan *Plan) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("in-app update installation is unavailable on Windows")
+	}
 	lock := lockPath(plan)
 	f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -52,7 +56,7 @@ func StartInstaller(plan *Plan) error {
 	cmd := exec.Command(helper, InstallerArgument, path)
 	cmd.Stdout = log
 	cmd.Stderr = log
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	goplatform.Detach(cmd)
 	if err = cmd.Start(); err != nil {
 		return err
 	}
@@ -132,6 +136,9 @@ func replace(plan *Plan, launch func() error) error {
 }
 
 func RunInstaller(path string) error {
+	if runtime.GOOS == "windows" {
+		return fmt.Errorf("in-app update installation is unavailable on Windows")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err

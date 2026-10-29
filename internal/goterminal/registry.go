@@ -2,19 +2,16 @@ package goterminal
 
 import (
 	"errors"
-	"github.com/SurTeam/Water/internal/ptyprocess"
+	"github.com/SurTeam/Water/internal/gopty"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
-	"github.com/SurTeam/Water/internal/gometrics"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/gosupervisor"
-	"github.com/creack/pty"
 	"github.com/google/uuid"
 )
 
@@ -40,10 +37,9 @@ type Terminal struct {
 
 	registry *Registry
 
-	cmd            *exec.Cmd
-	processSession *ptyprocess.Session
-	ptmx           *os.File
-	supervised     *gosupervisor.Client
+	cmd        *exec.Cmd
+	ptmx       *gopty.Session
+	supervised *gosupervisor.Client
 	// supervisorKey is the pane id the supervisor holds the PTY under. It survives
 	// server restarts, while ID identifies this terminal instance to clients.
 	supervisorKey         string
@@ -143,29 +139,19 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 			_ = os.RemoveAll(integrationDir)
 		}
 	}()
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: uint16(size.Lines), Cols: uint16(size.Columns)})
+	ptmx, err := gopty.Start(cmd, &gopty.Size{Rows: uint16(size.Lines), Cols: uint16(size.Columns)})
 	if err != nil {
 		return nil, err
 	}
-	processSession := ptyprocess.Capture(cmd.Process)
-	pollable, err := makePollablePTY(ptmx)
-	if err != nil {
-		_ = ptmx.Close()
-		_ = processSession.Kill()
-		_ = cmd.Wait()
-		return nil, err
-	}
-	ptmx = pollable
 	t := &Terminal{
 		registry:            r,
 		shellIntegrationDir: integrationDir,
 		ID:                  uuid.New(),
 		cmd:                 cmd,
-		processSession:      processSession,
 		ptmx:                ptmx,
-		pid:                 cmd.Process.Pid,
+		pid:                 ptmx.PID(),
 		program:             program,
-		args:                append([]string(nil), cmd.Args[1:]...),
+		args:                append([]string(nil), args...),
 		size:                size,
 		scrollbackLines:     r.scrollbackLines,
 		subs:                make(map[uint64]*subscriber),
@@ -453,7 +439,7 @@ func (t *Terminal) Close() error {
 	var err error
 	t.once.Do(func() {
 		close(t.closed)
-		err = t.processSession.Kill()
+		err = t.ptmx.Kill()
 		_ = t.ptmx.Close()
 	})
 	return err
@@ -663,7 +649,7 @@ func (t *Terminal) readLoop() {
 			if req.cellHeight > 0 {
 				t.cellHeight = min(req.cellHeight, 1024)
 			}
-			err := pty.Setsize(t.ptmx, &pty.Winsize{
+			err := t.ptmx.Resize(&gopty.Size{
 				Rows: uint16(req.size.Lines),
 				Cols: uint16(req.size.Columns),
 				X:    uint16(min(65535, t.cellWidth*req.size.Columns)),
@@ -692,134 +678,16 @@ func (t *Terminal) readLoop() {
 	}
 }
 
-func (t *Terminal) rawReadLoop(out chan<- []byte, free <-chan []byte) {
-	defer close(out)
-	raw, err := t.ptmx.SyscallConn()
-	if err != nil {
-		return
-	}
-	var buf []byte
-	pause := func(request rawFlushRequest) bool {
-		_ = t.ptmx.SetReadDeadline(time.Time{})
-		close(request.ready)
-		select {
-		case <-request.resume:
-			return true
-		case <-t.closed:
-			return false
-		}
-	}
-	for {
-		select {
-		case request := <-t.rawFlushRequests:
-			if !pause(request) {
-				return
-			}
-		default:
-		}
-		if buf == nil {
-			select {
-			case buf = <-free:
-			case request := <-t.rawFlushRequests:
-				if !pause(request) {
-					return
-				}
-				continue
-			case <-t.closed:
-				return
-			default:
-				buf = make([]byte, readBlockBytes)
-			}
-		}
-		buf = buf[:readBlockBytes]
-
-		n := 0
-		var readErr error
-		// Drain available fragments into one reader-owned block. A partial
-		// block can wait for readiness up to the idle/max-age deadline, avoiding
-		// a channel handoff/timer reset for every ~1 KiB Darwin PTY fragment.
-		var burstStarted time.Time
-		waitingForData := false
-		err := raw.Read(func(fd uintptr) bool {
-			for n < len(buf) {
-				gometrics.PTYReadCalls.Add(1)
-				count, callErr := syscall.Read(int(fd), buf[n:])
-				if count > 0 {
-					n += count
-					gometrics.PTYBytesRead.Add(uint64(count))
-					if burstStarted.IsZero() {
-						burstStarted = time.Now()
-					}
-				}
-				if errors.Is(callErr, syscall.EINTR) {
-					continue
-				}
-				if errors.Is(callErr, syscall.EAGAIN) || errors.Is(callErr, syscall.EWOULDBLOCK) {
-					gometrics.PTYReadWouldBlock.Add(1)
-					if n == 0 {
-						return false
-					}
-					if n <= echoFlushMaxBytes && time.Since(time.Unix(0, t.lastInput.Load())) < echoFlushWindow {
-						return true
-					}
-					// Keep this partial block while the poller waits for readiness.
-					// Bound that wait so a prompt or resize cannot get stuck behind
-					// an unfinished block, without spinning on an empty PTY.
-					deadline := time.Now().Add(outputBatchIdle)
-					if maximum := burstStarted.Add(outputBatchMaxAge); maximum.Before(deadline) {
-						deadline = maximum
-					}
-					_ = t.ptmx.SetReadDeadline(deadline)
-					waitingForData = true
-					return false
-				}
-				if callErr != nil {
-					readErr = callErr
-					return true
-				}
-				if count == 0 {
-					readErr = io.EOF
-					return true
-				}
-				if time.Since(burstStarted) >= outputBatchMaxAge {
-					return true
-				}
-			}
-			return true
-		})
-		if waitingForData {
-			_ = t.ptmx.SetReadDeadline(time.Time{})
-		}
-		if n > 0 {
-			out <- buf[:n]
-			buf = nil
-		}
-		if err != nil || readErr != nil {
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				continue
-			}
-			// Darwin/Linux PTYs commonly surface EIO after child exit.
-			return
-		}
-	}
-}
-
 func (t *Terminal) waitLoop() {
-	err := t.cmd.Wait()
+	_ = t.ptmx.Wait()
 	if t.shellIntegrationDir != "" {
 		_ = os.RemoveAll(t.shellIntegrationDir)
 	}
 	// Preserve stream ordering: all bytes
 	// readable from the PTY must be sequenced before the authoritative Exit.
 	<-t.readerDone
-	var code *int32
-	if t.cmd.ProcessState != nil {
-		v := int32(t.cmd.ProcessState.ExitCode())
-		code = &v
-	} else if err == nil {
-		v := int32(0)
-		code = &v
-	}
+	v := int32(t.ptmx.ExitCode())
+	code := &v
 	t.publish(goprotocol.TerminalEvent{Kind: goprotocol.ExitEvent, Code: code})
 	_ = t.Close()
 	t.registry.retire(t.ID)

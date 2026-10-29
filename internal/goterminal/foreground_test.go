@@ -6,6 +6,7 @@ import (
 	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/google/uuid"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -13,6 +14,9 @@ import (
 )
 
 func TestForegroundRecognizesFourAgentPTYJobs(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	shell, err := exec.LookPath("zsh")
 	if err != nil {
 		t.Skip("zsh required")
@@ -44,6 +48,9 @@ func TestForegroundRecognizesFourAgentPTYJobs(t *testing.T) {
 }
 
 func TestForegroundNameFollowsPTYJobAndReturnsToShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	r := NewRegistry()
 	term, err := r.Spawn("/bin/sh", []string{"-i"}, goprotocol.TerminalSize{Columns: 80, Lines: 24})
 	if err != nil {
@@ -88,6 +95,9 @@ func TestForegroundKeepsValidRecordsFromPartialPSFailure(t *testing.T) {
 }
 
 func TestForegroundProcessSamplesOnlyTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	r := NewRegistry()
 	defer r.CloseAll()
 	target, err := r.Spawn("/bin/sleep", []string{"30"}, goprotocol.TerminalSize{Columns: 80, Lines: 24})

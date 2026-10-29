@@ -12,7 +12,7 @@ import (
 
 func (w *EbitengineWindow) SetUpdateManager(m *goupdate.Manager) {
 	w.updates = m
-	w.updateVisible = m.Snapshot().Error != ""
+	w.updateVisible = m.Snapshot().Error != "" && m.Snapshot().Phase != "unsupported"
 }
 func (w *EbitengineWindow) SetUpdateRestartAllowed(allowed bool) {
 	w.updateRestartAllowed.Store(allowed)
@@ -69,6 +69,8 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 	label(58, c.trf("Current version: %s", s.Current), 12, true)
 	message := "Check for updates"
 	switch s.Phase {
+	case "unsupported":
+		message = "In-app updates are unavailable on this platform"
 	case "checking":
 		message = "Checking for updates…"
 	case "current":
@@ -123,7 +125,7 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 		w.button(dst, c, rect, title, hitSettingsControl, uuid.Nil, false)
 		c.hitRegions[len(c.hitRegions)-1].Label = "update:" + action
 	}
-	if s.Phase != "checking" && s.Phase != "downloading" && s.Phase != "installing" && w.updateResult == nil && (action != "install" || w.updateRestartAllowed.Load()) {
+	if s.Phase != "unsupported" && s.Phase != "checking" && s.Phase != "downloading" && s.Phase != "installing" && w.updateResult == nil && (action != "install" || w.updateRestartAllowed.Load()) {
 		button(image.Rect(r.Max.X-w.dp(250), r.Max.Y-w.dp(58), r.Max.X-w.dp(24), r.Max.Y-w.dp(24)), primary, action)
 	}
 	if w.updateResult == nil {

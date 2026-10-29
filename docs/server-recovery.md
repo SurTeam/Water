@@ -18,13 +18,15 @@ Plain `go build` uses a development revision marker. For revision-sensitive deve
 
 ## Remote discovery
 
-Default remote endpoints are stable across product and protocol upgrades:
+Unix remote endpoints are stable across product and protocol upgrades:
 
 ```
 /tmp/water-go-<variant>-<destination-hash>.sock
 ```
 
 Payload caches remain scoped by product version, server revision, protocol and platform. Discovery probes the stable endpoint first, then the previous `water-go-<variant>-p*-*-<destination-hash>.sock` endpoints. A discoverable old instance is reused, including in diagnostic mode; it is not replaced automatically. Ambiguous or uninspectable legacy instances produce an error instead of starting an unrelated fresh workspace. `WATER_REMOTE_CONTROL_SOCKET` selects a particular endpoint explicitly.
+
+Windows/portable SSH uses platform endpoints and stdio bridging as described in [remote connections](remote-connections.md#portable-ssh-与-windows-边界); Unix socket path probes and ControlMaster forwarding are specific to the Unix path.
 
 Remote restart preserves the discovered endpoint, including a legacy endpoint. Replacement GUI views receive fresh forwarding sockets so cancelling the old forward does not remove the replacement's endpoint. Health reconnect and explicit server operations are serialized per connection.
 
@@ -36,9 +38,9 @@ Remote restart preserves the discovered endpoint, including a legacy endpoint. R
 4. The replacement starts empty. `command.dispatch` → `recovery.restore` validates the complete document and prepares new shells before adopting the model. Missing directories or failed spawns remove the prepared PTYs and leave an empty model.
 5. The GUI replaces the connection view, preserves its selection/settings, and marks the artifact completed. Repeated import of the same recovery ID into the same server is idempotent.
 
-The schema retains workspace/tab/pane identities and order, names and title overrides, split axes/ratios, empty panes, active selections, terminal geometry, labels and current directories. Restored terminals and terminal surfaces receive new UUIDv4 identities. Shells use the replacement server's configured shell. Running jobs/Agents, terminal replay/history and process memory are not resumed.
+The schema retains workspace/tab/pane identities and order, names and title overrides, split axes/ratios, empty panes, active selections, terminal geometry, labels and current directories. Restored terminals and terminal surfaces receive new UUIDv4 identities. Shells use the replacement server's configured shell. Without a resumable supervisor, running jobs/Agents, terminal replay/history and process memory are not resumed. A validated recovery shutdown can preserve the existing supervisor programs and reattach by pane identity; new terminal UUIDs and server replay are rebuilt from supervisor history.
 
-Artifacts live under `recovery/` beside the GUI config, keyed by variant and logical endpoint; files are mode 0600. Pending artifacts are retried at startup/reconnect, but never imported into an unrelated nonempty model. A failed start/import retains the artifact and exposes Retry restore. An invalid existing artifact is not silently overwritten. Updating Water does not rewrite directories already stored in an artifact; if an older export contains an invalid directory, back up the artifact and verify the intended directory before correcting it and retrying.
+Artifacts live under `recovery/` beside the GUI config, keyed by variant and logical endpoint; files use mode 0600 on Unix and private Windows access control. Pending artifacts are retried at startup/reconnect, but never imported into an unrelated nonempty model. A failed start/import retains the artifact and exposes Retry restore. An invalid existing artifact is not silently overwritten. Updating Water does not rewrite directories already stored in an artifact; if an older export contains an invalid directory, back up the artifact and verify the intended directory before correcting it and retrying.
 
 Recovery availability and normal API admission are separate checks. A server
 that satisfies all current required capabilities but lacks recovery support may
@@ -51,9 +53,9 @@ directory export to an old running server.
 
 ## Verification and ownership
 
-`go-ui-server-smoke.py` exercises both Local and Remote settings/restart paths through real Water actions. Its SSH stand-in uses actual Unix forwarding and actual server processes on this machine.
+The Unix fixture `go-ui-server-smoke.py` exercises both Local and Remote settings/restart paths through real Water actions. Its SSH stand-in uses actual Unix forwarding and actual server processes on this machine.
 
-`go-ui-real-ssh-smoke.py` repeats the Local/Remote recovery assertions using an owned OpenSSH daemon on a random loopback port. It verifies key authentication and strict host-key checking, the default embedded payload detection/upload/start path, encrypted Unix socket forwarding, ControlMaster loss/reconnect, stable endpoint reuse, and GUI product-version upgrades. It uses an isolated forced-command configuration for the test server; it does not enable Remote Login or modify system SSH configuration. Host/client private keys are removed before exporting logs, including on test failure. This is a real SSH network connection to a separate server process on the same macOS host; native Linux runtime behavior remains unverified.
+`go-ui-real-ssh-smoke.py` repeats the Local/Remote recovery assertions using an owned OpenSSH daemon on a random loopback port. It verifies key authentication and strict host-key checking, the default embedded payload detection/upload/start path, encrypted Unix socket forwarding, ControlMaster loss/reconnect, stable endpoint reuse, and GUI product-version upgrades. It uses an isolated forced-command configuration for the test server; it does not enable Remote Login or modify system SSH configuration. Host/client private keys are removed before exporting logs, including on test failure. This is a real SSH network connection to a separate server process on the same macOS host; this fixture alone does not establish native Linux or Windows runtime behavior. Windows ConPTY/Job and portable SSH verification uses the separate native suite in [testing](testing.md#native-windows-verification).
 
 Run it with revision-matched dev binaries and refreshed payloads:
 

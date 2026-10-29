@@ -3,6 +3,7 @@ package goclient
 import (
 	"encoding/json"
 	"errors"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"net"
 	"os"
@@ -83,7 +84,7 @@ func TestSessionSimulatedBlackholeBoundsRequestAndReleasesWriter(t *testing.T) {
 }
 
 func TestCallTimeoutBoundsUnresponsiveServer(t *testing.T) {
-	dir, err := os.MkdirTemp("/tmp", "water-rpc.")
+	dir, err := os.MkdirTemp(testSocketDirectory(t), "water-rpc.")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,4 +151,13 @@ func TestSessionShutdownReplySurvivesEOF(t *testing.T) {
 	if reply.RequestID != requestID || reply.OK == nil || !*reply.OK || !result.Ack {
 		t.Fatalf("shutdown acknowledgement lost: %+v", reply)
 	}
+}
+
+func testSocketDirectory(t *testing.T) string {
+	t.Helper()
+	dir := goplatform.RuntimeDirectory()
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }

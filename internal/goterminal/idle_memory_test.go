@@ -9,6 +9,9 @@ import (
 )
 
 func TestIdleTerminalsDoNotReserveReadQueue(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)

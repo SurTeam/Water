@@ -1,17 +1,17 @@
 # 构建打包与发布
 
-实现入口：`internal/gobuild/`、`internal/goupdate/`、`scripts/build-go-*.sh`、`scripts/publish-unsigned-macos.sh` 和 `.github/workflows/macos-signed.yml`。构建命令、更新安装限制与签名流程在本文统一维护。
+实现入口：`internal/gobuild/`、`internal/goupdate/`、`scripts/build-go-*.sh`、`scripts/build-go-windows.ps1`、`scripts/publish-unsigned-macos.sh` 和 `.github/workflows/macos-signed.yml`。构建命令、更新安装限制与签名流程在本文统一维护。
 
 版本、提交、push、tag 与发布分别需要相应用户授权。文档随已确认实现更新的时机见 [AGENTS.md](../AGENTS.md#文档更新时机)。
 
 ## 构建与变体
 
-- 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 打包产物分别在 `target/go-app/<variant>` 和 `target/go-linux/<variant>`。
+- 只有 `dev` 和 `release` 两种运行身份。普通 `go build` 使用 dev；打包脚本通过 `WATER_APP_VARIANT` 和 linker flags 设置身份，不从优化参数推断身份。macOS/Linux 构建产物分别在 `target/go-app/<variant>/<arch>` 和 `target/go-linux/<variant>/<arch>`；Windows 在 `target/go-windows/<variant>/<arch>/package`。
 - dev 使用 `water-dev` namespace：`/tmp/water-dev.sock`、`~/.config/water-dev/config.json`、Bundle ID `dev.water.terminal.dev`、GUI/server/PTY supervisor 进程 `water-dev`/`water-srv-dev`/`water-pty-dev`。release 使用 `water` namespace：`/tmp/water.sock`、`~/.config/water/config.json`、Bundle ID `dev.water.terminal`、GUI/server/PTY supervisor 进程 `water`/`water-server`/`water-pty`。
 - 默认配置根目录依次采用绝对路径 `$XDG_CONFIG_HOME`、兼容变量 `$XDG_CONFIG`、`~/.config`。macOS 首次读取新路径时复制旧 Application Support 配置，保留旧文件；目标已存在时不覆盖。
-- GUI 在目标平台原生构建；headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
+- Windows GUI/server/updater 可在 macOS 或 Linux 以 `CGO_ENABLED=0` 交叉编译打包。macOS GUI 使用本机 Apple SDK，可用 `GOARCH=amd64` 或 `arm64` 跨架构构建；Linux GUI 需要目标 Linux C 编译器及 X11/Wayland、EGL/OpenGL、xkbcommon 和 Vulkan 开发库，可在本机 Linux 容器内构建。headless server payload 使用 Go 交叉编译。交叉编译成功不等于原生运行验证。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 
-macOS app 的 `Contents/Resources/Licenses` 和 Linux archive 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 统一收集。
+macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。
 
 控制命令见 [控制 API](control-api.md)，回归流程见 [测试策略](testing.md)。
 
@@ -40,8 +40,17 @@ bash scripts/build-go-macos-app.sh
 # Assemble a release app explicitly.
 WATER_APP_VARIANT=release bash scripts/build-go-macos-app.sh
 
-# Native Linux package, on a Linux host.
+# Linux package, on a Linux host/container with target C libraries.
 WATER_APP_VARIANT=release bash scripts/build-go-linux.sh
+
+# Cross-build both Windows architectures on macOS or Linux (no Windows host).
+WATER_APP_VARIANT=release bash scripts/build-go-windows.sh all
+# Or select a single target: amd64 / arm64.
+WATER_APP_VARIANT=release bash scripts/build-go-windows.sh amd64
+
+# Cross-build an Intel macOS app using this Mac's Apple SDK.
+GOARCH=amd64 WATER_APP_VARIANT=release CODESIGN_REQUIRED=1 \
+  bash scripts/build-go-macos-app.sh
 
 # Refresh embedded server payloads only.
 WATER_APP_VARIANT=dev bash scripts/build-go-embedded-servers.sh
@@ -49,7 +58,19 @@ WATER_APP_VARIANT=dev bash scripts/build-go-embedded-servers.sh
 
 裸 go build 使用 internal/gobuild/identity.go 的 dev 身份、源码默认产品版本（当前为 0.3.1）和 development revision，不读取 VERSION。要验证真实版本、更新或 payload 匹配，使用打包脚本或显式 linker flags。下述 VERSION 来源适用于脚本构建。
 
-The packaging scripts build the GUI, dedicated server and four embedded server targets. GUI builds are native to the target desktop platform; headless server payloads use Go cross-compilation. The app bundle must contain payloads whose variant and version match the GUI. Product version comes from the root `VERSION` file; use the same `WATER_APP_VERSION` for packaging and publishing when overriding it. `WATER_APP_VARIANT` selects dev/release and is injected through linker flags. macOS build directories are `target/go-app/<variant>`; Linux uses `target/go-linux/<variant>`; archives go to `dist`.
+The packaging scripts build the GUI, dedicated server, PTY supervisor, updater helper and six embedded server targets (darwin/linux/windows × amd64/arm64). `build-go-embedded-servers.py` is the portable payload builder; the shell entry delegates to it. Its manifest records variant/version/server revision and each payload's size and SHA256. Windows desktop builds are pure-Go cross-builds; macOS uses the local Apple SDK, and Linux requires target C libraries. The app bundle must contain payloads whose variant and version match the GUI. Product version comes from the root `VERSION` file; use the same `WATER_APP_VERSION` for packaging and publishing when overriding it. `WATER_APP_VARIANT` selects dev/release and is injected through linker flags. macOS build directories are `target/go-app/<variant>/<arch>`; Linux uses `target/go-linux/<variant>/<arch>`; archives go to `dist`.
+## Windows cross-packaging and signatures
+
+`bash scripts/build-go-windows.sh [all|amd64|arm64]` works on macOS/Linux; the default is both architectures. It needs Go, Bash and Python 3 (`PYTHON` can select the interpreter), with no Windows host or SDK dependency. The resulting `dist/water[-dev]-VERSION-windows-ARCH.zip` contains the GUI, dedicated server, copied PTY supervisor, updater helper, payload manifest and licenses. Windows executables carry `.exe`; the dev server is `water-srv-dev.exe`.
+
+For Authenticode signing, provide `WINDOWS_SIGN_P12`, `WINDOWS_SIGN_PASSWORD_FILE` and `WINDOWS_SIGN_CA_FILE`, and install `osslsigncode`. Set `WINDOWS_SIGN_REQUIRED=1` for credentialed release builds. The script signs all four executables with SHA256, verifies them against the supplied trust anchor, then creates and CRC-checks the ZIP. `WINDOWS_SIGN_TIMESTAMP_URL` optionally enables RFC3161 timestamping. Password contents are read from a protected file, never command-line text. Keep private signing materials outside tracked source; do not publish them. Verification validates the signature against the supplied trust anchor; confirming the intended signer additionally requires matching its certificate. This does not assert that every Windows machine already trusts that certificate or bypasses SmartScreen.
+
+The native Windows alternative is `scripts/build-go-windows.ps1 -Arch amd64` (or `arm64`), with optional `-Python`. It builds the same package layout. Windows update checking/download uses the release metadata, but in-app installation remains explicitly unsupported despite the packaged helper.
+
+For local multi-platform builds, run Windows and macOS scripts on the Mac; run the Linux script in a local Linux container with the selected architecture's C compiler and development libraries. `GOARCH` selects `amd64`/`arm64` for macOS and Linux; when cross-building Linux inside a container, also provide the target `CC`/`CXX` and `PKG_CONFIG_LIBDIR`. Build sequentially because the embedded payload set is shared. Cross-compilation is separate from runtime acceptance, including Windows ConPTY, clipboard, native dialogs and IME.
+
+A release may additionally publish `SHA256SUMS`, its detached SHA256/RSA signature `SHA256SUMS.sig`, and the public signing certificate `release-signing-certificate.pem`. This binds the archive bytes, including Linux archives, to the signer. Verify the manifest signature using the public key extracted from a separately trusted copy of the certificate, then verify archive hashes. This supplements platform signatures; it is not an OS trust-store installation or notarization claim.
+
 ## In-app updates (macOS and Linux)
 Open **Settings → Software update**, or the macOS application menu's
 **Software update** item. Water checks its public GitHub Releases, offers a
@@ -65,7 +86,7 @@ are not updates: increment `WATER_APP_VERSION` when publishing an update.
 macOS uses `Water-VERSION-macOS-ARCH.zip` for release and
 `Water Dev-VERSION-macOS-ARCH.zip` for dev, where ARCH is arm64 or amd64
 (GitHub replaces spaces with periods); Linux uses `water[-dev]-VERSION-{aarch64,x86_64}-linux.tar.gz`.
-Publish Linux packages to the matching release after building them natively.
+Publish Linux packages to the matching release after building them with the target Linux libraries.
 macOS development machines sign locally with the same certificate as CI; the
 signing-only workflow remains a fallback for machines without local signing.
 
@@ -128,12 +149,12 @@ WATER_APP_VARIANT=release CODESIGN_REQUIRED=1 \
   bash scripts/build-go-macos-app.sh
 codesign --verify --deep --strict dist/Water.app
 APP_VERSION="${WATER_APP_VERSION:-$(cat VERSION)}"
-case "$(uname -m)" in arm64) ARCH=arm64 ;; x86_64) ARCH=amd64 ;; esac
+ARCH="${GOARCH:-$(go env GOHOSTARCH)}"
 test -s "dist/Water-${APP_VERSION}-macOS-${ARCH}.zip"
 unzip -tq "dist/Water-${APP_VERSION}-macOS-${ARCH}.zip"
 ```
 
-The native script signs updater, server, GUI and app using the same runtime and
+The native script signs updater, server, PTY supervisor, GUI and app using the same runtime and
 timestamp options as CI, then verifies the bundle. Commit/push the version and
 tag before uploading the signed archive to the matching release. Local signing
 failure is a blocker; never silently substitute ad-hoc signing or CI.

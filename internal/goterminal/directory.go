@@ -9,25 +9,22 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"golang.org/x/sys/unix"
 )
 
 // CurrentDirectory is queried on the server command worker when creating a
 // terminal, never on the GUI thread. Prefer the foreground job, then its shell.
 func (t *Terminal) CurrentDirectory() string {
+	if dir, handled := t.platformDirectory(); handled {
+		return dir
+	}
 	pid := t.processID()
 	if pid <= 0 {
 		return ""
 	}
 	foreground := pid
 	if t.ptmx != nil {
-		if raw, err := t.ptmx.SyscallConn(); err == nil {
-			_ = raw.Control(func(fd uintptr) {
-				if group, err := unix.IoctlGetInt(int(fd), unix.TIOCGPGRP); err == nil && group > 0 {
-					foreground = group
-				}
-			})
+		if group, err := t.ptmx.ForegroundGroup(); err == nil && group > 0 {
+			foreground = group
 		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)

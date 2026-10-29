@@ -3,6 +3,7 @@ package goterminal
 import (
 	"fmt"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,9 @@ import (
 // redraw after they exit. Primary-buffer redraws must leave the surrounding
 // lines in place. Retained replay stays far below one full copy of the floods.
 func TestDozensOfTerminalsKeepScrollbackUnderTUIPressure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires raw Unix PTY VT passthrough; ConPTY synthesizes its output stream")
+	}
 	python, err := exec.LookPath("python3")
 	if err != nil {
 		t.Fatal(err)

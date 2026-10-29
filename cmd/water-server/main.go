@@ -2,13 +2,18 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"github.com/SurTeam/Water/internal/gobridge"
+	"github.com/SurTeam/Water/internal/goplatform"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/SurTeam/Water/internal/gobuild"
 	"github.com/SurTeam/Water/internal/goconfig"
@@ -32,6 +37,7 @@ func main() {
 	var printVersion bool
 	var printServerInfo bool
 	var ptySupervisor bool
+	var stdioBridge, endpointStatus bool
 
 	flags := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flags.StringVar(&socket, "socket", "", "Unix control socket (compatibility alias)")
@@ -46,12 +52,39 @@ func main() {
 	flags.BoolVar(&printServerInfo, "server-info", false, "print server compatibility descriptor and exit")
 	flags.BoolVar(&printVersion, "V", false, "print version and exit")
 	flags.BoolVar(&ptySupervisor, "pty-supervisor", false, "own PTYs for a Water server (internal)")
+	flags.BoolVar(&stdioBridge, "stdio-bridge", false, "relay an existing private socket over encoded SSH stdio (internal)")
+	flags.BoolVar(&endpointStatus, "endpoint-status", false, "probe a private endpoint without replacing it (internal)")
 	flags.Usage = func() {
 		fmt.Fprintln(flags.Output(), "water-server [--control-socket PATH] [--config PATH] [--no-initial-terminal] [--empty-workspace] [--daemonize]")
 		flags.PrintDefaults()
 	}
 	_ = flags.Parse(os.Args[1:])
 
+	if stdioBridge || endpointStatus {
+		if socket == "" {
+			fmt.Fprintln(os.Stderr, "private socket path is required")
+			os.Exit(2)
+		}
+		connection, err := net.DialTimeout("unix", socket, time.Second)
+		if endpointStatus {
+			if err == nil {
+				connection.Close()
+				fmt.Println("occupied")
+				return
+			}
+			if errors.Is(err, os.ErrNotExist) || goplatform.ConnectionRefused(err) {
+				fmt.Println("free")
+				return
+			}
+		} else if err == nil {
+			err = gobridge.Relay(connection, os.Stdin, os.Stdout)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "water-server bridge:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if printServerInfo {
 		_ = json.NewEncoder(os.Stdout).Encode(goprotocol.Descriptor{BuildVariant: buildVariant, Version: serverVersion, ServerRevision: gobuild.ServerRevision, ProtocolVersion: goprotocol.ProtocolVersion, APISignature: goprotocol.APISignature, Capabilities: goprotocol.ServerCapabilities()})
 		return
@@ -146,10 +179,7 @@ func resolveSocket(explicit string, cfg goconfig.AppConfig) string {
 	if cfg.Startup.ControlSocket != nil && strings.TrimSpace(*cfg.Startup.ControlSocket) != "" {
 		return strings.TrimSpace(*cfg.Startup.ControlSocket)
 	}
-	if buildVariant == "release" {
-		return "/tmp/water.sock"
-	}
-	return "/tmp/water-dev.sock"
+	return goplatform.DefaultSocket(buildVariant)
 }
 
 func startDetached(args []string) error {
@@ -171,6 +201,6 @@ func startDetached(args []string) error {
 			cmd.Env = append(cmd.Env, value)
 		}
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	goplatform.Detach(cmd)
 	return cmd.Start()
 }

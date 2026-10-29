@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goplatform"
 )
 
 const maxWebTLSFile = 256 << 10
@@ -30,14 +31,14 @@ func (w *webService) configureFiles(cfg goconfig.WebConfig, certificate, key []b
 	if w.server.ConfigPath != "" {
 		base = filepath.Join(filepath.Dir(w.server.ConfigPath), "web-tls-"+w.server.Build)
 	}
-	if err := os.MkdirAll(base, 0700); err != nil {
+	if err := goplatform.MkdirPrivate(base); err != nil {
 		return err
 	}
 	info, err := os.Lstat(base)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+	if !info.IsDir() || !goplatform.IsPrivate(base, info) {
 		return errors.New("TLS storage directory must be private (0700)")
 	}
 	dir, err := os.MkdirTemp(base, "pair-")

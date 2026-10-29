@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/gomodel"
+	"github.com/SurTeam/Water/internal/goplatform"
 	"github.com/google/uuid"
 )
 
@@ -56,7 +57,7 @@ func SaveRecovery(path string, a RecoveryArtifact) error {
 	if err := a.Layout.Validate(); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if err := goplatform.MkdirPrivate(filepath.Dir(path)); err != nil {
 		return err
 	}
 	f, err := os.CreateTemp(filepath.Dir(path), ".recovery-*")
@@ -75,15 +76,7 @@ func SaveRecovery(path string, a RecoveryArtifact) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(tmp, path); err != nil {
-		return err
-	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return goplatform.PublishFile(tmp, path)
 }
 func PrepareRecovery(s *Session, path, variant, endpoint string, pending bool, project ...func(*gomodel.RecoveryLayout)) (RecoveryPrepared, error) {
 	var p RecoveryPrepared

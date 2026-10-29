@@ -18,6 +18,15 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+archive_arch="${GOARCH:-$(go env GOHOSTARCH)}"
+case "$archive_arch" in
+  arm64) clang_arch=arm64 ;;
+  amd64) clang_arch=x86_64 ;;
+  *) echo 'error: unsupported macOS target architecture' >&2; exit 1 ;;
+esac
+export GOOS=darwin GOARCH="$archive_arch" CGO_ENABLED=1
+export CC="${CC:-clang -arch $clang_arch}" CXX="${CXX:-clang++ -arch $clang_arch}"
+
 variant="${WATER_APP_VARIANT:-dev}"
 case "$variant" in
   dev)
@@ -52,7 +61,7 @@ if [[ "$variant" == "release" ]]; then
   ldflags="-s -w ${ldflags}"
 fi
 
-build_dir="$root_dir/target/go-app/$variant"
+build_dir="$root_dir/target/go-app/$variant/$archive_arch"
 app_dir="$root_dir/dist/${app_name}.app"
 contents_dir="$app_dir/Contents"
 macos_dir="$contents_dir/MacOS"
@@ -116,11 +125,6 @@ if [[ "$codesign_skip" != "1" ]]; then
   codesign --verify --deep --strict "$app_dir"
 fi
 
-case "$(uname -m)" in
-  arm64) archive_arch=arm64 ;;
-  x86_64) archive_arch=amd64 ;;
-  *) echo "error: unsupported macOS architecture" >&2; exit 1 ;;
-esac
 zip_name="${app_name}-${version}-macOS-${archive_arch}.zip"
 zip_path="$root_dir/dist/$zip_name"
 rm -f "$zip_path"

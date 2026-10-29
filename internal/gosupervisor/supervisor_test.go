@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +68,9 @@ func collect(t *testing.T, events <-chan Event, want string, timeout time.Durati
 }
 
 func TestProgramSurvivesServerReconnect(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 
@@ -139,6 +143,9 @@ func TestProgramSurvivesServerReconnect(t *testing.T) {
 }
 
 func TestReconnectReplaysFromOffsetWithoutLoss(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)
@@ -187,6 +194,9 @@ func TestReconnectReplaysFromOffsetWithoutLoss(t *testing.T) {
 }
 
 func TestResizeAndExitAreOrderedWithOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)
@@ -243,6 +253,9 @@ func TestResizeAndExitAreOrderedWithOutput(t *testing.T) {
 }
 
 func TestHistoryIsBoundedButKeepsRecentOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)
@@ -277,6 +290,9 @@ func TestHistoryIsBoundedButKeepsRecentOutput(t *testing.T) {
 }
 
 func TestConcurrentSpawnsGetTheirOwnReplies(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	client, err := Dial(socket)
 	if err != nil {
@@ -317,6 +333,9 @@ func TestConcurrentSpawnsGetTheirOwnReplies(t *testing.T) {
 }
 
 func TestSlowConsumerDoesNotStallTheProgram(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)
@@ -360,6 +379,9 @@ func TestSlowConsumerDoesNotStallTheProgram(t *testing.T) {
 }
 
 func TestForegroundGroupIsReportedForOwnedPTY(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)
@@ -385,6 +407,9 @@ func TestForegroundGroupIsReportedForOwnedPTY(t *testing.T) {
 }
 
 func TestReplaceStartsANewProgramAndDropsStaleEvents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	_, socket := startSupervisor(t)
 	id := uuid.New()
 	client, err := Dial(socket)

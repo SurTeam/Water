@@ -19,7 +19,7 @@ import (
 // Regression: the former one-second inspect deadline closed the session,
 // and the subsequent server.info fallback could not revive that socket.
 func TestOpenSessionAcceptsDelayedInspection(t *testing.T) {
-	path := filepath.Join("/tmp", "water-inspect-"+uuid.NewString()+".sock")
+	path := filepath.Join(testSocketDirectory(t), "water-inspect-"+uuid.NewString()+".sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

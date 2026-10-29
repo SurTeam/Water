@@ -469,7 +469,7 @@ func (w *EbitengineWindow) request(c *WorkspaceClient, method string, params jso
 // only the Update that follows the drop.
 func (w *EbitengineWindow) deliverFileDrop(c *WorkspaceClient) {
 	if paths := pathsFromDroppedFS(ebiten.DroppedFiles()); len(paths) > 0 {
-		text := fileDropToText(paths)
+		text := c.fileDropText(paths)
 		if w.fileDropText != "" {
 			text = w.fileDropText + " " + text
 		}

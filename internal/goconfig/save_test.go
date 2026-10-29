@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -43,7 +44,7 @@ func TestSavePreservesEnvelopeAndUnknownFields(t *testing.T) {
 		t.Fatal("unknown configuration was discarded")
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0600 {
 		t.Fatalf("permissions: %v", info.Mode())
 	}
 }

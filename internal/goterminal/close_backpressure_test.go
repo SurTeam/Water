@@ -1,6 +1,7 @@
 package goterminal
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -8,6 +9,9 @@ import (
 )
 
 func TestCloseUnblocksPublisherWithFullSubscriber(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
 	r := NewRegistry()
 	term, err := r.Spawn("/bin/sh", []string{"-c", "exec sleep 30"}, goprotocol.TerminalSize{Columns: 20, Lines: 4})
 	if err != nil {

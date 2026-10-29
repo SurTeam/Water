@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Native Linux package build for the Go rewrite.
+# Linux package build using native or target Linux C libraries.
 #
 # Environment:
 #   WATER_APP_VARIANT   dev (default) or release
@@ -40,12 +40,13 @@ esac
 version="${WATER_APP_VERSION:-$(cat "$root_dir/VERSION")}"
 [[ -n "$version" ]] || { echo "error: product version is empty" >&2; exit 1; }
 
-arch="$(uname -m)"
-case "$arch" in
-  aarch64 | arm64) arch="aarch64" ;;
-  x86_64 | amd64) arch="x86_64" ;;
-  *) echo "error: unsupported Linux architecture: $arch" >&2; exit 1 ;;
+target_arch="${GOARCH:-$(go env GOHOSTARCH)}"
+case "$target_arch" in
+  arm64) arch=aarch64 ;;
+  amd64) arch=x86_64 ;;
+  *) echo "error: unsupported Linux architecture: $target_arch" >&2; exit 1 ;;
 esac
+export GOOS=linux GOARCH="$target_arch" CGO_ENABLED=1
 
 identity_pkg="github.com/SurTeam/Water/internal/gobuild"
 server_revision="$(bash "$root_dir/scripts/server-revision.sh")"
@@ -54,26 +55,27 @@ if [[ "$variant" == "release" ]]; then
   ldflags="-s -w ${ldflags}"
 fi
 
-build_dir="$root_dir/target/go-linux/$variant"
-stage_dir="$build_dir/$package_name"
+build_dir="$root_dir/target/go-linux/$variant/$target_arch"
+binary_dir="$build_dir/bin"
+stage_dir="$build_dir/package"
 dist_dir="$root_dir/dist"
 archive="$dist_dir/$package_name-$version-$arch-linux.tar.gz"
 
-mkdir -p "$build_dir" "$dist_dir"
+mkdir -p "$binary_dir" "$dist_dir"
 WATER_APP_VARIANT="$variant" WATER_APP_VERSION="$version" \
   bash "$root_dir/scripts/build-go-embedded-servers.sh"
 
-go build -trimpath -ldflags="$ldflags" -o "$build_dir/water" ./cmd/water
-go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-server" ./cmd/water-server
-go build -trimpath -ldflags="$ldflags" -o "$build_dir/water-update" ./cmd/water-update
+go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water" ./cmd/water
+go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water-server" ./cmd/water-server
+go build -trimpath -ldflags="$ldflags" -o "$binary_dir/water-update" ./cmd/water-update
 
 rm -rf "$stage_dir"
 mkdir -p "$stage_dir"
-install -m 755 "$build_dir/water" "$stage_dir/$gui_installed_name"
-install -m 755 "$build_dir/water-server" "$stage_dir/$server_installed_name"
+install -m 755 "$binary_dir/water" "$stage_dir/$gui_installed_name"
+install -m 755 "$binary_dir/water-server" "$stage_dir/$server_installed_name"
 # Give the PTY owner a distinct process name while sharing the server build.
-install -m 755 "$build_dir/water-server" "$stage_dir/$supervisor_installed_name"
-install -m 755 "$build_dir/water-update" "$stage_dir/$updater_installed_name"
+install -m 755 "$binary_dir/water-server" "$stage_dir/$supervisor_installed_name"
+install -m 755 "$binary_dir/water-update" "$stage_dir/$updater_installed_name"
 bash "$root_dir/scripts/package-licenses.sh" "$stage_dir/Licenses"
 
 rm -f "$archive"

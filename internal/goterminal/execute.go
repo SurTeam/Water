@@ -40,7 +40,8 @@ type ExecuteResult struct {
 	AltScreen bool     `json:"alt_screen"`
 }
 
-// Execute runs a foreground child through an idle POSIX interactive shell.
+// Execute runs an isolated command through an idle interactive shell.
+// Unix uses a POSIX subshell; Windows uses an owned PowerShell command Job.
 // It reconstructs retained replay privately; it does not persist a server screen.
 func (t *Terminal) Execute(ctx context.Context, opts ExecuteOptions) (ExecuteResult, error) {
 	var result ExecuteResult
@@ -64,6 +65,9 @@ func (t *Terminal) Execute(ctx context.Context, opts ExecuteOptions) (ExecuteRes
 	}
 	defer t.executeMu.Unlock()
 	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if result, handled, err := t.executePlatform(ctx, opts); handled {
 		return result, err
 	}
 	if !t.interactivePOSIXShell() {
@@ -187,7 +191,7 @@ func (t *Terminal) Execute(ctx context.Context, opts ExecuteOptions) (ExecuteRes
 		if fg, err = t.ForegroundGroup(); err != nil || fg != pid {
 			return
 		}
-		if syscall.Kill(-pid, sig) == nil {
+		if signalProcessGroup(pid, sig) == nil {
 			if sig == syscall.SIGTERM {
 				result.Signals = append(result.Signals, "TERM")
 			} else {

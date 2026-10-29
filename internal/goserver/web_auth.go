@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goplatform"
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/google/uuid"
 )
@@ -64,7 +65,7 @@ func (w *webService) loadAuthLocked() error {
 		legacy := filepath.Join(filepath.Dir(configPath), "web-"+w.server.Build+"-"+webDigest(w.server.SocketPath))
 		if _, err := os.Lstat(dir); errors.Is(err, os.ErrNotExist) {
 			if info, oldErr := os.Lstat(legacy); oldErr == nil {
-				if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+				if !info.IsDir() || !goplatform.IsPrivate(legacy, info) {
 					return errors.New("legacy Web authorization directory must be private (0700)")
 				}
 				if err := os.Rename(legacy, dir); err != nil {
@@ -77,14 +78,14 @@ func (w *webService) loadAuthLocked() error {
 			return err
 		}
 	}
-	if err := os.Mkdir(dir, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	if err := goplatform.MkdirPrivate(dir); err != nil {
 		return err
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
 		return err
 	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
+	if !info.IsDir() || !goplatform.IsPrivate(dir, info) {
 		return errors.New("Web authorization directory must be a private directory (0700)")
 	}
 	w.authPath = filepath.Join(dir, "devices.json")
@@ -96,7 +97,7 @@ func (w *webService) loadAuthLocked() error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 1024*1024 {
+	if !info.Mode().IsRegular() || !goplatform.IsPrivate(w.authPath, info) || info.Size() > 1024*1024 {
 		return errors.New("invalid Web authorization file permissions or size")
 	}
 	data, err := os.ReadFile(w.authPath)
