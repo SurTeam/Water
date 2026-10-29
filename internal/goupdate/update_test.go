@@ -129,8 +129,8 @@ func TestNativeInstallerRestartAndRollback(t *testing.T) {
 			statusFile := filepath.Join(dir, "status")
 			gui := filepath.Join(dir, "water")
 			newGUI := filepath.Join(stage, "new-water")
-			oldScript := []byte("#!/bin/sh\nprintf '%s' \"$$\" > \"$WATER_TEST_UPDATE_PID\"\nprintf 'old:%s' \"$WATER_UPDATE_ERROR\" > \"$WATER_TEST_UPDATE_STATUS\"\nexec /usr/bin/tail -f /dev/null\n")
-			newScript := []byte("#!/bin/sh\nprintf '%s' \"$$\" > \"$WATER_TEST_UPDATE_PID\"\nprintf ready > \"$WATER_UPDATE_ACK\"\nprintf new > \"$WATER_TEST_UPDATE_STATUS\"\nexec /usr/bin/tail -f /dev/null\n")
+			oldScript := []byte("#!/bin/sh\nprintf '%s' \"$$\" > \"$WATER_TEST_UPDATE_PID\"\nprintf 'ready\\n' > \"$WATER_UPDATE_ACK\"\nprintf 'old:%s' \"$WATER_UPDATE_ERROR\" > \"$WATER_TEST_UPDATE_STATUS\"\nexec /usr/bin/tail -f /dev/null\n")
+			newScript := []byte("#!/bin/sh\ntest \"$WATER_UPDATE_PRESERVE_SERVER\" = 1 || exit 8\nprintf '%s' \"$$\" > \"$WATER_TEST_UPDATE_PID\"\nprintf '%s' \"$$\" > \"$WATER_UPDATE_ACK\"\nprintf new > \"$WATER_TEST_UPDATE_STATUS\"\nexec /usr/bin/tail -f /dev/null\n")
 			if failStartup {
 				newScript = []byte("#!/bin/sh\nexit 7\n")
 			}
@@ -182,7 +182,7 @@ func TestNativeInstallerRestartAndRollback(t *testing.T) {
 				_, lockErr := os.Stat(filepath.Join(dir, ".water-update-lock"))
 				if len(status) > 0 && os.IsNotExist(lockErr) {
 					if failStartup {
-						if !strings.HasPrefix(string(status), "old:new GUI exited") {
+						if !strings.HasPrefix(string(status), "old:GUI exited") {
 							t.Fatalf("rollback did not restart old GUI with error: %s", status)
 						}
 						contents, _ := os.ReadFile(gui)

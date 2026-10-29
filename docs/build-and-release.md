@@ -118,21 +118,69 @@ from the extracted package together in the same directory. A system
 package manager installation should continue using that package manager when
 its directory is not writable. Water does not request elevated privileges.
 
-An independent installer waits for the GUI to exit, retains the old app/binaries,
-and rolls back if replacement fails or the new GUI fails to render a live frame
-within 20 seconds. The control socket, config and SSH destinations are preserved.
-Detached terminal servers continue running during the GUI restart, including
-when `detach_on_quit` is false. An embedded local server blocks installation;
+The GUI copies and runs the helper from the **currently installed package**, not
+from the downloaded replacement. A helper/GUI protocol change therefore cannot
+retroactively protect the first update started by an older installation. The
+full protocol below applies once both installed GUI and helper include it;
+installing only a new GUI beside an old helper does not provide these guarantees.
+
+The GUI holds a stable advisory `.water-update-lock.guard` (or
+`.water-dev-update-lock.guard`) and transfers its open descriptor to the helper.
+A bounded ready/commit/takeover handshake must finish before the GUI enters its
+update exit path. The helper first opens a keeper session to an explicitly
+selected local control socket, when present; it only connects and never starts
+a server. Failed takeover leaves the GUI and installation in place and allows
+retry. After takeover the helper waits up to 30 seconds for the recorded GUI PID
+to exit before replacing files; reparenting alone is not proof of exit.
+
+The installer retains the old app/binaries and waits up to 20 seconds for a
+private first-live-frame ACK from the replacement GUI. macOS launches app bundles
+through LaunchServices using `open -n -W`, forwarding update environment and
+original arguments explicitly. The ACK contains the GUI PID; its startup PID
+marker identifies the process belonging to that launch attempt. Startup ACK and
+server-preservation environment variables are consumed at process initialization
+so child windows, servers and shells do not inherit those capabilities. ACK
+writes are serialized, retry on failure, and release server protection only
+after a successful write.
+
+The control socket, config and SSH destinations are preserved. Detached terminal
+servers continue running during the GUI restart, including when
+`detach_on_quit` is false: outgoing update cleanup skips shutdown, the helper
+holds its keeper session across replacement/rollback, and the replacement GUI
+suppresses shutdown cleanup until its first-frame ACK. During this protected
+startup, explicit GUI server shutdown/restart is also blocked. Update installation
+and Quit GUI and Local Server cannot start concurrently; recovery restart checks
+update protection again before requesting shutdown and cancels a prepared lease
+if protection became active. An embedded local server blocks installation;
 enable `server.detached` and restart Water before installing updates. Remote
 connections reconnect through the existing transport. Protocol incompatibility
 with a retained server causes startup failure and rollback rather than server
 replacement or session termination.
 
-Failed installations retain `.water-update-*` (release) or `.water-dev-update-*` (dev) staging/backup files and
-`install.log` beside the installation. A crashed installer may leave
-`.water-update-lock` / `.water-dev-update-lock`; remove that lock only after confirming no installer for
-this installation is running. Normal successful installation cleans its files.
-No update is installed without clicking **Install and restart**.
+Replacement or startup failure triggers rollback only after the attempted new
+GUI has exited or its owned PID has been stopped. If its identity/exit cannot be
+confirmed, files and backups remain for diagnosis without overwriting a possibly
+running replacement. Incomplete rollback also disables automatic restart.
+After a complete rollback the helper launches the restored GUI and waits for its
+first frame, accepting the legacy `ready` ACK only on this rollback path. The
+keeper session protects even legacy last-client cleanup while the helper remains
+alive; an old restored GUI does not acquire the new startup guards by receiving
+an environment variable.
+
+Failed installations retain `.water-update-*` (release) or
+`.water-dev-update-*` (dev) staging/backup files and append-only `install.log`
+beside the installation. The visible `.water-update-lock` /
+`.water-dev-update-lock` records the owner PID. Startup and install retries may
+remove a stale visible lock only while holding the advisory guard and after
+confirming its recorded owner is gone. Legacy empty locks require checking
+matching staging directories' `installer.pid`; an active PID, malformed owner or
+uncertain legacy plan is preserved and installation remains blocked. Automatic
+lock recovery does not delete staging/backups. The stable `.guard` file remains
+on disk; its existence is not evidence of an active installer and it must not be
+unlinked to bypass locking. For uncertain locks, inspect `install.log`, plan,
+owner PID and installation paths before manual recovery; never delete an active
+installer's lock or backup. Normal successful installation cleans its staging
+files and visible lock. No update is installed without clicking **Install and restart**.
 
 Run `~/.venv/bin/python scripts/go-ui-update-smoke.py` with `WATER_BIN` pointing
 to the native test binary. It uses an isolated socket/config and real Water

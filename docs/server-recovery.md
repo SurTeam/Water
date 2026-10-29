@@ -30,6 +30,8 @@ Windows/portable SSH uses platform endpoints and stdio bridging as described in 
 
 Remote restart preserves the discovered endpoint, including a legacy endpoint. Replacement GUI views receive fresh forwarding sockets so cancelling the old forward does not remove the replacement's endpoint. Health reconnect and explicit server operations are serialized per connection.
 
+GUI-driven server operations are blocked while application update installation or protected replacement startup is active. Recovery checks this guard both before preparation and immediately before `recovery.shutdown`; if protection starts after preparation, it cancels the lease and leaves the server running. This also covers explicit local shutdown and startup-failure session cleanup. Application updates retain existing servers rather than invoking this recovery transaction; their helper/first-frame protection and old-installation limits are described in [build and release](build-and-release.md#in-app-updates-macos-and-linux).
+
 ## Recovery transaction
 
 1. `recovery.prepare` checks the expected server instance and refuses another GUI window or another active recovery lease. It freezes dispatched changes, exports topology, queries current directories on the owning server, and verifies the layout revision did not change. Directory collection has a total deadline.

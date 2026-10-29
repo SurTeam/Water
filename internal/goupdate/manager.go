@@ -36,6 +36,7 @@ func NewManager(version, variant string, args []string, invalidate func()) *Mana
 	ctx, cancel := context.WithCancel(context.Background())
 	executable, _ := os.Executable()
 	executable, _ = filepath.EvalSymlinks(executable)
+	recoverStale(executable)
 	m := &Manager{state: State{Phase: "idle", Current: version}, variant: variant, executable: executable, args: append([]string(nil), args...), ctx: ctx, cancel: cancel, invalidate: invalidate}
 	if runtime.GOOS == "windows" {
 		m.state.Phase = "unsupported"

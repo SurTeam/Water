@@ -12,6 +12,7 @@ import (
 	"github.com/SurTeam/Water/internal/goprotocol"
 	"github.com/SurTeam/Water/internal/goremote"
 	"github.com/SurTeam/Water/internal/goui"
+	"github.com/SurTeam/Water/internal/goupdate"
 )
 
 type serverOperations struct {
@@ -51,7 +52,7 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 	fail := func(err error) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), string, error) {
 		return entry, nil, nil, path, err
 	}
-	if o.window.Updating() {
+	if o.window.Updating() || goupdate.PreserveServer() {
 		return fail(errors.New("software update is in progress; server was left running"))
 	}
 	project := func(d *gomodel.RecoveryLayout) { o.multi.ProjectRecoveryLayout(entry.ID, d) }
@@ -78,6 +79,10 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 		p, err := goclient.PrepareRecovery(session, path, o.variant, endpoint, true, project)
 		if err != nil {
 			return fail(err)
+		}
+		if o.window.Updating() || goupdate.PreserveServer() {
+			_ = session.CallTimeout("recovery.cancel", map[string]any{"token": p.Token}, nil, time.Second)
+			return fail(errors.New("software update is in progress; server was left running"))
 		}
 		if err := session.CallTimeout("recovery.shutdown", map[string]any{"token": p.Token}, nil, 3*time.Second); err != nil {
 			_ = session.CallTimeout("recovery.cancel", map[string]any{"token": p.Token}, nil, time.Second)
@@ -172,7 +177,7 @@ func (o *serverOperations) closeSession(s *goclient.Session, local bool, tunnel 
 		}
 	}
 	return func() {
-		if local && !detachOnQuit && !o.window.Updating() {
+		if local && !detachOnQuit && !o.window.Updating() && !goupdate.PreserveServer() {
 			_ = s.CallTimeout("session.release", map[string]any{"shutdown_if_last": true}, nil, time.Second)
 		}
 		_ = s.Close()
@@ -180,6 +185,13 @@ func (o *serverOperations) closeSession(s *goclient.Session, local bool, tunnel 
 			_ = tunnel.Close()
 		}
 	}
+}
+
+func shutdownLocalServer(w *goui.EbitengineWindow, session *goclient.Session) error {
+	if w.Updating() || goupdate.PreserveServer() {
+		return errors.New("software update is in progress; server was left running")
+	}
+	return session.CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
 }
 
 func pendingRecovery(configPath, variant string, entry goui.ConnectionEntry) bool {

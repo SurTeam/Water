@@ -129,18 +129,14 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			if session == nil {
 				return fmt.Errorf("local connection is unavailable")
 			}
-			return session.CallTimeout("server.shutdown", map[string]any{}, nil, 5*time.Second)
+			return shutdownLocalServer(w, session)
 		})
 		if embedded != nil {
 			defer func() { embedded.WaitForGUIRelease(); _ = embedded.Close() }()
 		}
 		localView := operations.newView(localSession, localEntry)
-		if err := multi.AddConnection(localEntry, localView, func() {
-			if embedded == nil && !cfg.Server.DetachOnQuit && !w.Updating() {
-				_ = localSession.CallTimeout("session.release", map[string]any{"shutdown_if_last": true}, nil, time.Second)
-			}
-			_ = localSession.Close()
-		}, len(sshDestinations) == 0); err != nil {
+		closeLocal := operations.closeSession(localSession, embedded == nil, nil)
+		if err := multi.AddConnection(localEntry, localView, closeLocal, len(sshDestinations) == 0); err != nil {
 			return err
 		}
 	} else if len(sshDestinations) == 0 {

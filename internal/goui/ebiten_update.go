@@ -38,7 +38,7 @@ func (w *EbitengineWindow) updateAction(action string) {
 	case "download":
 		w.updates.Download()
 	case "install":
-		if !w.updateRestartAllowed.Load() || w.updateResult != nil || w.multi != nil && w.multi.serverOperationBusy() {
+		if !w.updateRestartAllowed.Load() || w.updateResult != nil || w.quitResult != nil || goupdate.PreserveServer() || w.multi != nil && w.multi.serverOperationBusy() {
 			return
 		}
 		result := make(chan error, 1)

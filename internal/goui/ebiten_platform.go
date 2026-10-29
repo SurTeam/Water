@@ -2,6 +2,7 @@ package goui
 
 import (
 	"github.com/SurTeam/Water/internal/goconfig"
+	"github.com/SurTeam/Water/internal/goupdate"
 	"github.com/hajimehoshi/ebiten/v2"
 	"os"
 	"strings"
@@ -67,7 +68,7 @@ func (w *EbitengineWindow) menuAction(action string) {
 	case "quit-gui":
 		w.closing = true
 	case "quit-and-server":
-		if w.quitResult != nil || w.quitServer == nil {
+		if w.quitResult != nil || w.quitServer == nil || w.Updating() || goupdate.PreserveServer() {
 			return
 		}
 		w.quitError = ""
