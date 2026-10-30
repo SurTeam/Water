@@ -128,6 +128,18 @@ retroactively protect the first update started by an older installation. The
 full protocol below applies once both installed GUI and helper include it;
 installing only a new GUI beside an old helper does not provide these guarantees.
 
+On macOS, newly launched detached Water processes also disclaim the launching
+application's process responsibility; `setsid` alone leaves that association in
+place. The server, PTY supervisor and installer consume a private launch marker
+and re-exec in place with `POSIX_SPAWN_SETEXEC` and the dynamically resolved
+`responsibility_spawnattrs_setdisclaim` extension before their role initializes.
+PID and inherited takeover descriptors remain unchanged. Failure to detach is a
+startup error. Already running processes retain their old responsibility, so
+installing this code does not retroactively detach an existing server, supervisor
+or updater. Native regression checks responsibility, PID, descriptor inheritance
+and marker consumption; a complete installed-app update remains a separate
+runtime check.
+
 The GUI holds a stable advisory `.water-update-lock.guard` (or
 `.water-dev-update-lock.guard`) and transfers its open descriptor to the helper.
 A bounded ready/commit/takeover handshake must finish before the GUI enters its

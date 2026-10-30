@@ -59,6 +59,7 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - 本地打包将 server 二进制另装为 `water-pty`（release）或 `water-pty-dev`（dev），优先以该名称启动 supervisor；旧安装包及仅携带 server 的远端 payload 回退到原 server 名称。`--pty-supervisor` 角色以平台 detached 方式启动（Unix 为新 session），生命周期不跟随 server。默认启用，`WATER_PTY_SUPERVISOR=off` 退回进程内模式。
 - PTY 后端统一由 `internal/gopty` 持有。Windows 使用 ConPTY 与注册到 Go poller 的 overlapped 管道，支持读写 deadline 和 resize 顺序屏障；每个 terminal 拥有独立 kill-on-close Job。根进程以 suspended 状态创建，成功加入 Job 后才恢复执行；Job 分配失败则终止启动，不能让用户代码先运行。关闭 pane、替换 terminal 和普通关闭 server 终止该 Job 内的进程树，不能套用 Unix PID/进程组信号规则。Windows 前台进程查询依据该 terminal 的 Job，PowerShell prompt 目录报告带进程启动身份，避免 PID 复用污染目录继承。
 - GUI 内嵌 server 与独立 server 都必须调用同一个启用入口；否则本地重启会重新 spawn pane，而远端升级却能接回。
+- macOS 的 detached server、supervisor 与更新 helper 除新 session 外，还须解除启动它们的应用 responsibility，避免应用退出或替换时仍被作为下属进程处理。启动标记在角色初始化前消费，并以保留 PID 和继承描述符的原地 re-exec 完成；失败时中止启动。已有进程不会因磁盘上的应用更新而自动取得这一保护，具体更新边界见[构建与发布](build-and-release.md#in-app-updates-macos-and-linux)。
 - supervisor 的键是 pane id（跨 server 重启稳定），terminal 实例 id 每次 spawn 都新建。两者必须分开：客户端按实例 id 订阅，替换 pane 的 terminal 时才会重新 attach；若让实例 id 等于 pane id，GUI 会继续挂在已退役的流上，OSC 标题、Agent 状态都会停在旧值。
 - 普通 spawn 用 `Replace` 关闭该键上的旧程序；只有 recovery 导入时传 `resume`，才接回上一个 server 留下的程序。旧代的事件按 generation 丢弃，被替换的 terminal 从 registry 移除后其 Exit 不再关闭 pane。
 - supervisor 按终端保留有界原始输出（上限 2 MiB，超出后保留最近的尾部）；重新 attach 时从指定 offset 继续，截断时明确标记，server 用自己的 replay 逻辑重建，不使用逐屏快照。

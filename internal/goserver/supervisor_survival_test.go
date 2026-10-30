@@ -385,7 +385,8 @@ func TestSupervisedMouseSurvivesServerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	text = waitText(t, socket, resumed, "MOUSE_RECEIVED")
-	if !strings.Contains(text, "1b 5b 3c 36 34 3b 35 3b 33 4d") {
+	// od pads bytes differently across host platforms; compare the byte tokens.
+	if !strings.Contains(strings.Join(strings.Fields(text), " "), "1b 5b 3c 36 34 3b 35 3b 33 4d") {
 		t.Fatalf("original PTY did not receive wheel: %q", text)
 	}
 }
