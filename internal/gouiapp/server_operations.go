@@ -131,7 +131,7 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 				return fail(err)
 			}
 			view := o.newView(s, entry)
-			return entry, view, o.closeSession(s, entry.Kind == "local", existingTunnel), path, nil
+			return entry, view, o.closeSession(s, existingTunnel), path, nil
 		}
 	}
 	var s *goclient.Session
@@ -148,7 +148,6 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 		if loadErr != nil {
 			return fail(loadErr)
 		}
-		cfg.Server.Detached = true
 		s, _, _, err = connectOrStartWithRecovery(entry.SocketPath, o.configPath, cfg, o.variant, true)
 	}
 	if err != nil {
@@ -157,7 +156,7 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 		}
 		return fail(fmt.Errorf("start replacement; recovery saved at %s: %w", path, err))
 	}
-	cleanup := o.closeSession(s, entry.Kind == "local", tunnel)
+	cleanup := o.closeSession(s, tunnel)
 	if err := goclient.RestorePending(s, path, o.variant, endpoint); err != nil {
 		_ = s.Close()
 		if tunnel != nil {
@@ -167,19 +166,10 @@ func (o *serverOperations) operate(entry goui.ConnectionEntry, session *goclient
 	}
 	return entry, o.newView(s, entry), cleanup, path, nil
 }
-func (o *serverOperations) closeSession(s *goclient.Session, local bool, tunnel *goremote.Tunnel) func() {
-	detachOnQuit := o.cfg.Server.DetachOnQuit
-	if local {
-		if cfg, err := goconfig.Load(o.configPath); err == nil {
-			detachOnQuit = cfg.Server.DetachOnQuit
-		} else {
-			detachOnQuit = true
-		}
-	}
+func (o *serverOperations) closeSession(s *goclient.Session, tunnel *goremote.Tunnel) func() {
+	// GUI sessions never own the shared server lifecycle. Legacy quit flags
+	// must not terminate terminals when the last window disconnects.
 	return func() {
-		if local && !detachOnQuit && !o.window.Updating() && !goupdate.PreserveServer() {
-			_ = s.CallTimeout("session.release", map[string]any{"shutdown_if_last": true}, nil, time.Second)
-		}
 		_ = s.Close()
 		if tunnel != nil {
 			_ = tunnel.Close()

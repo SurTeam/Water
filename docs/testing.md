@@ -233,11 +233,10 @@ GUI 侧分段计时（`input.send`、`input.ime`、`input.echo_latency`、`publi
 
 ## 多窗口验证
 
-多窗口检查必须覆盖 detached/embedded 两种 server 生命周期、独立选择、焦点 resize 和仅清理自有实例。
+多窗口检查必须覆盖 GUI 启动的独立 server 在单个和多个窗口退出后继续运行、独立选择、焦点 resize 和仅清理自有实例。
 
 ```sh
 ~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water
-~/.venv/bin/python scripts/go-ui-multiwindow-smoke.py --binary target/go-ui-smoke/water --embedded
 ```
 
 ## 现有 fixture 的剪贴板边界

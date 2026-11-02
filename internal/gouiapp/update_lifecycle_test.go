@@ -76,7 +76,7 @@ func TestUpdateTakeoverCleanup(t *testing.T) {
 	}
 	o := &serverOperations{cfg: cfg, window: w, configPath: configPath}
 	// This is the deferred cleanup used when GUI initialization fails.
-	o.closeSession(session, true, nil)()
+	o.closeSession(session, nil)()
 	if err := syscall.Kill(pid, 0); err != nil {
 		t.Fatalf("pane process lost during failed startup: %v", err)
 	}
@@ -102,15 +102,18 @@ func TestUpdateTakeoverCleanup(t *testing.T) {
 	if goupdate.PreserveServer() {
 		t.Fatal("successful ACK did not release protection")
 	}
-	o.closeSession(next, true, nil)()
-	deadline = time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(socket); os.IsNotExist(err) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	o.closeSession(next, nil)()
+	fresh, err := goclient.New(socket).OpenSession()
+	if err != nil {
+		t.Fatalf("normal GUI cleanup stopped independent server: %v", err)
 	}
-	t.Fatal("normal detach_on_quit=false cleanup no longer shuts down server")
+	defer fresh.Close()
+	if fresh.Server.InstanceID != next.Server.InstanceID || fresh.Server.ServerPID != next.Server.ServerPID {
+		t.Fatal("GUI cleanup replaced server")
+	}
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("GUI cleanup lost running pane: %v", err)
+	}
 }
 
 func stringMustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }

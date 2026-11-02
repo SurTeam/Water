@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify native menu actions and an owned detached server's lifetime."""
+"""Verify native menu actions and an owned independent server's lifetime."""
 
 from water_test import hold_gui_lock
 hold_gui_lock()
@@ -21,7 +21,7 @@ socket = str(directory / "water.sock")
 config = directory / "config.json"
 shell = next(p for p in ("/opt/homebrew/bin/zsh", "/bin/zsh") if Path(p).exists())
 config.write_text(json.dumps({"startup": {"window_columns": 96, "window_rows": 30},
-    "server": {"detached": True, "detach_on_quit": True}, "shell": {"program": shell, "args": ["-f"]},
+    "server": {"auto_start": True}, "shell": {"program": shell, "args": ["-f"]},
     "shortcuts": {"focus_left": "cmd-h", "hide_window": "cmd-w", "minimize_window": "cmd-m", "ignore_quit": "cmd-q"}}))
 gui = None
 server_pid = None
@@ -58,7 +58,9 @@ def wait(predicate, description):
 try:
     start()
     initial = wait(lambda s: s.get("native_menu", {}).get("ready") and s.get("frame_active_terminal") not in (None, "00000000-0000-0000-0000-000000000000"), "native menu and terminal")
-    server_pid = ctl("server", "info")["server_pid"]
+    original_info = ctl("server", "info")
+    server_pid = original_info["server_pid"]
+    original_instance = original_info["instance_id"]
     print(f"owned_server_pid={server_pid}", flush=True)
     assert server_pid != gui.pid
     assert ctl("ui", "key", "cmd-n")["handled"]
@@ -106,9 +108,12 @@ try:
     wait(lambda s: not s["window_minimized"] and not s["application_hidden"], "native restore")
     ctl("ui", "menu", "quit-gui")
     assert gui.wait(timeout=5) == 0
-    assert ctl("server", "info")["server_pid"] == server_pid, "GUI-only quit should preserve detached server"
+    assert ctl("server", "info")["server_pid"] == server_pid, "GUI-only quit should preserve independent server"
+    retained_state = ctl("state")
     start()
     wait(lambda s: s.get("native_menu", {}).get("ready"), "reattached native menu")
+    assert ctl("server", "info")["instance_id"] == original_instance
+    assert ctl("state")["workspaces"] == retained_state["workspaces"], "GUI restart changed shared model"
     assert ctl("server", "info")["server_pid"] == server_pid
     ctl("ui", "menu", "quit-and-server")
     assert gui.wait(timeout=8) == 0
@@ -122,7 +127,7 @@ try:
     else:
         raise RuntimeError("Owned server still running after combined quit")
     assert not Path(socket).exists(), "combined quit must remove owned socket"
-    print("PASS Cmd+H pane focus, Cmd+W hide, Cmd+Q ignore, minimize/restore; actual native menu GUI-only quit and GUI+server quit; detached server process and socket removed", flush=True)
+    print("PASS Cmd+H pane focus, Cmd+W hide, Cmd+Q ignore, minimize/restore; actual native menu GUI-only quit and GUI+server quit; independent server process and socket removed", flush=True)
 finally:
     # Every operation is scoped to this instance's unique socket and recorded PIDs.
     try:

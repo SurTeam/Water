@@ -150,6 +150,9 @@ func (c *WorkspaceClient) openSettingsConfig(cfg goconfig.AppConfig) {
 			if group == "Startup" && legacyPixelField(field.Name) {
 				continue
 			}
+			if group == "Server" && (field.Name == "Detached" || field.Name == "DetachOnQuit") {
+				continue
+			}
 			if group == "Terminal" && (field.Name == "DefaultColumns" || field.Name == "DefaultLines") {
 				continue
 			}

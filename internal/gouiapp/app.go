@@ -121,8 +121,8 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 	multi.SetServerOperator(operations.operate)
 	localEntry := goui.ConnectionEntry{ID: uuid.New(), Name: "Local", Kind: "local", Status: "connected", SocketPath: socket}
 
-	localSession, embedded, _, localErr := connectOrStartWithRecovery(socket, configPath, cfg, buildVariant, pendingRecovery(configPath, buildVariant, localEntry))
-	w.SetUpdateRestartAllowed(embedded == nil)
+	localSession, _, _, localErr := connectOrStartWithRecovery(socket, configPath, cfg, buildVariant, pendingRecovery(configPath, buildVariant, localEntry))
+	w.SetUpdateRestartAllowed(true)
 	if localErr == nil {
 		w.SetQuitServerHandler(func() error {
 			session := multi.ConnectionSession(localEntry.ID)
@@ -131,11 +131,8 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 			}
 			return shutdownLocalServer(w, session)
 		})
-		if embedded != nil {
-			defer func() { embedded.WaitForGUIRelease(); _ = embedded.Close() }()
-		}
 		localView := operations.newView(localSession, localEntry)
-		closeLocal := operations.closeSession(localSession, embedded == nil, nil)
+		closeLocal := operations.closeSession(localSession, nil)
 		if err := multi.AddConnection(localEntry, localView, closeLocal, len(sshDestinations) == 0); err != nil {
 			return err
 		}
@@ -143,8 +140,8 @@ func runWindowWithConnections(socket, configPath string, cfg goconfig.AppConfig,
 		return localErr
 	}
 
-	// Register this after local server lifecycle defers so child sessions and
-	// terminal attachments are closed before an embedded/detached server stops.
+	// Register this after local connection setup so child sessions and terminal
+	// attachments are closed before the GUI-owned session disconnects.
 	defer multi.Close()
 
 	makeRemote := func(rawDestination string, interactive bool) (goui.ConnectionEntry, *goui.WorkspaceClient, func(), error) {
@@ -290,40 +287,6 @@ func connectOrStartWithRecovery(socket, configPath string, cfg goconfig.AppConfi
 	}
 	if !cfg.Server.AutoStart {
 		return nil, nil, false, fmt.Errorf("server is not available at %s and auto_start is disabled", socket)
-	}
-
-	if !cfg.Server.Detached {
-		srv := goserver.NewWithConfig(socket, cfg)
-		srv.ConfigPath = configPath
-		// An embedded server owns the same panes as a standalone one, so it must
-		// use the supervisor too; otherwise a GUI restart re-spawns the panes.
-		if err := srv.EnableSupervisorFromEnv(); err != nil {
-			fmt.Fprintln(os.Stderr, "water: pty supervisor unavailable, terminals run in-process:", err)
-		}
-		if err := srv.Initialize(cfg.Startup.InitialWorkspace && !empty, cfg.Startup.InitialTerminal && cfg.Startup.InitialWorkspace && !empty); err != nil {
-			return nil, nil, false, err
-		}
-		errCh := make(chan error, 1)
-		go func() { errCh <- srv.ListenAndServe() }()
-		session, err := waitForSession(socket, 3*time.Second)
-		if err != nil {
-			_ = srv.Close()
-			select {
-			case serveErr := <-errCh:
-				if serveErr != nil {
-					return nil, nil, false, serveErr
-				}
-			default:
-			}
-			return nil, nil, false, err
-		}
-		select {
-		case <-errCh:
-			_ = srv.Close()
-			return session, nil, false, nil
-		default:
-		}
-		return session, srv, false, nil
 	}
 
 	if err := startDetachedServerWithRecovery(socket, configPath, buildVariant, empty); err != nil {

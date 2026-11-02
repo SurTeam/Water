@@ -89,9 +89,7 @@
     "hyperlink_download_directory": "~/Downloads/Water"
   },
   "server": {
-    "detached": true,
     "auto_start": true,
-    "detach_on_quit": true,
     "socket_path": null
   },
   "ui": {

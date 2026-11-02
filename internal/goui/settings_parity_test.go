@@ -44,6 +44,9 @@ func TestEveryConfigFieldHasSettingsControlAndRoundTrips(t *testing.T) {
 			if group == "Startup" && legacyPixelField(field) {
 				continue
 			}
+			if group == "Server" && (field == "Detached" || field == "DetachOnQuit") {
+				continue // legacy JSON migration fields, not editable settings
+			}
 			if group == "Terminal" && (field == "DefaultColumns" || field == "DefaultLines") {
 				continue
 			}

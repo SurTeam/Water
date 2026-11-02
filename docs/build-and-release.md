@@ -159,16 +159,16 @@ so child windows, servers and shells do not inherit those capabilities. ACK
 writes are serialized, retry on failure, and release server protection only
 after a successful write.
 
-The control socket, config and SSH destinations are preserved. Detached terminal
-servers continue running during the GUI restart, including when
-`detach_on_quit` is false: outgoing update cleanup skips shutdown, the helper
+The control socket, config and SSH destinations are preserved. Local terminal
+servers continue running during the GUI restart: outgoing update cleanup
+skips session shutdown, the helper
 holds its keeper session across replacement/rollback, and the replacement GUI
 suppresses shutdown cleanup until its first-frame ACK. During this protected
 startup, explicit GUI server shutdown/restart is also blocked. Update installation
 and Quit GUI and Local Server cannot start concurrently; recovery restart checks
 update protection again before requesting shutdown and cancels a prepared lease
-if protection became active. An embedded local server blocks installation;
-enable `server.detached` and restart Water before installing updates. Remote
+if protection became active. The local server is always independent, so an
+existing GUI-managed server does not block installation. Remote
 connections reconnect through the existing transport. Protocol incompatibility
 with a retained server causes startup failure and rollback rather than server
 replacement or session termination.

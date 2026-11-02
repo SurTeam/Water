@@ -108,9 +108,9 @@ func (w *EbitengineWindow) drawUpdate(c *WorkspaceClient, dst *ebiten.Image) {
 		label(136, c.tr("Updates are downloaded from Water's GitHub Releases."), 11, true)
 	}
 	if s.Phase == "ready" {
-		warning := "Restart keeps detached terminal servers running."
+		warning := "Restart keeps terminal servers running."
 		if !w.updateRestartAllowed.Load() {
-			warning = "Restart requires a detached local server. Change Server settings first."
+			warning = "Restart requires an independent local server."
 		}
 		label(210, c.tr(warning), 10, true)
 	}

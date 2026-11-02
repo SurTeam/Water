@@ -52,9 +52,10 @@ type StartupConfig struct {
 }
 
 type ServerConfig struct {
-	Detached     bool    `json:"detached"`
+	// Deprecated lifecycle fields are accepted from older configs and cleared on save.
+	Detached     bool    `json:"detached,omitempty"`
 	AutoStart    bool    `json:"auto_start"`
-	DetachOnQuit bool    `json:"detach_on_quit"`
+	DetachOnQuit bool    `json:"detach_on_quit,omitempty"`
 	SocketPath   *string `json:"socket_path"`
 }
 
@@ -253,7 +254,7 @@ func Default() AppConfig {
 			WindowMinColumns: 40,
 			WindowMinRows:    10,
 		},
-		Server:   ServerConfig{Detached: true, AutoStart: true, DetachOnQuit: true},
+		Server:   ServerConfig{AutoStart: true},
 		Web:      WebConfig{ListenAddress: "127.0.0.1", ListenPort: 8080},
 		Shell:    ShellConfig{Program: DefaultShellProgram()},
 		Features: FeatureConfig{MouseReporting: true, BracketedPaste: true, Selection: true},
@@ -436,6 +437,7 @@ func (c AppConfig) Normalized() AppConfig {
 	c.Terminal.DefaultLines = c.Startup.WindowRows
 	c.Startup.WindowWidth, c.Startup.WindowHeight = 0, 0
 	c.Startup.WindowMinWidth, c.Startup.WindowMinHeight = 0, 0
+	c.Server.Detached, c.Server.DetachOnQuit = false, false
 	switch strings.ToLower(strings.TrimSpace(c.UI.Language)) {
 	case "zh", "zh-cn", "zh-hans":
 		c.UI.Language = "zh-Hans"

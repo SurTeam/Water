@@ -238,13 +238,28 @@ type session struct {
 func (ss *session) write(v any) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return goprotocol.WriteJSON(ss.conn, v)
+	return ss.writeFrame(func() error { return goprotocol.WriteJSON(ss.conn, v) })
 }
 
 func (ss *session) writeTerminal(id uuid.UUID, ev goprotocol.TerminalEvent) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	return goprotocol.WriteTerminal(ss.conn, id, ev)
+	return ss.writeFrame(func() error { return goprotocol.WriteTerminal(ss.conn, id, ev) })
+}
+
+// Called with the session writer lock held. A stalled reader must eventually
+// release both the writer and any request waiting behind it. After a partial
+// frame fails the connection cannot be reused safely.
+func (ss *session) writeFrame(write func() error) error {
+	if err := ss.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		_ = ss.conn.Close()
+		return err
+	}
+	err := write()
+	if err != nil {
+		_ = ss.conn.Close()
+	}
+	return err
 }
 
 func (ss *session) close() {
@@ -367,9 +382,9 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			return errors.New("diagnostic session requires a GUI descriptor")
 		}
 		s.commandMu.Lock()
-		defer s.commandMu.Unlock()
 		busy := s.recovery != nil && time.Now().Before(s.recovery.expires)
 		if busy {
+			s.commandMu.Unlock()
 			return errors.New("server recovery is in progress")
 		}
 		if isGUI {
@@ -377,10 +392,14 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			// Register before acknowledging session.open. Once OpenSession
 			// returns, callers must be able to route UI automation immediately.
 			if !s.addSession(ss) {
+				s.commandMu.Unlock()
 				return errors.New("server is shutting down after the last window closed")
 			}
 		}
 		ss.opened = true
+		// Admission is atomic with recovery, but network I/O must not hold
+		// the global command lock: one stalled GUI cannot freeze the server.
+		s.commandMu.Unlock()
 		if ss.browser {
 			_ = ss.conn.SetReadDeadline(time.Time{})
 		}

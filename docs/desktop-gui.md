@@ -13,9 +13,9 @@
 
 Cmd+N 启动同变体的独立 GUI 进程，复用 socket 和配置。各窗口独立保留 workspace/tab/pane 选择；共享快照不覆盖其他窗口选择。焦点 session 负责自动调整共享 PTY 网格，失焦窗口仍更新自身像素度量；获得焦点时重发当前几何。
 
-普通关闭释放自己的 session，server 生命周期按共享客户端、detach 策略和正在运行的 Web 服务判断。显式 Quit GUI and Local Server 会停止共享本地服务；不能把此动作等同于只关闭当前窗口。详见 [服务端与远程连接](remote-connections.md)。
+GUI 启动或连接的本地 server 始终是独立进程，GUI 不持有其生命周期。普通关闭只释放当前窗口的 session；最后一个窗口退出后，server、workspace、PTY 和 Web listener 继续运行。旧配置中的 `server.detached` 与 `server.detach_on_quit` 仅为读取兼容字段，不再显示在 Settings，保存时清除，也不影响生命周期。显式 Quit GUI and Local Server 会停止共享本地服务；不能把此动作等同于只关闭当前窗口。详见 [服务端与远程连接](remote-connections.md)。
 
-应用内更新退出，以及更新启动的替换 GUI 在首个 live frame 确认之前，关闭 session 不发送 `shutdown_if_last`，即使 `detach_on_quit=false` 也保留 detached server。启动失败的 deferred cleanup 使用相同保护。该阶段禁止 GUI 的显式 server shutdown/restart；安装与 Quit GUI and Local Server 互斥，已准备的 recovery 在 shutdown 前重新检查保护并按需取消。首帧 ACK 成功后恢复普通退出语义。helper 接管、回滚与旧版本首次升级边界见 [构建与发布](build-and-release.md#in-app-updates-macos-and-linux)。
+GUI 会话关闭从不发送 `shutdown_if_last`；更新退出和替换 GUI 的失败清理同样只断开自己的 session，并保留 server 与终端。更新启动的首帧确认前仍禁止显式 server shutdown/restart；安装与 Quit GUI and Local Server 互斥，已准备的 recovery 在 shutdown 前重新检查保护并按需取消。首帧 ACK 成功后恢复普通退出语义。helper 接管、回滚与旧版本首次升级边界见 [构建与发布](build-and-release.md#in-app-updates-macos-and-linux)。
 
 Ebitengine 的 Water 维护副本位于 `third_party/ebiten`，具体差异见其 [WATER_CHANGES](../third_party/ebiten/WATER_CHANGES.md)。事件处理完成后才采样可见性；不可见帧继续允许 offscreen 绘制与截图，但不排入最终屏幕命令。Metal 缓存 drawable 显式持有跨 readback autorelease pool 的引用，并在呈现完成调用后释放，避免截图后复用失效对象。原生生命周期通过真实 macOS 读回回归验证。
 

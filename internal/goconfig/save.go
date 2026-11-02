@@ -102,6 +102,10 @@ func saveConfig(path string, cfg AppConfig, preferencesOnly bool, sectionOnly st
 				delete(startup, key)
 			}
 		}
+		if server, ok := target["server"].(map[string]any); ok {
+			delete(server, "detached")
+			delete(server, "detach_on_quit")
+		}
 		if ui, ok := target["ui"].(map[string]any); ok {
 			if _, legacy := ui["ui_font_size"]; legacy {
 				ui["ui_font_size"] = cfg.UI.UIFontSize

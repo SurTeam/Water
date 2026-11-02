@@ -21,14 +21,12 @@ os.environ["WATER_TEST_UNFOCUSED"] = "1"
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
-    parser.add_argument("--embedded", action="store_true")
     args = parser.parse_args()
     binary = str(pathlib.Path(args.binary).resolve())
     root = pathlib.Path(tempfile.mkdtemp(prefix="water-multi-", dir="/tmp"))
     socket = root / "control.sock"
     config = root / "config.json"
-    config.write_text(json.dumps({"server": {"detached": not args.embedded,
-        "auto_start": True, "detach_on_quit": False},
+    config.write_text(json.dumps({"server": {"auto_start": True},
         "shell": {"program": "/opt/homebrew/bin/zsh" if pathlib.Path("/opt/homebrew/bin/zsh").exists() else "/bin/zsh", "args": ["-f"]}}))
     log = (root / "gui.log").open("w")
     gui = subprocess.Popen([binary, "--control-socket", str(socket), "--config", str(config)], stdout=log, stderr=log)
@@ -38,7 +36,7 @@ def main():
         if proc.returncode:
             raise RuntimeError(proc.stderr.strip())
         output = proc.stdout.strip()
-        if not output or output == "pong": return output
+        if not output or output in ("pong", "server shutdown requested"): return output
         return json.loads(output)
 
     def wait(fn, description):
@@ -104,9 +102,11 @@ def main():
         assert ctl("ping") == "pong"
         assert ctl("server", "info")["server_pid"] == server_pid
         ctl("ui", "menu", "quit-gui", "--window", b)
-        wait(lambda: not socket.exists(), "last window stops server")
+        wait(lambda: ctl("server", "info")["ui_sessions"] == 0, "last window released")
+        assert ctl("server", "info")["server_pid"] == server_pid
+        assert ctl("server", "info")["instance_id"] == info["instance_id"]
         gui.wait(timeout=7)
-        print(json.dumps({"passed": True, "embedded": args.embedded, "gui_pid":gui.pid, "server_pid":server_pid, "windows":windows, "focused_columns":[large_cols,small_cols], "artifacts":str(root)}))
+        print(json.dumps({"passed": True, "gui_pid":gui.pid, "server_pid":server_pid, "windows":windows, "focused_columns":[large_cols,small_cols], "artifacts":str(root)}))
     finally:
         if socket.exists():
             try:
