@@ -141,12 +141,14 @@ const terminalEventQueueCapacity = 64
 const terminalStreamQueueCapacity = 8
 
 const sessionSendQueueCapacity = 64
+const sessionStagingCapacity = 256
 const sessionSendQueueBytes = goprotocol.MaxFrameBytes
 
 var ErrSessionBackpressure = errors.New("session send queue is full")
 
 type pendingSessionFrame struct {
 	message goprotocol.WireMessage
+	input   *goprotocol.TerminalInputFrame
 	cost    int
 	written chan error
 	staged  bool
@@ -169,12 +171,14 @@ type Session struct {
 	// SSH-forwarded channels) so a slow TUI cannot block control RPC replies.
 	terminalMu            sync.Mutex
 	terminalStreams       map[uuid.UUID]*terminalStream
+	terminalInputs        map[uuid.UUID]*Session
 	terminalSubscriptions map[*TerminalSubscription]struct{}
 	terminalReaders       sync.WaitGroup
 
 	Server        goprotocol.ServerInfo
 	Compatibility goprotocol.Compatibility
 	Diagnostic    bool
+	BinaryInput   bool
 	conn          net.Conn
 	writeMu       sync.Mutex
 	outbound      chan pendingSessionFrame
@@ -202,6 +206,7 @@ type TerminalPush struct {
 }
 
 type terminalStream struct {
+	id      uuid.UUID
 	session *Session
 	stop    chan struct{}
 }
@@ -259,6 +264,7 @@ func (c *Client) openSessionContext(ctx context.Context, role string) (*Session,
 		}
 	}
 	s.Server = info
+	s.BinaryInput = goprotocol.HasCapability(info.Capabilities, goprotocol.TerminalInputBinaryCapability)
 	clientInfo := Descriptor(c.Build)
 	s.Compatibility = goprotocol.Assess(clientInfo, info.Descriptor)
 	s.Diagnostic = !s.Compatibility.Compatible
@@ -279,6 +285,7 @@ func (c *Client) openSessionContext(ctx context.Context, role string) (*Session,
 	s.WindowID = result.WindowID
 	if result.Server.ProtocolVersion != 0 {
 		s.Server = result.Server
+		s.BinaryInput = goprotocol.HasCapability(result.Server.Capabilities, goprotocol.TerminalInputBinaryCapability)
 		s.Compatibility = result.Compatibility
 		s.Diagnostic = result.Diagnostic
 	}
@@ -399,6 +406,10 @@ func (s *Session) readLoop() {
 		if err := json.Unmarshal(frame.JSON, &msg); err != nil {
 			continue
 		}
+		if msg.RequestID == 0 && msg.Error != nil {
+			_ = s.closeWithError(msg.Error)
+			return
+		}
 		if msg.OK == nil {
 			select {
 			case s.Pushes <- msg:
@@ -428,6 +439,12 @@ func (s *Session) failReplies() {
 }
 
 func (s *Session) DispatchAsync(command any) error {
+	if target := s.terminalSessionForCommand(command); target != nil {
+		// Per-pane input and geometry use the pane's own connection. A stalled
+		// resize or write then waits only on that pane, never on the shared GUI
+		// session that also carries control RPCs.
+		return target.DispatchAsync(command)
+	}
 	if handled, err := s.stageTerminal(command); handled {
 		return err
 	}
@@ -444,6 +461,82 @@ func (s *Session) DispatchAsync(command any) error {
 		Params:          params,
 	}
 	return s.enqueue(req, false)
+}
+
+func (s *Session) terminalSessionForCommand(command any) *Session {
+	m, ok := command.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch m["type"] {
+	case "terminal.send_text", "terminal.send_bytes", "terminal.resize":
+	default:
+		return nil
+	}
+	id, ok := commandUUID(m["terminal_id"])
+	if !ok {
+		return nil
+	}
+	s.terminalMu.Lock()
+	target := s.terminalInputs[id]
+	s.terminalMu.Unlock()
+	return target
+}
+
+// SendInput queues PTY bytes for one terminal. It uses the negotiated WT5
+// binary frame when the server supports it and falls back to the JSON
+// terminal.send_bytes command for older servers.
+func (s *Session) SendInput(id uuid.UUID, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if id == uuid.Nil {
+		return errors.New("terminal input requires a terminal id")
+	}
+	// A terminal's dedicated connection owns both its output and input
+	// direction. Routing here keeps one pane's input queue from consuming the
+	// shared GUI session used by every other pane and by control RPCs.
+	s.terminalMu.Lock()
+	stream := s.terminalInputs[id]
+	s.terminalMu.Unlock()
+	if stream != nil {
+		return stream.SendInput(id, data)
+	}
+	if !s.BinaryInput {
+		return s.DispatchAsync(map[string]any{
+			"type":        "terminal.send_bytes",
+			"terminal_id": id,
+			"bytes":       bytesAsInts(data),
+		})
+	}
+	return s.stageInput(id, data)
+}
+
+func (s *Session) stageInput(id uuid.UUID, data []byte) error {
+	if s.Diagnostic {
+		return errors.New("diagnostic session cannot send terminal input")
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	select {
+	case <-s.done:
+		return errors.New("session closed")
+	default:
+	}
+	if s.stagedBytes+len(data) > sessionSendQueueBytes {
+		return ErrSessionBackpressure
+	}
+	if n := len(s.staged); n > 0 && !s.staged[n-1].enqueued && s.staged[n-1].kind == "input" && s.staged[n-1].id == id {
+		s.staged[n-1].data = append(s.staged[n-1].data, data...)
+	} else {
+		if len(s.staged) >= sessionStagingCapacity {
+			return ErrSessionBackpressure
+		}
+		s.staged = append(s.staged, stagedTerminal{id: id, kind: "input", data: append([]byte(nil), data...)})
+	}
+	s.stagedBytes += len(data)
+	s.flushStagedLocked()
+	return nil
 }
 
 // stageTerminal merges PTY writes and resizes ahead of the socket queue.
@@ -481,6 +574,9 @@ func (s *Session) stageTerminal(command any) (bool, error) {
 		if n := len(s.staged); n > 0 && !s.staged[n-1].enqueued && s.staged[n-1].kind == "bytes" && s.staged[n-1].id == id {
 			s.staged[n-1].data = append(s.staged[n-1].data, data...)
 		} else {
+			if len(s.staged) >= sessionStagingCapacity {
+				return true, ErrSessionBackpressure
+			}
 			s.staged = append(s.staged, stagedTerminal{id: id, kind: "bytes", data: append([]byte(nil), data...)})
 		}
 		s.stagedBytes += len(data)
@@ -489,6 +585,9 @@ func (s *Session) stageTerminal(command any) (bool, error) {
 		if n := len(s.staged); n > 0 && !s.staged[n-1].enqueued && s.staged[n-1].kind == "resize" && s.staged[n-1].id == id {
 			s.staged[n-1] = op
 		} else {
+			if len(s.staged) >= sessionStagingCapacity {
+				return true, ErrSessionBackpressure
+			}
 			s.staged = append(s.staged, op)
 		}
 	}
@@ -501,27 +600,35 @@ func (s *Session) flushStagedLocked() {
 		return
 	}
 	op := s.staged[0]
-	if op.kind == "bytes" && len(op.data) > 128*1024 {
+	if (op.kind == "bytes" || op.kind == "input") && len(op.data) > 128*1024 {
 		chunk := append([]byte(nil), op.data[:128*1024]...)
 		rest := append([]byte(nil), op.data[128*1024:]...)
 		s.staged[0].data = chunk
 		inserted := make([]stagedTerminal, 0, len(s.staged)+1)
-		inserted = append(inserted, s.staged[0], stagedTerminal{id: op.id, kind: "bytes", data: rest})
+		inserted = append(inserted, s.staged[0], stagedTerminal{id: op.id, kind: op.kind, data: rest})
 		inserted = append(inserted, s.staged[1:]...)
 		s.staged = inserted
 		op = s.staged[0]
 	}
-	params, err := json.Marshal(map[string]any{"command": stagedCommand(op)})
-	if err != nil {
-		return
+	var message goprotocol.WireMessage
+	var input *goprotocol.TerminalInputFrame
+	cost := 0
+	if op.kind == "input" {
+		input = &goprotocol.TerminalInputFrame{TerminalID: op.id, Data: op.data}
+		cost = 4 + 4 + 16 + len(op.data)
+	} else {
+		params, err := json.Marshal(map[string]any{"command": stagedCommand(op)})
+		if err != nil {
+			return
+		}
+		message = goprotocol.WireMessage{BuildVariant: s.Build, ProtocolVersion: goprotocol.ProtocolVersion, RequestID: s.nextID.Add(1), Method: "command.dispatch", Params: params}
+		cost = len(message.Params) + len(message.Method) + len(message.BuildVariant) + 256
 	}
-	message := goprotocol.WireMessage{BuildVariant: s.Build, ProtocolVersion: goprotocol.ProtocolVersion, RequestID: s.nextID.Add(1), Method: "command.dispatch", Params: params}
-	cost := len(message.Params) + len(message.Method) + len(message.BuildVariant) + 256
 	if cost > sessionSendQueueBytes-s.queuedBytes || len(s.outbound) == cap(s.outbound) {
 		return
 	}
 	s.staged[0].enqueued = true
-	s.outbound <- pendingSessionFrame{message: message, cost: cost, staged: true}
+	s.outbound <- pendingSessionFrame{message: message, input: input, cost: cost, staged: true}
 	s.queuedBytes += cost
 }
 
@@ -664,7 +771,7 @@ func (s *Session) Attach(id uuid.UUID, out any) error {
 		return err
 	}
 
-	next := &terminalStream{session: stream, stop: make(chan struct{})}
+	next := &terminalStream{id: id, session: stream, stop: make(chan struct{})}
 	s.terminalMu.Lock()
 	select {
 	case <-s.done:
@@ -676,8 +783,12 @@ func (s *Session) Attach(id uuid.UUID, out any) error {
 	if s.terminalStreams == nil {
 		s.terminalStreams = make(map[uuid.UUID]*terminalStream)
 	}
+	if s.terminalInputs == nil {
+		s.terminalInputs = make(map[uuid.UUID]*Session)
+	}
 	previous := s.terminalStreams[id]
 	s.terminalStreams[id] = next
+	s.terminalInputs[id] = stream
 	s.terminalReaders.Add(1)
 	s.terminalMu.Unlock()
 	if previous != nil {
@@ -690,6 +801,16 @@ func (s *Session) Attach(id uuid.UUID, out any) error {
 
 func (s *Session) forwardTerminalEvents(stream *terminalStream) {
 	defer s.terminalReaders.Done()
+	defer func() {
+		// A dedicated connection may end without Detach (server restart or
+		// pane-local output failure). Drop its input route so a later SendInput
+		// falls back instead of writing into a dead session.
+		s.terminalMu.Lock()
+		if s.terminalInputs != nil && s.terminalInputs[stream.id] == stream.session {
+			delete(s.terminalInputs, stream.id)
+		}
+		s.terminalMu.Unlock()
+	}()
 	for {
 		// Do not forward pending events from a detached/replaced stream.
 		select {
@@ -726,6 +847,9 @@ func (s *Session) Detach(id uuid.UUID) error {
 	s.terminalMu.Lock()
 	stream := s.terminalStreams[id]
 	delete(s.terminalStreams, id)
+	if stream != nil && s.terminalInputs[id] == stream.session {
+		delete(s.terminalInputs, id)
+	}
 	s.terminalMu.Unlock()
 	if stream != nil {
 		close(stream.stop)
@@ -753,6 +877,7 @@ func (s *Session) closeWithError(cause error) error {
 		subscriptions := s.terminalSubscriptions
 		s.terminalSubscriptions = nil
 		s.terminalStreams = nil
+		s.terminalInputs = nil
 		s.terminalMu.Unlock()
 		for subscription := range subscriptions {
 			_ = subscription.Close()
@@ -837,12 +962,16 @@ func (s *Session) writeLoop() {
 		case frame := <-s.outbound:
 			err := s.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err == nil {
-				err = goprotocol.WriteJSON(s.conn, frame.message)
+				if frame.input != nil {
+					err = goprotocol.WriteInput(s.conn, frame.input.TerminalID, frame.input.Data)
+				} else {
+					err = goprotocol.WriteJSON(s.conn, frame.message)
+				}
 			}
 			s.writeMu.Lock()
 			s.queuedBytes -= frame.cost
 			if err == nil && frame.staged && len(s.staged) > 0 && s.staged[0].enqueued {
-				if s.staged[0].kind == "bytes" {
+				if s.staged[0].kind == "bytes" || s.staged[0].kind == "input" {
 					s.stagedBytes -= len(s.staged[0].data)
 				}
 				s.staged = s.staged[1:]

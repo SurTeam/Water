@@ -1137,14 +1137,18 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 		return false
 	}
 	if edit, ok := ev.(key.EditEvent); ok {
-		if edit.Text != "" {
-			term.input.emit([]byte(edit.Text))
-		}
+		term.input.handleTerminalText(edit.Text, snap.KittyKeyboardFlags)
 		return true
 	}
 	pressed, ok := ev.(key.Event)
 	if !ok {
 		return false
+	}
+	if kittyCtrlDisambiguated(pressed, snap.KittyKeyboardFlags) {
+		if seq := EncodeKeyAdvanced(pressed, snap.ApplicationCursor, snap.KittyKeyboardFlags); len(seq) > 0 {
+			term.input.emit(seq)
+			return true
+		}
 	}
 	if shortcutMatches(pressed, bindings.Paste) {
 		if w.clipboardReady {
@@ -1213,7 +1217,7 @@ func (w *EbitengineWindow) key(c *WorkspaceClient, spec string) bool {
 	if pressed.Modifiers.Contain(key.ModCommand) || pressed.Modifiers.Contain(key.ModSuper) {
 		return false
 	}
-	if seq := EncodeKey(pressed, snap.ApplicationCursor); len(seq) > 0 {
+	if seq := EncodeKeyAdvanced(pressed, snap.ApplicationCursor, snap.KittyKeyboardFlags); len(seq) > 0 {
 		term.input.emit(seq)
 		return true
 	}
@@ -1331,8 +1335,19 @@ func (w *EbitengineWindow) nativeKeys(c *WorkspaceClient) {
 	if ebiten.IsKeyPressed(ebiten.KeyMeta) {
 		mods += "cmd-"
 	}
+	kittyFlags := 0
+	if id, ok := c.activeTerminalID(); ok {
+		c.mu.RLock()
+		term := c.terminals[id]
+		c.mu.RUnlock()
+		if term != nil {
+			term.mu.RLock()
+			kittyFlags = term.snapshot.KittyKeyboardFlags
+			term.mu.RUnlock()
+		}
+	}
 	now := time.Now()
-	for _, spec := range nativeKeySpecs(mods, w.composition != "", func(k ebiten.Key) int {
+	for _, spec := range nativeKeySpecs(mods, w.composition != "", kittyFlags, func(k ebiten.Key) int {
 		if w.keyRepeat.ready(k, ebiten.IsKeyPressed(k), now) {
 			return 1
 		}
@@ -1348,8 +1363,10 @@ func (w *EbitengineWindow) nativeKeys(c *WorkspaceClient) {
 }
 
 // Enumerate physical keys from zero: KeyDigit0 is after letters, arrows and
-// Backspace in Ebitengine's enum. Printable text still comes through the IME.
-func nativeKeySpecs(mods string, composing bool, durationOf func(ebiten.Key) int) []string {
+// Backspace in Ebitengine's enum. Printable text normally comes through the IME.
+// Kitty's report-all-keys flag suppresses that text path, so printable keys
+// must then come from the physical event path instead.
+func nativeKeySpecs(mods string, composing bool, kittyFlags int, durationOf func(ebiten.Key) int) []string {
 	var specs []string
 	for k := ebiten.Key(0); k <= ebiten.KeyMax; k++ {
 		duration := durationOf(k)
@@ -1360,13 +1377,20 @@ func nativeKeySpecs(mods string, composing bool, durationOf func(ebiten.Key) int
 		if name == "" {
 			continue
 		}
-		if printable && !strings.Contains(mods, "cmd-") && !strings.Contains(mods, "ctrl-") && !strings.Contains(mods, "alt-") {
+		if printable && kittyFlags&kittyReportAllKeys == 0 &&
+			!strings.Contains(mods, "cmd-") && !strings.Contains(mods, "ctrl-") && !strings.Contains(mods, "alt-") {
 			continue
 		}
 		if composing && name != "Escape" {
 			continue
 		}
-		specs = append(specs, mods+name)
+		spec := mods + name
+		if printable && kittyFlags&kittyReportAllKeys != 0 && mods == "" {
+			// A single printable character is normally parsed as text. Mark
+			// this physical event so all-keys emits CSI-u instead of dropping it.
+			spec = "key:" + spec
+		}
+		specs = append(specs, spec)
 	}
 	return specs
 }

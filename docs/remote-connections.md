@@ -65,7 +65,7 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - supervisor 按终端保留有界原始输出（上限 2 MiB，超出后保留最近的尾部）；重新 attach 时从指定 offset 继续，截断时明确标记，server 用自己的 replay 逻辑重建，不使用逐屏快照。
 - 输出在 supervisor 内按 1 ms 空闲 / 5 ms 最大窗口合并后再转发，避免把每次 read 变成一个事件。
 - resize 由 supervisor 的读循环串行处理：先 flush 已观察输出，再应用几何并发布 resize 事件，保证 server 不会先看到新几何。
-- 每个连接一个写协程串行化所有帧（控制回复与终端输出共用 socket，不串行会交叉破坏帧）；订阅者队列满时只丢弃该订阅，不阻塞 PTY 读循环，也不关闭承载控制流量的连接。
+- 每个连接一个写协程串行化帧，避免交叉破坏帧。server 为每个 pane 分离 supervisor 输入、输出和控制连接；输入积压不能延迟该 pane 的 resize/close 或其他 pane。supervisor 输出订阅溢出只取消该订阅，PTY 继续运行，server 从已消费 offset 重连。registry 的有界 subscriber 队列满时只等待所属 pane 的容量或取消，保留原始字节顺序。
 - 只有已确认的 `recovery.shutdown` 才 detach 并保留程序；普通 `Close` 关闭 supervisor 并等待连接结束。supervisor 收到关闭请求后终止程序并退出进程。默认按控制 socket 隔离 supervisor；升级时发现旧版共享 socket 则兼容接回，普通关闭只清理自己的 pane，共享 supervisor 无剩余终端时才关闭。异常强制终止不能保证执行清理。
 - Unix 关闭 pane、替换 terminal 和普通关闭 server 时，进程内终端与新版 supervisor 共用 `internal/ptyprocess` 清理：spawn 后、启动 Wait 前保存根进程的原生启动身份，关闭时在终止 shell 前枚举同一 PTY 会话成员及仍可追溯的后代，并发送 `SIGKILL`，包括独立任务进程组和仍保有亲缘关系的另建会话子进程。此操作强制终止程序，不执行优雅退出。
 - Unix 进程枚举使用 750 ms 预算和 4 MiB 输出上限；信号前复核根进程与目标身份，避免历史 PID 复用建立错误的清理归属。枚举失败时只回退到身份已确认的原进程组及直接子进程；根进程已回收或身份无法确认时只尝试由 `os.Process` 持有的直接子进程。清理为尽力执行，快照之后新建的后代，以及已经脱离会话且失去可追溯关系的进程，不保证被终止。预算不代表整个关闭操作的硬性时限。
@@ -76,6 +76,8 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - 当前 supervisor 协议没有请求关联 ID；已发送请求取消后保留 FIFO 占位，迟到响应只消费原请求的位置。不能直接删除等待项而让旧响应满足新请求。永不返回的响应占位保留至连接关闭；协议字段保持兼容已有 supervisor。
 
 性能边界：多一跳平台控制 transport，但保留了服务端原有的批处理与背压；PTY 读取不得因慢客户端阻塞，控制回复不得因输出拥挤而超时。终端流预算见 [性能与资源管理](performance.md)。
+
+实时终端输出使用 WT4 二进制帧直接携带原始字节。输入在协商 `terminal-input-binary/v1` 后使用 WT5，保留完整 terminal UUID；旧 server/supervisor 使用兼容输入路径。控制 RPC 继续使用结构化协议，不能把键盘 escape 序列当作文本重新编码。专用终端 session 出错只关闭本流；浏览器聚合 session 通过 `push.terminal_error` 报告对应 terminal 的错误。
 
 ## 验证
 

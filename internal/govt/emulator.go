@@ -58,6 +58,7 @@ type Snapshot struct {
 	TrimmedLines        uint64
 	AltScreen           bool
 	ApplicationCursor   bool
+	KittyKeyboardFlags  int
 	BracketedPaste      bool
 	MouseTracking       string
 	MouseEncoding       string
@@ -143,6 +144,7 @@ func New(cols, rows, scrollback int) *Emulator {
 			xterm.WithCols(cols),
 			xterm.WithRows(rows),
 			xterm.WithScrollback(scrollback),
+			xterm.WithVtExtensions(xterm.VtExtensions{KittyKeyboard: true}),
 		),
 	}
 	e.term.SetPreserveScrollbackOnErase(true)
@@ -533,6 +535,7 @@ func (e *Emulator) snapshot(reuseRows bool) Snapshot {
 		s.CursorBlink = *modes.CursorBlinkOverride
 	}
 	s.ApplicationCursor = modes.ApplicationCursorKeys
+	s.KittyKeyboardFlags = term.KittyKeyboardFlags()
 	s.BracketedPaste = modes.BracketedPasteMode
 	s.MouseTracking = modes.MouseTrackingMode
 	s.MouseEncoding = modes.MouseEncoding

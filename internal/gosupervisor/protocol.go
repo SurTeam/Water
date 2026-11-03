@@ -23,6 +23,9 @@ const (
 	kindList       byte = 6
 	kindShutdown   byte = 7
 	kindForeground byte = 8
+	// kindWriteBinary carries [terminal id:16][raw input]. It avoids JSON and
+	// base64 for the hot input path; older supervisors simply ignore it.
+	kindWriteBinary byte = 9
 
 	kindSpawned      byte = 101
 	kindOutput       byte = 102
@@ -57,13 +60,21 @@ type terminalRef struct {
 }
 
 type attachRequest struct {
-	ID     string `json:"id"`
-	Offset uint64 `json:"offset"`
+	ID        string `json:"id"`
+	Offset    uint64 `json:"offset"`
+	Dedicated bool   `json:"dedicated,omitempty"`
 }
 
 type writeRequest struct {
 	ID   string `json:"id"`
 	Data []byte `json:"data"`
+}
+
+// writeBinary is the decoded form of kindWriteBinary. The id is already parsed
+// and the payload is raw PTY bytes.
+type writeBinary struct {
+	ID   [16]byte
+	Data []byte
 }
 
 type resizeRequest struct {
@@ -75,11 +86,12 @@ type resizeRequest struct {
 }
 
 type spawnedResponse struct {
-	ID         string `json:"id"`
-	Generation uint64 `json:"generation"`
-	PID        int    `json:"pid"`
-	Resumed    bool   `json:"resumed"`
-	Error      string `json:"error,omitempty"`
+	ID          string `json:"id"`
+	Generation  uint64 `json:"generation"`
+	PID         int    `json:"pid"`
+	Resumed     bool   `json:"resumed"`
+	BinaryInput bool   `json:"binary_input,omitempty"`
+	Error       string `json:"error,omitempty"`
 }
 
 // attachedResponse reports how much history the supervisor still holds for the
@@ -95,6 +107,7 @@ type attachedResponse struct {
 	Generation       uint64 `json:"generation"`
 	Exited           bool   `json:"exited"`
 	Code             int32  `json:"code"`
+	BinaryInput      bool   `json:"binary_input,omitempty"`
 	Error            string `json:"error,omitempty"`
 }
 
@@ -146,14 +159,29 @@ func writeFrame(w io.Writer, kind byte, payload []byte) error {
 	var header [5]byte
 	header[0] = kind
 	binary.BigEndian.PutUint32(header[1:], uint32(len(payload)))
-	if _, err := w.Write(header[:]); err != nil {
+	if err := writeAll(w, header[:]); err != nil {
 		return err
 	}
 	if len(payload) == 0 {
 		return nil
 	}
-	_, err := w.Write(payload)
-	return err
+	return writeAll(w, payload)
+}
+
+func writeAll(w io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := w.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
 }
 
 func readFrame(r io.Reader) (byte, []byte, error) {
@@ -205,4 +233,14 @@ func parseOutput(payload []byte) (outputHeader, []byte, error) {
 	header.generation = binary.BigEndian.Uint64(payload[16:])
 	header.offset = binary.BigEndian.Uint64(payload[24:])
 	return header, payload[outputHeaderBytes:], nil
+}
+
+func parseWriteBinary(payload []byte) (writeBinary, error) {
+	if len(payload) < 16 {
+		return writeBinary{}, errors.New("short binary write frame")
+	}
+	var req writeBinary
+	copy(req.ID[:], payload[:16])
+	req.Data = payload[16:]
+	return req, nil
 }

@@ -15,8 +15,10 @@ import (
 )
 
 type subscriptionTestConn struct {
-	conn net.Conn
-	mu   sync.Mutex
+	conn     net.Conn
+	mu       sync.Mutex
+	input    chan goprotocol.TerminalInputFrame
+	messages chan goprotocol.WireMessage
 }
 
 func (c *subscriptionTestConn) reply(id uint64, result any) error {
@@ -56,15 +58,26 @@ func subscriptionTestServer(t *testing.T, attach func(*subscriptionTestConn, gop
 			go func() {
 				defer wg.Done()
 				defer conn.Close()
-				c := &subscriptionTestConn{conn: conn}
+				c := &subscriptionTestConn{conn: conn, input: make(chan goprotocol.TerminalInputFrame, 16), messages: make(chan goprotocol.WireMessage, 16)}
 				for {
 					frame, err := goprotocol.ReadFrame(conn)
 					if err != nil {
 						return
 					}
+					if frame.Input != nil {
+						select {
+						case c.input <- *frame.Input:
+						default:
+						}
+						continue
+					}
 					var msg goprotocol.WireMessage
 					if json.Unmarshal(frame.JSON, &msg) != nil {
 						return
+					}
+					select {
+					case c.messages <- msg:
+					default:
 					}
 					switch msg.Method {
 					case "server.inspect":
@@ -134,6 +147,135 @@ func TestOwnedTerminalSubscriptionPreservesAttachLiveBoundary(t *testing.T) {
 	}
 	if len(parent.Events) != 0 {
 		t.Fatal("isolated events leaked into aggregate queue")
+	}
+}
+
+func TestOwnedTerminalSubscriptionCarriesInputForItsPane(t *testing.T) {
+	id := uuid.New()
+	conns := make(chan *subscriptionTestConn, 1)
+	socket := subscriptionTestServer(t, func(c *subscriptionTestConn, msg goprotocol.WireMessage, _ <-chan struct{}) {
+		conns <- c
+		_ = c.reply(msg.RequestID, map[string]any{"last_seq": 0})
+	})
+	parent, _ := pipeSession(t)
+	parent.SocketPath = socket
+	parent.BinaryInput = true
+	sub, err := parent.AttachTerminal(context.Background(), id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	stream := <-conns
+	data := []byte("\x1b[97;5u")
+	if err := parent.SendInput(id, data); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case frame := <-stream.input:
+		if frame.TerminalID != id || string(frame.Data) != string(data) {
+			t.Fatalf("dedicated input frame = %#v", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pane input did not use its dedicated connection")
+	}
+	select {
+	case <-sub.Events:
+		t.Fatal("unexpected event")
+	default:
+	}
+	parent.writeMu.Lock()
+	staged := len(parent.staged)
+	parent.writeMu.Unlock()
+	if staged != 0 || len(parent.outbound) != 0 {
+		t.Fatal("pane input consumed the shared GUI session queue")
+	}
+}
+
+func TestDedicatedInputFallsBackAfterSubscriptionClose(t *testing.T) {
+	id := uuid.New()
+	socket := subscriptionTestServer(t, func(c *subscriptionTestConn, msg goprotocol.WireMessage, _ <-chan struct{}) {
+		_ = c.reply(msg.RequestID, map[string]any{})
+	})
+	parent, peer := pipeSession(t)
+	parent.SocketPath = socket
+	parent.BinaryInput = true
+	sub, err := parent.AttachTerminal(context.Background(), id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = sub.Close()
+	if err := parent.SendInput(id, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	frame, err := goprotocol.ReadFrame(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Input == nil || frame.Input.TerminalID != id || string(frame.Input.Data) != "x" {
+		t.Fatalf("fallback input frame = %#v", frame.Input)
+	}
+}
+
+func TestDedicatedConnectionCarriesPaneResize(t *testing.T) {
+	id := uuid.New()
+	conns := make(chan *subscriptionTestConn, 1)
+	socket := subscriptionTestServer(t, func(c *subscriptionTestConn, msg goprotocol.WireMessage, _ <-chan struct{}) {
+		conns <- c
+		_ = c.reply(msg.RequestID, map[string]any{})
+	})
+	parent, peer := pipeSession(t)
+	parent.SocketPath = socket
+	sub, err := parent.AttachTerminal(context.Background(), id, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	stream := <-conns
+	if err := parent.DispatchAsync(map[string]any{
+		"type": "terminal.resize", "terminal_id": id, "columns": 100, "lines": 30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-stream.input:
+		t.Fatal("resize unexpectedly used a binary input frame")
+	case <-time.After(50 * time.Millisecond):
+	}
+	var resize goprotocol.WireMessage
+	timeout := time.After(time.Second)
+	for resize.Method == "" {
+		select {
+		case msg := <-stream.messages:
+			if msg.Method == "command.dispatch" {
+				resize = msg
+			}
+		case <-timeout:
+			t.Fatal("resize did not use the dedicated connection")
+		}
+	}
+	var params struct {
+		Command struct {
+			Type    string `json:"type"`
+			Columns int    `json:"columns"`
+			Lines   int    `json:"lines"`
+		} `json:"command"`
+	}
+	if err := json.Unmarshal(resize.Params, &params); err != nil {
+		t.Fatal(err)
+	}
+	if params.Command.Type != "terminal.resize" || params.Command.Columns != 100 || params.Command.Lines != 30 {
+		t.Fatalf("dedicated resize = %+v", params.Command)
+	}
+	parent.writeMu.Lock()
+	staged := len(parent.staged)
+	parent.writeMu.Unlock()
+	if staged != 0 || len(parent.outbound) != 0 {
+		t.Fatal("pane resize consumed the shared GUI session queue")
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	if _, err := goprotocol.ReadFrame(peer); err == nil {
+		t.Fatal("pane resize leaked onto the shared GUI connection")
 	}
 }
 

@@ -3,8 +3,10 @@ package gosupervisor
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/SurTeam/Water/internal/gopty"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -26,11 +28,21 @@ const (
 	// block on a subscriber: dropping the connection is recoverable (it re-attaches
 	// from its offset) while blocking would stall the program's output.
 	subscriberQueue = 4096
+	// Each terminal owns a bounded input queue and one writer goroutine. The
+	// Dedicated pane connections wait for input capacity independently, so a
+	// program that stops reading stdin cannot stall another pane's connection.
+	inputQueue      = 64
+	inputQueueBytes = 1 << 20
+	inputWriteLimit = 250 * time.Millisecond
 	// Output is coalesced before fanout for the same reason the server batches
 	// PTY reads: a fast program otherwise produces thousands of tiny events that
 	// cost more to frame and forward than the bytes they carry.
 	batchIdle   = time.Millisecond
 	batchMaxAge = 5 * time.Millisecond
+	// A shared connection writer must not hold its mutex forever when one
+	// consumer stops reading. The deadline fails that frame and lets the
+	// affected subscription close without freezing every other pane.
+	connWriteLimit = 10 * time.Second
 	// A tiny read right after input is almost certainly the echo the user is
 	// waiting for. Flushing it immediately keeps the keystroke off the
 	// coalescing window; larger reads keep batching so bulk throughput is
@@ -71,10 +83,19 @@ type terminal struct {
 	exitCode    int32
 	subs        map[*subscriber]struct{}
 
-	lastInput atomic.Int64 // UnixNano of the most recent input write
-	resize    chan resizeRequest
-	closed    chan struct{}
-	once      sync.Once
+	lastInput   atomic.Int64 // UnixNano of the most recent input write
+	resize      chan resizeRequest
+	input       chan inputRequest
+	inputBytes  atomic.Int64
+	inputSpace  chan struct{}
+	inputFailed chan struct{}
+	inputError  error
+	closed      chan struct{}
+	once        sync.Once
+}
+
+type inputRequest struct {
+	data []byte
 }
 
 // connWriter serializes every frame on one connection. Control replies and
@@ -88,18 +109,24 @@ type connWriter struct {
 func (w *connWriter) write(frame []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	_, err := w.conn.Write(frame)
+	if err := w.conn.SetWriteDeadline(time.Now().Add(connWriteLimit)); err != nil {
+		return err
+	}
+	err := writeAll(w.conn, frame)
+	_ = w.conn.SetWriteDeadline(time.Time{})
 	return err
 }
 
 // subscriber owns a bounded outbound queue and its own writer goroutine, so a
 // slow socket never blocks the PTY reader or another terminal's fanout.
 type subscriber struct {
-	writer *connWriter
-	frames chan []byte
-	mu     sync.Mutex
-	closed bool
-	once   sync.Once
+	writer  *connWriter
+	frames  chan []byte
+	mu      sync.Mutex
+	closed  bool
+	once    sync.Once
+	onClose func()
+	conn    net.Conn
 }
 
 func newSubscriber(writer *connWriter) *subscriber {
@@ -111,6 +138,9 @@ func newSubscriber(writer *connWriter) *subscriber {
 func (s *subscriber) writeLoop() {
 	for frame := range s.frames {
 		if err := s.writer.write(frame); err != nil {
+			// Drop only this output subscription. The connection also carries
+			// control replies and other panes, so closing it would amplify one
+			// pane's socket failure across every terminal.
 			s.close()
 			return
 		}
@@ -188,10 +218,23 @@ func (s *Server) serve(conn net.Conn) {
 	writer := &connWriter{conn: conn}
 	reply := func(kind byte, value any) error { return writer.writeJSON(kind, value) }
 	subs := make(map[string]*subscriber)
+	var subsMu sync.Mutex
+	removeSub := func(id string, sub *subscriber) {
+		subsMu.Lock()
+		if subs[id] == sub {
+			delete(subs, id)
+		}
+		subsMu.Unlock()
+	}
 	defer func() {
+		subsMu.Lock()
+		live := make([]*subscriber, 0, len(subs))
 		for _, sub := range subs {
+			live = append(live, sub)
+		}
+		subsMu.Unlock()
+		for _, sub := range live {
 			sub.close()
-			s.detach(sub)
 		}
 	}()
 	for {
@@ -220,19 +263,41 @@ func (s *Server) serve(conn net.Conn) {
 				continue
 			}
 			sub := newSubscriber(writer)
+			if req.Dedicated {
+				sub.conn = conn
+			}
+			sub.onClose = func() {
+				removeSub(req.ID, sub)
+				s.detach(sub)
+			}
 			resp, replay := s.attach(req, sub)
 			if resp.Error != "" {
 				_ = reply(kindAttached, resp)
+				sub.close()
 				continue
 			}
+			subsMu.Lock()
 			subs[req.ID] = sub
+			subsMu.Unlock()
 			_ = replay // attach queues response and replay before registering live output.
 		case kindWrite:
 			var req writeRequest
 			if err := unmarshal(payload, &req); err != nil {
 				continue
 			}
-			s.write(req.ID, req.Data)
+			if err := s.write(req.ID, req.Data); err != nil {
+				_ = reply(kindFailure, failureResponse{Error: err.Error()})
+				return
+			}
+		case kindWriteBinary:
+			req, err := parseWriteBinary(payload)
+			if err != nil {
+				continue
+			}
+			if err := s.writeBytes(req.ID, req.Data); err != nil {
+				_ = reply(kindFailure, failureResponse{Error: err.Error()})
+				return
+			}
 		case kindResize:
 			var req resizeRequest
 			if err := unmarshal(payload, &req); err != nil {
@@ -277,7 +342,7 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 	}
 	if existing != nil && !existing.isExited() {
 		// Reuse a live terminal instead of restarting the program.
-		return spawnedResponse{ID: req.ID, PID: existing.pid, Generation: existing.generation, Resumed: true}, nil
+		return spawnedResponse{ID: req.ID, PID: existing.pid, Generation: existing.generation, Resumed: true, BinaryInput: true}, nil
 	}
 
 	cmd := exec.Command(req.Program, req.Args...)
@@ -302,6 +367,9 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 		pid:              ptmx.PID(),
 		subs:             make(map[*subscriber]struct{}),
 		resize:           make(chan resizeRequest, 8),
+		input:            make(chan inputRequest, inputQueue),
+		inputSpace:       make(chan struct{}, 1),
+		inputFailed:      make(chan struct{}),
 		closed:           make(chan struct{}),
 	}
 	s.mu.Lock()
@@ -309,7 +377,8 @@ func (s *Server) spawn(req spawnRequest) (spawnedResponse, *terminal) {
 	s.mu.Unlock()
 	go t.readLoop(s)
 	go t.waitLoop(s)
-	return spawnedResponse{ID: req.ID, PID: t.pid, Generation: t.generation}, replaced
+	go t.inputLoop()
+	return spawnedResponse{ID: req.ID, PID: t.pid, Generation: t.generation, BinaryInput: true}, replaced
 }
 
 func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, []byte) {
@@ -335,7 +404,7 @@ func (s *Server) attach(req attachRequest, sub *subscriber) (attachedResponse, [
 		restore = t.restore.bytes()
 	}
 	replay := t.copyHistoryLocked(offset)
-	resp := attachedResponse{RestoreSupported: true, ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Restore: restore, Exited: exited, Code: code}
+	resp := attachedResponse{RestoreSupported: true, BinaryInput: true, ID: req.ID, PID: t.pid, Generation: t.generation, Offset: offset, Available: produced, Truncated: truncated, Restore: restore, Exited: exited, Code: code}
 	// The bounded replay uses at most 32 frames, leaving room in the 64-frame
 	// queue. Queue the entire attach prefix under the snapshot lock, before
 	// publishers can discover this subscriber. No socket I/O holds the lock.
@@ -363,16 +432,137 @@ func (s *Server) detach(sub *subscriber) {
 	}
 }
 
-func (s *Server) write(id string, data []byte) {
+func (s *Server) write(id string, data []byte) error {
 	s.mu.Lock()
 	t := s.terms[id]
 	s.mu.Unlock()
 	if t == nil || len(data) == 0 {
-		return
+		return nil
 	}
-	if _, err := t.ptmx.Write(data); err == nil {
-		t.lastInput.Store(time.Now().UnixNano())
+	return t.enqueueInput(data)
+}
+
+func (s *Server) writeBytes(id [16]byte, data []byte) error {
+	s.mu.Lock()
+	t := s.terms[uuid.UUID(id).String()]
+	s.mu.Unlock()
+	if t == nil || len(data) == 0 {
+		return nil
 	}
+	return t.enqueueInput(data)
+}
+
+func (t *terminal) enqueueInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	for len(data) > inputQueueBytes {
+		if err := t.enqueueInput(data[:inputQueueBytes]); err != nil {
+			return err
+		}
+		data = data[inputQueueBytes:]
+	}
+	t.mu.Lock()
+	inputError := t.inputError
+	t.mu.Unlock()
+	if inputError != nil {
+		return inputError
+	}
+	select {
+	case <-t.closed:
+		return io.ErrClosedPipe
+	default:
+	}
+	for {
+		queued := t.inputBytes.Load()
+		if queued+int64(len(data)) > inputQueueBytes {
+			select {
+			case <-t.inputSpace:
+				continue
+			case <-t.closed:
+				return io.ErrClosedPipe
+			case <-t.inputFailed:
+				t.mu.Lock()
+				err := t.inputError
+				t.mu.Unlock()
+				return err
+			}
+		}
+		if t.inputBytes.CompareAndSwap(queued, queued+int64(len(data))) {
+			break
+		}
+	}
+	req := inputRequest{data: append([]byte(nil), data...)}
+	select {
+	case t.input <- req:
+	case <-t.closed:
+		t.inputBytes.Add(-int64(len(req.data)))
+		return io.ErrClosedPipe
+	case <-t.inputFailed:
+		t.inputBytes.Add(-int64(len(req.data)))
+		t.mu.Lock()
+		err := t.inputError
+		t.mu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (t *terminal) inputLoop() {
+	for {
+		select {
+		case <-t.closed:
+			return
+		case req := <-t.input:
+			t.inputBytes.Add(-int64(len(req.data)))
+			select {
+			case t.inputSpace <- struct{}{}:
+			default:
+			}
+			select {
+			case <-t.closed:
+				return
+			default:
+			}
+			if err := t.writeInput(req.data); err != nil {
+				t.mu.Lock()
+				t.inputError = err
+				t.mu.Unlock()
+				close(t.inputFailed)
+				return
+			}
+		}
+	}
+}
+
+func (t *terminal) writeInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	defer t.ptmx.SetWriteDeadline(time.Time{})
+	for len(data) > 0 {
+		select {
+		case <-t.closed:
+			return io.ErrClosedPipe
+		default:
+		}
+		if err := t.ptmx.SetWriteDeadline(time.Now().Add(inputWriteLimit)); err != nil {
+			return err
+		}
+		written, err := t.ptmx.Write(data)
+		data = data[written:]
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			return err
+		}
+		if written == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	t.lastInput.Store(time.Now().UnixNano())
+	return nil
 }
 
 func (s *Server) resize(req resizeRequest) {
@@ -599,7 +789,9 @@ func (t *terminal) announceResize(req resizeRequest) {
 		return
 	}
 	for _, sub := range subs {
-		sub.enqueueJSON(kindResized, payload)
+		if !sub.enqueueJSON(kindResized, payload) {
+			sub.close()
+		}
 	}
 }
 
@@ -628,6 +820,7 @@ func (t *terminal) publish(data []byte) {
 			t.mu.Lock()
 			delete(t.subs, sub)
 			t.mu.Unlock()
+			sub.close()
 		}
 	}
 }
@@ -649,7 +842,9 @@ func (t *terminal) waitLoop(s *Server) {
 	payload, err := json.Marshal(exitedEvent{ID: t.id, Generation: t.generation, Code: code})
 	if err == nil {
 		for _, sub := range subs {
-			sub.enqueueJSON(kindExited, payload)
+			if !sub.enqueueJSON(kindExited, payload) {
+				sub.close()
+			}
 		}
 	}
 	_ = t.ptmx.Close()
@@ -667,9 +862,17 @@ func (s *subscriber) close() {
 	s.once.Do(func() {
 		s.mu.Lock()
 		s.closed = true
+		frames := s.frames
 		s.mu.Unlock()
-		close(s.frames)
-		_ = s.writer.conn.Close()
+		if frames != nil {
+			close(frames)
+		}
+		if s.onClose != nil {
+			s.onClose()
+		}
+		if s.conn != nil {
+			_ = s.conn.Close()
+		}
 	})
 }
 

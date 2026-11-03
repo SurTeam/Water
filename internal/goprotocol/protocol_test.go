@@ -34,50 +34,90 @@ func TestTerminalFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTerminalInputFrameRoundTrip(t *testing.T) {
+	id := uuid.New()
+	want := []byte{0x1b, '[', 'A', 0, 0xff, 'x'}
+	var buf bytes.Buffer
+	if err := WriteInput(&buf, id, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadFrame(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Input == nil || got.Input.TerminalID != id || !bytes.Equal(got.Input.Data, want) {
+		t.Fatalf("decoded input = %#v", got.Input)
+	}
+}
+
+func TestTerminalInputFrameRejectsNilID(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteInput(&buf, uuid.Nil, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFrame(&buf); err == nil {
+		t.Fatal("nil terminal id was accepted")
+	}
+}
 
 type shortWriter struct {
 	buf bytes.Buffer
 	max int
 }
 
-func (w *shortWriter) Write(p []byte)(int,error){
-	if len(p)>w.max{p=p[:w.max]}
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
+	}
 	return w.buf.Write(p)
 }
 
-func TestTerminalFrameHandlesShortWritesWithoutCopies(t *testing.T){
-	id:=uuid.New()
-	want:=TerminalEvent{
-		Kind:OutputEvent,
-		Seq:42,
-		Size:TerminalSize{Columns:137,Lines:51},
-		Data:bytes.Repeat([]byte("water-"),4096),
+func TestTerminalFrameHandlesShortWritesWithoutCopies(t *testing.T) {
+	id := uuid.New()
+	want := TerminalEvent{
+		Kind: OutputEvent,
+		Seq:  42,
+		Size: TerminalSize{Columns: 137, Lines: 51},
+		Data: bytes.Repeat([]byte("water-"), 4096),
 	}
-	writer:=&shortWriter{max:7}
-	if err:=WriteTerminal(writer,id,want);err!=nil{t.Fatal(err)}
-	frame,err:=ReadFrame(&writer.buf)
-	if err!=nil{t.Fatal(err)}
-	if frame.TerminalID!=id || frame.Terminal==nil{t.Fatalf("bad frame: %#v",frame)}
-	got:=frame.Terminal
-	if got.Kind!=OutputEvent || got.Seq!=want.Seq || got.Size!=want.Size{
-		t.Fatalf("metadata = %#v, want %#v",got,want)
+	writer := &shortWriter{max: 7}
+	if err := WriteTerminal(writer, id, want); err != nil {
+		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Data,want.Data){
-		t.Fatalf("output mismatch: got %d bytes want %d",len(got.Data),len(want.Data))
+	frame, err := ReadFrame(&writer.buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.TerminalID != id || frame.Terminal == nil {
+		t.Fatalf("bad frame: %#v", frame)
+	}
+	got := frame.Terminal
+	if got.Kind != OutputEvent || got.Seq != want.Seq || got.Size != want.Size {
+		t.Fatalf("metadata = %#v, want %#v", got, want)
+	}
+	if !bytes.Equal(got.Data, want.Data) {
+		t.Fatalf("output mismatch: got %d bytes want %d", len(got.Data), len(want.Data))
 	}
 }
 
-
-func TestJSONFrameHandlesShortWrites(t *testing.T){
-	writer:=&shortWriter{max:3}
-	want:=Success(77,map[string]any{"value":"water"})
-	if err:=WriteJSON(writer,want);err!=nil{t.Fatal(err)}
-	frame,err:=ReadFrame(&writer.buf)
-	if err!=nil{t.Fatal(err)}
-	if frame.Terminal!=nil{t.Fatal("JSON frame decoded as terminal frame")}
+func TestJSONFrameHandlesShortWrites(t *testing.T) {
+	writer := &shortWriter{max: 3}
+	want := Success(77, map[string]any{"value": "water"})
+	if err := WriteJSON(writer, want); err != nil {
+		t.Fatal(err)
+	}
+	frame, err := ReadFrame(&writer.buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Terminal != nil {
+		t.Fatal("JSON frame decoded as terminal frame")
+	}
 	var got WireMessage
-	if err:=json.Unmarshal(frame.JSON,&got);err!=nil{t.Fatal(err)}
-	if got.RequestID!=77 || got.OK==nil || !*got.OK{
-		t.Fatalf("decoded reply = %#v",got)
+	if err := json.Unmarshal(frame.JSON, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RequestID != 77 || got.OK == nil || !*got.OK {
+		t.Fatalf("decoded reply = %#v", got)
 	}
 }

@@ -1,6 +1,7 @@
 package gosupervisor
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -375,6 +376,58 @@ func TestSlowConsumerDoesNotStallTheProgram(t *testing.T) {
 	}
 	if progress == 0 {
 		t.Fatal("supervisor stopped answering while the consumer was slow")
+	}
+}
+
+// A pane whose program never reads stdin must not delay input to another pane.
+// The supervisor writes each terminal from its own goroutine with a bounded
+// queue, so filling pane A's PTY buffer cannot consume the connection loop.
+func TestBlockedInputDoesNotStallAnotherTerminal(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires Unix shell/process fixture; native Windows lifecycle is covered separately")
+	}
+	_, socket := startSupervisor(t)
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	blocked, quiet := uuid.New(), uuid.New()
+	for _, spec := range []struct {
+		id      uuid.UUID
+		program string
+		args    []string
+	}{
+		{blocked, "/bin/sh", []string{"-c", "exec sleep 30"}},
+		{quiet, "/bin/sh", []string{"-c", "while read line; do echo got:$line; done"}},
+	} {
+		if _, _, err := client.Spawn(SpawnSpec{ID: spec.id, Program: spec.program, Args: spec.args, Env: os.Environ(), Size: struct{ Lines, Columns uint16 }{24, 80}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, events, err := client.Attach(quiet, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Fill the blocked pane's input queue; each write is bounded by its own
+	// deadline and must not hold the supervisor's connection reader.
+	for i := 0; i < inputQueue; i++ {
+		_ = client.Write(blocked, bytes.Repeat([]byte("x"), 4096))
+	}
+	// Filling one pane's input queue must not close it. The program still owns
+	// its PTY and may resume reading later.
+	listed, err := client.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 2 {
+		t.Fatalf("input overflow closed a terminal: %+v", listed)
+	}
+	if err := client.Write(quiet, []byte("hello\n")); err != nil {
+		t.Fatalf("quiet pane input failed: %v", err)
+	}
+	if got := collect(t, events, "got:hello", 3*time.Second); !strings.Contains(got, "got:hello") {
+		t.Fatalf("quiet pane stalled behind blocked stdin: %q", got)
 	}
 }
 

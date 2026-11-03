@@ -1,6 +1,7 @@
 package goclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"github.com/SurTeam/Water/internal/goprotocol"
@@ -27,6 +28,47 @@ func TestSessionSendQueueHasByteBudget(t *testing.T) {
 	}
 	if !errors.Is(err, ErrSessionBackpressure) || accepted >= sessionSendQueueCapacity {
 		t.Fatalf("byte budget did not bind before slot capacity: accepted=%d err=%v", accepted, err)
+	}
+}
+
+func TestUnsolicitedInputFailureIsVisible(t *testing.T) {
+	s, peer := pipeSession(t)
+	if err := goprotocol.WriteJSON(peer, goprotocol.Failure(0, "INPUT_REJECTED", "pane input queue is full")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.done:
+		var failure *goprotocol.RPCError
+		if !errors.As(s.Err(), &failure) || failure.Code != "INPUT_REJECTED" {
+			t.Fatalf("lost input failure: %v", s.Err())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unsolicited input failure was ignored")
+	}
+}
+
+func TestInterleavedResizeStagingHasEventBudget(t *testing.T) {
+	s, _ := pipeSession(t)
+	first, second := uuid.New(), uuid.New()
+	var err error
+	for index := 0; index <= sessionStagingCapacity+2; index++ {
+		id := first
+		if index%2 != 0 {
+			id = second
+		}
+		err = s.DispatchAsync(map[string]any{"type": "terminal.resize", "terminal_id": id, "columns": 80, "lines": 24})
+		if err != nil {
+			break
+		}
+	}
+	if !errors.Is(err, ErrSessionBackpressure) {
+		t.Fatalf("unbounded resize staging: %v", err)
+	}
+	s.writeMu.Lock()
+	count := len(s.staged)
+	s.writeMu.Unlock()
+	if count > sessionStagingCapacity || s.Err() != nil {
+		t.Fatalf("staging count=%d session error=%v", count, s.Err())
 	}
 }
 
@@ -165,6 +207,24 @@ func TestTerminalTrafficCoalescesWithoutClosingSession(t *testing.T) {
 	}
 	if frames != 3 || columns != 84 || len(got) != 100 || got[0] != 0 || got[99] != 99 {
 		t.Fatalf("frames=%d columns=%d bytes=%v", frames, columns, got)
+	}
+}
+
+func TestSendInputUsesBinaryFrameWhenSupported(t *testing.T) {
+	s, peer := pipeSession(t)
+	s.BinaryInput = true
+	id := uuid.New()
+	data := []byte{0x1b, '[', 'A', 0xff}
+	if err := s.SendInput(id, data); err != nil {
+		t.Fatal(err)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(time.Second))
+	frame, err := goprotocol.ReadFrame(peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frame.Input == nil || frame.Input.TerminalID != id || !bytes.Equal(frame.Input.Data, data) {
+		t.Fatalf("binary input frame = %#v", frame.Input)
 	}
 }
 

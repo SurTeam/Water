@@ -46,14 +46,21 @@ with WaterGUI("water-pi-redraw.", {"startup": {"window_columns": 90, "window_row
     wait(lambda: "PI_DETAIL_079" in content()["text"] and not content()["synchronized_output"], "Pi transcript rendered")
 
     def history(name):
-        before = content()
-        text = test.history(pane)
-        after = content()
-        assert after["y_disp"] == before["y_disp"], "content query changed scroll position"
-        assert after["selection"] == before["selection"], "content query changed selection"
-        assert not after["selection"]["Active"], "test must not leave a selected terminal"
-        test.save(name + ".txt", text)
-        return text
+        observations = []
+        for _ in range(3):
+            before = content()
+            text = test.history(pane)
+            after = content()
+            observations.append({"before": before, "after": after})
+            test.save(name + "-query-boundaries.json", observations)
+            if any(after[field] != before[field] for field in ("last_seq", "trimmed_lines", "total_rows", "alt_screen")):
+                continue
+            assert after["y_disp"] == before["y_disp"], "content query changed scroll position"
+            assert after["selection"] == before["selection"], "content query changed selection"
+            assert not after["selection"]["Active"], "test must not leave a selected terminal"
+            test.save(name + ".txt", text)
+            return text
+        raise RuntimeError("Pi output changed throughout history verification")
 
     initial = history("collapsed")
     welcome = "Pi can explain its own features"

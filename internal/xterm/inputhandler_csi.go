@@ -965,7 +965,8 @@ func boolToPm(set bool) int {
 const kittyKeyboardMaxStackSize = 10
 
 // kittyKeyboardSet handles CSI = Ps ; Pm u — set kitty keyboard flags.
-// Ps = flags value (default 0), Pm = mode: 1=set (OR), 2=clear (AND NOT), 3=assign (default 1).
+// Ps = flags value (default 0), Pm = mode: 1=assign, 2=set bits (OR),
+// 3=clear bits (AND NOT), default 1.
 func (h *InputHandler) kittyKeyboardSet(params *Params) bool {
 	if !h.optionsService.Options.VtExtensions.KittyKeyboard {
 		return true
@@ -981,11 +982,11 @@ func (h *InputHandler) kittyKeyboardSet(params *Params) bool {
 	}
 	switch mode {
 	case 1:
-		kk.Flags |= flags
-	case 2:
-		kk.Flags &^= flags
-	case 3:
 		kk.Flags = flags
+	case 2:
+		kk.Flags |= flags
+	case 3:
+		kk.Flags &^= flags
 	}
 	return true
 }
@@ -1009,7 +1010,12 @@ func (h *InputHandler) kittyKeyboardPush(params *Params) bool {
 		return true
 	}
 	kk := &h.coreService.KittyKeyboard
-	if len(kk.MainStack) < kittyKeyboardMaxStackSize {
+	if len(kk.MainStack) >= kittyKeyboardMaxStackSize {
+		// The protocol requires the oldest entry to be evicted when the stack
+		// is full, so a nested application can still restore its immediate
+		// predecessor instead of having its push silently ignored.
+		kk.MainStack = append(kk.MainStack[1:], kk.Flags)
+	} else {
 		kk.MainStack = append(kk.MainStack, kk.Flags)
 	}
 	flags := 0

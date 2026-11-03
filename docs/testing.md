@@ -28,6 +28,8 @@ The following Python profiles use the existing Unix desktop/shell fixtures. They
 
 GUI/clipboard test lifetimes use the shared per-user advisory lock in `scripts/water_test.py`, including directly invoked legacy scripts and shell runners. Acquire it before process baselines and desktop/clipboard access; release it after cleanup and clipboard restoration. The regression runner executes steps sequentially without a second outer lock. A competing test’s lock wait currently counts toward the step deadline.
 
+`go-ui-input-isolation-smoke.py` fills stdin of an owned child that does not read it, then verifies another pane's echo, workspace creation, closing the blocked pane, child exit and active PTY removal. Registry tests additionally delay raw-mode readers across several write deadlines and compare exact input SHA-256, including escape bytes, for local and supervised PTYs; a blocked supervised input stream must not block resize/close. Binary input serialization benchmarks measure framing and allocations only, not transport throughput or GUI latency.
+
 Cleanup verifies owned GUI/server exit, socket removal and preservation of pre-existing Water processes. Ownership failures refuse shutdown; ordinary transport or evidence failures still clean up directly owned processes. Cleanup errors do not replace the original test failure. Clipboard backups are deleted after successful restoration and excluded from evidence exports, including failure paths.
 
 Unix regression launchers must preserve the default SIGHUP disposition. `nohup` passes
@@ -176,7 +178,7 @@ read in a loop and report exact wire length and SHA-256, including each brackete
 paste delimiter. A separately ordered end marker detects extra trailing bytes.
 Echoed bytes exercise the GUI parser and drawing; screenshots
 and GUI content are retained. Three additional ZLE command-line cycles verify
-450 pastes using a distinct payload/digest per cycle.
+450 pastes using a distinct payload/digest per cycle. The runner invokes raw and ZLE phases separately to keep each step within its deadline; clipboard changes by another application are reported explicitly.
 
 Clipboard assertions must exercise the native paste path: text: input bypasses clipboard inspection. Native autorelease pools must stay on their creating OS thread for their whole lifetime; Go race checks cannot prove this. TestMacAutoreleasePoolStaysOnCreatingThread explicitly yields while native objects remain live.
 

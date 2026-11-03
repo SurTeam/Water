@@ -27,7 +27,9 @@ macOS 最小化恢复调用返回不代表动画及事件处理完成；AppKit/D
 
 ## 输入与终端呈现
 
-按键处理在每帧 `Update` 内、二次 layout 之前完成，键盘与 IME 提交后立即写 PTY，不等布局；IME 重定位按几何与缩放去重，几何未变时不再每帧发起同步主线程调用。回显延迟与发布节奏见 [性能与资源管理](performance.md)。
+按键处理在每帧 `Update` 内、二次 layout 之前完成，键盘与 IME 提交后立即进入所属 pane 的输入队列，不等布局或同步 PTY 写入；IME 重定位按几何与缩放去重，几何未变时不再每帧发起同步主线程调用。回显延迟与发布节奏见 [性能与资源管理](performance.md)。
+
+终端快照携带 Kitty 键盘模式，桌面编码器支持消歧（1）、事件类型/释放（2）和全部按键报告（8），按 xterm set/push/pop 语义更新。功能键保留协议定义的 CSI 编号与后缀；未启用时保留传统编码。此处不宣称实现 alternate keys（4）及 associated text（16）。输入与输出错误显示在所属 pane，不能令其他 pane 进入共享连接失败状态。
 
 Cmd+C 只复制，无选区不发送字节；Ctrl+C 才是中断，Command/Super 不隐式编码成 Control。Cmd+D 不隐式发送 EOF。文本粘贴走终端 bracketed-paste 状态；macOS 图片粘贴交给前台 Agent 的图像读取路径，不自动上传本地剪贴板到远端。
 

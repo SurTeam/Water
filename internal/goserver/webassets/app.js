@@ -214,6 +214,7 @@
    const p=requests.get(msg.request_id);if(!p)return;requests.delete(msg.request_id);clearTimeout(p.timer);
    if(msg.ok)p.resolve(msg.result);else p.reject(new Error(msg.error?.message||'Request failed'));
   }else if(msg.method==='push.snapshot')render(msg.params);
+  else if(msg.method==='push.terminal_error' && active?.id===msg.params.terminal_id){active.ready=false;status(msg.params.message);}
  }
  function leaves(node,workspace,tab,result){
   if(!node)return;

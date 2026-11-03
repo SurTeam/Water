@@ -23,7 +23,9 @@ GUI 的兼容/in-memory 聚合事件路径另有每终端 256 events / 1 MiB mai
 
 纯 `terminal.send_text` / `terminal.send_bytes` 成功后不广播 workspace 模型快照，输入回显继续由终端输出流传递；命令结果与 operation 查询保留。
 
-普通 session send 队列为 64 frames，并受 `MaxFrameBytes` 对应字节预算约束。终端输入/resize 先进入 staging，合并相邻同终端同类型操作，再分块送往 socket 队列；staged bytes 溢出返回背压错误但保留 session。staging 数量预算与错误呈现的限制见下表。
+普通 session send 队列为 64 frames，并受 `MaxFrameBytes` 对应字节预算约束。终端输入/resize 先进入 staging，合并相邻同终端同类型操作，再分块送往 socket 队列；staging 同时限制字节数和 256 个事件，超限显式返回背压错误。GUI 输入错误归属到对应 pane，不升级为共享 connection 错误。
+
+每个 terminal 的输入由独立 writer 消费 64 项 / 1 MiB 队列。进程不读取 stdin 时，PTY 写入按 250ms 截止时间重试实际未写的后缀，不能重发已写字节或静默丢弃剩余字节；关闭解除等待，永久写入错误停止该 writer 并拒绝后续输入。supervisor 满输入队列只背压该 pane 的输入连接；输入、输出和控制使用三个独立连接，resize/close 不排在输入积压之后。server 输入和 resize 不持全局命令锁。本地 resize 队列为 8 项，请求有 1s 预算，超时请求取消后不得迟到应用。
 
 ## 内存与历史逻辑
 
@@ -41,14 +43,14 @@ server replay 扫描 escape 以识别主副屏边界与不完整序列，普通 
 
 | 路径 | 当前事实与需要验证的风险 |
 | --- | --- |
-| staging | 有输入字节预算，无完整事件数量预算；交错 resize 等不能视为已受 64-frame socket 队列总量约束 |
-| GUI 输入拒绝 | `workspace.go` 的输入回调忽略 `DispatchAsync` 返回值，不能保证溢出拒绝对用户可见 |
+| staging | 同时限制字节与事件数量；交错终端输入和 resize 也计入事件预算 |
+| GUI 输入拒绝 | 同步拒绝及异步无请求 ID 的错误均终止或标记所属 pane 的输入流，保留其他 pane 与控制连接 |
 | subscriber 关闭 | 满队列 publish 可被订阅取消或 terminal 关闭解除；有容量时优先发送最终事件，已关闭慢消费者不保证收到全部积压或 Exit |
 | 恢复隐藏视图 | TryLock 忙时保留旧视图并延后恢复；取得锁后仍同步构建 FrameSnapshot |
 | 回显旁路归属 | 只能按「输入后首个输出事件 + 配额 + 120 ms 窗口」近似，PTY 无回显标识；同一终端先到的后台输出可能消耗该次旁路，后续回显回到发布上限 |
 | 回显同步 | 仅在聚焦、可见、非 catchUp 且实测延迟能落进当帧时等待；高刷新率下帧预算较小，可能完全不启用；不持锁等待但仍占用本帧时间 |
 
-staging 与输入拒绝仍是源码可见缺口，不能将设计目标写作已全面满足。pane 隔离、繁忙恢复与满队列关闭已有专门回归；验收范围见 [测试与验证](testing.md)。
+pane 隔离、繁忙恢复、延迟读取后的输入逐字节一致性与满队列关闭已有专门回归；验收范围见 [测试与验证](testing.md)。浏览器仍复用 WebSocket，不能将独立 GUI 流的隔离证据当作浏览器传输完全隔离的保证。
 
 ## 测量与验收
 

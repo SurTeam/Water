@@ -129,11 +129,17 @@ func TestCompatibilityOutputOverflowFailsExplicitly(t *testing.T) {
 	if !failed || !term.closed.Load() {
 		t.Fatal("overflow did not fail explicitly and release queued output")
 	}
+	term.mu.RLock()
+	paneError := term.outputError
+	term.mu.RUnlock()
+	if paneError == "" {
+		t.Fatal("overflow error was not attached to the pane")
+	}
 	c.mu.RLock()
-	reported := c.connectionError != ""
+	global := c.connectionError != ""
 	c.mu.RUnlock()
-	if !reported {
-		t.Fatal("overflow error was not exposed")
+	if global {
+		t.Fatal("pane-local overflow contaminated the session connection error")
 	}
 	term.parseMu.Unlock()
 	select {

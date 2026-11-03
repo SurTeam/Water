@@ -179,6 +179,8 @@ type terminalClient struct {
 	lastInputAt    atomic.Int64
 	inputAt        atomic.Int64
 	publishedAt    atomic.Int64
+	outputError    string
+	inputError     string
 }
 
 // Input after which the first output event may bypass the publication window.
@@ -311,6 +313,7 @@ type WorkspaceClient struct {
 	connectionError string
 	terminals       map[uuid.UUID]*terminalClient
 	attaching       map[uuid.UUID]*terminalAttachAttempt
+	terminalErrors  map[uuid.UUID]string
 	asyncOutput     atomic.Bool
 	outputWake      chan struct{}
 	// Terminal that just received a keystroke and is waiting for its echo.
@@ -1294,6 +1297,11 @@ func (c *WorkspaceClient) applyState(state gomodel.StateDump) {
 			remove = append(remove, term)
 		}
 	}
+	for id := range c.terminalErrors {
+		if _, ok := wanted[id]; !ok {
+			delete(c.terminalErrors, id)
+		}
+	}
 	var add []terminalSummary
 	var update []*terminalClient
 	for id, summary := range wanted {
@@ -1410,7 +1418,10 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 	if err != nil {
 		if ctx.Err() == nil && !c.stopped.Load() {
 			c.mu.Lock()
-			c.connectionError = fmt.Sprintf("attach terminal %s: %v", summary.TerminalID, err)
+			if c.terminalErrors == nil {
+				c.terminalErrors = make(map[uuid.UUID]string)
+			}
+			c.terminalErrors[summary.TerminalID] = fmt.Sprintf("attach terminal %s: %v", summary.TerminalID, err)
 			c.mu.Unlock()
 			if c.invalidate != nil {
 				c.invalidate()
@@ -1500,11 +1511,14 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 				c.invalidate()
 			}
 			end := traceNativeWork("input.send")
-			_ = c.session.DispatchAsync(map[string]any{
-				"type":        "terminal.send_bytes",
-				"terminal_id": summary.TerminalID,
-				"bytes":       bytesAsInts(data),
-			})
+			if err := c.session.SendInput(summary.TerminalID, data); err != nil {
+				term.mu.Lock()
+				term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
+				term.mu.Unlock()
+				if c.invalidate != nil {
+					c.invalidate()
+				}
+			}
 			if end != nil {
 				end()
 			}
@@ -1718,6 +1732,7 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 		return
 	}
 	c.terminals[summary.TerminalID] = term
+	delete(c.terminalErrors, summary.TerminalID)
 	c.mu.Unlock()
 	installed = true
 	if subscription != nil && (ticket != nil || c.asyncOutput.Load()) {
@@ -2081,20 +2096,17 @@ func (c *WorkspaceClient) flushVTResponses(term *terminalClient) {
 	}
 	term.mu.RUnlock()
 	for _, data := range responses {
-		_ = c.session.DispatchAsync(map[string]any{
-			"type":        "terminal.send_bytes",
-			"terminal_id": term.id,
-			"bytes":       bytesAsInts(data),
-		})
+		if err := c.session.SendInput(term.id, data); err != nil {
+			term.mu.Lock()
+			if term.inputError == "" {
+				term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
+			}
+			term.mu.Unlock()
+			if c.invalidate != nil {
+				c.invalidate()
+			}
+		}
 	}
-}
-
-func bytesAsInts(data []byte) []int {
-	out := make([]int, len(data))
-	for i, b := range data {
-		out[i] = int(b)
-	}
-	return out
 }
 
 func (c *WorkspaceClient) Layout(gtx layout.Context, th *material.Theme) layout.Dimensions {

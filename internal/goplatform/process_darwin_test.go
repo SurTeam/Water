@@ -28,8 +28,9 @@ func TestDetachedApplicationResponsibility(t *testing.T) {
 		}
 		return
 	}
-	for _, detached := range []bool{false, true} {
-		t.Run(map[bool]string{false: "setsid-only", true: "independent-application"}[detached], func(t *testing.T) {
+	var baselineIndependent bool
+	for _, mode := range []string{"baseline", "setsid-only", "independent-application"} {
+		t.Run(mode, func(t *testing.T) {
 			r, w, err := os.Pipe()
 			if err != nil {
 				t.Fatal(err)
@@ -39,9 +40,9 @@ func TestDetachedApplicationResponsibility(t *testing.T) {
 			cmd := exec.Command(os.Args[0], "-test.run=^TestDetachedApplicationResponsibility$")
 			cmd.Env = append(os.Environ(), "WATER_TEST_DETACHED_CHILD=1")
 			cmd.ExtraFiles = []*os.File{w}
-			if detached {
+			if mode == "independent-application" {
 				Detach(cmd)
-			} else {
+			} else if mode == "setsid-only" {
 				cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			}
 			if out, err := cmd.CombinedOutput(); err != nil {
@@ -55,7 +56,12 @@ func TestDetachedApplicationResponsibility(t *testing.T) {
 			if err := json.NewDecoder(r).Decode(&result); err != nil {
 				t.Fatal(err)
 			}
-			if result.PID != cmd.Process.Pid || (result.Responsible == result.PID) != detached || result.Marker != "" {
+			independent := result.Responsible == result.PID
+			if mode == "baseline" {
+				baselineIndependent = independent
+			}
+			wantIndependent := baselineIndependent || mode == "independent-application"
+			if result.PID != cmd.Process.Pid || independent != wantIndependent || result.Marker != "" {
 				t.Fatalf("detached child retained application ownership or lost launch identity: %+v", result)
 			}
 		})

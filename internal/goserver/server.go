@@ -229,6 +229,7 @@ type session struct {
 	opened           bool
 	browser          bool
 	tui              bool
+	terminalOnly     bool
 
 	snapshotRequests chan struct{}
 	done             chan struct{}
@@ -304,6 +305,12 @@ func (s *Server) handleConn(conn net.Conn) {
 			}
 			return
 		}
+		if frame.Input != nil {
+			if err := s.handleBinaryInput(ss, frame.Input); err != nil {
+				_ = ss.write(goprotocol.Failure(0, "INVALID_FRAME", err.Error()))
+			}
+			continue
+		}
 		if frame.Terminal != nil {
 			_ = ss.write(goprotocol.Failure(0, "INVALID_FRAME", "client terminal frames are not accepted"))
 			continue
@@ -342,6 +349,31 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
+// handleBinaryInput applies one WT5 frame without involving the command lock
+// or operation history. Input is accepted only after the session has opened,
+// and browser sessions still pass the same authorization gate as commands.
+func (s *Server) handleBinaryInput(ss *session, frame *goprotocol.TerminalInputFrame) error {
+	if !ss.opened {
+		return errors.New("open the session before sending terminal input")
+	}
+	if ss.diagnostic {
+		return errors.New("diagnostic session cannot send terminal input")
+	}
+	// Browser sessions are authenticated before opened. WT5 input is the binary
+	// equivalent of the already permitted terminal.send_bytes command.
+	if frame.TerminalID == uuid.Nil {
+		return errors.New("terminal input requires a terminal id")
+	}
+	t, ok := s.registry.Get(frame.TerminalID)
+	if !ok {
+		return errors.New("terminal not found")
+	}
+	if len(frame.Data) == 0 {
+		return nil
+	}
+	return t.EnqueueInput(frame.Data)
+}
+
 func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 	if ss.diagnostic && msg.Method != "session.open" && msg.Method != "session.release" && msg.Method != "server.inspect" && msg.Method != "server.info" && !strings.HasPrefix(msg.Method, "recovery.") && !strings.HasPrefix(msg.Method, "ui.") {
 		return errors.New("server is incompatible; use Server settings to inspect or restart with recovery")
@@ -373,6 +405,7 @@ func (s *Server) dispatch(ss *session, msg goprotocol.WireMessage) error {
 			}
 		}
 		ss.tui = p.Role == "tui"
+		ss.terminalOnly = p.Role == "terminal" && !ss.browser
 		isGUI := p.Role == "gui" || ss.tui || ss.browser
 		var compatibility goprotocol.Compatibility
 		if p.Client != nil {
@@ -577,7 +610,7 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 		cancel()
 	}
 
-	ch, done, cancel := t.Subscribe()
+	ch, done, cancel, overflowed := t.SubscribeWithOverflow()
 	replay := t.Replay()
 	var first *uint64
 	var last uint64
@@ -609,9 +642,22 @@ func (s *Server) attach(ss *session, requestID uint64, id uuid.UUID) error {
 
 	go func() {
 		defer cancel()
+		defer func() {
+			if overflowed() {
+				if ss.terminalOnly {
+					_ = ss.conn.Close()
+				} else {
+					params, _ := json.Marshal(map[string]any{"terminal_id": id, "message": "terminal output subscription exceeded its bounded queue"})
+					_ = ss.write(goprotocol.WireMessage{Method: "push.terminal_error", Params: params})
+				}
+			}
+		}()
 		for {
 			select {
-			case ev := <-ch:
+			case ev, ok := <-ch:
+				if !ok {
+					return
+				}
 				gometrics.TerminalStreamEvents.Add(1)
 				if ev.Kind == goprotocol.OutputEvent {
 					gometrics.TerminalOutputBytesSent.Add(uint64(len(ev.Data)))

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,9 +15,11 @@ import (
 // Client is one server's connection to the supervisor. A server may drop this
 // connection and reconnect; terminals and their programs keep running.
 type Client struct {
-	conn      net.Conn
-	writeOnce sync.Once
-	writeGate chan struct{} // serializes waiter registration and frame writes
+	conn        net.Conn
+	writeOnce   sync.Once
+	writeGate   chan struct{} // serializes waiter registration and frame writes
+	binaryInput atomic.Bool
+	dedicated   atomic.Bool
 
 	pendingMu sync.Mutex
 	pending   [slotCount][]*pendingReply
@@ -62,6 +65,7 @@ type SpawnSpec struct {
 // Attach describes retained history for a resumed terminal.
 type Attach struct {
 	RestoreSupported bool
+	BinaryInput      bool
 	PID              int
 	Offset           uint64
 	Available        uint64
@@ -181,7 +185,17 @@ func (c *Client) sendRequest(ctx context.Context, kind byte, value any, slot int
 		c.pending[slot] = append(c.pending[slot], &pendingReply{id: id, ch: ch})
 		c.pendingMu.Unlock()
 	}
-	err := writeJSON(c.conn, kind, value)
+	var err error
+	if kind == kindWriteBinary {
+		payload, ok := value.([]byte)
+		if !ok {
+			c.fail(errors.New("binary supervisor write requires raw payload"))
+			return nil, errors.New("binary supervisor write requires raw payload")
+		}
+		err = writeFrame(c.conn, kind, payload)
+	} else {
+		err = writeJSON(c.conn, kind, value)
+	}
 	if !stop() {
 		<-interrupted
 	}
@@ -235,17 +249,32 @@ func (c *Client) Spawn(spec SpawnSpec) (pid int, resumed bool, err error) {
 	if resp.Error != "" {
 		return 0, false, errors.New(resp.Error)
 	}
+	c.binaryInput.Store(resp.BinaryInput)
 	return resp.PID, resp.Resumed, nil
 }
 
 // Attach subscribes to a terminal's output, replaying retained history first.
 func (c *Client) Attach(id uuid.UUID, offset uint64) (Attach, <-chan Event, error) {
+	return c.attach(id, offset, false)
+}
+
+// AttachDedicated subscribes on a connection that carries only this output
+// stream. If its event queue overflows, the client closes the connection so the
+// supervisor removes the old subscription before the caller re-attaches.
+func (c *Client) AttachDedicated(id uuid.UUID, offset uint64) (Attach, <-chan Event, error) {
+	return c.attach(id, offset, true)
+}
+
+func (c *Client) attach(id uuid.UUID, offset uint64, dedicated bool) (Attach, <-chan Event, error) {
 	key := id.String()
 	events := make(chan Event, 256)
 	c.eventsMu.Lock()
 	c.events[key] = events
 	c.eventsMu.Unlock()
-	value, err := c.call(kindAttach, attachRequest{ID: key, Offset: offset}, attachedSlot, key)
+	if dedicated {
+		c.dedicated.Store(true)
+	}
+	value, err := c.call(kindAttach, attachRequest{ID: key, Offset: offset, Dedicated: dedicated}, attachedSlot, key)
 	resp, _ := value.(attachedResponse)
 	if err != nil {
 		c.dropEvents(key)
@@ -255,7 +284,10 @@ func (c *Client) Attach(id uuid.UUID, offset uint64) (Attach, <-chan Event, erro
 		c.dropEvents(key)
 		return Attach{}, nil, errors.New(resp.Error)
 	}
-	return Attach{RestoreSupported: resp.RestoreSupported, PID: resp.PID, Offset: resp.Offset, Available: resp.Available, Truncated: resp.Truncated, Restore: resp.Restore, Exited: resp.Exited, Code: resp.Code}, events, nil
+	if resp.BinaryInput {
+		c.binaryInput.Store(true)
+	}
+	return Attach{RestoreSupported: resp.RestoreSupported, BinaryInput: resp.BinaryInput, PID: resp.PID, Offset: resp.Offset, Available: resp.Available, Truncated: resp.Truncated, Restore: resp.Restore, Exited: resp.Exited, Code: resp.Code}, events, nil
 }
 
 // Write sends terminal input.
@@ -263,7 +295,27 @@ func (c *Client) Write(id uuid.UUID, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if c.binaryInput.Load() {
+		return c.writeBinary(id, data)
+	}
 	return c.send(kindWrite, writeRequest{ID: id.String(), Data: data})
+}
+
+func (c *Client) WriteBinaryInput(id uuid.UUID, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	return c.writeBinary(id, data)
+}
+
+func (c *Client) writeBinary(id uuid.UUID, data []byte) error {
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+	payload := make([]byte, 16+len(data))
+	copy(payload, id[:])
+	copy(payload[16:], data)
+	_, err := c.sendRequest(ctx, kindWriteBinary, payload, -1, "")
+	return err
 }
 
 // Resize applies a new geometry; the supervisor orders it against output.
@@ -426,11 +478,7 @@ func (c *Client) publish(header outputHeader, data []byte) {
 	select {
 	case ch <- Event{Kind: EventOutput, Output: copied, Offset: header.offset}:
 	default:
-		c.eventsMu.Lock()
-		if current, ok := c.events[key]; ok && current == ch {
-			c.closeEventsLocked(key)
-		}
-		c.eventsMu.Unlock()
+		c.overflowEvents(key, ch)
 	}
 }
 
@@ -445,6 +493,21 @@ func (c *Client) publishEvent(id string, generation uint64, event Event) {
 	select {
 	case ch <- event:
 	default:
+		c.overflowEvents(id, ch)
+	}
+}
+
+func (c *Client) overflowEvents(key string, ch chan Event) {
+	c.eventsMu.Lock()
+	if current, ok := c.events[key]; ok && current == ch {
+		c.closeEventsLocked(key)
+	}
+	c.eventsMu.Unlock()
+	if c.dedicated.Load() {
+		// A dedicated output connection cannot be reused after its subscription
+		// was dropped: re-attaching on the same socket would leave the old
+		// supervisor subscriber alive and duplicate every later output byte.
+		c.shutdown()
 	}
 }
 

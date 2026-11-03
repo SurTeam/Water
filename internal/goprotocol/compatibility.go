@@ -35,11 +35,17 @@ type Compatibility struct {
 }
 
 func ServerCapabilities() []string {
-	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1", "agent-profiles/v1", "pane-execute/v1", WebCapability, WebTLSImportCapability}
+	return []string{"workspace/v1", "terminal-stream/v1", "window-selection/v1", "recovery/v1", "server-inspect/v1", "agent-profiles/v1", "pane-execute/v1", TerminalInputBinaryCapability, WebCapability, WebTLSImportCapability}
 }
 func ClientCapabilities() []string {
-	return []string{"terminal-stream/v1", "window-selection/v1", "ui-control/v1"}
+	return []string{"terminal-stream/v1", "window-selection/v1", "ui-control/v1", TerminalInputBinaryCapability}
 }
+
+// TerminalInputBinaryCapability negotiates WT5 client-to-server input. It is
+// advertised, never required, so older clients and servers keep the JSON
+// terminal.send_bytes path.
+const TerminalInputBinaryCapability = "terminal-input-binary/v1"
+
 func HasCapability(values []string, wanted string) bool {
 	for _, v := range values {
 		if v == wanted {

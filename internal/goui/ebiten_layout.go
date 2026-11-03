@@ -462,9 +462,14 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 	content := r.Inset(w.dp(float64(cfg.UI.PanePadding)))
 	c.mu.RLock()
 	term := c.terminals[summary.TerminalID]
+	attachError := c.terminalErrors[summary.TerminalID]
 	c.mu.RUnlock()
 	if term == nil {
-		w.label(dst, c, content, c.tr("Attaching terminal…"), 12, muted, false)
+		message := c.tr("Attaching terminal…")
+		if attachError != "" {
+			message = attachError
+		}
+		w.label(dst, c, content, message, 12, muted, false)
 		return
 	}
 	applyViewConfig(term.view, cfg)
@@ -484,6 +489,20 @@ func (w *EbitengineWindow) layoutNativePane(c *WorkspaceClient, dst *ebiten.Imag
 	w.resizeTerminal(c, term, content, cw, lh)
 	if dst != nil {
 		w.drawTerminal(c, dst, term, content, cw, lh, tab.ActivePane == node.PaneID && ebiten.IsFocused())
+		term.mu.RLock()
+		paneError := term.outputError
+		if term.inputError != "" {
+			if paneError != "" {
+				paneError += "; "
+			}
+			paneError += term.inputError
+		}
+		term.mu.RUnlock()
+		if paneError != "" {
+			bar := image.Rect(content.Min.X, content.Max.Y-w.dp(24), content.Max.X, content.Max.Y)
+			w.round(dst, bar, w.dp(4), configColor(cfg.Theme.ChromeBackground, 0x171b20))
+			w.label(dst, c, bar.Inset(w.dp(6)), paneError, 11, configColor("#ef766f", 0), false)
+		}
 		if cfg.UI.DimInactivePanes && tab.ActivePane != node.PaneID {
 			w.round(dst, r, radius, color.NRGBA{A: 55})
 		}

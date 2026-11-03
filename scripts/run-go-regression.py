@@ -32,7 +32,7 @@ if args.profile != "unit":
              ("build-server", ["go", "build", "-ldflags", ldflags, "-o", str(server), "./cmd/water-server"]),
              ("scenarios", ["bash", "scripts/run-go-scenario-suite.sh"]),
              ("gui", ["bash", "scripts/run-go-ui-smoke.sh"])]
-    scripts = ["go-ui-pane-smoke.py", "go-ui-output-isolation-smoke.py", "go-ui-settings-visual-smoke.py", "go-ui-selection-modal-smoke.py", "go-ui-content-smoke.py", "go-ui-server-smoke.py", "go-ui-long-run-smoke.py", "go-ui-agent-settings-smoke.py"]
+    scripts = ["go-ui-pane-smoke.py", "go-ui-output-isolation-smoke.py", "go-ui-input-isolation-smoke.py", "go-ui-settings-visual-smoke.py", "go-ui-selection-modal-smoke.py", "go-ui-content-smoke.py", "go-ui-server-smoke.py", "go-ui-long-run-smoke.py", "go-ui-agent-settings-smoke.py"]
     if args.profile in ("terminal", "full"):
         scripts += ["go-ui-text-paste-smoke.py", "go-ui-query-smoke.py", "go-ui-graphics-history-smoke.py", "go-ui-pi-redraw-smoke.py", "go-ui-tui-reattach-scroll-smoke.py"]
     if args.profile in ("agent", "full"):
@@ -41,7 +41,13 @@ if args.profile != "unit":
             scripts += ["go-ui-pi-redraw-smoke.py"]
     if sys.platform == "darwin":
         scripts += ["go-ui-metal-readback-smoke.py"]
-    plan += [(name.removesuffix(".py"), [sys.executable, "scripts/" + name]) for name in scripts]
+    for name in scripts:
+        phases = ("raw", "zle") if name == "go-ui-text-paste-smoke.py" else (None,)
+        for phase in phases:
+            command = [sys.executable, "scripts/" + name]
+            if phase:
+                command += ["--phase", phase]
+            plan.append((name.removesuffix(".py") + ("-" + phase if phase else ""), command))
 if args.list:
     print(json.dumps({"profile": args.profile, "version": version, "step_timeout_seconds": 60,
                       "steps": [{"name": name, "command": command} for name, command in plan]}, indent=2))

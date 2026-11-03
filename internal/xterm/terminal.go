@@ -432,6 +432,9 @@ func (t *Terminal) Modes() Modes { return t.coreService.Modes }
 // DecPrivateModes returns the current DEC private modes.
 func (t *Terminal) DecPrivateModes() DecPrivateModes { return t.coreService.DecPrivateModes }
 
+// KittyKeyboardFlags returns the active Kitty keyboard protocol flags.
+func (t *Terminal) KittyKeyboardFlags() int { return t.coreService.KittyKeyboard.Flags }
+
 // IsCursorHidden returns whether the cursor is hidden (DECTCEM).
 func (t *Terminal) IsCursorHidden() bool { return t.coreService.IsCursorHidden }
 

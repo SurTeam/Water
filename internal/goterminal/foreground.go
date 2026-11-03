@@ -23,9 +23,9 @@ func (t *Terminal) ForegroundGroupContext(ctx context.Context) (int, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if t.supervised != nil {
+	if t.supervisor != nil {
 		// The supervisor owns the PTY master, so only it can read TIOCGPGRP.
-		return t.supervised.ForegroundContext(ctx, t.supervisedKeyUUID())
+		return t.supervisor.foreground(ctx)
 	}
 	group, err := t.ptmx.ForegroundGroup()
 	if err != nil {

@@ -2,6 +2,7 @@ package govt
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -47,6 +48,59 @@ func TestTerminalQueryResponsesAreRetained(t *testing.T) {
 	}
 	if more := e.TakeResponses(); len(more) != 0 {
 		t.Fatalf("responses were not drained: %q", more)
+	}
+}
+
+func TestKittyKeyboardFlagsSnapshotAndQuery(t *testing.T) {
+	e := New(20, 3, 100)
+	defer e.Close()
+
+	e.Write([]byte("\x1b[>1u"))
+	if got := e.Snapshot().KittyKeyboardFlags; got != 1 {
+		t.Fatalf("flags after push = %d, want 1", got)
+	}
+	e.Write([]byte("\x1b[?u"))
+	if got := string(bytes.Join(e.TakeResponses(), nil)); got != "\x1b[?1u" {
+		t.Fatalf("query response = %q, want %q", got, "\x1b[?1u")
+	}
+
+	e.Write([]byte("\x1b[>0u"))
+	if got := e.Snapshot().KittyKeyboardFlags; got != 0 {
+		t.Fatalf("flags after clear = %d, want 0", got)
+	}
+	e.Write([]byte("\x1b[?u"))
+	if got := string(bytes.Join(e.TakeResponses(), nil)); got != "\x1b[?0u" {
+		t.Fatalf("cleared query response = %q, want %q", got, "\x1b[?0u")
+	}
+}
+
+func TestKittyKeyboardSetModesAndStackEviction(t *testing.T) {
+	e := New(20, 3, 100)
+	defer e.Close()
+
+	e.Write([]byte("\x1b[=2;1u"))
+	if got := e.Snapshot().KittyKeyboardFlags; got != 2 {
+		t.Fatalf("assign mode flags = %d, want 2", got)
+	}
+	e.Write([]byte("\x1b[=1;2u"))
+	if got := e.Snapshot().KittyKeyboardFlags; got != 3 {
+		t.Fatalf("set mode flags = %d, want 3", got)
+	}
+	e.Write([]byte("\x1b[=1;3u"))
+	if got := e.Snapshot().KittyKeyboardFlags; got != 2 {
+		t.Fatalf("clear mode flags = %d, want 2", got)
+	}
+	e.Write([]byte("\x1b[=0;1u"))
+	for i := 0; i < 12; i++ {
+		e.Write([]byte("\x1b[>" + fmt.Sprint(i+1) + "u"))
+	}
+	for i := 0; i < 10; i++ {
+		e.Write([]byte("\x1b[<u"))
+	}
+	// Twelve pushes retain only the newest ten saved flags (2 through 11),
+	// so popping all ten restores the oldest surviving entry.
+	if got := e.Snapshot().KittyKeyboardFlags; got != 2 {
+		t.Fatalf("stack eviction restored flags = %d, want 2", got)
 	}
 }
 

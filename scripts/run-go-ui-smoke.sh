@@ -26,6 +26,7 @@ esac
 # Keep control socket paths below Darwin's Unix socket path limit.
 TMP_ROOT="$(mktemp -d /tmp/water-go-ui-smoke.XXXXXX)"
 SOCKET="$TMP_ROOT/water.sock"
+SUPERVISOR_SOCKET="$TMP_ROOT/pty-supervisor.sock"
 CONFIG="$TMP_ROOT/config.json"
 LOG="$TMP_ROOT/water-gui.log"
 SNAPSHOT="$TMP_ROOT/ui-snapshot.json"
@@ -45,6 +46,19 @@ cleanup() {
     kill "$gui_pid" >/dev/null 2>&1 || true
     wait "$gui_pid" >/dev/null 2>&1 || true
   fi
+  "$PYTHON" - "$SOCKET" "$SUPERVISOR_SOCKET" <<'PY'
+import subprocess, sys, time
+sockets = sys.argv[1:]
+deadline = time.monotonic() + 5
+while True:
+    rows = subprocess.run(["ps", "-axww", "-o", "command="], capture_output=True, text=True, check=True, timeout=3).stdout.splitlines()
+    remaining = [row for row in rows if any(socket in row for socket in sockets) and ("--control-socket " in row or "--pty-supervisor " in row)]
+    if not remaining:
+        break
+    if time.monotonic() >= deadline:
+        raise SystemExit("owned GUI smoke server/supervisor did not exit")
+    time.sleep(.025)
+PY
   if [[ "${WATER_KEEP_UI_SMOKE:-0}" != "1" ]]; then
     rm -rf "$TMP_ROOT"
   else
@@ -77,7 +91,7 @@ cat >"$CONFIG" <<JSON
 }
 JSON
 
-WATER_TEST_UNFOCUSED=1 "$WATER_BIN" --control-socket "$SOCKET" --config "$CONFIG" >"$LOG" 2>&1 &
+WATER_TEST_UNFOCUSED=1 WATER_PTY_SUPERVISOR_SOCKET="$SUPERVISOR_SOCKET" "$WATER_BIN" --control-socket "$SOCKET" --config "$CONFIG" >"$LOG" 2>&1 &
 gui_pid=$!
 
 for _ in $(seq 1 240); do

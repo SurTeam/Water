@@ -23,6 +23,7 @@ const (
 )
 
 var terminalPrefix = [4]byte{0, 'W', 'T', '4'}
+var terminalInputPrefix = [4]byte{0, 'W', 'T', '5'}
 
 type WireMessage struct {
 	BuildVariant    string          `json:"build_variant,omitempty"`
@@ -108,6 +109,15 @@ type Frame struct {
 	JSON       []byte
 	TerminalID uuid.UUID
 	Terminal   *TerminalEvent
+	Input      *TerminalInputFrame
+}
+
+// TerminalInputFrame carries client-to-server PTY input without JSON or a
+// per-byte integer array. The terminal id identifies the pane; the remaining
+// bytes are written to its PTY in order.
+type TerminalInputFrame struct {
+	TerminalID uuid.UUID
+	Data       []byte
 }
 
 func WriteJSON(w io.Writer, v any) error {
@@ -186,6 +196,24 @@ func WriteTerminal(w io.Writer, id uuid.UUID, ev TerminalEvent) error {
 	}
 }
 
+// WriteInput writes a WT5 binary terminal-input frame. The frame is only valid
+// for an already opened, non-diagnostic session.
+func WriteInput(w io.Writer, id uuid.UUID, data []byte) error {
+	// [0 W T 5][terminal id:16][raw input]
+	payloadLen := 4 + 16 + len(data)
+	if payloadLen > MaxFrameBytes {
+		return fmt.Errorf("frame too large: %d", payloadLen)
+	}
+	var frame [24]byte
+	binary.BigEndian.PutUint32(frame[0:4], uint32(payloadLen))
+	copy(frame[4:8], terminalInputPrefix[:])
+	copy(frame[8:24], id[:])
+	if err := writeAll(w, frame[:]); err != nil {
+		return err
+	}
+	return writeAll(w, data)
+}
+
 func writeAll(w io.Writer, data []byte) error {
 	for len(data) > 0 {
 		n, err := w.Write(data)
@@ -212,6 +240,23 @@ func ReadFrame(r io.Reader) (Frame, error) {
 	payload := make([]byte, n)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return Frame{}, err
+	}
+	if n >= 4 && bytes.Equal(payload[:4], terminalInputPrefix[:]) {
+		if n < 20 {
+			return Frame{}, errors.New("truncated terminal input frame")
+		}
+		var id uuid.UUID
+		copy(id[:], payload[4:20])
+		if id == uuid.Nil {
+			return Frame{}, errors.New("terminal input frame has nil terminal id")
+		}
+		return Frame{
+			TerminalID: id,
+			Input: &TerminalInputFrame{
+				TerminalID: id,
+				Data:       payload[20:],
+			},
+		}, nil
 	}
 	if n < 4 || !bytes.Equal(payload[:4], terminalPrefix[:]) {
 		return Frame{JSON: payload}, nil

@@ -91,6 +91,13 @@ func (s *Server) command(ss *session, msg goprotocol.WireMessage) error {
 }
 
 func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
+	switch kind {
+	case "terminal.send_text", "terminal.send_bytes", "terminal.resize":
+		// PTY writes and resizes are bounded per pane, but a stalled program must
+		// never hold the global command lock. Only terminal resolution and the
+		// recovery admission check use that lock.
+		return s.executeTerminalIOCommand(kind, raw)
+	}
 	s.commandMu.Lock()
 	if s.recovery != nil && time.Now().Before(s.recovery.expires) {
 		s.commandMu.Unlock()
@@ -110,6 +117,101 @@ func (s *Server) executeCommand(kind string, raw json.RawMessage) (any, *goproto
 	}
 	defer s.commandMu.Unlock()
 	return s.executeCommandUnlocked(kind, raw)
+}
+
+func (s *Server) executeTerminalIOCommand(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
+	fail := func(code string, err error) (any, *goprotocol.RPCError) {
+		return nil, &goprotocol.RPCError{Code: code, Message: err.Error()}
+	}
+	var terminalID, paneID *uuid.UUID
+	var text string
+	var values []int
+	var size goprotocol.TerminalSize
+	var cellWidth, cellHeight int
+
+	switch kind {
+	case "terminal.send_text":
+		var c struct {
+			TerminalID *uuid.UUID `json:"terminal_id"`
+			PaneID     *uuid.UUID `json:"pane_id"`
+			Text       string     `json:"text"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fail("INVALID_COMMAND", err)
+		}
+		terminalID, paneID, text = c.TerminalID, c.PaneID, c.Text
+	case "terminal.send_bytes":
+		var c struct {
+			TerminalID *uuid.UUID `json:"terminal_id"`
+			PaneID     *uuid.UUID `json:"pane_id"`
+			Bytes      []int      `json:"bytes"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fail("INVALID_COMMAND", err)
+		}
+		terminalID, paneID, values = c.TerminalID, c.PaneID, c.Bytes
+	case "terminal.resize":
+		var c struct {
+			TerminalID *uuid.UUID `json:"terminal_id"`
+			PaneID     *uuid.UUID `json:"pane_id"`
+			Columns    int        `json:"columns"`
+			Lines      int        `json:"lines"`
+			CellWidth  int        `json:"cell_width"`
+			CellHeight int        `json:"cell_height"`
+		}
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fail("INVALID_COMMAND", err)
+		}
+		terminalID, paneID = c.TerminalID, c.PaneID
+		size = goprotocol.TerminalSize{Columns: c.Columns, Lines: c.Lines}.Normalized()
+		cellWidth, cellHeight = c.CellWidth, c.CellHeight
+		if cellWidth < 0 || cellWidth > 1024 || cellHeight < 0 || cellHeight > 1024 {
+			return fail("INVALID_COMMAND", errors.New("cell dimensions must be between 0 and 1024"))
+		}
+	}
+
+	s.commandMu.Lock()
+	if s.recovery != nil && time.Now().Before(s.recovery.expires) {
+		s.commandMu.Unlock()
+		return nil, &goprotocol.RPCError{Code: "RECOVERY_IN_PROGRESS", Message: "server restart is being prepared; retry after completion"}
+	}
+	id, err := s.resolveTerminal(terminalID, paneID)
+	s.commandMu.Unlock()
+	if err != nil {
+		return fail("TERMINAL_NOT_FOUND", err)
+	}
+	t, ok := s.registry.Get(id)
+	if !ok {
+		return fail("TERMINAL_NOT_FOUND", errors.New("terminal not found"))
+	}
+
+	switch kind {
+	case "terminal.send_text":
+		if err := t.EnqueueInput([]byte(text)); err != nil {
+			return fail("TERMINAL_WRITE_FAILED", err)
+		}
+		return map[string]any{"type": "terminal_text_sent", "terminal_id": id}, nil
+	case "terminal.send_bytes":
+		data := make([]byte, len(values))
+		for i, v := range values {
+			if v < 0 || v > 255 {
+				return fail("INVALID_COMMAND", errors.New("byte value out of range"))
+			}
+			data[i] = byte(v)
+		}
+		if err := t.EnqueueInput(data); err != nil {
+			return fail("TERMINAL_WRITE_FAILED", err)
+		}
+		return map[string]any{"type": "terminal_bytes_sent", "terminal_id": id}, nil
+	case "terminal.resize":
+		if err := t.ResizeWithCells(size, cellWidth, cellHeight); err != nil {
+			return fail("TERMINAL_RESIZE_FAILED", err)
+		}
+		s.model.SetTerminalSize(id, size)
+		return map[string]any{"type": "terminal_resized", "terminal_id": id, "columns": size.Columns, "lines": size.Lines}, nil
+	default:
+		panic("unreachable")
+	}
 }
 
 func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, *goprotocol.RPCError) {
@@ -604,78 +706,6 @@ func (s *Server) executeCommandUnlocked(kind string, raw json.RawMessage) (any, 
 			return fail("TERMINAL_SPAWN_FAILED", err)
 		}
 		return map[string]any{"type": "terminal_spawned", "terminal_id": t.ID}, nil
-
-	case "terminal.send_text":
-		var c struct {
-			TerminalID *uuid.UUID `json:"terminal_id"`
-			PaneID     *uuid.UUID `json:"pane_id"`
-			Text       string     `json:"text"`
-		}
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return fail("INVALID_COMMAND", err)
-		}
-		id, err := s.resolveTerminal(c.TerminalID, c.PaneID)
-		if err != nil {
-			return fail("TERMINAL_NOT_FOUND", err)
-		}
-		t, _ := s.registry.Get(id)
-		if err := t.Write([]byte(c.Text)); err != nil {
-			return fail("TERMINAL_WRITE_FAILED", err)
-		}
-		return map[string]any{"type": "terminal_text_sent", "terminal_id": id}, nil
-
-	case "terminal.send_bytes":
-		var c struct {
-			TerminalID *uuid.UUID `json:"terminal_id"`
-			PaneID     *uuid.UUID `json:"pane_id"`
-			Bytes      []int      `json:"bytes"`
-		}
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return fail("INVALID_COMMAND", err)
-		}
-		id, err := s.resolveTerminal(c.TerminalID, c.PaneID)
-		if err != nil {
-			return fail("TERMINAL_NOT_FOUND", err)
-		}
-		data := make([]byte, len(c.Bytes))
-		for i, v := range c.Bytes {
-			if v < 0 || v > 255 {
-				return fail("INVALID_COMMAND", errors.New("byte value out of range"))
-			}
-			data[i] = byte(v)
-		}
-		t, _ := s.registry.Get(id)
-		if err := t.Write(data); err != nil {
-			return fail("TERMINAL_WRITE_FAILED", err)
-		}
-		return map[string]any{"type": "terminal_bytes_sent", "terminal_id": id}, nil
-
-	case "terminal.resize":
-		var c struct {
-			TerminalID *uuid.UUID `json:"terminal_id"`
-			PaneID     *uuid.UUID `json:"pane_id"`
-			Columns    int        `json:"columns"`
-			Lines      int        `json:"lines"`
-			CellWidth  int        `json:"cell_width"`
-			CellHeight int        `json:"cell_height"`
-		}
-		if err := json.Unmarshal(raw, &c); err != nil {
-			return fail("INVALID_COMMAND", err)
-		}
-		id, err := s.resolveTerminal(c.TerminalID, c.PaneID)
-		if err != nil {
-			return fail("TERMINAL_NOT_FOUND", err)
-		}
-		t, _ := s.registry.Get(id)
-		size := goprotocol.TerminalSize{Columns: c.Columns, Lines: c.Lines}.Normalized()
-		if c.CellWidth < 0 || c.CellWidth > 1024 || c.CellHeight < 0 || c.CellHeight > 1024 {
-			return fail("INVALID_COMMAND", errors.New("cell dimensions must be between 0 and 1024"))
-		}
-		if err := t.ResizeWithCells(size, c.CellWidth, c.CellHeight); err != nil {
-			return fail("TERMINAL_RESIZE_FAILED", err)
-		}
-		s.model.SetTerminalSize(id, size)
-		return map[string]any{"type": "terminal_resized", "terminal_id": id, "columns": size.Columns, "lines": size.Lines}, nil
 
 	case "terminal.scroll":
 		var c struct {

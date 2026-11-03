@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real Cmd+V regressions: CJK redraw, UTF-8 integrity and paste framing."""
+import argparse
 import hashlib
 import shlex
 import subprocess
@@ -31,13 +32,16 @@ print('\\nRESULT_' + name + ':' + str(len(data)) + ':' + hashlib.sha256(data).he
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--phase', choices=('all', 'raw', 'zle'), default='all')
+    phase = parser.parse_args().phase
     with WaterGUI('water-text-paste.') as test:
         pane = test.ctl('ui', 'snapshot')['frame_focused_pane']
         fixture = test.root / 'scripts/clipboard-fixture.swift'
         saved = test.directory / 'clipboard.json'
         subprocess.run(['swift', str(fixture), 'save', str(saved)], check=True, timeout=20)
         try:
-            for bracketed in (False, True):
+            for bracketed in ((False, True) if phase != 'zle' else ()):
                 for label, text, repeats in [('repeat', '啊啊啊啊啊啊啊', 80),
                                              ('large', '啊中文🙂abc' * 16384, 1)]:
                     name = label + ('-bracketed' if bracketed else '-plain')
@@ -57,6 +61,8 @@ def main():
                     subprocess.run(['pbcopy'], input=payload, check=True, timeout=5)
                     for _ in range(repeats):
                         test.ctl('ui', 'key', 'cmd-v')
+                    if subprocess.run(['pbpaste'], capture_output=True, check=True, timeout=5).stdout != payload:
+                        raise RuntimeError('System clipboard changed externally during paste verification')
                     # A separately ordered marker catches duplicated trailing
                     # bytes rather than accepting only the expected prefix.
                     test.ctl('ui', 'key', 'text:WATER_PASTE_END_7bc92d')
@@ -70,7 +76,7 @@ def main():
             # ZLE redraw/control sequences differ from raw echo. Verify the
             # actual edited command using its digest, then draw each long line.
             repeats = 150
-            for cycle in range(3):
+            for cycle in (range(3) if phase != 'raw' else ()):
                 text = '啊啊啊啊啊啊啊周期' + str(cycle)
                 digest = hashlib.sha256((text * repeats).encode()).hexdigest()
                 subprocess.run(['pbcopy'], input=text.encode(), check=True, timeout=5)
@@ -78,6 +84,8 @@ def main():
                 test.ctl('ui', 'key', "text:printf '%s' '")
                 for _ in range(repeats):
                     test.ctl('ui', 'key', 'cmd-v')
+                if subprocess.run(['pbpaste'], capture_output=True, check=True, timeout=5).stdout != text.encode():
+                    raise RuntimeError('System clipboard changed externally during ZLE paste verification')
                 test.wait(lambda: (lambda c: c['last_seq'] > before and text in c['text'])(test.content(pane)),
                           'Chinese ZLE redraw')
                 test.screenshot('zle-' + str(cycle) + '.png')
@@ -86,7 +94,8 @@ def main():
                 test.wait(lambda: digest in test.content(pane)['text'].replace('\n', '')
                           and 'ZLE_DONE_' + str(cycle) in test.content(pane)['text'],
                           'ZLE command integrity ' + str(cycle))
-            print('PASS 450 Chinese Cmd+V events through ZLE; distinct SHA-256 per cycle', flush=True)
+            if phase != 'raw':
+                print('PASS 450 Chinese Cmd+V events through ZLE; distinct SHA-256 per cycle', flush=True)
         finally:
             subprocess.run(['swift', str(fixture), 'restore', str(saved)], check=True, timeout=20)
             saved.unlink()

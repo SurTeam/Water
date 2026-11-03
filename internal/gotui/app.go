@@ -642,11 +642,17 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 	if len(b) == 0 {
 		return
 	}
-	ints := make([]int, len(b))
-	for i, v := range b {
-		ints[i] = int(v)
+	if a.session == nil {
+		ints := make([]int, len(b))
+		for i, v := range b {
+			ints[i] = int(v)
+		}
+		a.command(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": ints})
+		return
 	}
-	a.command(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": ints})
+	if err := a.session.SendInput(id, b); err != nil {
+		a.status = fmt.Sprintf("terminal %s input stopped: %v", id, err)
+	}
 }
 
 func isRefused(err error) bool { return goplatform.ConnectionRefused(err) }

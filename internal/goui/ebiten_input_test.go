@@ -10,6 +10,7 @@ import (
 	"golang.org/x/image/font/gofont/goregular"
 	"image"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -53,7 +54,7 @@ func TestNativePhysicalKeysReachVTEncoder(t *testing.T) {
 		{ebiten.KeyBackspace, "", "\x7f"}, {ebiten.KeyC, "ctrl-", "\x03"},
 		{ebiten.KeyDelete, "", "\x1b[3~"}, {ebiten.KeyDelete, "ctrl-", "\x1b[3;5~"},
 		{ebiten.KeySpace, "ctrl-", "\x00"}} {
-		specs := nativeKeySpecs(tc.mods, false, func(k ebiten.Key) int {
+		specs := nativeKeySpecs(tc.mods, false, 0, func(k ebiten.Key) int {
 			if k == tc.physical {
 				return 1
 			}
@@ -73,6 +74,54 @@ func TestNativePhysicalKeysReachVTEncoder(t *testing.T) {
 	}
 }
 
+func TestNativePhysicalKeysUseKittyEncoder(t *testing.T) {
+	ev := key.Event{Name: key.Name("C"), Modifiers: key.ModCtrl, State: key.Press}
+	if got := string(EncodeKeyAdvanced(ev, false, 1)); got != "\x1b[99;5u" {
+		t.Fatalf("kitty ctrl-c = %q, want %q", got, "\x1b[99;5u")
+	}
+}
+
+func TestNativeTextEventsRespectKittyAllKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		flags int
+		want  string
+	}{
+		{"legacy", 0, "a"},
+		{"all-keys", 8, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var terminalInput TerminalInput
+			var emitted []string
+			terminalInput.OnInput = func(data []byte) { emitted = append(emitted, string(data)) }
+			terminalInput.handleTerminalText("a", tc.flags)
+			if got := strings.Join(emitted, ""); got != tc.want {
+				t.Fatalf("emitted = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNativePrintableKeysUseAllKeysPath(t *testing.T) {
+	specs := nativeKeySpecs("", false, 8, func(k ebiten.Key) int {
+		if k == ebiten.KeyA {
+			return 1
+		}
+		return 0
+	})
+	if !reflect.DeepEqual(specs, []string{"key:A"}) {
+		t.Fatalf("all-keys printable spec = %v, want [key:A]", specs)
+	}
+	ev, ok := automationInputEvent(specs[0])
+	pressed, isKey := ev.(key.Event)
+	if !ok || !isKey {
+		t.Fatalf("all-keys printable spec must be a key event: %v", specs[0])
+	}
+	if got := string(EncodeKeyAdvanced(pressed, false, 8)); got != "\x1b[97u" {
+		t.Fatalf("all-keys plain A = %q, want %q", got, "\x1b[97u")
+	}
+}
+
 func TestNativeKeyboardAllPhysicalKeysHaveDefinedRoles(t *testing.T) {
 	osKeys := map[ebiten.Key]bool{
 		ebiten.KeyAlt: true, ebiten.KeyAltLeft: true, ebiten.KeyAltRight: true,
@@ -83,7 +132,7 @@ func TestNativeKeyboardAllPhysicalKeysHaveDefinedRoles(t *testing.T) {
 		ebiten.KeyContextMenu: true, ebiten.KeyPause: true, ebiten.KeyPrintScreen: true,
 	}
 	for k := ebiten.Key(0); k <= ebiten.KeyMax; k++ {
-		specs := nativeKeySpecs("ctrl-", false, func(physical ebiten.Key) int {
+		specs := nativeKeySpecs("ctrl-", false, 0, func(physical ebiten.Key) int {
 			if physical == k {
 				return 1
 			}
@@ -103,7 +152,7 @@ func TestNativeKeyboardAllPhysicalKeysHaveDefinedRoles(t *testing.T) {
 		}
 		_, printable := nativeKeyName(k, "")
 		if printable {
-			plain := nativeKeySpecs("", false, func(physical ebiten.Key) int {
+			plain := nativeKeySpecs("", false, 0, func(physical ebiten.Key) int {
 				if physical == k {
 					return 1
 				}
@@ -136,7 +185,7 @@ func TestNativeKeyboardControlAltFunctionAndKeypadEncoding(t *testing.T) {
 		{ebiten.KeyF13, "", "\x1b[25~"}, {ebiten.KeyF20, "ctrl-", "\x1b[34;5~"},
 		{ebiten.KeyF24, "", "\x1b[45~"}, {ebiten.KeyArrowLeft, "ctrl-alt-shift-", "\x1b[1;8D"},
 	} {
-		specs := nativeKeySpecs(tc.mods, false, func(k ebiten.Key) int {
+		specs := nativeKeySpecs(tc.mods, false, 0, func(k ebiten.Key) int {
 			if k == tc.physical {
 				return 1
 			}
@@ -166,7 +215,7 @@ func TestNativePhysicalKeysIncludeKeysBeforeDigitZero(t *testing.T) {
 		{ebiten.KeyA, "cmd-", "cmd-A"}, {ebiten.KeySpace, "ctrl-", "ctrl-Space"}} {
 		t.Run(tc.want, func(t *testing.T) {
 			for _, duration := range []int{1, 22, 25} {
-				got := nativeKeySpecs(tc.mods, false, func(k ebiten.Key) int {
+				got := nativeKeySpecs(tc.mods, false, 0, func(k ebiten.Key) int {
 					if k == tc.key {
 						return duration
 					}
@@ -185,7 +234,7 @@ func TestNativeKeysRespectCompositionAndRepeatDelay(t *testing.T) {
 		composing bool
 		duration  int
 	}{{true, 1}, {false, 2}, {false, 23}} {
-		got := nativeKeySpecs("", tc.composing, func(k ebiten.Key) int {
+		got := nativeKeySpecs("", tc.composing, 0, func(k ebiten.Key) int {
 			if k == ebiten.KeyBackspace {
 				return tc.duration
 			}

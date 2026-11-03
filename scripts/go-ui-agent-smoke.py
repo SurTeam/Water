@@ -40,14 +40,23 @@ def wait(predicate, description):
     raise RuntimeError("Timeout: "+description)
 
 def click(label=None, kind=None, target=None):
+    observations=[]
     def locate():
         s = ctl("ui","snapshot")
+        observations.append(s)
         hits = [h for h in s.get("automation_hits",[]) if (label is None or h.get("label")==label) and (kind is None or h["kind"]==kind) and (target is None or h.get("id")==target) and h["rect"][3]>h["rect"][1]]
         if hits: return hits[-1]
         if s.get("settings_visible"):
             w,h=s["frame_size"]
-            ctl("ui","wheel","--x",w*.65,"--y",h*.5,"--dy",100)
-    h=wait(locate,"hit "+str(label or kind))
+            # Keep overlap between viewports, but reach the later UI sections
+            # within the bounded locator deadline even on Retina displays.
+            ctl("ui","wheel","--x",w*.65,"--y",h*.5,"--dy",h*.2)
+    try:
+        h=wait(locate,"hit "+str(label or kind))
+    except RuntimeError:
+        (directory/"failed-hit-snapshots.json").write_text(json.dumps(observations))
+        ctl("ui","screenshot","--output",str(directory/"failed-hit.png"))
+        raise
     x0,y0,x1,y1=h["rect"]
     ctl("ui","click","--x",(x0+x1)/2,"--y",(y0+y1)/2)
 

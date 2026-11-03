@@ -63,6 +63,7 @@ type TerminalInput struct {
 	imeInitialized       bool
 	imeCaret             key.Caret
 	imeCompositionBounds image.Rectangle
+	shortcutKeys         map[key.Name]struct{}
 }
 
 func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidth, lineHeight int) {
@@ -306,22 +307,47 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 		case key.CompositionEvent:
 			i.handleComposition(ev)
 		case key.EditEvent:
-			i.handleEdit(ev)
+			i.handleEditWithFlags(ev, snap.KittyKeyboardFlags)
 		case key.SnippetEvent, key.SelectionEvent:
 			// A terminal has no editable backing document. Re-publish the
 			// zero-length snippet/selection at the terminal cursor instead of
 			// allowing the platform IME to move through screen contents.
 			i.imeInitialized = false
 		case key.Event:
-			if ev.State != key.Press {
+			if ev.State != key.Press && snap.KittyKeyboardFlags&2 == 0 {
+				if ev.State == key.Release {
+					delete(i.shortcutKeys, ev.Name)
+				}
 				continue
 			}
-			if i.OnShortcut != nil && i.OnShortcut(ev) {
+			if ev.State == key.Release {
+				if _, ok := i.shortcutKeys[ev.Name]; ok {
+					delete(i.shortcutKeys, ev.Name)
+					continue
+				}
+			}
+			if ev.State == key.Press && i.OnShortcut != nil && i.OnShortcut(ev) {
+				if i.shortcutKeys == nil {
+					i.shortcutKeys = make(map[key.Name]struct{})
+				}
+				i.shortcutKeys[ev.Name] = struct{}{}
+				continue
+			}
+			if ev.State != key.Press {
+				if seq := EncodeKeyAdvanced(ev, snap.ApplicationCursor, snap.KittyKeyboardFlags); len(seq) > 0 {
+					i.emit(seq)
+				}
 				continue
 			}
 			bindings := goconfig.ShortcutConfig{Paste: "cmd-v", CopyOrInterrupt: "cmd-c", EOF: "ctrl-d", ScrollPageUp: "shift-pageup", ScrollPageDown: "shift-pagedown"}
 			if i.Shortcuts != nil {
 				bindings = *i.Shortcuts
+			}
+			if kittyCtrlDisambiguated(ev, snap.KittyKeyboardFlags) {
+				if seq := EncodeKeyAdvanced(ev, snap.ApplicationCursor, snap.KittyKeyboardFlags); len(seq) > 0 {
+					i.emit(seq)
+				}
+				continue
 			}
 			if shortcutMatches(ev, bindings.Paste) {
 				gtx.Execute(clipboard.ReadCmd{Tag: &i.tag})
@@ -363,12 +389,31 @@ func (i *TerminalInput) Process(gtx layout.Context, snap govt.Snapshot, cellWidt
 			if ev.Modifiers.Contain(key.ModCommand) || ev.Modifiers.Contain(key.ModSuper) {
 				continue
 			}
-			if seq := EncodeKey(ev, snap.ApplicationCursor); len(seq) > 0 {
+			if seq := EncodeKeyAdvanced(ev, snap.ApplicationCursor, snap.KittyKeyboardFlags); len(seq) > 0 {
 				i.emit(seq)
 			}
 		}
 	}
 	i.syncIME(gtx, snap, cellWidth, lineHeight)
+}
+
+// Kitty disambiguation reports Ctrl+letter as CSI-u so applications can
+// distinguish it from a plain control byte. The GUI's Ctrl-C/Ctrl-D shortcuts
+// must not consume those presses before the terminal encoder sees them.
+func kittyCtrlDisambiguated(ev key.Event, flags int) bool {
+	if flags&(kittyDisambiguate|kittyReportAllKeys) == 0 || ev.State != key.Press {
+		return false
+	}
+	if !ev.Modifiers.Contain(key.ModCtrl) || ev.Modifiers.Contain(key.ModAlt) ||
+		ev.Modifiers.Contain(key.ModCommand) || ev.Modifiers.Contain(key.ModSuper) {
+		return false
+	}
+	name := string(ev.Name)
+	if len(name) != 1 {
+		return false
+	}
+	r := rune(name[0])
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
 }
 
 func (i *TerminalInput) Add(gtx layout.Context, size image.Point) {
@@ -411,16 +456,27 @@ func (i *TerminalInput) handleComposition(ev key.CompositionEvent) {
 }
 
 func (i *TerminalInput) handleEdit(ev key.EditEvent) {
+	i.handleEditWithFlags(ev, 0)
+}
+
+func (i *TerminalInput) handleEditWithFlags(ev key.EditEvent, kittyFlags int) {
 	if i.composing {
 		i.pendingComposition = ev.Text
 		i.imeInitialized = false
 		return
 	}
 	i.pendingComposition = ""
-	if ev.Text != "" {
-		i.emit([]byte(ev.Text))
-	}
+	i.handleTerminalText(ev.Text, kittyFlags)
 	i.imeInitialized = false
+}
+
+func (i *TerminalInput) handleTerminalText(text string, kittyFlags int) {
+	if text == "" || kittyFlags&kittyReportAllKeys != 0 {
+		// With all keys reported, text-producing presses arrive as CSI-u key
+		// events; the platform's text event would duplicate those bytes.
+		return
+	}
+	i.emit([]byte(text))
 }
 
 func (i *TerminalInput) resetComposition() {
@@ -503,6 +559,244 @@ func (i *TerminalInput) emit(data []byte) {
 }
 
 func EncodeKey(ev key.Event, applicationCursor bool) []byte {
+	return EncodeKeyAdvanced(ev, applicationCursor, 0)
+}
+
+// EncodeKeyAdvanced encodes a key event using the legacy protocol or the
+// active Kitty keyboard protocol flags.
+func EncodeKeyAdvanced(ev key.Event, applicationCursor bool, kittyFlags int) []byte {
+	if kittyFlags == 0 {
+		return encodeLegacyKey(ev, applicationCursor)
+	}
+	return encodeKittyKey(ev, applicationCursor, kittyFlags)
+}
+
+const (
+	kittyDisambiguate  = 1
+	kittyReportEvents  = 2
+	kittyReportAllKeys = 8
+	kittyModifierShift = 1
+	kittyModifierAlt   = 2
+	kittyModifierCtrl  = 4
+	kittyModifierSuper = 8
+	kittyKeyEscape     = 27
+	kittyKeyEnter      = 13
+	kittyKeyTab        = 9
+	kittyKeyBackspace  = 127
+	kittyKeyF13        = 57376
+)
+
+func encodeKittyKey(ev key.Event, applicationCursor bool, flags int) []byte {
+	if ev.State == key.Release && flags&kittyReportEvents == 0 {
+		return nil
+	}
+	mods := ev.Modifiers
+	modParam := kittyModifierParameter(mods)
+	eventType := 0
+	switch ev.State {
+	case key.Release:
+		eventType = 3
+	}
+	allKeys := flags&kittyReportAllKeys != 0
+	disambiguate := flags&kittyDisambiguate != 0 || allKeys
+
+	code, trailer, ok := kittyFunctionalKey(ev.Name)
+	if ok {
+		switch ev.Name {
+		case key.NameEscape:
+			if !allKeys && !disambiguate && eventType == 0 {
+				return encodeLegacyKey(ev, applicationCursor)
+			}
+		case key.NameReturn, key.NameEnter:
+			if eventType != 0 && !allKeys {
+				return nil
+			}
+			if !allKeys && eventType == 0 && mods&(key.ModShift|key.ModAlt|key.ModCtrl|key.ModSuper) == 0 {
+				return []byte{'\r'}
+			}
+		case key.NameTab:
+			if eventType != 0 && !allKeys {
+				return nil
+			}
+			if !allKeys && eventType == 0 && mods == 0 {
+				return []byte{'\t'}
+			}
+		case key.NameDeleteBackward:
+			if eventType != 0 && !allKeys {
+				return nil
+			}
+			if !allKeys && eventType == 0 && mods == 0 {
+				return []byte{0x7f}
+			}
+		}
+		if trailer == 'A' || trailer == 'B' || trailer == 'C' || trailer == 'D' || trailer == 'H' || trailer == 'F' {
+			// Cursor keys only use the SS3 form in legacy mode with no
+			// modifiers. Any Kitty enhancement keeps the CSI form.
+			if !allKeys && !disambiguate && eventType == 0 && mods == 0 && applicationCursor {
+				return []byte{'\x1b', 'O', trailer}
+			}
+		}
+		return kittyCSI(code, trailer, modParam, eventType, flags&kittyReportEvents != 0)
+	}
+
+	if fn := kittyFunctionKeyNumber(ev.Name); fn != 0 {
+		code, trailer := kittyFunctionKey(fn)
+		return kittyCSI(code, trailer, modParam, eventType, flags&kittyReportEvents != 0)
+	}
+
+	name := string(ev.Name)
+	r, count := utf8.DecodeRuneInString(name)
+	if r == utf8.RuneError || count != len(name) || !unicode.IsPrint(r) {
+		return nil
+	}
+	keyCode := kittyBaseRune(r)
+	if allKeys {
+		return kittyCSI(int(keyCode), 'u', modParam, eventType, flags&kittyReportEvents != 0)
+	}
+	if eventType != 0 {
+		return kittyCSI(int(keyCode), 'u', modParam, eventType, flags&kittyReportEvents != 0)
+	}
+	if disambiguate && mods&(key.ModAlt|key.ModCtrl|key.ModSuper) != 0 {
+		return kittyCSI(int(keyCode), 'u', modParam, eventType, flags&kittyReportEvents != 0)
+	}
+	return encodeLegacyKey(ev, applicationCursor)
+}
+
+// kittyCSI serializes CSI key-code:alternates;modifiers:event-type trailer.
+// Functional keys use legacy-compatible numbers and trailers, not the private
+// use area numbers Kitty reserves for F13 and above.
+func kittyCSI(code int, trailer byte, modParam, eventType int, reportEventTypes bool) []byte {
+	b := []byte("\x1b[")
+	if code != 1 || modParam > 1 || eventType > 1 {
+		b = strconv.AppendInt(b, int64(code), 10)
+	}
+	if modParam > 1 || eventType > 1 {
+		b = append(b, ';')
+		b = strconv.AppendInt(b, int64(modParam), 10)
+		if eventType > 1 && reportEventTypes {
+			b = append(b, ':')
+			b = strconv.AppendInt(b, int64(eventType), 10)
+		}
+	}
+	b = append(b, trailer)
+	return b
+}
+
+func kittyFunctionalKey(name key.Name) (code int, trailer byte, ok bool) {
+	switch name {
+	case key.NameEscape:
+		return kittyKeyEscape, 'u', true
+	case key.NameReturn, key.NameEnter:
+		return kittyKeyEnter, 'u', true
+	case key.NameTab:
+		return kittyKeyTab, 'u', true
+	case key.NameDeleteBackward:
+		return kittyKeyBackspace, 'u', true
+	case key.Name("Insert"):
+		return 2, '~', true
+	case key.NameDeleteForward:
+		return 3, '~', true
+	case key.NameLeftArrow:
+		return 1, 'D', true
+	case key.NameRightArrow:
+		return 1, 'C', true
+	case key.NameUpArrow:
+		return 1, 'A', true
+	case key.NameDownArrow:
+		return 1, 'B', true
+	case key.NamePageUp:
+		return 5, '~', true
+	case key.NamePageDown:
+		return 6, '~', true
+	case key.NameHome:
+		return 1, 'H', true
+	case key.NameEnd:
+		return 1, 'F', true
+	}
+	return 0, 0, false
+}
+
+func kittyFunctionKeyNumber(name key.Name) int {
+	if !strings.HasPrefix(string(name), "F") {
+		return 0
+	}
+	n, err := strconv.Atoi(string(name)[1:])
+	if err != nil || n < 1 || n > 35 {
+		return 0
+	}
+	return n
+}
+
+func kittyFunctionKey(fn int) (int, byte) {
+	switch fn {
+	case 1:
+		return 1, 'P'
+	case 2:
+		return 1, 'Q'
+	case 3:
+		return 13, '~'
+	case 4:
+		return 1, 'S'
+	case 5:
+		return 15, '~'
+	case 6:
+		return 17, '~'
+	case 7:
+		return 18, '~'
+	case 8:
+		return 19, '~'
+	case 9:
+		return 20, '~'
+	case 10:
+		return 21, '~'
+	case 11:
+		return 23, '~'
+	case 12:
+		return 24, '~'
+	}
+	if fn >= 13 && fn <= 35 {
+		return kittyKeyF13 + fn - 13, 'u'
+	}
+	return 0, 0
+}
+
+// kittyBaseRune maps a printable key to its unshifted base-layout rune. Gio
+// reports the produced character, so shift punctuation must be reversed before
+// it is reported alongside the shift modifier.
+func kittyBaseRune(r rune) rune {
+	if unicode.IsLetter(r) {
+		return unicode.ToLower(r)
+	}
+	if base, ok := kittyShiftedRunes[r]; ok {
+		return base
+	}
+	return r
+}
+
+var kittyShiftedRunes = map[rune]rune{
+	'!': '1', '@': '2', '#': '3', '$': '4', '%': '5', '^': '6', '&': '7', '*': '8',
+	'(': '9', ')': '0', '_': '-', '+': '=', '{': '[', '}': ']', '|': '\\',
+	':': ';', '"': '\'', '<': ',', '>': '.', '?': '/', '~': '`',
+}
+
+func kittyModifierParameter(mods key.Modifiers) int {
+	value := 1
+	if mods.Contain(key.ModShift) {
+		value += kittyModifierShift
+	}
+	if mods.Contain(key.ModAlt) {
+		value += kittyModifierAlt
+	}
+	if mods.Contain(key.ModCtrl) {
+		value += kittyModifierCtrl
+	}
+	if mods.Contain(key.ModCommand) || mods.Contain(key.ModSuper) {
+		value += kittyModifierSuper
+	}
+	return value
+}
+
+func encodeLegacyKey(ev key.Event, applicationCursor bool) []byte {
 	mods := ev.Modifiers
 	if mods.Contain(key.ModCommand) || mods.Contain(key.ModSuper) {
 		return nil

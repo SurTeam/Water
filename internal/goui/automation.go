@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"gioui.org/f32"
@@ -44,13 +45,18 @@ func routeAutomationInput(terminal *TerminalInput, snapshot govt.Snapshot, spec 
 }
 
 func automationInputEvent(spec string) (event.Event, bool) {
-	if strings.HasPrefix(spec, "text:") {
-		return key.EditEvent{Text: strings.TrimPrefix(spec, "text:")}, true
+	if strings.HasPrefix(spec, "key:") {
+		spec = strings.TrimPrefix(spec, "key:")
+	} else {
+		if strings.HasPrefix(spec, "text:") {
+			return key.EditEvent{Text: strings.TrimPrefix(spec, "text:")}, true
+		}
+		spec = strings.TrimSpace(spec)
+		if utf8.RuneCountInString(spec) == 1 {
+			return key.EditEvent{Text: spec}, true
+		}
 	}
 	spec = strings.TrimSpace(spec)
-	if utf8.RuneCountInString(spec) == 1 {
-		return key.EditEvent{Text: spec}, true
-	}
 	spec = strings.ReplaceAll(strings.ToLower(spec), "page-up", "pageup")
 	spec = strings.ReplaceAll(spec, "page-down", "pagedown")
 	// A trailing hyphen is the key itself (default split-down: cmd--).
@@ -102,6 +108,9 @@ func automationInputEvent(spec string) (event.Event, bool) {
 			return nil, false
 		}
 		keyName = key.Name(strings.ToUpper(name))
+		if strings.HasPrefix(spec, "key:") && unicode.IsLower(rune(name[0])) {
+			keyName = key.Name(name)
+		}
 	}
 	return key.Event{Name: keyName, Modifiers: mods, State: key.Press}, true
 }

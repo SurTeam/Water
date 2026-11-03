@@ -196,3 +196,56 @@ func TestForegroundRejectsWrongTerminal(t *testing.T) {
 		t.Fatal("accepted wrong terminal reply")
 	}
 }
+
+func TestAttachEnablesBinaryInput(t *testing.T) {
+	c, peer := pipeClient(t)
+	id := uuid.New()
+	go func() {
+		kind, _, err := readFrame(peer)
+		if err != nil || kind != kindAttach {
+			return
+		}
+		_ = writeJSON(peer, kindAttached, attachedResponse{ID: id.String(), PID: 42, BinaryInput: true})
+		kind, payload, err := readFrame(peer)
+		if err != nil || kind != kindWriteBinary {
+		}
+		req, parseErr := parseWriteBinary(payload)
+		if parseErr != nil || uuid.UUID(req.ID) != id {
+			return
+		}
+		_ = writeJSON(peer, kindListed, listedResponse{})
+	}()
+	if _, _, err := c.Attach(id, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Write(id, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWriteBinaryFailureDoesNotRetryJSON(t *testing.T) {
+	local, peer := net.Pipe()
+	defer peer.Close()
+	conn := &failingWriteConn{Conn: local}
+	c := &Client{conn: conn, events: make(map[string]chan Event), generations: make(map[string]uint64), closed: make(chan struct{})}
+	defer c.Close()
+	go c.readLoop()
+	id := uuid.New()
+	c.binaryInput.Store(true)
+	if err := c.Write(id, []byte("x")); err == nil {
+		t.Fatal("binary write unexpectedly succeeded with a failing connection")
+	}
+	if conn.writes != 1 {
+		t.Fatalf("write attempts = %d, want 1 (no JSON retry)", conn.writes)
+	}
+}
+
+type failingWriteConn struct {
+	net.Conn
+	writes int
+}
+
+func (c *failingWriteConn) Write([]byte) (int, error) {
+	c.writes++
+	return 0, errors.New("write failed")
+}

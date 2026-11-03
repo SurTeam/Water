@@ -108,9 +108,11 @@ func (t *terminalClient) failOutput(c *WorkspaceClient, err error) {
 		w.err = err
 	}
 	w.mu.Unlock()
-	c.mu.Lock()
-	c.connectionError = fmt.Sprintf("terminal %s output stopped: %v", t.id, err)
-	c.mu.Unlock()
+	t.mu.Lock()
+	if t.outputError == "" {
+		t.outputError = fmt.Sprintf("terminal %s output stopped: %v", t.id, err)
+	}
+	t.mu.Unlock()
 	t.stopWorker()
 	if c.invalidate != nil {
 		c.invalidate()

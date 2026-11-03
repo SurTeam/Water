@@ -15,6 +15,7 @@ import (
 // subscription, including when another subscription attaches the same UUID.
 type TerminalSubscription struct {
 	Events  <-chan TerminalPush
+	id      uuid.UUID
 	parent  *Session
 	session *Session
 	done    chan struct{}
@@ -29,6 +30,9 @@ func (s *TerminalSubscription) Close() error {
 		s.cancel()
 		s.parent.terminalMu.Lock()
 		delete(s.parent.terminalSubscriptions, s)
+		if s.parent.terminalInputs[s.id] == s.session {
+			delete(s.parent.terminalInputs, s.id)
+		}
 		s.parent.terminalMu.Unlock()
 		err = s.session.Close()
 		// Cancellation discards this subscription's pending live payloads and
@@ -71,7 +75,7 @@ func (s *Session) AttachTerminal(ctx context.Context, id uuid.UUID, out any) (*T
 		}
 		return nil, err
 	}
-	sub := &TerminalSubscription{Events: stream.Events, parent: s, session: stream, done: make(chan struct{}), cancel: cancel}
+	sub := &TerminalSubscription{Events: stream.Events, id: id, parent: s, session: stream, done: make(chan struct{}), cancel: cancel}
 	s.terminalMu.Lock()
 	select {
 	case <-s.done:
@@ -102,6 +106,32 @@ func (s *Session) AttachTerminal(ctx context.Context, id uuid.UUID, out any) (*T
 	if ctx.Err() != nil {
 		_ = sub.Close()
 		return nil, ctx.Err()
+	}
+	// AttachTerminal owns the same dedicated connection for this pane's input.
+	// Register only after the attach succeeded, so a failed attempt cannot
+	// steal input from an existing subscription.
+	s.terminalMu.Lock()
+	closed := false
+	select {
+	case <-s.done:
+		closed = true
+	case <-sub.done:
+		closed = true
+	default:
+	}
+	if !closed {
+		if s.terminalInputs == nil {
+			s.terminalInputs = make(map[uuid.UUID]*Session)
+		}
+		s.terminalInputs[id] = stream
+	}
+	s.terminalMu.Unlock()
+	if closed {
+		_ = sub.Close()
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, errors.New("terminal subscription closed during attach")
 	}
 	transferred = true
 	return sub, nil

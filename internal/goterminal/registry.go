@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/SurTeam/Water/internal/goprotocol"
-	"github.com/SurTeam/Water/internal/gosupervisor"
 	"github.com/google/uuid"
 )
 
@@ -20,8 +19,14 @@ const (
 	readBlockBytes         = 128 * 1024
 	rawReadQueueCapacity   = 64
 	idleReadCacheBlocks    = 2
+	inputQueueCapacity     = 64
+	inputQueueBytes        = 1 << 20
 	outputBatchIdle        = time.Millisecond
 	outputBatchMaxAge      = 5 * time.Millisecond
+	subscriberQueueEvents  = 64
+	subscriberQueueBytes   = 1 << 20
+	resizeQueueCapacity    = 8
+	resizeRequestTimeout   = time.Second
 	// A tiny read right after input is almost certainly the echo the user is
 	// waiting for; flush it immediately and keep larger reads batched.
 	echoFlushWindow     = 100 * time.Millisecond
@@ -39,7 +44,7 @@ type Terminal struct {
 
 	cmd        *exec.Cmd
 	ptmx       *gopty.Session
-	supervised *gosupervisor.Client
+	supervisor *supervisedLink
 	// supervisorKey is the pane id the supervisor holds the PTY under. It survives
 	// server restarts, while ID identifies this terminal instance to clients.
 	supervisorKey         string
@@ -47,9 +52,13 @@ type Terminal struct {
 	program               string
 	args                  []string // launch arguments, independent of local process ownership
 	shellIntegrationDir   string
-	cellWidth, cellHeight int          // owned by the ordered PTY reader
-	executeMu             sync.Mutex   // one foreground execution per pane
+	cellWidth, cellHeight int        // owned by the ordered PTY reader
+	executeMu             sync.Mutex // one foreground execution per pane
+	writeMu               sync.Mutex
 	lastInput             atomic.Int64 // UnixNano of the most recent input write
+	input                 chan inputRequest
+	inputBytes            atomic.Int64
+	inputError            error
 
 	mu              sync.RWMutex
 	size            goprotocol.TerminalSize
@@ -83,6 +92,16 @@ type exitedTerminal struct {
 	terminal *Terminal
 	bytes    int
 }
+
+type inputRequest struct {
+	data []byte
+}
+
+var (
+	ErrInputQueueFull = errors.New("terminal input queue is full")
+	ErrTerminalClosed = errors.New("terminal is closed")
+	ErrResizeTimeout  = errors.New("terminal resize timed out")
+)
 
 type Registry struct {
 	mu              sync.RWMutex
@@ -157,8 +176,9 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 		subs:                make(map[uint64]*subscriber),
 		closed:              make(chan struct{}),
 		readerDone:          make(chan struct{}),
-		resizeRequests:      make(chan resizeRequest),
+		resizeRequests:      make(chan resizeRequest, resizeQueueCapacity),
 		rawFlushRequests:    make(chan rawFlushRequest, 1),
+		input:               make(chan inputRequest, inputQueueCapacity),
 	}
 	r.mu.Lock()
 	r.terms[t.ID] = t
@@ -166,6 +186,7 @@ func (r *Registry) SpawnWithDir(program string, args []string, size goprotocol.T
 	started = true
 	go t.readLoop()
 	go t.waitLoop()
+	go t.inputLoop()
 	return t, nil
 }
 
@@ -322,20 +343,102 @@ func (t *Terminal) Size() goprotocol.TerminalSize {
 }
 
 func (t *Terminal) Write(data []byte) error {
-	if t.supervised != nil {
+	if t.supervisor != nil {
 		return t.supervisedWrite(data)
 	}
-	if _, err := t.ptmx.Write(data); err != nil {
-		return err
+	t.writeMu.Lock()
+	defer t.writeMu.Unlock()
+	if t.ptmx == nil {
+		return io.ErrClosedPipe
+	}
+	defer t.ptmx.SetWriteDeadline(time.Time{})
+	for len(data) > 0 {
+		select {
+		case <-t.closed:
+			return ErrTerminalClosed
+		default:
+		}
+		if err := t.ptmx.SetWriteDeadline(time.Now().Add(250 * time.Millisecond)); err != nil {
+			return err
+		}
+		written, err := t.ptmx.Write(data)
+		data = data[written:]
+		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				continue
+			}
+			return err
+		}
+		if written == 0 {
+			return io.ErrNoProgress
+		}
 	}
 	t.lastInput.Store(time.Now().UnixNano())
 	return nil
+}
+
+// EnqueueInput accepts interactive bytes without performing PTY I/O on the
+// caller's goroutine. Each terminal owns a bounded queue and one writer, so a
+// program that stops reading stdin cannot stall its session's other panes.
+func (t *Terminal) EnqueueInput(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	t.mu.RLock()
+	inputError := t.inputError
+	t.mu.RUnlock()
+	if inputError != nil {
+		return inputError
+	}
+	if t.input == nil {
+		return t.Write(data)
+	}
+	select {
+	case <-t.closed:
+		return ErrTerminalClosed
+	default:
+	}
+	for {
+		queued := t.inputBytes.Load()
+		if queued+int64(len(data)) > inputQueueBytes {
+			return ErrInputQueueFull
+		}
+		if t.inputBytes.CompareAndSwap(queued, queued+int64(len(data))) {
+			break
+		}
+	}
+	req := inputRequest{data: append([]byte(nil), data...)}
+	select {
+	case t.input <- req:
+		return nil
+	default:
+		t.inputBytes.Add(-int64(len(req.data)))
+		return ErrInputQueueFull
+	}
+}
+
+func (t *Terminal) inputLoop() {
+	for {
+		select {
+		case <-t.closed:
+			return
+		case req := <-t.input:
+			t.inputBytes.Add(-int64(len(req.data)))
+			if err := t.Write(req.data); err != nil {
+				t.mu.Lock()
+				t.inputError = err
+				t.mu.Unlock()
+				return
+			}
+		}
+	}
 }
 
 type resizeRequest struct {
 	size                  goprotocol.TerminalSize
 	cellWidth, cellHeight int
 	done                  chan error
+	canceled              *atomic.Bool
 }
 
 type rawFlushRequest struct {
@@ -348,16 +451,20 @@ func (t *Terminal) Resize(size goprotocol.TerminalSize) error {
 }
 
 func (t *Terminal) ResizeWithCells(size goprotocol.TerminalSize, cellWidth, cellHeight int) error {
-	if t.supervised != nil {
+	if t.supervisor != nil {
 		return t.supervisedResize(size, cellWidth, cellHeight)
 	}
-	req := resizeRequest{size: size.Normalized(), cellWidth: cellWidth, cellHeight: cellHeight, done: make(chan error, 1)}
+	req := resizeRequest{size: size.Normalized(), cellWidth: cellWidth, cellHeight: cellHeight, done: make(chan error, 1), canceled: &atomic.Bool{}}
+	timer := time.NewTimer(resizeRequestTimeout)
+	defer timer.Stop()
 	select {
 	case t.resizeRequests <- req:
 	case <-t.readerDone:
 		return io.ErrClosedPipe
 	case <-t.closed:
 		return io.ErrClosedPipe
+	case <-timer.C:
+		return ErrResizeTimeout
 	}
 	select {
 	case err := <-req.done:
@@ -366,6 +473,9 @@ func (t *Terminal) ResizeWithCells(size goprotocol.TerminalSize, cellWidth, cell
 		return io.ErrClosedPipe
 	case <-t.closed:
 		return io.ErrClosedPipe
+	case <-timer.C:
+		req.canceled.Store(true)
+		return ErrResizeTimeout
 	}
 }
 
@@ -400,39 +510,138 @@ func (t *Terminal) Replay() []goprotocol.TerminalEvent {
 }
 
 type subscriber struct {
-	events chan goprotocol.TerminalEvent
-	done   chan struct{}
-	once   sync.Once
+	mu       sync.Mutex
+	queue    []goprotocol.TerminalEvent
+	bytes    int
+	wake     chan struct{}
+	space    chan struct{}
+	events   chan goprotocol.TerminalEvent
+	done     chan struct{}
+	overflow atomic.Bool
+	closed   atomic.Bool
+	once     sync.Once
 }
 
 func (t *Terminal) Subscribe() (<-chan goprotocol.TerminalEvent, <-chan struct{}, func()) {
+	events, done, cancel, _ := t.SubscribeWithOverflow()
+	return events, done, cancel
+}
+
+func (t *Terminal) SubscribeWithOverflow() (<-chan goprotocol.TerminalEvent, <-chan struct{}, func(), func() bool) {
 	t.mu.Lock()
 	t.nextSub++
 	id := t.nextSub
 	sub := &subscriber{
-		events: make(chan goprotocol.TerminalEvent, 64),
+		events: make(chan goprotocol.TerminalEvent, subscriberQueueEvents),
+		wake:   make(chan struct{}, 1),
+		space:  make(chan struct{}, 1),
 		done:   make(chan struct{}),
 	}
 	t.subs[id] = sub
 	t.mu.Unlock()
+	go sub.deliver(t)
 
 	cancel := func() {
-		sub.once.Do(func() {
-			close(sub.done)
-			t.mu.Lock()
-			delete(t.subs, id)
-			t.mu.Unlock()
-		})
+		sub.close(t, id, false)
 	}
-	return sub.events, sub.done, cancel
+	return sub.events, sub.done, cancel, sub.overflow.Load
+}
+
+func (s *subscriber) close(t *Terminal, id uint64, overflow bool) {
+	s.once.Do(func() {
+		s.closed.Store(true)
+		if overflow {
+			s.overflow.Store(true)
+		}
+		close(s.done)
+		t.mu.Lock()
+		delete(t.subs, id)
+		t.mu.Unlock()
+		s.mu.Lock()
+		s.queue = nil
+		s.bytes = 0
+		s.mu.Unlock()
+	})
+}
+
+func (s *subscriber) enqueue(t *Terminal, id uint64, ev goprotocol.TerminalEvent) bool {
+	n := retainedEventBytes(ev)
+	if n > subscriberQueueBytes {
+		s.close(t, id, true)
+		return false
+	}
+	for {
+		s.mu.Lock()
+		if s.closed.Load() {
+			s.mu.Unlock()
+			return false
+		}
+		if len(s.queue) >= subscriberQueueEvents || s.bytes+n > subscriberQueueBytes {
+			s.mu.Unlock()
+			select {
+			case <-s.space:
+				continue
+			case <-s.done:
+				return false
+			case <-t.closed:
+				return false
+			}
+		}
+		s.queue = append(s.queue, ev)
+		s.bytes += n
+		s.mu.Unlock()
+		select {
+		case s.wake <- struct{}{}:
+		default:
+		}
+		return true
+	}
+}
+
+// deliver drains the bounded queue in sequence order. Closing an overflowing
+// subscription ends only that pane's stream; the terminal and other panes
+// remain live and the client reattaches from its last sequence.
+func (s *subscriber) deliver(t *Terminal) {
+	defer close(s.events)
+	for {
+		s.mu.Lock()
+		if len(s.queue) == 0 {
+			closed := s.closed.Load()
+			s.mu.Unlock()
+			if closed {
+				return
+			}
+			select {
+			case <-s.wake:
+				continue
+			case <-s.done:
+				return
+			}
+		}
+		ev := s.queue[0]
+		s.queue[0] = goprotocol.TerminalEvent{}
+		s.queue = s.queue[1:]
+		s.bytes -= retainedEventBytes(ev)
+		s.mu.Unlock()
+		select {
+		case s.space <- struct{}{}:
+		default:
+		}
+		select {
+		case s.events <- ev:
+		case <-s.done:
+			return
+		}
+	}
 }
 
 func (t *Terminal) Close() error {
-	if t.supervised != nil {
+	if t.supervisor != nil {
 		var err error
 		t.once.Do(func() {
 			close(t.closed)
 			err = t.supervisedClose()
+			t.supervisor.closeLinks()
 		})
 		return err
 	}
@@ -649,6 +858,10 @@ func (t *Terminal) readLoop() {
 			if req.cellHeight > 0 {
 				t.cellHeight = min(req.cellHeight, 1024)
 			}
+			if req.canceled.Load() {
+				close(barrier.resume)
+				continue
+			}
 			err := t.ptmx.Resize(&gopty.Size{
 				Rows: uint16(req.size.Lines),
 				Cols: uint16(req.size.Columns),
@@ -665,7 +878,9 @@ func (t *Terminal) readLoop() {
 				})
 			}
 			close(barrier.resume)
-			req.done <- err
+			if !req.canceled.Load() {
+				req.done <- err
+			}
 		case <-t.closed:
 			// Closing ptmx wakes the raw reader. Keep draining until it closes
 			// so bytes already returned by the kernel still precede Exit.
@@ -698,28 +913,20 @@ func (t *Terminal) publish(ev goprotocol.TerminalEvent) {
 	t.mu.Lock()
 	t.storeLocked(ev)
 	t.trimReplayLocked()
-	subs := make([]*subscriber, 0, len(t.subs))
-	for _, sub := range t.subs {
-		subs = append(subs, sub)
+	subs := make([]struct {
+		id  uint64
+		sub *subscriber
+	}, 0, len(t.subs))
+	for id, sub := range t.subs {
+		subs = append(subs, struct {
+			id  uint64
+			sub *subscriber
+		}{id, sub})
 	}
 	t.mu.Unlock()
 
-	// The 64-event subscriber queue is a
-	// bounded backpressure boundary. Never silently drop a terminal event.
 	for _, sub := range subs {
-		// Preserve final/exit events for consumers that still have capacity.
-		// Closing only cancels delivery that would otherwise remain blocked.
-		select {
-		case sub.events <- ev:
-			continue
-		default:
-		}
-		select {
-		case sub.events <- ev:
-		case <-sub.done:
-		case <-t.closed:
-			return
-		}
+		sub.sub.enqueue(t, sub.id, ev)
 	}
 }
 
