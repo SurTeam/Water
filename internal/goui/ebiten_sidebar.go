@@ -89,7 +89,11 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 				if state, reported := term.emu.ProgressState(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") {
 					a.status = agentMappedStatus(a.profile, state)
 				}
-				if state, app, reported := term.emu.ProgramStatus(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") && agentProgramStatusApp(a.kind, app) {
+				profileName := ""
+				if a.profile != nil {
+					profileName = a.profile.Name
+				}
+				if state, app, reported := term.emu.ProgramStatus(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") && agentProgramStatusApp(a.kind, profileName, app) {
 					a.status = agentProgramStatus(state)
 				}
 			}

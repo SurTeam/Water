@@ -366,7 +366,10 @@ func (c *WorkspaceClient) agentSettingsAction(action string) {
 }
 
 // A status belongs to the emitting application, not another program in the pane.
-func agentProgramStatusApp(kind, app string) bool {
+// For built-in agents the app identity is fixed; for a custom profile the
+// kind is a UUID, so the report is also accepted when the normalized app
+// matches the profile's display name (e.g. app=firstrule for "FirstRule Go").
+func agentProgramStatusApp(kind, name, app string) bool {
 	switch goagent.Kind(kind) {
 	case goagent.Pi:
 		return app == "pi"
@@ -377,8 +380,30 @@ func agentProgramStatusApp(kind, app string) bool {
 	case goagent.ClaudeCode:
 		return app == "claude" || app == "claude-code"
 	default:
-		return app != "" && app == kind
+		if app == "" {
+			return false
+		}
+		if app == kind {
+			return true
+		}
+		// A custom profile's kind is a UUID, so also accept a report whose
+		// app identity is embedded in the profile's display name (e.g.
+		// app=firstrule for a profile named "FirstRule Go").
+		return len(app) >= 4 && strings.Contains(normalizeAgentIdentity(name), normalizeAgentIdentity(app))
 	}
+}
+
+// normalizeAgentIdentity reduces an app or profile name to its letters and
+// digits so that display names like "FirstRule Go" line up with the bare
+// app identity "firstrule" that a program reports.
+func normalizeAgentIdentity(value string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(value) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func agentProgramStatus(state string) string {

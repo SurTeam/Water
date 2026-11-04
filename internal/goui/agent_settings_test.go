@@ -162,6 +162,31 @@ func TestAgentOSCMappingAndSource(t *testing.T) {
 	}
 }
 
+func TestAgentProgramStatusAppCustomProfileName(t *testing.T) {
+	// Built-in agents match on their fixed app identity, not the profile name.
+	if !agentProgramStatusApp("pi", "Pi Coding Agent", "pi") {
+		t.Fatal("builtin pi app match lost")
+	}
+	if agentProgramStatusApp("pi", "Pi Coding Agent", "firstrule") {
+		t.Fatal("builtin pi accepted foreign app")
+	}
+	// A custom profile has a UUID kind; the report must still be accepted when
+	// the normalized app matches the profile's display name.
+	profileID := "dca47dd0-98de-4d59-ad40-bb6c498fc4a0"
+	if !agentProgramStatusApp(profileID, "FirstRule Go", "firstrule") {
+		t.Fatal("custom profile name did not accept app=firstrule")
+	}
+	if agentProgramStatusApp(profileID, "FirstRule Go", "other-app") {
+		t.Fatal("custom profile accepted unrelated app")
+	}
+	if agentProgramStatusApp(profileID, "", "firstrule") {
+		t.Fatal("unnamed custom profile accepted app")
+	}
+	if !agentProgramStatusApp("firstrule", "FirstRule Go", "firstrule") {
+		t.Fatal("custom profile kind match lost")
+	}
+}
+
 func TestAgentStatusSourceReportsUnknownUntilOSC(t *testing.T) {
 	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
 	id := uuid.New()
@@ -186,6 +211,35 @@ func TestAgentStatusSourceReportsUnknownUntilOSC(t *testing.T) {
 	raw["status"] = map[string]any{"exited": map[string]any{"code": 0}}
 	if c.sidebarAgents(state)[0].status != "Completed" {
 		t.Fatal("exited process retained Running state")
+	}
+}
+
+// A custom Agent profile (UUID kind) must adopt a FirstRule OSC 7501 report
+// whose app identity matches the profile's display name, so the sidebar can
+// show the done state as Completed.
+func TestSidebarCustomProfileAdoptsFirstRuleStatus(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	id := uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer emu.Close()
+	c.terminals[id] = &terminalClient{id: id, emu: emu}
+	profile := goagent.Profile{
+		ID:           "dca47dd0-98de-4d59-ad40-bb6c498fc4a0",
+		Name:         "FirstRule Go",
+		Enabled:      true,
+		StatusSource: "osc",
+	}
+	raw := map[string]any{"kind": profile.ID, "label": profile.Name, "terminal_id": id, "status": "running", "profile": &profile}
+	state := gomodel.StateDump{Agents: []any{raw}}
+	// Working report with the matching app identity.
+	emu.Write([]byte("\x1b]7501;state=working:app=firstrule\x1b\\"))
+	if c.sidebarAgents(state)[0].status != "Running" {
+		t.Fatalf("custom profile ignored working report: %s", c.sidebarAgents(state)[0].status)
+	}
+	// Done report flips to Completed.
+	emu.Write([]byte("\x1b]7501;state=done:app=firstrule\x1b\\"))
+	if c.sidebarAgents(state)[0].status != "Completed" {
+		t.Fatalf("custom profile did not adopt done report: %s", c.sidebarAgents(state)[0].status)
 	}
 }
 
