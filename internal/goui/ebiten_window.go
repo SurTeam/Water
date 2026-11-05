@@ -179,6 +179,12 @@ type EbitengineWindow struct {
 	revealHold              int
 	titlebarZoom            atomic.Bool
 	dragTargets             atomic.Pointer[dragTargetList]
+	fitWindowSeen           bool
+	fitWindowX              int
+	fitWindowY              int
+	fitWindowW              int
+	fitWindowH              int
+	fitMonitor              *ebiten.MonitorType
 	fileDropText            string // pending file-drop text to insert into the terminal
 }
 
@@ -646,6 +652,7 @@ func (w *EbitengineWindow) Update() error {
 		platformConfig.UI.WindowCornerRadius = 0
 	}
 	w.platform.Update(platformConfig)
+	w.maybeFitWindowHeight()
 	w.processNotificationsAt(c, focused, time.Now())
 	w.processTerminalReports()
 	w.multi.mu.RLock()

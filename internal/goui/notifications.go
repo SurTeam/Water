@@ -2,6 +2,7 @@ package goui
 
 import (
 	"encoding/json"
+	"github.com/hajimehoshi/ebiten/v2"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -37,6 +38,24 @@ type foregroundCommand struct {
 // foreground state actually changes after a command has been running long
 // enough (e.g. the prompt returns after a long command finishes), not merely
 // because a command has been running a while.
+// maybeFitWindowHeight shrinks the window when the screen it is on can no
+// longer hold its height, for example after a drag from an external display
+// onto the built-in display. Width and horizontal position stay as they are.
+func (w *EbitengineWindow) maybeFitWindowHeight() {
+	if ebiten.IsFullscreen() || ebiten.IsWindowMinimized() {
+		return
+	}
+	x, y := ebiten.WindowPosition()
+	width, height := ebiten.WindowSize()
+	monitor := ebiten.Monitor()
+	if w.fitWindowSeen && w.fitWindowX == x && w.fitWindowY == y && w.fitWindowW == width && w.fitWindowH == height && w.fitMonitor == monitor {
+		return
+	}
+	w.fitWindowSeen = true
+	w.fitWindowX, w.fitWindowY, w.fitWindowW, w.fitWindowH, w.fitMonitor = x, y, width, height, monitor
+	fitWindowHeightToScreen()
+}
+
 func (w *EbitengineWindow) processNotifications(c *WorkspaceClient) {
 	w.processNotificationsAt(c, false, time.Now())
 }

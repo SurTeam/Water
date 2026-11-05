@@ -7,6 +7,7 @@ import (
 
 	"github.com/ebitengine/purego"
 	"github.com/ebitengine/purego/objc"
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 var (
@@ -80,7 +81,9 @@ func startNativeTitlebarDrag(view, event objc.ID) bool {
 		return true
 	}
 	window := macSend(view, "window")
-	if window == 0 || macSend(window, "isZoomed") != 0 {
+	// isZoomed only means the frame matches the screen's zoomed frame.
+	// Refusing the drag left a filled window stuck in place.
+	if window == 0 {
 		return false
 	}
 	sel := objc.RegisterName("performWindowDragWithEvent:")
@@ -90,4 +93,40 @@ func startNativeTitlebarDrag(view, event objc.ID) bool {
 	macSend(window, "setMovable:", true)
 	macSend(window, "performWindowDragWithEvent:", event)
 	return true
+}
+
+func titlebarDragSuppressed() bool { return false }
+
+// fitWindowHeightToScreen runs on the main thread. Update is not that thread,
+// and AppKit geometry calls from it deadlock while the window is activating.
+func fitWindowHeightToScreen() {
+	if ebiten.IsFullscreen() || ebiten.IsWindowMinimized() {
+		return
+	}
+	ebiten.RunOnMainThread(func() {
+		window := macSend(macApplication(), "mainWindow")
+		if window == 0 {
+			window = macSend(macApplication(), "keyWindow")
+		}
+		if window == 0 || macSend(window, "isMiniaturized") != 0 {
+			return
+		}
+		screen := macSend(window, "screen")
+		if screen == 0 {
+			return
+		}
+		visible := objc.Send[macRect](screen, objc.RegisterName("visibleFrame"))
+		current := objc.Send[macRect](window, objc.RegisterName("frame"))
+		next, ok := fitFrameToVisibleHeight(
+			screenFrame{x: current.origin.x, y: current.origin.y, width: current.size.width, height: current.size.height},
+			screenFrame{x: visible.origin.x, y: visible.origin.y, width: visible.size.width, height: visible.size.height},
+		)
+		if !ok {
+			return
+		}
+		window.Send(objc.RegisterName("setFrame:display:"), macRect{
+			origin: macPoint{x: current.origin.x, y: next.y},
+			size:   macSize{width: current.size.width, height: next.height},
+		}, true)
+	})
 }

@@ -1,5 +1,7 @@
 package goui
 
+import "math"
+
 // dragTarget is one hit region in window points, origin at the top left.
 // Later entries win, matching the framebuffer hit test.
 type dragTarget struct {
@@ -50,4 +52,37 @@ func windowDragNeedsFrames(d *nativeDrag) bool {
 
 func (w *EbitengineWindow) consumeTitlebarZoom() bool {
 	return w != nil && w.titlebarZoom.CompareAndSwap(true, false)
+}
+
+// screenFrame is an AppKit-style rectangle: origin at the bottom left, in points.
+type screenFrame struct {
+	x, y, width, height float64
+}
+
+// fitFrameToVisibleHeight shrinks a window that is taller than the screen it
+// is on and shifts it so the vertical span stays inside that screen. Width and
+// horizontal position are left untouched. A non-positive visible height means
+// the screen metrics are not usable yet.
+func fitFrameToVisibleHeight(frame, visible screenFrame) (screenFrame, bool) {
+	if visible.height <= 0 {
+		return frame, false
+	}
+	height := frame.height
+	y := frame.y
+	if height > visible.height {
+		height = visible.height
+	}
+	if y < visible.y {
+		y = visible.y
+	}
+	if y+height > visible.y+visible.height {
+		y = visible.y + visible.height - height
+	}
+	const eps = 0.5
+	if math.Abs(y-frame.y) < eps && math.Abs(height-frame.height) < eps {
+		return frame, false
+	}
+	frame.y = y
+	frame.height = height
+	return frame, true
 }

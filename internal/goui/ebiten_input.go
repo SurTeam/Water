@@ -67,7 +67,7 @@ func (w *EbitengineWindow) pointerDown(c *WorkspaceClient, p image.Point, count 
 				w.pressed = nil
 				return true
 			}
-			if ebiten.IsWindowMaximized() {
+			if ebiten.IsWindowMaximized() && titlebarDragSuppressed() {
 				return true
 			}
 			x, y := ebiten.WindowPosition()
