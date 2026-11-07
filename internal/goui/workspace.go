@@ -132,14 +132,19 @@ type ConnectionEntry struct {
 }
 
 type terminalClient struct {
-	id                      uuid.UUID
-	worker                  terminalWorker
-	closed                  atomic.Bool
-	dirty                   atomic.Bool
-	publishing              atomic.Bool
-	mu                      sync.RWMutex
-	parseMu                 sync.Mutex
-	emu                     *govt.Emulator
+	id         uuid.UUID
+	worker     terminalWorker
+	closed     atomic.Bool
+	dirty      atomic.Bool
+	publishing atomic.Bool
+	mu         sync.RWMutex
+	parseMu    sync.Mutex
+	emu        *govt.Emulator
+	// lastOSCStatus keeps the last sidebar status derived from OSC 9;4 /
+	// OSC 7501 while parseMu was held. scrollActiveTerminal and other
+	// TryLock callers can miss the emulator briefly; without this cache the
+	// sidebar falls back to Unknown and notifications re-fire Completed.
+	lastOSCStatus           string
 	snapshot                govt.Snapshot
 	lastSeq                 uint64
 	cols                    int

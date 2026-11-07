@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/SurTeam/Water/internal/goagent"
 	"github.com/SurTeam/Water/internal/goclient"
 	"github.com/SurTeam/Water/internal/goconfig"
 	"github.com/SurTeam/Water/internal/gomodel"
@@ -213,6 +214,42 @@ func TestAgentInteractionOSCNotifications(t *testing.T) {
 		if len(platform.messages) != i+1 || platform.messages[i] != "Water: Agent paused; it may need your attention: Pi" {
 			t.Fatalf("%s: %v", kind, platform.messages)
 		}
+	}
+}
+
+func TestBusyParserDoesNotRenotifyCompletedOSC(t *testing.T) {
+	cfg := goconfig.Default()
+	cfg.UI.SystemNotifications = true
+	manager := NewMultiWorkspaceClient(nil)
+	defer manager.Close()
+	view := NewWorkspaceClientWithConnection(nil, nil, cfg, "")
+	terminal, pane := uuid.New(), uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer func() { delete(view.terminals, terminal); emu.Close() }()
+	term := &terminalClient{id: terminal, emu: emu}
+	view.terminals[terminal] = term
+	profile := goagent.Profile{ID: "dca47dd0-98de-4d59-ad40-bb6c498fc4a0", Name: "FirstRule Go", Enabled: true, StatusSource: "osc"}
+	view.state.Agents = []any{map[string]any{"kind": profile.ID, "label": profile.Name, "pane_id": pane, "terminal_id": terminal, "status": "running", "profile": &profile}}
+	if err := manager.AddConnection(ConnectionEntry{ID: uuid.New(), Kind: "local", Status: "connected"}, view, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	platform := &recordingNotifications{}
+	window := &EbitengineWindow{multi: manager, platform: platform}
+	window.processNotifications(view)
+	emu.Write([]byte("\x1b]7501;state=working:app=firstrule\x1b\\"))
+	window.processNotifications(view)
+	emu.Write([]byte("\x1b]7501;state=done:app=firstrule\x1b\\"))
+	window.processNotifications(view)
+	if len(platform.messages) != 1 || platform.messages[0] != "Water: Agent completed: FirstRule Go" {
+		t.Fatalf("expected one completion notify, got %v", platform.messages)
+	}
+	term.parseMu.Lock()
+	window.processNotifications(view)
+	window.processNotifications(view)
+	term.parseMu.Unlock()
+	window.processNotifications(view)
+	if len(platform.messages) != 1 {
+		t.Fatalf("scroll/busy parser re-notified completion: %v", platform.messages)
 	}
 }
 

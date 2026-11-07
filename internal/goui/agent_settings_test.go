@@ -243,6 +243,35 @@ func TestSidebarCustomProfileAdoptsFirstRuleStatus(t *testing.T) {
 	}
 }
 
+func TestSidebarKeepsOSCStatusWhileParserBusy(t *testing.T) {
+	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
+	id := uuid.New()
+	emu := govt.New(80, 24, 10)
+	defer emu.Close()
+	term := &terminalClient{id: id, emu: emu}
+	c.terminals[id] = term
+	profile := goagent.Profile{
+		ID:           "dca47dd0-98de-4d59-ad40-bb6c498fc4a0",
+		Name:         "FirstRule Go",
+		Enabled:      true,
+		StatusSource: "osc",
+	}
+	raw := map[string]any{"kind": profile.ID, "label": profile.Name, "terminal_id": id, "status": "running", "profile": &profile}
+	state := gomodel.StateDump{Agents: []any{raw}}
+	emu.Write([]byte("\x1b]7501;state=done:app=firstrule\x1b\\"))
+	if got := c.sidebarAgents(state)[0].status; got != "Completed" {
+		t.Fatalf("seed done status: %s", got)
+	}
+	if term.lastOSCStatus != "Completed" {
+		t.Fatalf("cache not primed: %q", term.lastOSCStatus)
+	}
+	term.parseMu.Lock()
+	defer term.parseMu.Unlock()
+	if got := c.sidebarAgents(state)[0].status; got != "Completed" {
+		t.Fatalf("busy parser dropped OSC status to %s", got)
+	}
+}
+
 func TestAgentListPaginationPreservesInvalidDraft(t *testing.T) {
 	c := NewWorkspaceClientWithConnection(nil, nil, goconfig.Default(), "")
 	defer c.Close()

@@ -81,34 +81,53 @@ func (c *WorkspaceClient) sidebarAgents(state gomodel.StateDump) []nativeAgent {
 		c.mu.RLock()
 		term := c.terminals[a.terminal]
 		c.mu.RUnlock()
-		if term != nil && term.parseMu.TryLock() {
-			term.mu.RLock()
-			var title string
-			if term.emu != nil {
-				title = term.emu.Title()
-				if state, reported := term.emu.ProgressState(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") {
-					a.status = agentMappedStatus(a.profile, state)
-				}
-				profileName := ""
-				if a.profile != nil {
-					profileName = a.profile.Name
-				}
-				if state, app, reported := term.emu.ProgramStatus(); reported && a.running && (a.profile == nil || a.profile.StatusSource != "process") && agentProgramStatusApp(a.kind, profileName, app) {
-					a.status = agentProgramStatus(state)
-				}
+		if term == nil {
+			continue
+		}
+		useOSC := a.running && (a.profile == nil || a.profile.StatusSource != "process")
+		if !term.parseMu.TryLock() {
+			// Parser is busy (for example while scrolling). Keep the last OSC
+			// status so Unknown -> Completed is not synthesized as a new event.
+			if useOSC && term.lastOSCStatus != "" {
+				a.status = term.lastOSCStatus
 			}
-			term.mu.RUnlock()
-			term.parseMu.Unlock()
-			title = strings.TrimSpace(strings.Map(func(r rune) rune {
-				if unicode.IsControl(r) {
-					return -1
-				}
-				return r
-			}, title))
-			if title != "" && a.titleSource != "custom" {
-				a.label = string([]rune(title)[:min(256, len([]rune(title)))])
-				a.titleSource = "osc"
+			continue
+		}
+		term.mu.RLock()
+		var title string
+		oscStatus := ""
+		if term.emu != nil {
+			title = term.emu.Title()
+			if state, reported := term.emu.ProgressState(); reported && useOSC {
+				oscStatus = agentMappedStatus(a.profile, state)
 			}
+			profileName := ""
+			if a.profile != nil {
+				profileName = a.profile.Name
+			}
+			if state, app, reported := term.emu.ProgramStatus(); reported && useOSC && agentProgramStatusApp(a.kind, profileName, app) {
+				oscStatus = agentProgramStatus(state)
+			}
+		}
+		term.mu.RUnlock()
+		term.lastOSCStatus = oscStatus
+		if useOSC {
+			if oscStatus != "" {
+				a.status = oscStatus
+			} else if a.profile != nil && a.profile.StatusSource == "osc" {
+				a.status = "Unknown"
+			}
+		}
+		term.parseMu.Unlock()
+		title = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if unicode.IsControl(r) {
+				return -1
+			}
+			return r
+		}, title))
+		if title != "" && a.titleSource != "custom" {
+			a.label = string([]rune(title)[:min(256, len([]rune(title)))])
+			a.titleSource = "osc"
 		}
 	}
 	return agents
