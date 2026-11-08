@@ -70,6 +70,7 @@ PTY 与其中的程序由独立的 supervisor 进程持有（`internal/gosupervi
 - Unix 关闭 pane、替换 terminal 和普通关闭 server 时，进程内终端与新版 supervisor 共用 `internal/ptyprocess` 清理：spawn 后、启动 Wait 前保存根进程的原生启动身份，关闭时在终止 shell 前枚举同一 PTY 会话成员及仍可追溯的后代，并发送 `SIGKILL`，包括独立任务进程组和仍保有亲缘关系的另建会话子进程。此操作强制终止程序，不执行优雅退出。
 - Unix 进程枚举使用 750 ms 预算和 4 MiB 输出上限；信号前复核根进程与目标身份，避免历史 PID 复用建立错误的清理归属。枚举失败时只回退到身份已确认的原进程组及直接子进程；根进程已回收或身份无法确认时只尝试由 `os.Process` 持有的直接子进程。清理为尽力执行，快照之后新建的后代，以及已经脱离会话且失去可追溯关系的进程，不保证被终止。预算不代表整个关闭操作的硬性时限。
 - 升级后保留的旧 supervisor 继续使用旧清理实现；仅更新 GUI 或通过 recovery 接回已有 PTY，不会替换该 supervisor 的代码。
+- macOS 原地替换 supervisor 二进制后，旧进程仍持有已经在跑的 PTY，但 TCC 会按现在该路径上的签名检查它，新 shell 会丢失应用的完全磁盘访问。新 server 比较进程启动时间与当前要启动的二进制修改时间：未替换时继续使用原 socket；已替换或旧 supervisor 不能报告自身时，新 shell 改由当前二进制新启动的 supervisor 创建，已有 pane id 仍从旧 supervisor 恢复。已经在跑的 shell 不会因此恢复权限。
 - 显式替换 pane 的 terminal 走 supervisor 的 `Replace`：先注册新 terminal 并把回复写到线上，再关闭旧程序，server 因此能在旧 Exit 到达前完成安装。
 - Unix supervisor 的 PTY 必须是 nonblocking 并注册到 runtime poller：阻塞读会占住线程，使并发的 `TIOCGPGRP` 查询（前台进程组，Agent 分类依赖它）等待数秒。
 - 客户端须在发送请求前登记响应等待项，登记顺序与帧写入顺序共用同一个可取消的门；带终端身份的响应还须校验目标，避免后台采样与手动诊断并发时丢失或错配回复。请求写入与等待均受截止时间约束。

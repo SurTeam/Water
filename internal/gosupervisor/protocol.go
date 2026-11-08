@@ -26,15 +26,19 @@ const (
 	// kindWriteBinary carries [terminal id:16][raw input]. It avoids JSON and
 	// base64 for the hot input path; older supervisors simply ignore it.
 	kindWriteBinary byte = 9
+	// kindExecutable asks which binary the supervisor is running. A supervisor
+	// started before an in-place upgrade cannot answer it.
+	kindExecutable byte = 10
 
-	kindSpawned      byte = 101
-	kindOutput       byte = 102
-	kindResized      byte = 103
-	kindExited       byte = 104
-	kindListed       byte = 105
-	kindFailure      byte = 106
-	kindAttached     byte = 107
-	kindForegrounded byte = 108
+	kindSpawned        byte = 101
+	kindOutput         byte = 102
+	kindResized        byte = 103
+	kindExited         byte = 104
+	kindListed         byte = 105
+	kindFailure        byte = 106
+	kindAttached       byte = 107
+	kindForegrounded   byte = 108
+	kindExecutableInfo byte = 109
 )
 
 // maxFrameBytes bounds a single frame so a corrupt length cannot exhaust memory.
@@ -142,6 +146,11 @@ type foregroundResponse struct {
 
 type failureResponse struct {
 	Error string `json:"error"`
+}
+
+type executableResponse struct {
+	Path string `json:"path"`
+	PID  int    `json:"pid"`
 }
 
 // outputPayload is the header of an output frame: the terminal id followed by the

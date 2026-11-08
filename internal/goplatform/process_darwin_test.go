@@ -6,9 +6,34 @@ import (
 	"os/exec"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ebitengine/purego"
 )
+
+func TestRunningBinaryReplaced(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced, err := RunningBinaryReplaced(os.Getpid(), self)
+	if err != nil || replaced {
+		t.Fatalf("current process binary = replaced %v (%v)", replaced, err)
+	}
+	file, err := os.CreateTemp(t.TempDir(), "replaced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file.Close()
+	future := time.Now().Add(time.Hour)
+	if err := os.Chtimes(file.Name(), future, future); err != nil {
+		t.Fatal(err)
+	}
+	replaced, err = RunningBinaryReplaced(os.Getpid(), file.Name())
+	if err != nil || !replaced {
+		t.Fatalf("newer file = replaced %v (%v)", replaced, err)
+	}
+}
 
 func TestDetachedApplicationResponsibility(t *testing.T) {
 	if os.Getenv("WATER_TEST_DETACHED_CHILD") == "1" {

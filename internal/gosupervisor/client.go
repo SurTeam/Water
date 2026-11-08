@@ -348,6 +348,19 @@ func (c *Client) ForegroundContext(ctx context.Context, id uuid.UUID) (int, erro
 	return resp.Group, nil
 }
 
+// Executable reports the binary and pid of this supervisor. A supervisor
+// started before that query existed leaves the connection unanswered.
+func (c *Client) Executable() (string, int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	value, err := c.request(ctx, kindExecutable, struct{}{}, executableSlot, "")
+	if err != nil {
+		return "", 0, err
+	}
+	resp, _ := value.(executableResponse)
+	return resp.Path, resp.PID, nil
+}
+
 // List reports terminals the supervisor still owns.
 func (c *Client) List() ([]ListedTerminal, error) {
 	value, err := c.call(kindList, struct{}{}, listedSlot, "")
@@ -422,6 +435,12 @@ func (c *Client) readLoop() {
 				return
 			}
 			c.deliver(listedSlot, resp)
+		case kindExecutableInfo:
+			var resp executableResponse
+			if err := unmarshal(payload, &resp); err != nil {
+				return
+			}
+			c.deliver(executableSlot, resp)
 		case kindForegrounded:
 			var resp foregroundResponse
 			if err := unmarshal(payload, &resp); err != nil {
@@ -517,6 +536,7 @@ const (
 	listedSlot
 	foregroundSlot
 	failureSlot
+	executableSlot
 	slotCount
 )
 

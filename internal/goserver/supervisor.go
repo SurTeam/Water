@@ -2,6 +2,7 @@ package goserver
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/SurTeam/Water/internal/goplatform"
@@ -46,10 +47,16 @@ func (s *Server) EnableSupervisor() error {
 			s.sharedSupervisor = true
 		}
 	}
-	if err := ensureSupervisor(socket); err != nil {
+	current, legacy, ids, err := ensureSupervisor(socket)
+	if err != nil {
 		return err
 	}
-	return s.UseSupervisor(socket)
+	s.legacySupervisorSocket = legacy
+	if err := s.registry.AttachSupervisors(current, legacy, ids); err != nil {
+		return err
+	}
+	s.supervisorSocket = current
+	return nil
 }
 
 // EnableSupervisorFromEnv enables the supervisor unless WATER_PTY_SUPERVISOR is
@@ -72,15 +79,75 @@ func (s *Server) UseSupervisor(socket string) error {
 	return nil
 }
 
-// ensureSupervisor starts a detached supervisor when the socket is not served.
-func ensureSupervisor(socket string) error {
-	if client, err := gosupervisor.Dial(socket); err == nil {
-		_ = client.Close()
-		return nil
+// ensureSupervisor returns the supervisor that must own new shells, plus the
+// supervisor that still owns programs started before its binary was replaced.
+// On macOS that replacement drops Full Disk Access: TCC checks the signature
+// now at the process path, and a supervisor kept across the upgrade fails it.
+func ensureSupervisor(socket string) (current, legacy string, legacyIDs []string, err error) {
+	client, dialErr := gosupervisor.Dial(socket)
+	if dialErr != nil {
+		return socket, "", nil, startSupervisor(socket, "")
+	}
+	replaced := supervisorReplaced(client)
+	terms, listErr := client.List()
+	_ = client.Close()
+	if !replaced {
+		return socket, "", nil, nil
+	}
+	_ = terms
+	_ = listErr
+	if listErr == nil {
+		for _, term := range terms {
+			if !term.Exited {
+				legacyIDs = append(legacyIDs, term.ID)
+			}
+		}
 	}
 	executable, err := supervisorExecutable()
 	if err != nil {
-		return err
+		return "", "", nil, err
+	}
+	next := supervisorGenerationSocket(socket, executable)
+	if next == socket {
+		next += ".new"
+	}
+	if gen, genErr := gosupervisor.Dial(next); genErr == nil {
+		stale := supervisorReplaced(gen)
+		_ = gen.Close()
+		if !stale {
+			return next, socket, legacyIDs, nil
+		}
+	}
+	return next, socket, legacyIDs, startSupervisor(next, executable)
+}
+
+// supervisorGenerationSocket names the supervisor for this exact binary, so the
+// next in-place upgrade does not keep using the previous generation.
+func supervisorGenerationSocket(base, executable string) string {
+	info, err := os.Stat(executable)
+	if err != nil {
+		return base + ".new"
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d", executable, info.ModTime().UnixNano(), info.Size())))
+	ext := "." + hex.EncodeToString(sum[:4])
+	next := base + ext
+	if len(next) > 100 {
+		keep := 100 - len(ext)
+		if keep < 1 {
+			keep = 1
+		}
+		next = base[:keep] + ext
+	}
+	return next
+}
+
+func startSupervisor(socket, executable string) error {
+	if executable == "" {
+		var err error
+		executable, err = supervisorExecutable()
+		if err != nil {
+			return err
+		}
 	}
 	command := exec.Command(executable, "--pty-supervisor", "--socket", socket)
 	command.Env = os.Environ()
@@ -106,6 +173,24 @@ func ensureSupervisor(socket string) error {
 	return errors.New("PTY supervisor did not become ready")
 }
 
+// supervisorReplaced reports whether the running supervisor's binary changed
+// after that process started. A supervisor that cannot identify itself is older
+// than this check and is treated as replaced. The result is read once per
+// connection; callers must not repeat it on the spawn path.
+func supervisorReplaced(client *gosupervisor.Client) bool {
+	executable, pid, err := client.Executable()
+	if err != nil || executable == "" || pid <= 0 {
+		return true
+	}
+	if current, currentErr := supervisorExecutable(); currentErr == nil && executable != current {
+		// The running process reports the path it was started from. An in-place
+		// upgrade replaces the file this server would start now.
+		executable = current
+	}
+	replaced, err := goplatform.RunningBinaryReplaced(pid, executable)
+	return err != nil || replaced
+}
+
 // detachSupervisorOnClose releases terminals without terminating their programs.
 func (s *Server) detachSupervisor() {
 	if s.supervisorSocket == "" {
@@ -116,6 +201,9 @@ func (s *Server) detachSupervisor() {
 
 // SupervisorSocketForTest reports the socket a supervised server uses.
 func SupervisorSocketForTest() string { return supervisorSocketPath() }
+
+// SupervisorSocketForServer reports the socket that owns newly created shells.
+func SupervisorSocketForServer(s *Server) string { return s.supervisorSocket }
 
 // supervisorExecutable finds a binary that serves the supervisor role. A GUI
 // embeds the server in its own process, so its own executable may not accept

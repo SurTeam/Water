@@ -6,8 +6,10 @@ import (
 	"os/exec"
 	"runtime"
 	"syscall"
+	"time"
 
 	"github.com/ebitengine/purego"
+	"golang.org/x/sys/unix"
 )
 
 const detachedExecEnv = "WATER_INTERNAL_DETACHED_EXEC"
@@ -15,6 +17,26 @@ const detachedExecEnv = "WATER_INTERNAL_DETACHED_EXEC"
 // Setsid alone does not remove LaunchServices' ownership of an application's
 // descendants. A replacement launch can terminate those subordinate processes,
 // including the updater, server and the supervisor holding the live PTYs.
+// RunningBinaryReplaced reports whether executable was written after pid started.
+// macOS TCC checks the signature of the file now at the process's path. A
+// supervisor kept alive across an in-place upgrade therefore loses the app's
+// Full Disk Access even though a newly started copy of the same path has it.
+func RunningBinaryReplaced(pid int, executable string) (bool, error) {
+	info, err := os.Stat(executable)
+	if err != nil {
+		return false, err
+	}
+	procs, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
+	if err != nil {
+		return false, err
+	}
+	if len(procs) != 1 || int(procs[0].Proc.P_pid) != pid {
+		return false, unix.ESRCH
+	}
+	started := time.Unix(procs[0].Proc.P_starttime.Sec, int64(procs[0].Proc.P_starttime.Usec)*1000)
+	return info.ModTime().After(started), nil
+}
+
 func Detach(command *exec.Cmd) {
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if command.Env == nil {

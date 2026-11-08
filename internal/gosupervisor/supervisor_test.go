@@ -516,3 +516,23 @@ func TestReplaceStartsANewProgramAndDropsStaleEvents(t *testing.T) {
 		t.Fatalf("unexpected terminals %v, want pid %d", listed, pid)
 	}
 }
+
+func TestSupervisorReportsItsExecutable(t *testing.T) {
+	_, socket := startSupervisor(t)
+	client, err := Dial(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	path, pid, err := client.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != want || pid != os.Getpid() {
+		t.Fatalf("executable=%q pid=%d, want %q %d", path, pid, want, os.Getpid())
+	}
+}

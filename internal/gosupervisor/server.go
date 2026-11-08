@@ -318,6 +318,13 @@ func (s *Server) serve(conn net.Conn) {
 			_ = reply(kindForegrounded, s.foreground(req.ID))
 		case kindList:
 			_ = reply(kindListed, s.list())
+		case kindExecutable:
+			executable, err := os.Executable()
+			if err != nil {
+				_ = reply(kindFailure, failureResponse{Error: err.Error()})
+				continue
+			}
+			_ = reply(kindExecutableInfo, executableResponse{Path: executable, PID: os.Getpid()})
 		case kindShutdown:
 			_ = s.Close()
 			return

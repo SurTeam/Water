@@ -17,18 +17,30 @@ import (
 // Supervisor owns the PTYs of this registry's terminals. A server that restarts
 // re-attaches to the same terminals, so programs survive an upgrade.
 type Supervisor struct {
-	socket string
+	socket    string
+	legacy    string
+	legacyIDs map[string]struct{}
 }
 
 // AttachSupervisor connects the registry to a running supervisor socket.
 func (r *Registry) AttachSupervisor(socket string) error {
-	client, err := gosupervisor.Dial(socket)
+	return r.AttachSupervisors(socket, "", nil)
+}
+
+// AttachSupervisors sends new shells to current. Programs already running under
+// legacy keep that supervisor; only a recovery resume of those ids goes there.
+func (r *Registry) AttachSupervisors(current, legacy string, legacyIDs []string) error {
+	client, err := gosupervisor.Dial(current)
 	if err != nil {
 		return err
 	}
 	_ = client.Close()
+	ids := make(map[string]struct{}, len(legacyIDs))
+	for _, id := range legacyIDs {
+		ids[id] = struct{}{}
+	}
 	r.mu.Lock()
-	r.supervisor = &Supervisor{socket: socket}
+	r.supervisor = &Supervisor{socket: current, legacy: legacy, legacyIDs: ids}
 	r.mu.Unlock()
 	return nil
 }
@@ -51,6 +63,15 @@ func (r *Registry) DetachSupervisor() {
 }
 
 // SupervisorSocket reports the attached supervisor, if any.
+func (s *Supervisor) socketFor(key string, resume bool) string {
+	if resume && s.legacy != "" {
+		if _, ok := s.legacyIDs[key]; ok {
+			return s.legacy
+		}
+	}
+	return s.socket
+}
+
 func (r *Registry) SupervisorSocket() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -113,7 +134,7 @@ func (r *Registry) SpawnSupervised(key uuid.UUID, program string, args []string,
 		return existing, true, nil
 	}
 	size = size.Normalized()
-	link := newSupervisedLink(supervisor.socket, key)
+	link := newSupervisedLink(supervisor.socketFor(keyString, resume), key)
 	_, resumed, err := link.spawn(gosupervisor.SpawnSpec{
 		ID:      key,
 		Program: program,

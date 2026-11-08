@@ -45,15 +45,16 @@ type Server struct {
 	web                     *webService
 	webActive               atomic.Bool
 
-	registry           *goterminal.Registry
-	supervisorSocket   string
-	preserveSupervisor atomic.Bool
-	lifecycleMu        sync.Mutex
-	sharedSupervisor   bool
-	model              *gomodel.Model
-	listener           net.Listener
-	closing            chan struct{}
-	once               sync.Once
+	registry               *goterminal.Registry
+	supervisorSocket       string
+	legacySupervisorSocket string
+	preserveSupervisor     atomic.Bool
+	lifecycleMu            sync.Mutex
+	sharedSupervisor       bool
+	model                  *gomodel.Model
+	listener               net.Listener
+	closing                chan struct{}
+	once                   sync.Once
 
 	opsMu   sync.RWMutex
 	ops     map[uuid.UUID]OperationSnapshot
@@ -176,6 +177,29 @@ func (s *Server) ListenAndServe() error {
 	}
 }
 
+func (s *Server) shutdownSupervisor(socket string, current bool) error {
+	client, err := gosupervisor.Dial(socket)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	// A shared supervisor may still hold another server's panes. The generation
+	// socket started for new shells belongs only to this server.
+	shared := s.sharedSupervisor && (!current || s.legacySupervisorSocket == "")
+	if shared {
+		s.registry.CloseAll()
+		terms, listErr := client.List()
+		if listErr != nil {
+			return listErr
+		}
+		if len(terms) == 0 {
+			return client.Shutdown()
+		}
+		return nil
+	}
+	return client.Shutdown()
+}
+
 func (s *Server) Close() error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
@@ -186,21 +210,9 @@ func (s *Server) Close() error {
 		if s.supervisorSocket != "" {
 			// Only a validated recovery shutdown leaves programs for a successor.
 			if !s.preserveSupervisor.Load() {
-				client, dialErr := gosupervisor.Dial(s.supervisorSocket)
-				if dialErr == nil {
-					if s.sharedSupervisor {
-						s.registry.CloseAll()
-						terms, listErr := client.List()
-						err = listErr
-						if listErr == nil && len(terms) == 0 {
-							err = client.Shutdown()
-						}
-					} else {
-						err = client.Shutdown()
-					}
-					_ = client.Close()
-				} else {
-					err = dialErr
+				err = s.shutdownSupervisor(s.supervisorSocket, true)
+				if s.legacySupervisorSocket != "" {
+					err = errors.Join(err, s.shutdownSupervisor(s.legacySupervisorSocket, false))
 				}
 			}
 			s.detachSupervisor()
