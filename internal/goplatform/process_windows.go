@@ -10,8 +10,6 @@ import (
 func RunningBinaryReplaced(int, string) (bool, error) { return false, nil }
 
 // Detached children must outlive the launcher and must not allocate a console.
-func RunningBinaryReplaced(int, string) (bool, error) { return false, nil }
-
 func Detach(command *exec.Cmd) {
 	flags := uint32(windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP)
 	// OpenSSH's job kills descendants when a command disconnects. Break away
