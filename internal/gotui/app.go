@@ -251,7 +251,24 @@ type app struct {
 	commands               chan map[string]any
 	results                chan error
 	stop                   chan struct{}
+
+	// pendingInput holds bytes refused by session/PTY backpressure so a large
+	// paste retries instead of permanently stopping the input path.
+	pendingInputID   uuid.UUID
+	pendingInputData []byte
 }
+
+// screenEvent carries either a raw tcell event or coalesced terminal bytes.
+// Paste bodies never transit as per-rune EventKey values on this channel.
+type screenEvent struct {
+	ev   tcell.Event
+	keys []byte
+}
+
+const (
+	screenEventQueue = 256
+	inputWriteChunk  = 64 * 1024
+)
 
 func newApp(s *goclient.Session, screen tcell.Screen, scrollback int) *app {
 	return &app{focused: true, attachments: make(chan attachResult), session: s, screen: screen, scrollback: scrollback, terms: map[uuid.UUID]*terminal{}, commands: make(chan map[string]any, 128), results: make(chan error, 128), stop: make(chan struct{})}
@@ -295,8 +312,11 @@ func (a *app) run() error {
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(signals)
-	events := make(chan tcell.Event, 32)
-	go a.screen.ChannelEvents(events, a.stop)
+	// Coalesce paste/rune bursts in a dedicated pump. ChannelEvents plus a tiny
+	// buffer stacked on tcell's own 10-slot EventQ stalls the TTY reader under
+	// large pastes; draining and merging keeps backpressure in the write path.
+	events := make(chan screenEvent, screenEventQueue)
+	go a.pumpScreenEvents(events)
 	if err := a.session.Call("state.dump", nil, &a.state); err != nil {
 		return err
 	}
@@ -306,48 +326,21 @@ func (a *app) run() error {
 	defer tick.Stop()
 	a.draw()
 	for {
+		// Prefer draining coalesced input before draws and push traffic.
+		if a.drainScreenEvents(events) {
+			return nil
+		}
 		select {
 		case <-signals:
 			return nil
 		case result := <-a.attachments:
 			a.finishAttach(result)
-		case ev := <-events:
-			if ev == nil {
+		case msg, ok := <-events:
+			if !ok {
 				return nil
 			}
-			switch e := ev.(type) {
-			case *tcell.EventResize:
-				a.screen.Sync()
-			case *tcell.EventFocus:
-				a.setFocus(e.Focused)
-			case *tcell.EventKey:
-				if !a.pasting {
-					a.focusActivity()
-				}
-				if a.key(e) {
-					return nil
-				}
-			case *tcell.EventPaste:
-				a.pasting = e.Start()
-				if e.Start() {
-					a.focusActivity()
-				}
-				if !e.Start() {
-					if a.promptKind != "" {
-						a.prompt += string(a.paste)
-					} else {
-						a.sendPaste()
-					}
-					a.paste = nil
-				}
-			case *tcell.EventMouse:
-				if e.Buttons() != tcell.ButtonNone && a.buttons == tcell.ButtonNone {
-					a.focusActivity()
-				}
-				a.mouse(e)
-				if a.quit {
-					return nil
-				}
+			if a.handleScreenEvent(msg) {
+				return nil
 			}
 		case push, ok := <-terminalEvents:
 			if !ok {
@@ -389,7 +382,170 @@ func (a *app) run() error {
 				a.status = err.Error()
 			}
 		case <-tick.C:
+			a.flushPendingInput()
 			a.draw()
+		}
+	}
+}
+
+func (a *app) drainScreenEvents(events <-chan screenEvent) bool {
+	for {
+		select {
+		case msg, ok := <-events:
+			if !ok {
+				return true
+			}
+			if a.handleScreenEvent(msg) {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+}
+
+func (a *app) handleScreenEvent(msg screenEvent) bool {
+	if len(msg.keys) > 0 && msg.ev == nil {
+		a.focusActivity()
+		a.input(msg.keys)
+		return false
+	}
+	if msg.ev == nil {
+		return false
+	}
+	switch e := msg.ev.(type) {
+	case *tcell.EventResize:
+		a.screen.Sync()
+	case *tcell.EventFocus:
+		a.setFocus(e.Focused)
+	case *tcell.EventKey:
+		if !a.pasting {
+			a.focusActivity()
+		}
+		return a.key(e)
+	case *tcell.EventPaste:
+		a.pasting = e.Start()
+		if e.Start() {
+			a.focusActivity()
+			return false
+		}
+		if a.promptKind != "" {
+			a.prompt += string(msg.keys)
+		} else {
+			a.paste = msg.keys
+			a.sendPaste()
+			a.paste = nil
+		}
+	case *tcell.EventMouse:
+		if e.Buttons() != tcell.ButtonNone && a.buttons == tcell.ButtonNone {
+			a.focusActivity()
+		}
+		a.mouse(e)
+		return a.quit
+	case *tcell.EventError:
+		a.status = e.Error()
+	}
+	return false
+}
+
+// pumpScreenEvents drains tcell through a large ChannelEvents buffer, coalesces
+// bracketed paste and plain-rune bursts, then hands compact work to the UI loop.
+// The library EventQ stays at 10 slots; without this drain it stalls the TTY
+// reader under large pastes and the frontend looks crashed.
+func (a *app) pumpScreenEvents(out chan<- screenEvent) {
+	defer close(out)
+	raw := make(chan tcell.Event, screenEventQueue)
+	go a.screen.ChannelEvents(raw, a.stop)
+	var pasting bool
+	var paste []byte
+	var pending tcell.Event
+	send := func(msg screenEvent) bool {
+		select {
+		case <-a.stop:
+			return false
+		case out <- msg:
+			return true
+		}
+	}
+	next := func() (tcell.Event, bool) {
+		if pending != nil {
+			ev := pending
+			pending = nil
+			return ev, true
+		}
+		select {
+		case <-a.stop:
+			return nil, false
+		case ev, ok := <-raw:
+			if !ok {
+				return nil, false
+			}
+			return ev, true
+		}
+	}
+	for {
+		ev, ok := next()
+		if !ok {
+			return
+		}
+		switch e := ev.(type) {
+		case *tcell.EventPaste:
+			if e.Start() {
+				pasting = true
+				paste = paste[:0]
+				if !send(screenEvent{ev: e}) {
+					return
+				}
+				continue
+			}
+			pasting = false
+			payload := append([]byte(nil), paste...)
+			paste = nil
+			if !send(screenEvent{ev: e, keys: payload}) {
+				return
+			}
+		case *tcell.EventKey:
+			if pasting {
+				paste = append(paste, keyBytes(e, false)...)
+				continue
+			}
+			if e.Key() == tcell.KeyRune && e.Modifiers() == tcell.ModNone {
+				buf := append([]byte(nil), string(e.Rune())...)
+				drain := true
+				for drain {
+					select {
+					case <-a.stop:
+						return
+					case nxt, ok := <-raw:
+						if !ok {
+							if !send(screenEvent{keys: buf}) {
+								return
+							}
+							return
+						}
+						nk, isKey := nxt.(*tcell.EventKey)
+						if !isKey || nk.Key() != tcell.KeyRune || nk.Modifiers() != tcell.ModNone {
+							pending = nxt
+							drain = false
+							break
+						}
+						buf = append(buf, string(nk.Rune())...)
+					default:
+						drain = false
+					}
+				}
+				if !send(screenEvent{keys: buf}) {
+					return
+				}
+				continue
+			}
+			if !send(screenEvent{ev: e}) {
+				return
+			}
+		default:
+			if !send(screenEvent{ev: ev}) {
+				return
+			}
 		}
 	}
 }
@@ -643,6 +799,8 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 		return
 	}
 	if a.session == nil {
+		// Tests observe input through the command queue; keep one entry per write
+	// so existing assertions stay byte-accurate without coalescing.
 		ints := make([]int, len(b))
 		for i, v := range b {
 			ints[i] = int(v)
@@ -650,9 +808,53 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 		a.command(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": ints})
 		return
 	}
-	if err := a.session.SendInput(id, b); err != nil {
-		a.status = fmt.Sprintf("terminal %s input stopped: %v", id, err)
+	if len(a.pendingInputData) > 0 {
+		if a.pendingInputID != id {
+			a.status = fmt.Sprintf("terminal %s input waiting on earlier backpressure", a.pendingInputID)
+			return
+		}
+		a.pendingInputData = append(a.pendingInputData, b...)
+		a.flushPendingInput()
+		return
 	}
+	a.writeInput(id, b)
+}
+
+func (a *app) writeInput(id uuid.UUID, b []byte) {
+	for len(b) > 0 {
+		chunk := b
+		if len(chunk) > inputWriteChunk {
+			chunk = chunk[:inputWriteChunk]
+		}
+		err := a.session.SendInput(id, chunk)
+		if err == nil {
+			b = b[len(chunk):]
+			continue
+		}
+		if errors.Is(err, goclient.ErrSessionBackpressure) {
+			a.pendingInputID = id
+			a.pendingInputData = append([]byte(nil), b...)
+			a.status = "Input backpressured; waiting"
+			return
+		}
+		a.pendingInputID = uuid.Nil
+		a.pendingInputData = nil
+		a.status = fmt.Sprintf("terminal %s input stopped: %v", id, err)
+		return
+	}
+	if a.status == "Input backpressured; waiting" {
+		a.status = ""
+	}
+}
+
+func (a *app) flushPendingInput() {
+	if len(a.pendingInputData) == 0 || a.session == nil {
+		return
+	}
+	id, data := a.pendingInputID, a.pendingInputData
+	a.pendingInputID = uuid.Nil
+	a.pendingInputData = nil
+	a.writeInput(id, data)
 }
 
 func isRefused(err error) bool { return goplatform.ConnectionRefused(err) }

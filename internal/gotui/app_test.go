@@ -80,6 +80,111 @@ func TestInputModesAndPaste(t *testing.T) {
 		t.Fatalf("prefix forwarding=%q", got)
 	}
 }
+func TestScreenEventPumpCoalescesPasteAndRunes(t *testing.T) {
+	screen := simulation(t, 80, 24)
+	a := newApp(nil, screen, 100)
+	defer a.close()
+	out := make(chan screenEvent, screenEventQueue)
+	go a.pumpScreenEvents(out)
+
+	if err := screen.PostEvent(tcell.NewEventPaste(true)); err != nil {
+		t.Fatal(err)
+	}
+	payload := strings.Repeat("Ab", 4096)
+	for _, r := range payload {
+		for {
+			err := screen.PostEvent(tcell.NewEventKey(tcell.KeyRune, r, tcell.ModNone))
+			if err == nil {
+				break
+			}
+			if err != tcell.ErrEventQFull {
+				t.Fatalf("post key: %v", err)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+	for {
+		err := screen.PostEvent(tcell.NewEventPaste(false))
+		if err == nil {
+			break
+		}
+		if err != tcell.ErrEventQFull {
+			t.Fatalf("post paste end: %v", err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	var got []byte
+	seenStart := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case msg, ok := <-out:
+			if !ok {
+				t.Fatal("pump closed early")
+			}
+			if pe, ok := msg.ev.(*tcell.EventPaste); ok && pe.Start() {
+				seenStart = true
+				continue
+			}
+			if pe, ok := msg.ev.(*tcell.EventPaste); ok && pe.End() {
+				if !seenStart {
+					t.Fatal("paste end without start")
+				}
+				got = append(got, msg.keys...)
+				if string(got) != payload {
+					t.Fatalf("paste bytes=%d want=%d prefix=%q", len(got), len(payload), string(got[:min(64, len(got))]))
+				}
+				return
+			}
+			if len(msg.keys) > 0 && msg.ev == nil {
+				t.Fatalf("rune burst escaped paste coalescing: %q", msg.keys[:min(32, len(msg.keys))])
+			}
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	t.Fatal("timed out waiting for coalesced paste")
+}
+
+func TestDrainPrefersCoalescedKeys(t *testing.T) {
+	a := newApp(nil, simulation(t, 80, 24), 100)
+	defer a.close()
+	id, pid := uuid.New(), uuid.New()
+	a.terms[id] = &terminal{emu: govt.New(20, 4, 100)}
+	a.focus = pid
+	a.panes = []pane{{id: pid, term: id, box: rect{0, 0, 20, 5}}}
+	events := make(chan screenEvent, 8)
+	events <- screenEvent{keys: []byte("hello-large-burst")}
+	if a.drainScreenEvents(events) {
+		t.Fatal("drain reported quit")
+	}
+	if got := queuedBytes(t, a); got != "hello-large-burst" {
+		t.Fatalf("coalesced keys=%q", got)
+	}
+}
+
+func TestPendingInputQueuesAcrossBackpressure(t *testing.T) {
+	a := newApp(nil, simulation(t, 80, 24), 100)
+	defer a.close()
+	id := uuid.New()
+	a.pendingInputID = id
+	a.pendingInputData = []byte("one")
+	// Session remains nil, so bytes() takes the test command-queue path and must
+	// not corrupt the pending backpressure buffer used by live sessions.
+	a.bytes(id, []byte("two"))
+	if got := queuedBytes(t, a); got != "two" {
+		t.Fatalf("nil-session bytes=%q", got)
+	}
+	if string(a.pendingInputData) != "one" || a.pendingInputID != id {
+		t.Fatalf("pending mutated: id=%s data=%q", a.pendingInputID, a.pendingInputData)
+	}
+	a.flushPendingInput() // no-op without session
+	if string(a.pendingInputData) != "one" {
+		t.Fatalf("flush without session dropped pending: %q", a.pendingInputData)
+	}
+}
+
 func TestRecursiveAndNarrowLayout(t *testing.T) {
 	a := newApp(nil, simulation(t, 120, 30), 100)
 	defer a.close()

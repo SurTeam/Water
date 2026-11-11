@@ -180,7 +180,7 @@
   if(!slot || slot.id!==id)return;
   if(!slot.ready){
    slot.waitingBytes+=bytes?.length||0;
-   if(slot.waiting.length>=256 || slot.waitingBytes>maxPending){socket?.close();return;}
+   if(slot.waiting.length>=256 || slot.waitingBytes>maxPending){fail('Terminal output backpressured; reconnecting');socket?.close();return;}
    slot.waiting.push([id,seq,kind,bytes,columns,lines,code]);return;
   }
   if(seq<=slot.seq)return;

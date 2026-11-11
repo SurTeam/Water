@@ -1522,7 +1522,11 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 			end := traceNativeWork("input.send")
 			if err := c.session.SendInput(summary.TerminalID, data); err != nil {
 				term.mu.Lock()
-				term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
+				if errors.Is(err, goclient.ErrSessionBackpressure) {
+					term.inputError = "Input backpressured; retry"
+				} else {
+					term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
+				}
 				term.mu.Unlock()
 				if c.invalidate != nil {
 					c.invalidate()
@@ -2109,7 +2113,9 @@ func (c *WorkspaceClient) flushVTResponses(term *terminalClient) {
 	for _, data := range responses {
 		if err := c.session.SendInput(term.id, data); err != nil {
 			term.mu.Lock()
-			if term.inputError == "" {
+			if errors.Is(err, goclient.ErrSessionBackpressure) {
+				term.inputError = "Input backpressured; retry"
+			} else if term.inputError == "" {
 				term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
 			}
 			term.mu.Unlock()
