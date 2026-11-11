@@ -149,6 +149,84 @@ func TestCompatibilityOutputOverflowFailsExplicitly(t *testing.T) {
 	}
 }
 
+func TestOwnedSubscriptionEOFSchedulesReattach(t *testing.T) {
+	id := uuid.New()
+	term := &terminalClient{id: id, emu: govt.New(20, 4, 100), scrollbackOnClearScreen: true}
+	events := make(chan goclient.TerminalPush)
+	sub := &goclient.TerminalSubscription{Events: events}
+	c := &WorkspaceClient{terminals: map[uuid.UUID]*terminalClient{id: term}}
+	term.startSubscription(c, sub)
+	close(events)
+	awaitWorkerCondition(t, func() bool {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		return c.terminals[id] == nil && c.attaching[id] != nil
+	})
+	c.mu.RLock()
+	ticket := c.attaching[id]
+	c.mu.RUnlock()
+	ticket.Store(true)
+	awaitWorkerCondition(t, func() bool {
+		term.worker.mu.Lock()
+		done := term.worker.done
+		term.worker.mu.Unlock()
+		if done == nil {
+			return false
+		}
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	term.mu.RLock()
+	paneError := term.outputError
+	term.mu.RUnlock()
+	if paneError != "" {
+		t.Fatalf("owned subscription EOF froze the pane: %q", paneError)
+	}
+}
+
+func TestSequenceGapSchedulesReattach(t *testing.T) {
+	id := uuid.New()
+	term := &terminalClient{id: id, emu: govt.New(20, 4, 100), lastSeq: 3, scrollbackOnClearScreen: true}
+	c := &WorkspaceClient{terminals: map[uuid.UUID]*terminalClient{id: term}}
+	c.applyTerminalEventFor(term, goclient.TerminalPush{
+		TerminalID: id,
+		Event:      goprotocol.TerminalEvent{Seq: 5, Kind: goprotocol.OutputEvent, Data: []byte("gap")},
+	})
+	awaitWorkerCondition(t, func() bool {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		return c.terminals[id] == nil && c.attaching[id] != nil
+	})
+	c.mu.RLock()
+	ticket := c.attaching[id]
+	c.mu.RUnlock()
+	ticket.Store(true)
+	awaitWorkerCondition(t, func() bool {
+		term.worker.mu.Lock()
+		done := term.worker.done
+		term.worker.mu.Unlock()
+		if done == nil {
+			return true
+		}
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	})
+	term.mu.RLock()
+	paneError := term.outputError
+	term.mu.RUnlock()
+	if paneError != "" {
+		t.Fatalf("sequence gap froze the pane: %q", paneError)
+	}
+}
+
 func TestStalePaneWorkerCannotParseReplacement(t *testing.T) {
 	id := uuid.New()
 	old := &terminalClient{id: id, emu: govt.New(20, 4, 100)}

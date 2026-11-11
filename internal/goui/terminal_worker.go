@@ -1,11 +1,13 @@
 package goui
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
 	"github.com/SurTeam/Water/internal/goclient"
+	"github.com/google/uuid"
 )
 
 // Only compatibility/in-memory transports use this mailbox. Real GUI panes
@@ -119,6 +121,50 @@ func (t *terminalClient) failOutput(c *WorkspaceClient, err error) {
 	}
 }
 
+// Owned socket subscriptions are expected to end on pane-local overflow or a
+// short transport glitch. Rebuild from server replay instead of freezing the
+// pane on the first unexpected EOF.
+func (t *terminalClient) recoverOwnedOutput(c *WorkspaceClient, err error) {
+	if t.closed.Load() || c == nil || c.stopped.Load() {
+		return
+	}
+	c.scheduleOwnedTerminalReattach(t.id, t.scrollbackOnClearScreen, err)
+}
+
+func (c *WorkspaceClient) scheduleOwnedTerminalReattach(id uuid.UUID, scrollbackOnClearScreen bool, cause error) {
+	if c == nil || id == uuid.Nil {
+		return
+	}
+	c.mu.Lock()
+	if c.stopped.Load() {
+		c.mu.Unlock()
+		return
+	}
+	term := c.terminals[id]
+	if term == nil {
+		c.mu.Unlock()
+		return
+	}
+	if c.attaching == nil {
+		c.attaching = make(map[uuid.UUID]*terminalAttachAttempt)
+	}
+	if c.attaching[id] != nil {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.terminals, id)
+	ticket := newTerminalAttachAttempt()
+	c.attaching[id] = ticket
+	delete(c.terminalErrors, id)
+	c.mu.Unlock()
+	term.stopWorker()
+	if c.invalidate != nil {
+		c.invalidate()
+	}
+	_ = cause
+	go c.attachTerminalAsync(terminalSummary{TerminalID: id}, scrollbackOnClearScreen, ticket)
+}
+
 // Cancellation releases queued payloads immediately. All emulator destruction
 // and subscription closure then go through the same shutdown path.
 func (t *terminalClient) stopWorker() {
@@ -202,7 +248,13 @@ func (t *terminalClient) runOutputWorker(c *WorkspaceClient) {
 			case value, ok := <-events:
 				if !ok {
 					if !t.closed.Load() {
-						t.failOutput(c, fmt.Errorf("terminal subscription ended: %v", subscription.Err()))
+						cause := errors.New("session closed")
+						if subscription != nil {
+							if err := subscription.Err(); err != nil {
+								cause = err
+							}
+						}
+						t.recoverOwnedOutput(c, fmt.Errorf("terminal subscription ended: %v", cause))
 					}
 					return
 				}

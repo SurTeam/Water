@@ -24,26 +24,44 @@ type TerminalSubscription struct {
 }
 
 func (s *TerminalSubscription) Close() error {
+	if s == nil {
+		return nil
+	}
 	var err error
 	s.once.Do(func() {
-		close(s.done)
-		s.cancel()
-		s.parent.terminalMu.Lock()
-		delete(s.parent.terminalSubscriptions, s)
-		if s.parent.terminalInputs[s.id] == s.session {
-			delete(s.parent.terminalInputs, s.id)
+		if s.done != nil {
+			close(s.done)
 		}
-		s.parent.terminalMu.Unlock()
-		err = s.session.Close()
+		if s.cancel != nil {
+			s.cancel()
+		}
+		if s.parent != nil {
+			s.parent.terminalMu.Lock()
+			delete(s.parent.terminalSubscriptions, s)
+			if s.parent.terminalInputs[s.id] == s.session {
+				delete(s.parent.terminalInputs, s.id)
+			}
+			s.parent.terminalMu.Unlock()
+		}
+		if s.session != nil {
+			err = s.session.Close()
+		}
 		// Cancellation discards this subscription's pending live payloads and
 		// joins its reader without involving any emulator/parser lock.
-		for range s.Events {
+		if s.Events != nil {
+			for range s.Events {
+			}
 		}
 	})
 	return err
 }
 
-func (s *TerminalSubscription) Err() error { return s.session.Err() }
+func (s *TerminalSubscription) Err() error {
+	if s == nil || s.session == nil {
+		return errors.New("session closed")
+	}
+	return s.session.Err()
+}
 
 // AttachTerminal creates an owned subscription rather than replacing the
 // legacy per-UUID aggregate stream. The context owns setup and the subscription

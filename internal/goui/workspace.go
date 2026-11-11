@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -1415,6 +1416,9 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 		if c.stopped.Load() {
 			return nil, context.Canceled
 		}
+		if c.session == nil {
+			return nil, errors.New("session closed")
+		}
 		if c.session.SocketPath != "" {
 			return c.session.AttachTerminal(ctx, summary.TerminalID, &attached)
 		}
@@ -2036,7 +2040,9 @@ func (c *WorkspaceClient) applyTerminalEventFor(term *terminalClient, push gocli
 	if term.lastSeq != 0 && push.Event.Seq != term.lastSeq+1 {
 		previous := term.lastSeq
 		term.mu.Unlock()
-		term.failOutput(c, fmt.Errorf("terminal event sequence gap: have %d, received %d", previous, push.Event.Seq))
+		// Match TUI gap recovery: rebuild this pane from server replay instead of
+		// freezing it behind a permanent outputError banner.
+		term.recoverOwnedOutput(c, fmt.Errorf("terminal event sequence gap: have %d, received %d", previous, push.Event.Seq))
 		return nil
 	}
 	term.lastSeq = push.Event.Seq

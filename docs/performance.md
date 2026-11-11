@@ -19,7 +19,7 @@ GUI 窗口使用可变期限 timer：空闲时每 250ms 进行维护检查，仅
 
 GUI 正常 socket 路径按 terminal 实例拥有独立订阅连接和解析 worker，直接消费该连接容量为 8 的事件队列；满队列只对所属终端连接施加背压，不占用控制 RPC 或其他 pane 的消费循环，也不把未解析的 live 字节丢弃后用历史 replay 代替。订阅在 attach 前建立，按句柄取消，旧 attach 的取消不能关闭同 UUID 的新订阅。TUI/legacy socket 路径仍通过独立终端连接转发到容量为 64 的聚合队列；浏览器复用 WebSocket。服务端 subscriber 队列容量为 64，满时等待容量或取消。
 
-GUI 的兼容/in-memory 聚合事件路径另有每终端 256 events / 1 MiB mailbox，超限显式停止该终端输出并报告错误。初始 attach/replay 在后台执行，失败最多尝试四次，退避为 100/200/400ms；取消可中断连接与 RPC。实时输出和 replay 按 4 KiB 块解析，块间检查关闭；正在执行的一次图形解析仍需自行返回。关闭立即取消订阅并清空待处理队列，worker 随后释放 emulator。
+GUI 的兼容/in-memory 聚合事件路径另有每终端 256 events / 1 MiB mailbox，超限显式停止该终端输出并报告错误。owned socket 订阅异常结束（含 unexpected EOF）或 live 序列出现 gap 时，所属 pane 从 server replay 重新 attach，不永久保留 `output stopped`；重挂仍受同一初始 attach 重试与取消规则约束。初始 attach/replay 在后台执行，失败最多尝试四次，退避为 100/200/400ms；取消可中断连接与 RPC。实时输出和 replay 按 4 KiB 块解析，块间检查关闭；正在执行的一次图形解析仍需自行返回。关闭立即取消订阅并清空待处理队列，worker 随后释放 emulator。
 
 纯 `terminal.send_text` / `terminal.send_bytes` 成功后不广播 workspace 模型快照，输入回显继续由终端输出流传递；命令结果与 operation 查询保留。
 
