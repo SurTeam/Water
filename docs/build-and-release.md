@@ -12,7 +12,7 @@
 - Windows GUI/server/updater 可在 macOS 或 Linux 以 `CGO_ENABLED=0` 交叉编译打包。macOS GUI 使用本机 Apple SDK，可用 `GOARCH=amd64` 或 `arm64` 跨架构构建；Linux GUI 使用 Zig 和 Alpine 3.22 的动态 musl sysroot 在 macOS 交叉编译，禁止引入 glibc 依赖。`scripts/prepare-linux-sysroot.py` 按 `scripts/linux-musl-packages.json` 的固定版本、URL 和 SHA256 下载并解包目标 APK，生成编译器与 pkg-config wrappers；不安装或运行目标软件。动态 musl 保留 GLFW 的 `dlopen` 路径，不能改为使用不支持该路径的静态 musl 构建。headless server payload 使用 Go 交叉编译。构建脚本必须使用本次变体和版本生成的 GUI/server/payload，不能回退到任意已安装的 release server。
 - 发布在当前主机完成各目标交叉编译，不为 Linux/Windows 构建或验证启动 Colima、容器或虚拟机。只对当前主机 OS 与架构对应版本运行测试和运行时验收；其他目标只构建、打包和签名，不另做异平台验证，也不因缺少异平台运行证据阻塞发布。发布仍核对待上传文件集合及本地/GitHub API 的 SHA256 digest 和大小，避免上传错误。交叉编译成功不等于异平台原生运行验证。
 
-macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。Go 运行库 LICENSE 为必需文件；收集器兼容标准 GOROOT 和 Homebrew 的上级目录布局，缺少该文件时中止组包。
+macOS app 的 `Contents/Resources/Licenses` 、Linux archive 和 Windows ZIP 的 `Licenses` 携带实际使用的本地依赖许可证、NOTICE 和 Ebitengine 修改说明，由 `scripts/package-licenses.sh` 收集本地依赖和已解析 Go module 的许可证；Windows PowerShell 入口执行等价收集。Go 运行库 LICENSE 为必需文件；收集器兼容标准 GOROOT、Homebrew 的上级目录布局以及发行版（如 Arch、Fedora）的 `/usr/share/licenses` 布局，缺少该文件时中止组包。
 
 控制命令见 [控制 API](control-api.md)，回归流程见 [测试策略](testing.md)。
 

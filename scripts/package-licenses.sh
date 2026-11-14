@@ -20,13 +20,18 @@ import subprocess
 import sys
 destination = Path(sys.argv[1])
 toolchain = Path(subprocess.check_output(['go', 'env', 'GOROOT'], text=True).strip())
+# Upstream toolchains and downloaded module-cache toolchains keep LICENSE at
+# the tree root; Homebrew keeps it beside libexec; distributions such as
+# Arch and Fedora ship it under /usr/share/licenses instead of in GOROOT.
+toolchain_candidates = (toolchain, toolchain.parent,
+                        Path('/usr/share/licenses/go'),
+                        Path('/usr/share/licenses/golang'))
 for name in ('LICENSE', 'PATENTS'):
-    source = toolchain / name
-    if not source.is_file():
-        source = toolchain.parent / name  # Homebrew keeps LICENSE beside libexec.
-    if name == 'LICENSE' and not source.is_file():
+    source = next((base / name for base in toolchain_candidates
+                   if (base / name).is_file()), None)
+    if name == 'LICENSE' and source is None:
         raise SystemExit('Go toolchain LICENSE not found')
-    if source.is_file():
+    if source is not None:
         target = destination / 'go-stdlib' / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, target)
