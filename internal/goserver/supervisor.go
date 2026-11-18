@@ -69,6 +69,38 @@ func (s *Server) EnableSupervisorFromEnv() error {
 	return s.EnableSupervisor()
 }
 
+// refreshSupervisorGeneration re-runs the macOS binary-replacement check for a
+// server that stayed alive across an in-place upgrade. New shells move to a
+// supervisor started from the current binary; existing pane ids stay on the
+// previous supervisor so recovery can still resume them.
+func (s *Server) refreshSupervisorGeneration() error {
+	if s.supervisorSocket == "" || os.Getenv("WATER_PTY_SUPERVISOR") == "off" {
+		return nil
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	if s.supervisorSocket == "" {
+		return nil
+	}
+	base := s.supervisorSocket
+	if s.legacySupervisorSocket != "" {
+		base = s.legacySupervisorSocket
+	}
+	current, legacy, ids, err := ensureSupervisor(base)
+	if err != nil {
+		return err
+	}
+	if current == s.supervisorSocket && legacy == s.legacySupervisorSocket {
+		return nil
+	}
+	if err := s.registry.AttachSupervisors(current, legacy, ids); err != nil {
+		return err
+	}
+	s.supervisorSocket = current
+	s.legacySupervisorSocket = legacy
+	return nil
+}
+
 // UseSupervisor attaches to an already running supervisor socket. Tests start the
 // supervisor in-process because the test binary is not water-server.
 func (s *Server) UseSupervisor(socket string) error {

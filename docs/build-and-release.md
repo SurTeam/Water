@@ -164,7 +164,12 @@ servers continue running during the GUI restart: outgoing update cleanup
 skips session shutdown, the helper
 holds its keeper session across replacement/rollback, and the replacement GUI
 suppresses shutdown cleanup until its first-frame ACK. During this protected
-startup, explicit GUI server shutdown/restart is also blocked. Update installation
+startup, explicit GUI server shutdown/restart is also blocked. After that ACK
+releases protection, a retained local server whose revision still belongs to the
+pre-update binary is recovery-restarted automatically so new shells are not
+left on a macOS supervisor that lost Full Disk Access when its path was
+replaced. Remote connections keep their existing outdated-server prompt.
+Update installation
 and Quit GUI and Local Server cannot start concurrently; recovery restart checks
 update protection again before requesting shutdown and cancels a prepared lease
 if protection became active. The local server is always independent, so an

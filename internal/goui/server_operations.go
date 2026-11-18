@@ -30,6 +30,45 @@ func (m *MultiWorkspaceClient) SetServerOperator(operator func(ConnectionEntry, 
 	m.syncSwitchersLocked()
 	m.mu.Unlock()
 }
+
+// RestartOutdatedLocalServersAfterUpdate recovery-restarts local servers whose
+// revision still belongs to the pre-update binary. Update takeover preserves the
+// running server and its PTY supervisor; macOS then checks the replaced path's
+// signature and later shells lose Full Disk Access until a current supervisor
+// owns them. Remote connections keep their existing restart prompt.
+func (m *MultiWorkspaceClient) RestartOutdatedLocalServersAfterUpdate() {
+	m.mu.RLock()
+	var ids []uuid.UUID
+	for _, id := range m.order {
+		connection := m.connections[id]
+		if connection == nil || connection.entry.Kind != "local" || connection.view == nil || connection.view.session == nil {
+			continue
+		}
+		if !connection.view.session.Compatibility.RestartRecommended {
+			continue
+		}
+		if !goprotocol.HasCapability(connection.view.session.Server.Capabilities, "recovery/v1") {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	m.mu.RUnlock()
+	for _, id := range ids {
+		if _, _, err := m.serverOperation(id, "restart"); err != nil {
+			m.mu.RLock()
+			connection := m.connections[id]
+			m.mu.RUnlock()
+			if connection != nil && connection.view != nil {
+				connection.view.server.mu.Lock()
+				connection.view.server.message = err.Error()
+				connection.view.server.mu.Unlock()
+				if connection.view.invalidate != nil {
+					connection.view.invalidate()
+				}
+			}
+		}
+	}
+}
 func (m *MultiWorkspaceClient) ProjectRecoveryLayout(id uuid.UUID, d *gomodel.RecoveryLayout) {
 	m.mu.RLock()
 	connection := m.connections[id]

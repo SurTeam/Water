@@ -824,6 +824,11 @@ func (s *Server) spawnInPane(paneID uuid.UUID, program string, args []string, si
 	var t *goterminal.Terminal
 	var err error
 	if s.supervisorSocket != "" {
+		// A preserved server may still be attached to a pre-update supervisor
+		// whose binary was replaced on disk. Re-check before creating shells.
+		if refreshErr := s.refreshSupervisorGeneration(); refreshErr != nil {
+			return nil, refreshErr
+		}
 		// The supervisor keys terminals by pane id, so a server restarted after an
 		// upgrade resumes the program instead of starting a new shell.
 		t, _, err = s.registry.SpawnSupervisedPane(paneID, program, args, size, cwd, false)

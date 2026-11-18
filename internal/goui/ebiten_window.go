@@ -575,10 +575,20 @@ func (w *EbitengineWindow) Update() error {
 		}
 	default:
 	}
-	if w.startupFrameDrawn && !w.startupAcknowledged {
-		w.startupAcknowledged = true
-		go goupdate.AcknowledgeStartup()
-	}
+		if w.startupFrameDrawn && !w.startupAcknowledged {
+			w.startupAcknowledged = true
+			// An in-app update keeps the local server across GUI replacement. After
+			// the first-frame ACK releases that protection, restart an outdated
+			// local server so new shells are not stuck on a pre-update supervisor
+			// that lost macOS Full Disk Access / Downloads permission.
+			preserved := goupdate.PreserveServer()
+			go func() {
+				goupdate.AcknowledgeStartup()
+				if preserved && w.multi != nil {
+					w.multi.RestartOutdatedLocalServersAfterUpdate()
+				}
+			}()
+		}
 	if w.quitResult != nil {
 		select {
 		case err := <-w.quitResult:
