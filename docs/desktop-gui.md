@@ -33,7 +33,7 @@ macOS 标题栏与侧栏空白区域共用同一命中：单击拖动窗口，�
 
 终端快照携带 Kitty 键盘模式，桌面编码器支持消歧（1）、事件类型/释放（2）和全部按键报告（8），按 xterm set/push/pop 语义更新。功能键保留协议定义的 CSI 编号与后缀；未启用时保留传统编码。此处不宣称实现 alternate keys（4）及 associated text（16）。输入与输出错误显示在所属 pane，不能令其他 pane 进入共享连接失败状态。
 
-Cmd+C 只复制，无选区不发送字节；Ctrl+C 才是中断，Command/Super 不隐式编码成 Control。Cmd+D 不隐式发送 EOF。文本粘贴走终端 bracketed-paste 状态；macOS 图片粘贴交给前台 Agent 的图像读取路径，不自动上传本地剪贴板到远端。
+Cmd+C 只复制，无选区不发送字节；Ctrl+C 才是中断，Command/Super 不隐式编码成 Control。Cmd+D 不隐式发送 EOF。文本粘贴走终端 bracketed-paste 状态；macOS 图片粘贴交给前台 Agent 的图像读取路径，不自动上传本地剪贴板到远端。普通大粘贴（未带 `\x1b[200~`）离开帧线程进入所属终端的 FIFO pending，按换行优先切成不超过 512 字节的块并短间隔泵出，避免 cooked/ICANON 的 `MAX_CANON`/`MAX_INPUT`（1024）截断；bracketed paste 与短按键在队列空闲时仍可直接写入。会话背压继续排队重试，输入错误只归属该 pane。
 
 Cmd+V 对 Excel 等同时提供文本和图片的富剪贴板优先读取纯文本，保留 Tab 与换行。图片数据同时带有绝对图片路径或 `file://` URL 时仍优先图片；纯图片同样通过 Ctrl+V 交给应用读取。文件 URL 全部指向受支持的图片扩展名且剪贴板提供图片数据时走图片分支，其他文件或混合文件引用继续转成 shell 引用的路径文本，避免把 PDF 等文件的 TIFF 图标误当成图片粘贴。图片路径识别要求单个绝对路径、无 Tab 或换行，并匹配 PNG、TIFF、JPEG、HEIC、HEIF、GIF、BMP 或 WebP 扩展名；它不解码文件内容，也不保证接收端支持系统剪贴板。
 

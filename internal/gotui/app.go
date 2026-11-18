@@ -2,6 +2,7 @@
 package gotui
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -252,10 +254,12 @@ type app struct {
 	results                chan error
 	stop                   chan struct{}
 
-	// pendingInput holds bytes refused by session/PTY backpressure so a large
-	// paste retries instead of permanently stopping the input path.
+	// pendingInput holds ordinary-paste/backpressure bytes so a large paste is
+	// paced under MAX_CANON and retries instead of permanently stopping input.
+	pendingInputMu   sync.Mutex
 	pendingInputID   uuid.UUID
 	pendingInputData []byte
+	pendingPumping   bool
 }
 
 // screenEvent carries either a raw tcell event or coalesced terminal bytes.
@@ -268,6 +272,10 @@ type screenEvent struct {
 const (
 	screenEventQueue = 256
 	inputWriteChunk  = 64 * 1024
+	// Ordinary paste must stay under Darwin MAX_CANON/MAX_INPUT (1024) or cooked
+	// consumers such as cat lose the burst. Bracketed paste keeps the large chunk.
+	pasteCanonChunk   = 512
+	pastePaceInterval = 5 * time.Millisecond
 )
 
 func newApp(s *goclient.Session, screen tcell.Screen, scrollback int) *app {
@@ -800,7 +808,7 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 	}
 	if a.session == nil {
 		// Tests observe input through the command queue; keep one entry per write
-	// so existing assertions stay byte-accurate without coalescing.
+		// so existing assertions stay byte-accurate without coalescing.
 		ints := make([]int, len(b))
 		for i, v := range b {
 			ints[i] = int(v)
@@ -808,37 +816,88 @@ func (a *app) bytes(id uuid.UUID, b []byte) {
 		a.command(map[string]any{"type": "terminal.send_bytes", "terminal_id": id, "bytes": ints})
 		return
 	}
-	if len(a.pendingInputData) > 0 {
+	a.pendingInputMu.Lock()
+	hasPending := len(a.pendingInputData) > 0
+	if hasPending {
 		if a.pendingInputID != id {
+			a.pendingInputMu.Unlock()
 			a.status = fmt.Sprintf("terminal %s input waiting on earlier backpressure", a.pendingInputID)
 			return
 		}
 		a.pendingInputData = append(a.pendingInputData, b...)
-		a.flushPendingInput()
+		start := !a.pendingPumping
+		a.pendingPumping = true
+		a.pendingInputMu.Unlock()
+		if start {
+			go a.pumpPendingInput()
+		}
 		return
 	}
+	a.pendingInputMu.Unlock()
 	a.writeInput(id, b)
 }
 
+func pasteChunkLimit(b []byte) int {
+	if len(b) >= 6 && bytes.Equal(b[:6], []byte("\x1b[200~")) {
+		return inputWriteChunk
+	}
+	if len(b) > pasteCanonChunk {
+		return pasteCanonChunk
+	}
+	return inputWriteChunk
+}
+
+func nextInputChunk(b []byte, max int) (chunk, rest []byte) {
+	if max <= 0 || len(b) <= max {
+		return b, nil
+	}
+	if i := bytes.LastIndexByte(b[:max], '\n'); i >= 0 {
+		return b[:i+1], b[i+1:]
+	}
+	return b[:max], b[max:]
+}
+
+func (a *app) queuePendingInput(id uuid.UUID, b []byte) {
+	a.pendingInputMu.Lock()
+	if len(a.pendingInputData) > 0 && a.pendingInputID != id {
+		a.pendingInputMu.Unlock()
+		a.status = fmt.Sprintf("terminal %s input waiting on earlier backpressure", a.pendingInputID)
+		return
+	}
+	a.pendingInputID = id
+	a.pendingInputData = append(a.pendingInputData, b...)
+	start := !a.pendingPumping
+	a.pendingPumping = true
+	a.pendingInputMu.Unlock()
+	if start {
+		go a.pumpPendingInput()
+	}
+}
+
 func (a *app) writeInput(id uuid.UUID, b []byte) {
+	limit := pasteChunkLimit(b)
+	if limit <= pasteCanonChunk && len(b) > pasteCanonChunk {
+		// Pace ordinary large pastes off the UI loop so cooked consumers drain.
+		a.queuePendingInput(id, b)
+		return
+	}
 	for len(b) > 0 {
-		chunk := b
-		if len(chunk) > inputWriteChunk {
-			chunk = chunk[:inputWriteChunk]
-		}
+		chunk, rest := nextInputChunk(b, limit)
 		err := a.session.SendInput(id, chunk)
 		if err == nil {
-			b = b[len(chunk):]
+			b = rest
 			continue
 		}
 		if errors.Is(err, goclient.ErrSessionBackpressure) {
-			a.pendingInputID = id
-			a.pendingInputData = append([]byte(nil), b...)
 			a.status = "Input backpressured; waiting"
+			a.queuePendingInput(id, b)
 			return
 		}
+		a.pendingInputMu.Lock()
 		a.pendingInputID = uuid.Nil
 		a.pendingInputData = nil
+		a.pendingPumping = false
+		a.pendingInputMu.Unlock()
 		a.status = fmt.Sprintf("terminal %s input stopped: %v", id, err)
 		return
 	}
@@ -848,13 +907,78 @@ func (a *app) writeInput(id uuid.UUID, b []byte) {
 }
 
 func (a *app) flushPendingInput() {
-	if len(a.pendingInputData) == 0 || a.session == nil {
+	a.pendingInputMu.Lock()
+	if len(a.pendingInputData) == 0 || a.session == nil || a.pendingPumping {
+		a.pendingInputMu.Unlock()
 		return
 	}
-	id, data := a.pendingInputID, a.pendingInputData
-	a.pendingInputID = uuid.Nil
-	a.pendingInputData = nil
-	a.writeInput(id, data)
+	a.pendingPumping = true
+	a.pendingInputMu.Unlock()
+	go a.pumpPendingInput()
+}
+
+func (a *app) pumpPendingInput() {
+	defer func() {
+		a.pendingInputMu.Lock()
+		a.pendingPumping = len(a.pendingInputData) > 0
+		restart := a.pendingPumping
+		a.pendingInputMu.Unlock()
+		if restart {
+			go a.pumpPendingInput()
+		}
+	}()
+	for {
+		if a.session == nil {
+			return
+		}
+		a.pendingInputMu.Lock()
+		id, data := a.pendingInputID, a.pendingInputData
+		if len(data) == 0 || id == uuid.Nil {
+			a.pendingPumping = false
+			a.pendingInputMu.Unlock()
+			return
+		}
+		limit := pasteChunkLimit(data)
+		chunk, rest := nextInputChunk(data, limit)
+		a.pendingInputData = append([]byte(nil), rest...)
+		a.pendingInputMu.Unlock()
+
+		err := a.session.SendInput(id, chunk)
+		if err == nil {
+			if len(rest) == 0 {
+				a.pendingInputMu.Lock()
+				if len(a.pendingInputData) == 0 {
+					a.pendingInputID = uuid.Nil
+					a.pendingPumping = false
+					if a.status == "Input backpressured; waiting" {
+						a.status = ""
+					}
+					a.pendingInputMu.Unlock()
+					return
+				}
+				a.pendingInputMu.Unlock()
+			}
+			if limit <= pasteCanonChunk {
+				time.Sleep(pastePaceInterval)
+			}
+			continue
+		}
+		if errors.Is(err, goclient.ErrSessionBackpressure) {
+			a.pendingInputMu.Lock()
+			a.pendingInputData = append(append([]byte(nil), chunk...), a.pendingInputData...)
+			a.pendingInputMu.Unlock()
+			a.status = "Input backpressured; waiting"
+			time.Sleep(pastePaceInterval)
+			continue
+		}
+		a.pendingInputMu.Lock()
+		a.pendingInputID = uuid.Nil
+		a.pendingInputData = nil
+		a.pendingPumping = false
+		a.pendingInputMu.Unlock()
+		a.status = fmt.Sprintf("terminal %s input stopped: %v", id, err)
+		return
+	}
 }
 
 func isRefused(err error) bool { return goplatform.ConnectionRefused(err) }

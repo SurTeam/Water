@@ -187,6 +187,11 @@ type terminalClient struct {
 	publishedAt    atomic.Int64
 	outputError    string
 	inputError     string
+	// pendingInput holds paste/backpressure bytes that must leave the frame
+	// thread. Ordinary large pastes are paced here so cooked PTY programs do
+	// not lose input past MAX_CANON/MAX_INPUT.
+	pendingInput []byte
+	inputPumping bool
 }
 
 // Input after which the first output event may bypass the publication window.
@@ -1500,41 +1505,9 @@ func (c *WorkspaceClient) attachTerminalAsync(summary terminalSummary, scrollbac
 		HyperlinkCommandClick: c.config.Terminal.HyperlinkCommandClick,
 		OnInput: func(data []byte) {
 			// Input must not wait for output parsing or allocate a screen copy on
-			// the frame thread. The terminal worker applies viewport follow-up.
-			term.inputPending.Store(true)
-			// The first output after this input may publish ahead of the shared
-			// 60Hz window. Bounded per input and expired by time so a late
-			// background event cannot inherit a stale bypass.
-			term.noteInputEcho(time.Now())
-			// Only a keystroke-sized write is worth synchronizing with; pastes are
-			// already batched by the PTY and would only add frame time.
-			if len(data) <= 64 {
-				c.echoWaitTerm.Store(term)
-				countNativeWork("count.echo_wait_marked", 1)
-			}
-			select {
-			case c.snapshotWake <- struct{}{}:
-			default:
-			}
-			if c.invalidate != nil {
-				c.invalidate()
-			}
-			end := traceNativeWork("input.send")
-			if err := c.session.SendInput(summary.TerminalID, data); err != nil {
-				term.mu.Lock()
-				if errors.Is(err, goclient.ErrSessionBackpressure) {
-					term.inputError = "Input backpressured; retry"
-				} else {
-					term.inputError = fmt.Sprintf("terminal %s input stopped: %v", term.id, err)
-				}
-				term.mu.Unlock()
-				if c.invalidate != nil {
-					c.invalidate()
-				}
-			}
-			if end != nil {
-				end()
-			}
+			// the frame thread. Large ordinary pastes are paced asynchronously
+			// under the PTY canonical input limit; the worker still owns viewport follow-up.
+			c.deliverTerminalInput(term, summary.TerminalID, data)
 		},
 		OnMouse: func(ev govt.MouseEvent) bool {
 			if !c.hyperlinkConfig().Features.MouseReporting {

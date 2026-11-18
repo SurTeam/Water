@@ -168,20 +168,43 @@ func TestPendingInputQueuesAcrossBackpressure(t *testing.T) {
 	a := newApp(nil, simulation(t, 80, 24), 100)
 	defer a.close()
 	id := uuid.New()
+	a.pendingInputMu.Lock()
 	a.pendingInputID = id
 	a.pendingInputData = []byte("one")
+	a.pendingInputMu.Unlock()
 	// Session remains nil, so bytes() takes the test command-queue path and must
 	// not corrupt the pending backpressure buffer used by live sessions.
 	a.bytes(id, []byte("two"))
 	if got := queuedBytes(t, a); got != "two" {
 		t.Fatalf("nil-session bytes=%q", got)
 	}
-	if string(a.pendingInputData) != "one" || a.pendingInputID != id {
-		t.Fatalf("pending mutated: id=%s data=%q", a.pendingInputID, a.pendingInputData)
+	a.pendingInputMu.Lock()
+	pending := string(a.pendingInputData)
+	pendingID := a.pendingInputID
+	a.pendingInputMu.Unlock()
+	if pending != "one" || pendingID != id {
+		t.Fatalf("pending mutated: id=%s data=%q", pendingID, pending)
 	}
 	a.flushPendingInput() // no-op without session
-	if string(a.pendingInputData) != "one" {
-		t.Fatalf("flush without session dropped pending: %q", a.pendingInputData)
+	a.pendingInputMu.Lock()
+	pending = string(a.pendingInputData)
+	a.pendingInputMu.Unlock()
+	if pending != "one" {
+		t.Fatalf("flush without session dropped pending: %q", pending)
+	}
+}
+
+func TestNextInputChunkAndPasteLimit(t *testing.T) {
+	data := []byte(strings.Repeat("a", 40) + "\n" + strings.Repeat("b", 80))
+	chunk, rest := nextInputChunk(data, 60)
+	if !strings.HasSuffix(string(chunk), "\n") || !strings.HasPrefix(string(rest), "b") {
+		t.Fatalf("chunk=%q rest=%q", chunk, rest)
+	}
+	if got := pasteChunkLimit([]byte("\x1b[200~" + strings.Repeat("x", 2000))); got != inputWriteChunk {
+		t.Fatalf("bracketed limit=%d", got)
+	}
+	if got := pasteChunkLimit([]byte(strings.Repeat("x", 2000))); got != pasteCanonChunk {
+		t.Fatalf("ordinary limit=%d", got)
 	}
 }
 

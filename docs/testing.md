@@ -176,9 +176,13 @@ It verifies 80 repetitions of `啊啊啊啊啊啊啊` and a single 256 KiB UTF-8
 payload with bracketed paste both disabled and enabled. Raw-mode PTY receivers
 read in a loop and report exact wire length and SHA-256, including each bracketed
 paste delimiter. A separately ordered end marker detects extra trailing bytes.
-Echoed bytes exercise the GUI parser and drawing; screenshots
-and GUI content are retained. Three additional ZLE command-line cycles verify
-450 pastes using a distinct payload/digest per cycle. The runner invokes raw and ZLE phases separately to keep each step within its deadline; clipboard changes by another application are reported explicitly.
+A cooked/ICANON phase pastes a multi-line payload larger than Darwin
+`MAX_INPUT` (1024) into a cat-like receiver and checks exact length/SHA-256, covering
+ordinary-paste pacing under the canonical limit. Echoed bytes exercise the GUI
+parser and drawing; screenshots and GUI content are retained. Three additional
+ZLE command-line cycles verify 450 pastes using a distinct payload/digest per
+cycle. The runner invokes cooked, raw and ZLE phases separately to keep each step
+within its deadline; clipboard changes by another application are reported explicitly.
 
 Clipboard assertions must exercise the native paste path: text: input bypasses clipboard inspection. Native autorelease pools must stay on their creating OS thread for their whole lifetime; Go race checks cannot prove this. TestMacAutoreleasePoolStaysOnCreatingThread explicitly yields while native objects remain live.
 
