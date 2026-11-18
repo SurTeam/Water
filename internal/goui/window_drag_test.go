@@ -68,14 +68,12 @@ func TestFitFrameToVisibleHeight(t *testing.T) {
 		t.Fatalf("tall window = %+v ok=%v", got, ok)
 	}
 	low := screenFrame{x: 10, y: 0, width: 800, height: 700}
-	got, ok = fitFrameToVisibleHeight(low, visible)
-	if !ok || got.y != 40 || got.height != 700 {
-		t.Fatalf("low window = %+v ok=%v", got, ok)
+	if _, ok = fitFrameToVisibleHeight(low, visible); ok {
+		t.Fatal("short window below visible frame was moved")
 	}
 	high := screenFrame{x: 10, y: 300, width: 800, height: 700}
-	got, ok = fitFrameToVisibleHeight(high, visible)
-	if !ok || got.y != 240 || got.height != 700 {
-		t.Fatalf("high window = %+v ok=%v", got, ok)
+	if _, ok = fitFrameToVisibleHeight(high, visible); ok {
+		t.Fatal("short window above visible frame was moved")
 	}
 	if _, ok = fitFrameToVisibleHeight(screenFrame{x: 10, y: 80, width: 800, height: 700}, visible); ok {
 		t.Fatal("fitting window was changed")

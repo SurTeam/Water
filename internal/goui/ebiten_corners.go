@@ -48,7 +48,7 @@ func (w *EbitengineWindow) maskWindow(screen *ebiten.Image) {
 		return
 	}
 	radius := w.dp(float64(c.currentConfig().UI.WindowCornerRadius))
-	if ebiten.IsWindowMaximized() || ebiten.IsFullscreen() {
+	if ebiten.IsFullscreen() {
 		radius = 0
 	}
 	bounds := screen.Bounds()

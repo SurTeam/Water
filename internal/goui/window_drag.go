@@ -60,18 +60,16 @@ type screenFrame struct {
 }
 
 // fitFrameToVisibleHeight shrinks a window that is taller than the screen it
-// is on and shifts it so the vertical span stays inside that screen. Width and
-// horizontal position are left untouched. A non-positive visible height means
-// the screen metrics are not usable yet.
+// is on and then shifts it so the reduced height fits that screen. Width and
+// horizontal position are left untouched. Windows that already fit in height
+// are left alone, so the top or bottom may sit past the visible frame. A
+// non-positive visible height means the screen metrics are not usable yet.
 func fitFrameToVisibleHeight(frame, visible screenFrame) (screenFrame, bool) {
-	if visible.height <= 0 {
+	if visible.height <= 0 || frame.height <= visible.height {
 		return frame, false
 	}
-	height := frame.height
+	height := visible.height
 	y := frame.y
-	if height > visible.height {
-		height = visible.height
-	}
 	if y < visible.y {
 		y = visible.y
 	}

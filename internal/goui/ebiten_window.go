@@ -648,7 +648,7 @@ func (w *EbitengineWindow) Update() error {
 		w.invalidateOutput()
 	}
 	platformConfig := c.currentConfig()
-	if ebiten.IsWindowMaximized() || ebiten.IsFullscreen() {
+	if ebiten.IsFullscreen() {
 		platformConfig.UI.WindowCornerRadius = 0
 	}
 	w.platform.Update(platformConfig)
