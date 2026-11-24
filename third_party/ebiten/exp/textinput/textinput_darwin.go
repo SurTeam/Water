@@ -20,6 +20,7 @@ import (
 	"image"
 	"math"
 	"structs"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/ebitengine/purego/cstrings"
@@ -29,10 +30,12 @@ import (
 )
 
 type textInputImpl struct {
-	events *textInputEvents
+	events           *textInputEvents
+	imeDiscardNeeded atomic.Bool
 }
 
 func (t *textInputImpl) markIMEDiscardNeeded() {
+	t.imeDiscardNeeded.Store(true)
 }
 
 func (t *textInputImpl) Start(bounds image.Rectangle, _, _ string) (<-chan textInputState, func()) {
@@ -74,6 +77,8 @@ var (
 	sel_makeFirstResponder   = objc.RegisterName("makeFirstResponder:")
 	sel_setFrame             = objc.RegisterName("setFrame:")
 	sel_sharedApplication    = objc.RegisterName("sharedApplication")
+	sel_superview            = objc.RegisterName("superview")
+	sel_firstResponder       = objc.RegisterName("firstResponder")
 	sel_window               = objc.RegisterName("window")
 	sel_string               = objc.RegisterName("string")
 	sel_length               = objc.RegisterName("length")
@@ -132,22 +137,18 @@ func (t *textInputImpl) start(bounds image.Rectangle) (<-chan textInputState, fu
 	tc := getTextInputClient()
 	window := idNSApplication.Send(sel_sharedApplication).Send(sel_mainWindow)
 	contentView := window.Send(sel_contentView)
-	contentView.Send(sel_addSubview, tc)
-	window.Send(sel_makeFirstResponder, tc)
-
-	// Discard marked text left over from a previous session. The text input
-	// client is shared, so otherwise a previously focused field's uncommitted
-	// composition would continue into this session (#3463). This runs at
-	// session start, not teardown, because a new session can begin before the
-	// previous field ends its own.
-	if ctx := tc.Send(sel_inputContext); ctx != 0 {
-		ctx.Send(sel_discardMarkedText)
+	if tc.Send(sel_superview) != contentView {
+		contentView.Send(sel_addSubview, tc)
 	}
-
-	// Discarding the OS marked text leaves any Go-side queued states describing
-	// a composition that no longer exists on the OS side. Clear them so start()
-	// does not replay them into the new session as a live composition.
-	t.events.clearQueue()
+	if window.Send(sel_firstResponder) != tc {
+		window.Send(sel_makeFirstResponder, tc)
+	}
+	if t.imeDiscardNeeded.Swap(false) {
+		if ctx := tc.Send(sel_inputContext); ctx != 0 {
+			ctx.Send(sel_discardMarkedText)
+		}
+		t.events.clearQueue()
+	}
 
 	r := objc.Send[nsRect](contentView, sel_frame)
 	// The Y dirction is upward in the Cocoa coordinate system.
@@ -474,6 +475,7 @@ func doCommandBySelector(_ objc.ID, _ objc.SEL, _ objc.SEL) {
 }
 
 func resignFirstResponder(self objc.ID, cmd objc.SEL) bool {
+	theTextInputImpl.markIMEDiscardNeeded()
 	theTextInputImpl.endIfNeeded()
 	return objc.SendSuper[bool](self, cmd)
 }
